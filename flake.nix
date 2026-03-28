@@ -4,23 +4,24 @@
     inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+    nix-ai-tools = {
+      url = "github:numtide/llm-agents.nix";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
-  outputs = { nixpkgs, flake-utils, ... }:
+  outputs = { nixpkgs, flake-utils, nix-ai-tools, ... }:
     flake-utils.lib.eachDefaultSystem (system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
+        piCommand = pkgs.lib.getExe nix-ai-tools.packages.${system}.pi;
       in
       {
         packages.default = pkgs.writeShellApplication {
           name = "pi-harness";
           runtimeInputs = [ pkgs.bash ];
           text = ''
-            if ! command -v pi >/dev/null 2>&1; then
-              echo "pi executable not found in PATH" >&2
-              exit 1
-            fi
-            exec pi "$@"
+            exec ${pkgs.lib.escapeShellArg piCommand} "$@"
           '';
         };
 
