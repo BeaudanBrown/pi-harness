@@ -4,37 +4,42 @@
 
 This repo is iterated on primarily inside the always-on `agent` VM.
 
-## Current Bootstrap Path
+## Required Path
 
-Until the project is exposed through `agent-share`, sync the repo into the VM
-as a normal working copy:
+This repo should be exposed into the `agent` VM through the host share
+boundary, not copied into the guest over SSH.
 
-```sh
-bin/agent-vm-sync
-```
-
-This copies the local repo to:
-
-- `/home/beau/projects/pi-harness` inside the `agent` VM
-
-## Future Preferred Path
-
-Once the NAS host exposes this repo through:
+Expose it on the NAS host with:
 
 ```sh
 sudo agent-share add ~/documents/projects/pi-harness projects/pi-harness
 ```
 
-the harness should treat the shared manifest under `/home/beau/host/.pi-hub/`
-as the authoritative exposure gate.
+After that, the canonical guest-visible path is:
 
-At that point the hub can merge:
+- `/home/beau/host/projects/pi-harness`
+
+and the harness should treat the shared manifest under
+`/home/beau/host/.pi-hub/` as the authoritative exposure gate.
+
+At that point the hub merges:
 
 - tracked projects
 - shared projects
 - guest-local runtime session state
 
-## Notes
+## Existing SSH/Tmux Interface
 
-- Syncing into the VM now is a bootstrap convenience, not the final share model.
-- The VM copy preserves git history because the sync includes `.git/`.
+The normal entrypoint remains:
+
+- `ssh agent`
+- or the existing `super+a` launcher on work machines
+
+That path should continue to attach to the shared `default` tmux session inside
+the VM. `pi-harness` should appear there as a normal tmux window rooted at the
+shared project path.
+
+## Non-Goal
+
+Do not maintain a separate guest-local copy of `pi-harness` under
+`/home/beau/projects/pi-harness`.
