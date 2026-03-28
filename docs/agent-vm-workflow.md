@@ -36,8 +36,18 @@ The normal entrypoint remains:
 - or the existing `super+a` launcher on work machines
 
 That path should continue to attach to the shared `default` tmux session inside
-the VM. `pi-harness` should appear there as a normal tmux window rooted at the
-shared project path.
+the VM.
+
+Start pi manually from shell:
+
+- `cd /home/beau/host/projects/pi-harness`
+- `pi-harness` (or `pi`)
+
+You can keep using tmux splits/panes for execution tasks around the UI:
+
+- open a split/pane in `default`, `cd /home/beau/host/projects/pi-harness`, and run `pi-harness`
+
+In this setup, `pi-harness` is installed from the flake input on the agent and should be available in PATH after you rebuild/deploy the host, so you do not need `./bin/pi-harness` anymore.
 
 ## Non-Goal
 
