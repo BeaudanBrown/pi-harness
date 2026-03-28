@@ -12,3 +12,4 @@ The goal is to provide:
 No production behavior is implemented yet.
 
 Current design notes live in `docs/pi-hub-data-model.md`.
+Agent VM bootstrap notes live in `docs/agent-vm-workflow.md`.

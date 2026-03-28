@@ -1,0 +1,20 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "$0")/.." && pwd)"
+remote_host="${PI_HARNESS_AGENT_HOST:-agent}"
+remote_root="${PI_HARNESS_AGENT_ROOT:-/home/beau/projects/pi-harness}"
+
+ssh "$remote_host" "mkdir -p \"$(dirname "$remote_root")\""
+
+rsync \
+  -a \
+  --delete \
+  --exclude '.direnv/' \
+  --exclude 'result/' \
+  --exclude 'node_modules/' \
+  --exclude '.DS_Store' \
+  "$repo_root"/ \
+  "$remote_host":"$remote_root"/
+
+ssh "$remote_host" "cd \"$remote_root\" && git status --short && git rev-parse --abbrev-ref HEAD"
