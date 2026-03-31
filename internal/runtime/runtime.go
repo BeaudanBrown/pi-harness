@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/beaudanbrown/pi-harness/internal/models"
 	"github.com/beaudanbrown/pi-harness/internal/paths"
@@ -20,6 +21,8 @@ const (
 	RuntimeSourceOK      = "ok"
 	RuntimeSourceMissing = "missing"
 	RuntimeSourceInvalid = "invalid"
+
+	staleRuntimeThreshold = 12 * time.Hour
 )
 
 // SessionInspector checks tmux session liveness.
@@ -32,6 +35,7 @@ type Service struct {
 	Roots    paths.Roots
 	Store    store.Store
 	Sessions SessionInspector
+	Now      func() time.Time
 }
 
 // New returns a runtime service.
@@ -43,6 +47,7 @@ func New(roots paths.Roots, sessions SessionInspector) Service {
 		Roots:    roots,
 		Store:    store.New(roots),
 		Sessions: sessions,
+		Now:      time.Now,
 	}
 }
 
@@ -105,9 +110,16 @@ func (s Service) Get(ctx context.Context, workstreamID string) (models.Workstrea
 		row.Runtime = status
 		row.LastSeenAt = status.LastSeenAt
 	}
-	row.Status = deriveStatus(sessionLive, status, runtimeSource)
+	row.Status = deriveStatus(sessionLive, status, runtimeSource, s.now())
 
 	return row, nil
+}
+
+func (s Service) now() time.Time {
+	if s.Now == nil {
+		return time.Now()
+	}
+	return s.Now()
 }
 
 func (s Service) readRuntime(workstreamID string) (*models.RuntimeStatus, string, string) {
@@ -121,14 +133,25 @@ func (s Service) readRuntime(workstreamID string) (*models.RuntimeStatus, string
 	return nil, RuntimeSourceInvalid, err.Error()
 }
 
-func deriveStatus(sessionLive bool, status *models.RuntimeStatus, runtimeSource string) string {
+func deriveStatus(sessionLive bool, status *models.RuntimeStatus, runtimeSource string, now time.Time) string {
 	if !sessionLive {
 		return models.RuntimeStateDead
 	}
 	if status == nil || runtimeSource != RuntimeSourceOK {
 		return models.RuntimeStateUnknown
 	}
+	if runtimeIsStale(status, now) {
+		return models.RuntimeStateUnknown
+	}
 	return status.State
+}
+
+func runtimeIsStale(status *models.RuntimeStatus, now time.Time) bool {
+	lastSeenAt, err := time.Parse(time.RFC3339, status.LastSeenAt)
+	if err != nil {
+		return true
+	}
+	return now.Sub(lastSeenAt) > staleRuntimeThreshold
 }
 
 // ExtensionEnv returns the environment variables the harness injects for the

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/beaudanbrown/pi-harness/internal/models"
 	"github.com/beaudanbrown/pi-harness/internal/paths"
@@ -64,6 +65,7 @@ func TestGetDerivesUnknownWhenTmuxExistsWithoutRuntime(t *testing.T) {
 	})
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
 	row, err := service.Get(context.Background(), "focus-bugfix")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -99,6 +101,7 @@ func TestGetDerivesDeadWhenTmuxSessionMissing(t *testing.T) {
 	})
 
 	service := New(roots, fakeSessions{})
+	service.Now = fixedNow
 	row, err := service.Get(context.Background(), "focus-bugfix")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -112,7 +115,7 @@ func TestGetDerivesDeadWhenTmuxSessionMissing(t *testing.T) {
 	}
 }
 
-func TestGetMarksInvalidRuntimeAsUnknown(t *testing.T) {
+func TestGetMarksUnreadableRuntimeAsUnknown(t *testing.T) {
 	roots := testRoots(t)
 	s := store.New(roots)
 	mustWriteManifest(t, s, models.WorkstreamRecord{
@@ -126,11 +129,12 @@ func TestGetMarksInvalidRuntimeAsUnknown(t *testing.T) {
 	})
 
 	runtimePath := roots.RuntimePath("focus-bugfix")
-	if err := writeInvalidRuntime(runtimePath); err != nil {
-		t.Fatalf("writeInvalidRuntime() error = %v", err)
+	if err := writeUnreadableRuntime(runtimePath); err != nil {
+		t.Fatalf("writeUnreadableRuntime() error = %v", err)
 	}
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
 	row, err := service.Get(context.Background(), "focus-bugfix")
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -144,6 +148,81 @@ func TestGetMarksInvalidRuntimeAsUnknown(t *testing.T) {
 	}
 	if row.RuntimeError == "" {
 		t.Fatal("row.RuntimeError = empty, want decode/validate detail")
+	}
+}
+
+func TestGetMarksSchemaMismatchedRuntimeAsUnknown(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	runtimePath := roots.RuntimePath("focus-bugfix")
+	if err := writeSchemaMismatchedRuntime(runtimePath); err != nil {
+		t.Fatalf("writeSchemaMismatchedRuntime() error = %v", err)
+	}
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if row.Status != models.RuntimeStateUnknown {
+		t.Fatalf("row.Status = %q, want unknown", row.Status)
+	}
+	if row.RuntimeSource != RuntimeSourceInvalid {
+		t.Fatalf("row.RuntimeSource = %q, want invalid", row.RuntimeSource)
+	}
+	if row.RuntimeError == "" {
+		t.Fatal("row.RuntimeError = empty, want validate detail")
+	}
+}
+
+func TestGetMarksStaleRuntimeAsUnknown(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+	mustWriteRuntime(t, s, models.RuntimeStatus{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		State:         models.RuntimeStateIdle,
+		CWD:           "/tmp/project",
+		LastSeenAt:    "2026-03-30T14:00:00Z",
+	})
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if row.Status != models.RuntimeStateUnknown {
+		t.Fatalf("row.Status = %q, want unknown", row.Status)
+	}
+	if row.RuntimeSource != RuntimeSourceOK {
+		t.Fatalf("row.RuntimeSource = %q, want ok", row.RuntimeSource)
+	}
+	if row.Runtime == nil || row.Runtime.State != models.RuntimeStateIdle {
+		t.Fatalf("row.Runtime = %#v, want preserved trusted runtime record", row.Runtime)
 	}
 }
 
@@ -161,6 +240,7 @@ func TestGetPropagatesTmuxErrors(t *testing.T) {
 	})
 
 	service := New(roots, fakeSessions{err: errors.New("tmux unavailable")})
+	service.Now = fixedNow
 	if _, err := service.Get(context.Background(), "focus-bugfix"); err == nil {
 		t.Fatal("Get() error = nil, want tmux error")
 	}
@@ -209,4 +289,22 @@ func writeInvalidRuntime(path string) error {
 		return err
 	}
 	return os.WriteFile(path, []byte("{\"schemaVersion\":1,\"workstreamId\":\"focus-bugfix\",\"tmuxSession\":\"ph:focus-bugfix\",\"state\":\"dead\",\"cwd\":\"/tmp/project\",\"lastSeenAt\":\"2026-03-31T01:06:00Z\"}\n"), 0o644)
+}
+
+func writeUnreadableRuntime(path string) error {
+	if err := writeInvalidRuntime(path); err != nil {
+		return err
+	}
+	return os.Chmod(path, 0)
+}
+
+func writeSchemaMismatchedRuntime(path string) error {
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte("{\"schemaVersion\":2,\"workstreamId\":\"focus-bugfix\",\"tmuxSession\":\"ph:focus-bugfix\",\"state\":\"idle\",\"cwd\":\"/tmp/project\",\"lastSeenAt\":\"2026-03-31T01:06:00Z\"}\n"), 0o644)
+}
+
+func fixedNow() time.Time {
+	return time.Date(2026, time.March, 31, 3, 21, 25, 0, time.UTC)
 }

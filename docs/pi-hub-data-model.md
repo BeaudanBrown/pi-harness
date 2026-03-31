@@ -257,6 +257,17 @@ with tmux session discovery.
 Do not block on smart inference beyond this. A small runtime state file written
 through a thin Pi lifecycle integration is enough for v1.
 
+### Derived Runtime Examples
+
+| Scenario | tmux session live? | Runtime file | Freshness | Derived status | Why |
+| --- | --- | --- | --- | --- | --- |
+| Manifest exists but tmux session is gone | no | valid or missing | any | `dead` | missing tmux session wins even if an old runtime file still exists |
+| tmux session exists but no runtime file exists yet | yes | missing | n/a | `unknown` | the harness cannot trust a live processing-vs-idle state without a runtime record |
+| tmux session exists but the runtime file cannot be opened or read | yes | unreadable | n/a | `unknown` | the runtime artifact exists but is not trustworthy input |
+| tmux session exists but the runtime file fails schema validation | yes | schema-incompatible | n/a | `unknown` | v1 trusts only runtime files that decode and validate cleanly |
+| tmux session exists and the newest trusted runtime file is older than 12 hours | yes | valid | older than 12h | `unknown` | the stale-file cutoff overrides stale `idle` or `processing` signals |
+| tmux session exists and the newest trusted runtime file is fresh | yes | valid | 12h or newer | runtime file state | a trusted runtime file may surface `idle` or `processing` directly |
+
 ## Context Isolation And Sync
 
 The default for git-backed project attachment should be an isolated worktree.
