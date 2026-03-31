@@ -214,6 +214,22 @@ sessions, stale runtime state, and abandoned harness-owned worktrees.
 
 The first command groups to evaluate after v1 are:
 
+### Naming Sketch
+
+Keep the surface aligned with the existing `ph` operator model:
+
+| Concern | Preferred path | Alternate to keep in mind | Why this shape fits |
+| --- | --- | --- | --- |
+| inspection | `ph doctor` | `ph inspect` | short read-only entrypoint before any mutation |
+| dead-session repair | `ph repair session <workstream>` | `ph revive <workstream>` | keeps repair grouped by subsystem while preserving a concise operator verb |
+| stale runtime repair | `ph repair runtime <workstream>` | `ph refresh-runtime <workstream>` | mirrors the session form and keeps runtime repair separate from session recreation |
+| cleanup and reclamation | `ph cleanup worktrees` / `ph cleanup runtime` | `ph prune <workstream>` | makes destructive maintenance explicit instead of hiding it under generic repair |
+| deeper state repair | `ph repair manifest <workstream>` | `ph rebind <workstream>` | reserves manifest fixes for structural inconsistencies, not normal operator flow |
+
+This sketch is exploratory, not a locked CLI contract. The current preference is
+to keep `doctor`, `repair`, and `cleanup` as the main top-level verbs, with
+short alternates noted only where they may still be useful.
+
 ### Runtime Inspection
 
 - `ph doctor`
