@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -65,7 +66,7 @@ func TestRunUnknownCommand(t *testing.T) {
 }
 
 func TestRunNewCreatesManifest(t *testing.T) {
-	app, roots := testApplication(t, fakeSessions{}, fixedNow())
+	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -91,7 +92,7 @@ func TestRunNewCreatesManifest(t *testing.T) {
 }
 
 func TestRunListJSONReturnsMergedRows(t *testing.T) {
-	app, roots := testApplication(t, fakeSessions{live: map[string]bool{"ph:alpha": true}}, fixedNow())
+	app, roots, _ := testApplication(t, fakeSessions{live: map[string]bool{"ph:alpha": true}}, fixedNow())
 	testStore := store.New(roots)
 
 	mustWriteManifest(t, testStore, models.WorkstreamRecord{
@@ -148,7 +149,7 @@ func TestRunListJSONReturnsMergedRows(t *testing.T) {
 }
 
 func TestRunStatusReportsDerivedDeadState(t *testing.T) {
-	app, roots := testApplication(t, fakeSessions{}, fixedNow())
+	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
 	testStore := store.New(roots)
 
 	mustWriteManifest(t, testStore, models.WorkstreamRecord{
@@ -180,6 +181,82 @@ func TestRunStatusReportsDerivedDeadState(t *testing.T) {
 	}
 }
 
+func TestRunAttachBootstrapsMissingSessionAndSwitches(t *testing.T) {
+	app, roots, sessions := testApplication(t, fakeSessions{
+		live: map[string]bool{},
+	}, fixedNow())
+	testStore := store.New(roots)
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "Main checkout",
+				Path:        "/tmp/alpha",
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"attach", "alpha"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(attach) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "bootstrapped alpha (ph:alpha)" {
+		t.Fatalf("run(attach) stdout = %q", got)
+	}
+
+	if len(sessions.ensureCalls) != 1 {
+		t.Fatalf("EnsureSession() calls = %d, want 1", len(sessions.ensureCalls))
+	}
+	ensureCall := sessions.ensureCalls[0]
+	if ensureCall.session != "ph:alpha" || ensureCall.cwd != "/tmp/alpha" {
+		t.Fatalf("EnsureSession() call = %#v", ensureCall)
+	}
+	if got := sessions.attachCalls; len(got) != 1 || got[0] != "ph:alpha" {
+		t.Fatalf("AttachOrSwitch() calls = %#v", got)
+	}
+}
+
+func TestRunAttachUsesHomeDirectoryWithoutPrimaryContext(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	app, roots, sessions := testApplication(t, fakeSessions{}, fixedNow())
+	testStore := store.New(roots)
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"attach", "alpha"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(attach) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	ensureCall := sessions.ensureCalls[0]
+	if ensureCall.cwd != os.Getenv("HOME") {
+		t.Fatalf("EnsureSession() cwd = %q, want %q", ensureCall.cwd, os.Getenv("HOME"))
+	}
+}
+
 func TestHasCommand(t *testing.T) {
 	if !HasCommand("menu") {
 		t.Fatal("HasCommand(menu) = false, want true")
@@ -190,18 +267,48 @@ func TestHasCommand(t *testing.T) {
 }
 
 type fakeSessions struct {
-	live map[string]bool
-	err  error
+	live        map[string]bool
+	err         error
+	ensureErr   error
+	attachErr   error
+	ensureCalls []ensureCall
+	attachCalls []string
 }
 
-func (f fakeSessions) HasSession(_ context.Context, session string) (bool, error) {
+type ensureCall struct {
+	session string
+	cwd     string
+}
+
+func (f *fakeSessions) HasSession(_ context.Context, session string) (bool, error) {
 	if f.err != nil {
 		return false, f.err
 	}
 	return f.live[session], nil
 }
 
-func testApplication(t *testing.T, sessions fakeSessions, now func() time.Time) (application, paths.Roots) {
+func (f *fakeSessions) EnsureSession(_ context.Context, session, cwd string) (bool, error) {
+	f.ensureCalls = append(f.ensureCalls, ensureCall{session: session, cwd: cwd})
+	if f.ensureErr != nil {
+		return false, f.ensureErr
+	}
+	_, exists := f.live[session]
+	if f.live == nil {
+		f.live = map[string]bool{}
+	}
+	if !exists {
+		f.live[session] = true
+		return true, nil
+	}
+	return false, nil
+}
+
+func (f *fakeSessions) AttachOrSwitch(_ context.Context, session string) error {
+	f.attachCalls = append(f.attachCalls, session)
+	return f.attachErr
+}
+
+func testApplication(t *testing.T, sessions fakeSessions, now func() time.Time) (application, paths.Roots, *fakeSessions) {
 	t.Helper()
 	base := t.TempDir()
 	roots := paths.Roots{
@@ -211,7 +318,8 @@ func testApplication(t *testing.T, sessions fakeSessions, now func() time.Time) 
 		ShareRoot:   base + "/share/pi-harness",
 		Worktrees:   base + "/share/pi-harness/worktrees",
 	}
-	return newApplication(roots, sessions, now), roots
+	controller := &sessions
+	return newApplication(roots, controller, now), roots, controller
 }
 
 func fixedNow() func() time.Time {

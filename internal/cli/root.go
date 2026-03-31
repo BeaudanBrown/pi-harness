@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -26,23 +27,36 @@ const (
 type application struct {
 	store   store.Store
 	runtime hruntime.Service
+	tmux    tmuxController
 	now     func() time.Time
 }
 
-func newApplication(roots paths.Roots, sessions hruntime.SessionInspector, now func() time.Time) application {
+type tmuxController interface {
+	hruntime.SessionInspector
+	EnsureSession(ctx context.Context, session, cwd string) (bool, error)
+	AttachOrSwitch(ctx context.Context, session string) error
+}
+
+func newApplication(roots paths.Roots, sessions tmuxController, now func() time.Time) application {
 	if now == nil {
 		now = time.Now
+	}
+	if sessions == nil {
+		controller := tmux.New()
+		sessions = controller
 	}
 	return application{
 		store:   store.New(roots),
 		runtime: hruntime.New(roots, sessions),
+		tmux:    sessions,
 		now:     now,
 	}
 }
 
 // Run executes the top-level CLI entrypoint.
 func Run(args []string, stdout, stderr io.Writer) int {
-	app := newApplication(paths.DefaultRoots(), tmux.New(), time.Now)
+	controller := tmux.New()
+	app := newApplication(paths.DefaultRoots(), controller, time.Now)
 	return run(args, stdout, stderr, app)
 }
 
@@ -74,6 +88,12 @@ func run(args []string, stdout, stderr io.Writer, app application) int {
 	case "status":
 		if err := app.runStatus(args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "status: %v\n", err)
+			return 1
+		}
+		return 0
+	case "attach":
+		if err := app.runAttach(args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "attach: %v\n", err)
 			return 1
 		}
 		return 0
@@ -209,6 +229,51 @@ func (app application) runStatus(args []string, stdout io.Writer) error {
 		fmt.Fprintf(stdout, "Runtime error: %s\n", row.RuntimeError)
 	}
 	return nil
+}
+
+func (app application) runAttach(args []string, stdout io.Writer) error {
+	if len(args) != 1 {
+		return errors.New("usage: pi-harness attach <workstream>")
+	}
+
+	record, err := app.store.ReadManifest(args[0])
+	if err != nil {
+		return fmt.Errorf("load workstream %q: %w", args[0], err)
+	}
+
+	cwd, err := bootstrapCWD(record)
+	if err != nil {
+		return err
+	}
+
+	created, err := app.tmux.EnsureSession(context.Background(), record.TmuxSession, cwd)
+	if err != nil {
+		return fmt.Errorf("ensure tmux session %q: %w", record.TmuxSession, err)
+	}
+	if err := app.tmux.AttachOrSwitch(context.Background(), record.TmuxSession); err != nil {
+		return fmt.Errorf("attach tmux session %q: %w", record.TmuxSession, err)
+	}
+
+	if created {
+		fmt.Fprintf(stdout, "bootstrapped %s (%s)\n", record.WorkstreamID, record.TmuxSession)
+	}
+	return nil
+}
+
+func bootstrapCWD(record models.WorkstreamRecord) (string, error) {
+	if record.PrimaryContextID != "" {
+		for _, context := range record.Contexts {
+			if context.ContextID == record.PrimaryContextID {
+				return context.Path, nil
+			}
+		}
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("resolve home directory: %w", err)
+	}
+	return home, nil
 }
 
 func writeJSON(w io.Writer, value any) error {
