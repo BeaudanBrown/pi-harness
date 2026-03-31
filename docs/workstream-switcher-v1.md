@@ -227,6 +227,42 @@ the durable registry and popup selector are stable.
 - Pi-native deep UI integration before the tmux-backed control plane is stable
 - automatic cleanup or deletion of detached worktrees
 
+## Detach-Only Cleanup Boundary For V1
+
+V1 should treat detach and cleanup as separate operator concerns.
+
+If a later v1 command or manual manifest edit removes a context from a
+workstream, that detach action should only stop the workstream from referring to
+the path. It must not delete the attached files automatically.
+
+For harness-owned isolated git worktrees, the operator contract is:
+
+- the harness may create the isolated worktree under
+  `~/.local/share/pi-harness/worktrees/<workstream-id>/<context-id>/`
+- the harness does not remove that worktree automatically in v1
+- old harness-owned worktrees are manual-cleanup artifacts until post-v1
+  cleanup commands exist
+- shared source paths such as `/home/beau/host/projects/<repo>` are never
+  cleanup targets for detach; only the harness-owned worktree copy is in scope
+
+Before removing an old harness-owned worktree manually, the operator should
+confirm all of these conditions:
+
+1. the worktree path is no longer referenced by any active workstream manifest
+2. no live tmux session is still using that path as its working directory
+3. any work that should be kept has already been committed, merged, or copied
+   elsewhere
+
+For git-backed contexts, manual removal should prefer normal git worktree
+cleanup from the source checkout, for example `git -C <repo> worktree remove
+<path>`, rather than deleting the directory blindly. If git still reports stale
+metadata after the path is gone, the operator can follow with `git -C <repo>
+worktree prune`.
+
+The important v1 expectation is simple: the harness owns creation, but the
+operator still owns destructive cleanup decisions for abandoned harness-owned
+worktrees.
+
 ## Alpha Target
 
 The first meaningful test milestone is workflow alpha.

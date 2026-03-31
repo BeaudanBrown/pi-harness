@@ -47,6 +47,12 @@ func TestWorkstreamSwitcherSpecIncludesAttachmentSummaryExamples(t *testing.T) {
 		"| `ph attach <workstream-id>` | outside tmux from any other shell in the VM | same as the default `ssh agent` path: join tmux and attach straight to `ph:<workstream-id>` |",
 		"`ph menu` outside tmux always uses the shared `default` tmux session as the",
 		"`ph attach` outside tmux always lands directly in the requested workstream",
+		"## Detach-Only Cleanup Boundary For V1",
+		"that detach action should only stop the workstream from referring to",
+		"the harness does not remove that worktree automatically in v1",
+		"shared source paths such as `/home/beau/host/projects/<repo>` are never",
+		"git -C <repo> worktree remove",
+		"operator still owns destructive cleanup decisions for abandoned harness-owned",
 	}
 
 	for _, snippet := range requiredSnippets {

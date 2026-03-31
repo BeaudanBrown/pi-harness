@@ -189,6 +189,13 @@ Expected outcome:
 - at least one context directory exists under that root
 - the isolated worktree was created under the harness-owned path rather than by mutating the shared repo in place
 
+Operator note:
+
+- this harness-owned path is the only cleanup candidate if the isolated context is retired later
+- in v1, removing the context does not remove the worktree automatically
+- do not treat `/home/beau/host/projects/pi-harness` as disposable cleanup state for detach
+- if you later clean up the isolated worktree manually, prefer `git worktree remove` from the source checkout over `rm -rf`
+
 ### 9. Add a plain directory context to the same workstream
 
 Run:
