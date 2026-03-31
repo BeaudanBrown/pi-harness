@@ -595,10 +595,7 @@ func TestRunMenuOpensPopupAndAttachesSelectedWorkstream(t *testing.T) {
 		UpdatedAt:     "2026-03-31T01:10:00Z",
 		Contexts:      []models.WorkstreamContext{},
 	})
-	sessions.popupHook = func(command string) error {
-		path := selectorOutputPath(t, command)
-		return os.WriteFile(path, []byte("beta\n"), 0o600)
-	}
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -610,11 +607,14 @@ func TestRunMenuOpensPopupAndAttachesSelectedWorkstream(t *testing.T) {
 	if len(sessions.popupCalls) != 1 {
 		t.Fatalf("DisplayPopup() calls = %d, want 1", len(sessions.popupCalls))
 	}
-	if got := sessions.attachCalls; len(got) != 1 || got[0] != "ph:beta" {
-		t.Fatalf("AttachOrSwitch() calls = %#v", got)
+	if got := sessions.popupCalls[0]; !strings.Contains(got, shellQuote("/tmp/pi-harness")+" "+internalMenuAttachCommand) {
+		t.Fatalf("DisplayPopup() command = %q, want internal attach command", got)
 	}
-	if got := sessions.ensureCalls; len(got) != 1 || got[0].session != "ph:beta" {
-		t.Fatalf("EnsureSession() calls = %#v", got)
+	if len(sessions.attachCalls) != 0 {
+		t.Fatalf("AttachOrSwitch() calls = %#v, want none from parent menu command", sessions.attachCalls)
+	}
+	if len(sessions.ensureCalls) != 0 {
+		t.Fatalf("EnsureSession() calls = %#v, want none from parent menu command", sessions.ensureCalls)
 	}
 }
 
@@ -632,10 +632,7 @@ func TestRunMenuLeavesSessionUnchangedWhenSelectorCloses(t *testing.T) {
 		UpdatedAt:     "2026-03-31T01:10:00Z",
 		Contexts:      []models.WorkstreamContext{},
 	})
-	sessions.popupHook = func(command string) error {
-		path := selectorOutputPath(t, command)
-		return os.WriteFile(path, []byte("\n"), 0o600)
-	}
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -648,6 +645,39 @@ func TestRunMenuLeavesSessionUnchangedWhenSelectorCloses(t *testing.T) {
 	}
 	if len(sessions.ensureCalls) != 0 {
 		t.Fatalf("EnsureSession() calls = %#v, want none", sessions.ensureCalls)
+	}
+}
+
+func TestRunMenuOutsideTmuxBootstrapsDefaultSessionAndOpensPopup(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("TMUX", "")
+	app, _, sessions := testApplication(t, fakeSessions{}, fixedNow())
+	app.executable = func() (string, error) { return "/tmp/pi-harness", nil }
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"menu"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(menu) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != outsideTmuxMenuMessage() {
+		t.Fatalf("run(menu) stdout = %q", got)
+	}
+	if len(sessions.popupCalls) != 0 {
+		t.Fatalf("DisplayPopup() calls = %#v, want none", sessions.popupCalls)
+	}
+	if len(sessions.joinPopupCalls) != 1 {
+		t.Fatalf("JoinSessionWithPopup() calls = %#v, want 1", sessions.joinPopupCalls)
+	}
+	call := sessions.joinPopupCalls[0]
+	if call.session != sharedDefaultTmuxSession {
+		t.Fatalf("JoinSessionWithPopup() session = %q, want %q", call.session, sharedDefaultTmuxSession)
+	}
+	if call.cwd != os.Getenv("HOME") {
+		t.Fatalf("JoinSessionWithPopup() cwd = %q, want %q", call.cwd, os.Getenv("HOME"))
+	}
+	if !strings.Contains(call.command, shellQuote("/tmp/pi-harness")+" "+internalMenuAttachCommand) {
+		t.Fatalf("JoinSessionWithPopup() command = %q, want internal attach command", call.command)
 	}
 }
 
@@ -682,6 +712,35 @@ func TestRunInternalMenuSelectWritesChosenWorkstreamID(t *testing.T) {
 	}
 	if got := strings.TrimSpace(string(mustReadFile(t, outputPath))); got != "alpha" {
 		t.Fatalf("selection file = %q, want alpha", got)
+	}
+}
+
+func TestRunInternalMenuAttachSwitchesSelectedWorkstream(t *testing.T) {
+	app, roots, sessions := testApplication(t, fakeSessions{
+		live: map[string]bool{"ph:alpha": true},
+	}, fixedNow())
+	testStore := store.New(roots)
+	app.selector = fakeSelector{selected: "alpha"}
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	if err := app.runInternalMenuAttach(); err != nil {
+		t.Fatalf("runInternalMenuAttach() error = %v", err)
+	}
+	if got := sessions.attachCalls; len(got) != 1 || got[0] != "ph:alpha" {
+		t.Fatalf("AttachOrSwitch() calls = %#v", got)
+	}
+	if got := sessions.ensureCalls; len(got) != 1 || got[0].session != "ph:alpha" {
+		t.Fatalf("EnsureSession() calls = %#v", got)
 	}
 }
 
@@ -782,20 +841,28 @@ func TestHasCommand(t *testing.T) {
 }
 
 type fakeSessions struct {
-	live        map[string]bool
-	err         error
-	ensureErr   error
-	attachErr   error
-	ensureCalls []ensureCall
-	attachCalls []string
-	popupErr    error
-	popupCalls  []string
-	popupHook   func(string) error
+	live           map[string]bool
+	err            error
+	ensureErr      error
+	attachErr      error
+	ensureCalls    []ensureCall
+	attachCalls    []string
+	popupErr       error
+	popupCalls     []string
+	popupHook      func(string) error
+	joinPopupErr   error
+	joinPopupCalls []ensurePopupCall
 }
 
 type ensureCall struct {
 	session string
 	cwd     string
+}
+
+type ensurePopupCall struct {
+	session string
+	cwd     string
+	command string
 }
 
 func (f *fakeSessions) HasSession(_ context.Context, session string) (bool, error) {
@@ -832,6 +899,14 @@ func (f *fakeSessions) DisplayPopup(_ context.Context, command string) error {
 		return f.popupHook(command)
 	}
 	return f.popupErr
+}
+
+func (f *fakeSessions) JoinSessionWithPopup(_ context.Context, session, cwd, command string) error {
+	f.joinPopupCalls = append(f.joinPopupCalls, ensurePopupCall{session: session, cwd: cwd, command: command})
+	if f.popupHook != nil {
+		return f.popupHook(command)
+	}
+	return f.joinPopupErr
 }
 
 type fakeSelector struct {
@@ -937,15 +1012,6 @@ func mustReadFile(t *testing.T, path string) []byte {
 		t.Fatalf("ReadFile(%q) error = %v", path, err)
 	}
 	return data
-}
-
-func selectorOutputPath(t *testing.T, command string) string {
-	t.Helper()
-	parts := strings.Split(command, "'")
-	if len(parts) < 4 {
-		t.Fatalf("popup command = %q, want quoted executable and output path", command)
-	}
-	return parts[3]
 }
 
 func createGitRepo(t *testing.T) string {

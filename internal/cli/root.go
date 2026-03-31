@@ -40,6 +40,7 @@ type tmuxController interface {
 	EnsureSession(ctx context.Context, session, cwd string) (bool, error)
 	AttachOrSwitch(ctx context.Context, session string) error
 	DisplayPopup(ctx context.Context, command string) error
+	JoinSessionWithPopup(ctx context.Context, session, cwd, command string) error
 }
 
 func newApplication(roots paths.Roots, sessions tmuxController, now func() time.Time) application {
@@ -120,6 +121,12 @@ func run(args []string, stdout, stderr io.Writer, app application) int {
 	case internalMenuSelectCommand:
 		if err := app.runInternalMenuSelect(args[1:]); err != nil {
 			fmt.Fprintf(stderr, "%s: %v\n", internalMenuSelectCommand, err)
+			return 1
+		}
+		return 0
+	case internalMenuAttachCommand:
+		if err := app.runInternalMenuAttach(); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", internalMenuAttachCommand, err)
 			return 1
 		}
 		return 0

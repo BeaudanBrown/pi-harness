@@ -79,3 +79,13 @@ func (c Controller) DisplayPopup(ctx context.Context, command string) error {
 	}
 	return nil
 }
+
+// JoinSessionWithPopup attaches the operator to the target session and opens a
+// popup there as one tmux flow. This is the outside-tmux bootstrap path for
+// commands that need a live client before running popup UI.
+func (c Controller) JoinSessionWithPopup(ctx context.Context, session, cwd, command string) error {
+	if err := c.runner.Run(ctx, "tmux", "new-session", "-A", "-s", session, "-c", cwd, ";", "display-popup", "-E", command); err != nil {
+		return fmt.Errorf("tmux join session %q with popup: %w", session, err)
+	}
+	return nil
+}

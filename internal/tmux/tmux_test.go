@@ -125,6 +125,20 @@ func TestDisplayPopupRunsTmuxDisplayPopup(t *testing.T) {
 	}
 }
 
+func TestJoinSessionWithPopupAttachesAndOpensPopup(t *testing.T) {
+	runner := fakeRunner{}
+	client := Controller{runner: &runner}
+
+	if err := client.JoinSessionWithPopup(context.Background(), "default", "/tmp/home", "pi-harness __menu-select /tmp/out"); err != nil {
+		t.Fatalf("JoinSessionWithPopup() error = %v", err)
+	}
+
+	want := []string{"tmux new-session -A -s default -c /tmp/home ; display-popup -E pi-harness __menu-select /tmp/out"}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("runner calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
 type fakeRunner struct {
 	calls []string
 	errs  map[string]error
