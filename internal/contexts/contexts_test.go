@@ -1,6 +1,10 @@
 package contexts
 
 import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -187,6 +191,97 @@ func TestUpdateContextRejectsInvalidModeAndPreservesManifest(t *testing.T) {
 	}
 }
 
+func TestAttachGitWorktreeCreatesIsolatedAttachment(t *testing.T) {
+	s := store.New(testRoots(t))
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:00:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	repoRoot := createGitRepo(t)
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+
+	record, err := attacher.AttachGitWorktree(context.Background(), "alpha", AttachGitWorktreeInput{
+		Path: repoRoot,
+	})
+	if err != nil {
+		t.Fatalf("AttachGitWorktree() error = %v", err)
+	}
+	if len(record.Contexts) != 1 {
+		t.Fatalf("len(Contexts) = %d, want 1", len(record.Contexts))
+	}
+
+	attached := record.Contexts[0]
+	if attached.Path != s.Roots.WorktreePath("alpha", attached.ContextID) {
+		t.Fatalf("attached path = %q, want worktree root path", attached.Path)
+	}
+	if attached.Path == repoRoot {
+		t.Fatalf("attached path = source checkout %q, want isolated worktree path", attached.Path)
+	}
+	if attached.Kind != models.ContextKindWorktree {
+		t.Fatalf("kind = %q, want worktree", attached.Kind)
+	}
+	if attached.Mode != models.ContextModeIsolated {
+		t.Fatalf("mode = %q, want isolated", attached.Mode)
+	}
+	if attached.OwnerWorkstreamID != "alpha" {
+		t.Fatalf("ownerWorkstreamId = %q, want alpha", attached.OwnerWorkstreamID)
+	}
+	if attached.Branch == "" {
+		t.Fatal("branch = empty, want branch metadata")
+	}
+	if record.PrimaryContextID != attached.ContextID {
+		t.Fatalf("PrimaryContextID = %q, want %q", record.PrimaryContextID, attached.ContextID)
+	}
+
+	if _, err := os.Stat(filepath.Join(attached.Path, ".git")); err != nil {
+		t.Fatalf("worktree .git missing: %v", err)
+	}
+	if branch := gitOutput(t, attached.Path, "branch", "--show-current"); branch != attached.Branch {
+		t.Fatalf("worktree branch = %q, want %q", branch, attached.Branch)
+	}
+}
+
+func TestAttachGitWorktreeAddsDistinctWorktreesForSameRepo(t *testing.T) {
+	s := store.New(testRoots(t))
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:00:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	repoRoot := createGitRepo(t)
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+
+	first, err := attacher.AttachGitWorktree(context.Background(), "alpha", AttachGitWorktreeInput{Path: repoRoot})
+	if err != nil {
+		t.Fatalf("first AttachGitWorktree() error = %v", err)
+	}
+	second, err := attacher.AttachGitWorktree(context.Background(), "alpha", AttachGitWorktreeInput{Path: repoRoot})
+	if err != nil {
+		t.Fatalf("second AttachGitWorktree() error = %v", err)
+	}
+
+	if len(second.Contexts) != 2 {
+		t.Fatalf("len(Contexts) = %d, want 2", len(second.Contexts))
+	}
+	if first.Contexts[0].Path == second.Contexts[1].Path {
+		t.Fatalf("second path = %q, want a distinct worktree path", second.Contexts[1].Path)
+	}
+	if first.Contexts[0].Branch == second.Contexts[1].Branch {
+		t.Fatalf("second branch = %q, want a distinct owned branch", second.Contexts[1].Branch)
+	}
+}
+
 func fixedNow() func() time.Time {
 	return func() time.Time {
 		return time.Date(2026, 3, 31, 2, 0, 0, 0, time.UTC)
@@ -210,4 +305,42 @@ func testRoots(t *testing.T) paths.Roots {
 		ShareRoot:   base + "/share/pi-harness",
 		Worktrees:   base + "/share/pi-harness/worktrees",
 	}
+}
+
+func createGitRepo(t *testing.T) string {
+	t.Helper()
+	repoRoot := filepath.Join(t.TempDir(), "repo")
+	if err := os.MkdirAll(repoRoot, 0o755); err != nil {
+		t.Fatalf("MkdirAll(repoRoot) error = %v", err)
+	}
+	gitRun(t, repoRoot, "init", "-b", "main")
+	gitRun(t, repoRoot, "config", "user.name", "Test User")
+	gitRun(t, repoRoot, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(filepath.Join(repoRoot, "README.md"), []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+	gitRun(t, repoRoot, "add", "README.md")
+	gitRun(t, repoRoot, "commit", "-m", "initial")
+	return repoRoot
+}
+
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s error = %v, output=%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
+}
+
+func gitOutput(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.Output()
+	if err != nil {
+		t.Fatalf("git %s error = %v", strings.Join(args, " "), err)
+	}
+	return strings.TrimSpace(string(output))
 }

@@ -261,6 +261,54 @@ func TestRunAttachUsesHomeDirectoryWithoutPrimaryContext(t *testing.T) {
 	}
 }
 
+func TestRunAddContextCreatesIsolatedGitWorktreeManifestEntry(t *testing.T) {
+	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
+	testStore := store.New(roots)
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:00:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	repoRoot := createGitRepo(t)
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"add-context", "alpha", repoRoot}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(add-context) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+	if !strings.Contains(stdout.String(), "attached") {
+		t.Fatalf("run(add-context) stdout = %q, want attach confirmation", stdout.String())
+	}
+
+	record, err := testStore.ReadManifest("alpha")
+	if err != nil {
+		t.Fatalf("ReadManifest(alpha) error = %v", err)
+	}
+	if len(record.Contexts) != 1 {
+		t.Fatalf("len(Contexts) = %d, want 1", len(record.Contexts))
+	}
+	context := record.Contexts[0]
+	if context.Path == repoRoot {
+		t.Fatalf("context.Path = %q, want isolated worktree path", context.Path)
+	}
+	if context.Path != roots.WorktreePath("alpha", context.ContextID) {
+		t.Fatalf("context.Path = %q, want worktree layout path", context.Path)
+	}
+	if context.OwnerWorkstreamID != "alpha" {
+		t.Fatalf("context.OwnerWorkstreamID = %q, want alpha", context.OwnerWorkstreamID)
+	}
+	if context.Branch == "" {
+		t.Fatal("context.Branch = empty, want owned branch metadata")
+	}
+}
+
 func TestRunMenuOpensPopupAndAttachesSelectedWorkstream(t *testing.T) {
 	app, roots, sessions := testApplication(t, fakeSessions{
 		live: map[string]bool{"ph:beta": true},
@@ -559,6 +607,30 @@ func selectorOutputPath(t *testing.T, command string) string {
 		t.Fatalf("popup command = %q, want quoted executable and output path", command)
 	}
 	return parts[3]
+}
+
+func createGitRepo(t *testing.T) string {
+	t.Helper()
+	repoRoot := t.TempDir()
+	gitRun(t, repoRoot, "init", "-b", "main")
+	gitRun(t, repoRoot, "config", "user.name", "Test User")
+	gitRun(t, repoRoot, "config", "user.email", "test@example.com")
+	if err := os.WriteFile(repoRoot+"/README.md", []byte("hello\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(README.md) error = %v", err)
+	}
+	gitRun(t, repoRoot, "add", "README.md")
+	gitRun(t, repoRoot, "commit", "-m", "initial")
+	return repoRoot
+}
+
+func gitRun(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	cmd := exec.Command("git", args...)
+	cmd.Dir = dir
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %s error = %v, output=%s", strings.Join(args, " "), err, strings.TrimSpace(string(output)))
+	}
 }
 
 func exitCodeError(code int) error {

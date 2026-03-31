@@ -12,6 +12,7 @@ import (
 	"text/tabwriter"
 	"time"
 
+	"github.com/beaudanbrown/pi-harness/internal/contexts"
 	"github.com/beaudanbrown/pi-harness/internal/models"
 	"github.com/beaudanbrown/pi-harness/internal/paths"
 	hruntime "github.com/beaudanbrown/pi-harness/internal/runtime"
@@ -27,6 +28,7 @@ const (
 type application struct {
 	store      store.Store
 	runtime    hruntime.Service
+	contexts   contexts.Attacher
 	tmux       tmuxController
 	selector   workstreamSelector
 	executable func() (string, error)
@@ -51,6 +53,7 @@ func newApplication(roots paths.Roots, sessions tmuxController, now func() time.
 	return application{
 		store:      store.New(roots),
 		runtime:    hruntime.New(roots, sessions),
+		contexts:   contexts.NewAttacher(roots, store.New(roots), now),
 		tmux:       sessions,
 		selector:   newCommandSelector(),
 		executable: os.Executable,
@@ -99,6 +102,12 @@ func run(args []string, stdout, stderr io.Writer, app application) int {
 	case "attach":
 		if err := app.runAttach(args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "attach: %v\n", err)
+			return 1
+		}
+		return 0
+	case "add-context":
+		if err := app.runAddContext(args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "add-context: %v\n", err)
 			return 1
 		}
 		return 0
@@ -274,6 +283,36 @@ func (app application) runAttach(args []string, stdout io.Writer) error {
 	if created {
 		fmt.Fprintf(stdout, "bootstrapped %s (%s)\n", record.WorkstreamID, record.TmuxSession)
 	}
+	return nil
+}
+
+func (app application) runAddContext(args []string, stdout io.Writer) error {
+	flags := flag.NewFlagSet("add-context", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	contextID := flags.String("context-id", "", "context id")
+	displayName := flags.String("display-name", "", "display name")
+	projectID := flags.String("project-id", "", "project id")
+	role := flags.String("role", "", "role")
+	if err := flags.Parse(args); err != nil {
+		return err
+	}
+	if flags.NArg() != 2 {
+		return errors.New("usage: pi-harness add-context [--context-id id] [--display-name name] [--project-id id] [--role primary|secondary] <workstream> <path>")
+	}
+
+	record, err := app.contexts.AttachGitWorktree(context.Background(), flags.Arg(0), contexts.AttachGitWorktreeInput{
+		ContextID:   *contextID,
+		DisplayName: *displayName,
+		ProjectID:   *projectID,
+		Path:        flags.Arg(1),
+		Role:        *role,
+	})
+	if err != nil {
+		return err
+	}
+
+	context := record.Contexts[len(record.Contexts)-1]
+	fmt.Fprintf(stdout, "attached %s to %s at %s\n", context.ContextID, record.WorkstreamID, context.Path)
 	return nil
 }
 
