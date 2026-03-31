@@ -25,6 +25,8 @@ const (
 
 	RuntimeStateProcessing = "processing"
 	RuntimeStateIdle       = "idle"
+	RuntimeStateDead       = "dead"
+	RuntimeStateUnknown    = "unknown"
 )
 
 var workstreamIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
@@ -65,6 +67,23 @@ type RuntimeStatus struct {
 	LastSeenAt       string `json:"lastSeenAt"`
 	LastProcessingAt string `json:"lastProcessingAt,omitempty"`
 	ActiveModel      string `json:"activeModel,omitempty"`
+}
+
+// WorkstreamRow is the merged operator-facing workstream view.
+type WorkstreamRow struct {
+	WorkstreamID    string              `json:"workstreamId"`
+	Title           string              `json:"title"`
+	TmuxSession     string              `json:"tmuxSession"`
+	CreatedAt       string              `json:"createdAt"`
+	UpdatedAt       string              `json:"updatedAt"`
+	Status          string              `json:"status"`
+	PrimaryContext  *WorkstreamContext  `json:"primaryContext,omitempty"`
+	Contexts        []WorkstreamContext `json:"contexts"`
+	LastSeenAt      string              `json:"lastSeenAt,omitempty"`
+	Runtime         *RuntimeStatus      `json:"runtime,omitempty"`
+	RuntimeSource   string              `json:"runtimeSource"`
+	RuntimeError    string              `json:"runtimeError,omitempty"`
+	TmuxSessionLive bool                `json:"tmuxSessionLive"`
 }
 
 func ValidateWorkstreamID(id string) error {
