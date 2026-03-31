@@ -78,6 +78,12 @@ workflow intact and avoids requiring Pi to own window management.
 If `ph menu` is invoked outside tmux, the harness should first start or join
 tmux and then open the popup from there.
 
+The operator-visible message for that path should be:
+
+`Outside tmux: joining the shared default tmux session, then opening the workstream menu.`
+
+After bootstrap, the operator lands in the shared `default` tmux session with the popup open there.
+
 ## Session Model
 
 - one tmux session per workstream
@@ -170,6 +176,12 @@ operator into the new managed tmux session.
 
 If `ph attach <workstream>` is invoked outside tmux, the harness should first
 start or join tmux and then attach to the target session.
+
+The operator-visible message for that path should be:
+
+`Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).`
+
+After bootstrap, the operator lands directly in the requested workstream session.
 
 In v1, commands that take `<workstream>` should resolve only exact
 `workstreamId` matches. Prefix, fuzzy, or title-based resolution can land after

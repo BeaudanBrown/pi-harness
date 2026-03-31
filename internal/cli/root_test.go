@@ -278,6 +278,7 @@ func TestRunAttachBootstrapsMissingSessionAndSwitches(t *testing.T) {
 		live: map[string]bool{},
 	}, fixedNow())
 	testStore := store.New(roots)
+	t.Setenv("TMUX", "")
 
 	mustWriteManifest(t, testStore, models.WorkstreamRecord{
 		SchemaVersion: models.CurrentSchemaVersion,
@@ -305,7 +306,7 @@ func TestRunAttachBootstrapsMissingSessionAndSwitches(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("run(attach) exit code = %d, stderr=%q", exitCode, stderr.String())
 	}
-	if got := strings.TrimSpace(stdout.String()); got != "bootstrapped alpha (ph:alpha)" {
+	if got := strings.TrimSpace(stdout.String()); got != "Outside tmux: joining tmux and attaching alpha (ph:alpha).\nbootstrapped alpha (ph:alpha)" {
 		t.Fatalf("run(attach) stdout = %q", got)
 	}
 
@@ -323,6 +324,7 @@ func TestRunAttachBootstrapsMissingSessionAndSwitches(t *testing.T) {
 
 func TestRunAttachUsesHomeDirectoryWithoutPrimaryContext(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
 	app, roots, sessions := testApplication(t, fakeSessions{}, fixedNow())
 	testStore := store.New(roots)
 
@@ -346,6 +348,51 @@ func TestRunAttachUsesHomeDirectoryWithoutPrimaryContext(t *testing.T) {
 	ensureCall := sessions.ensureCalls[0]
 	if ensureCall.cwd != os.Getenv("HOME") {
 		t.Fatalf("EnsureSession() cwd = %q, want %q", ensureCall.cwd, os.Getenv("HOME"))
+	}
+}
+
+func TestRunAttachPrintsOutsideTmuxMessageBeforeAttachingExistingSession(t *testing.T) {
+	app, roots, sessions := testApplication(t, fakeSessions{
+		live: map[string]bool{"ph:alpha": true},
+	}, fixedNow())
+	testStore := store.New(roots)
+	t.Setenv("TMUX", "")
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"attach", "alpha"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(attach) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+	if got := strings.TrimSpace(stdout.String()); got != "Outside tmux: joining tmux and attaching alpha (ph:alpha)." {
+		t.Fatalf("run(attach) stdout = %q", got)
+	}
+	if got := sessions.attachCalls; len(got) != 1 || got[0] != "ph:alpha" {
+		t.Fatalf("AttachOrSwitch() calls = %#v", got)
+	}
+}
+
+func TestOutsideTmuxMessagesMatchCLIContract(t *testing.T) {
+	record := models.WorkstreamRecord{
+		WorkstreamID: "alpha",
+		TmuxSession:  "ph:alpha",
+	}
+
+	if got := outsideTmuxMenuMessage(); got != "Outside tmux: joining the shared default tmux session, then opening the workstream menu." {
+		t.Fatalf("outsideTmuxMenuMessage() = %q", got)
+	}
+	if got := outsideTmuxAttachMessage(record); got != "Outside tmux: joining tmux and attaching alpha (ph:alpha)." {
+		t.Fatalf("outsideTmuxAttachMessage() = %q", got)
 	}
 }
 

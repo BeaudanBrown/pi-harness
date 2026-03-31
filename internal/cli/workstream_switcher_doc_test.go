@@ -34,6 +34,10 @@ func TestWorkstreamSwitcherSpecIncludesAttachmentSummaryExamples(t *testing.T) {
 		"That 12-hour cutoff is a v1 operator tradeoff:",
 		"without turning healthy sessions into `unknown` too quickly",
 		"current `idle` or `processing` signal",
+		"Outside tmux: joining the shared default tmux session, then opening the workstream menu.",
+		"After bootstrap, the operator lands in the shared `default` tmux session with the popup open there.",
+		"Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).",
+		"After bootstrap, the operator lands directly in the requested workstream session.",
 	}
 
 	for _, snippet := range requiredSnippets {

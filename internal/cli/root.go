@@ -268,6 +268,10 @@ func (app application) runAttach(args []string, stdout io.Writer) error {
 		return err
 	}
 
+	if !insideTmux() {
+		fmt.Fprintln(stdout, outsideTmuxAttachMessage(record))
+	}
+
 	created, err := app.tmux.EnsureSession(context.Background(), record.TmuxSession, cwd)
 	if err != nil {
 		return fmt.Errorf("ensure tmux session %q: %w", record.TmuxSession, err)

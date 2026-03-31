@@ -112,7 +112,8 @@ Checkpoint:
 The later verification runbook can expand this skeleton with:
 
 - exact sample ids captured from a real run
-- outside-tmux entry coverage for `ph attach`
+- outside-tmux entry coverage for `ph menu`, including `Outside tmux: joining the shared default tmux session, then opening the workstream menu.`
+- outside-tmux entry coverage for `ph attach`, including `Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).`
 - plain-directory attachment coverage
 - `ph list` and status checks, including output such as:
 

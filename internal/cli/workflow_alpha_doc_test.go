@@ -37,6 +37,8 @@ func TestWorkflowAlphaTranscriptCoversRequiredCommandSequence(t *testing.T) {
 		"workflow-alpha       waiting     Workflow Alpha       no paths",
 		"workflow-alpha-peer  processing  Workflow Alpha Peer  2 paths",
 		"ID                  STATUS      TITLE                ATTACHMENTS",
+		"Outside tmux: joining the shared default tmux session, then opening the workstream menu.",
+		"Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).",
 	}
 
 	for _, snippet := range requiredSnippets {
