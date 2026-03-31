@@ -111,6 +111,28 @@ func TestAttachOrSwitchUsesSwitchClientInsideTmux(t *testing.T) {
 	}
 }
 
+func TestAttachOrSwitchFallsBackToAttachWhenSwitchClientHasNoLiveClient(t *testing.T) {
+	runner := fakeRunner{
+		errs: map[string]error{
+			"tmux switch-client -t ph:alpha": exitCodeError(1),
+		},
+	}
+	client := Controller{runner: &runner}
+	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
+
+	if err := client.AttachOrSwitch(context.Background(), "ph:alpha"); err != nil {
+		t.Fatalf("AttachOrSwitch() error = %v", err)
+	}
+
+	want := []string{
+		"tmux switch-client -t ph:alpha",
+		"tmux attach-session -t ph:alpha",
+	}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("runner calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
 func TestDisplayPopupRunsTmuxDisplayPopup(t *testing.T) {
 	runner := fakeRunner{}
 	client := Controller{runner: &runner}

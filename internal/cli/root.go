@@ -174,6 +174,18 @@ func (app application) runNew(args []string, stdout io.Writer) error {
 		return fmt.Errorf("write manifest: %w", err)
 	}
 
+	cwd, err := bootstrapCWD(record)
+	if err != nil {
+		return err
+	}
+
+	if _, err := app.tmux.EnsureSession(context.Background(), record.TmuxSession, cwd); err != nil {
+		return fmt.Errorf("ensure tmux session %q: %w", record.TmuxSession, err)
+	}
+	if err := app.tmux.AttachOrSwitch(context.Background(), record.TmuxSession); err != nil {
+		return fmt.Errorf("attach tmux session %q: %w", record.TmuxSession, err)
+	}
+
 	fmt.Fprintf(stdout, "created %s (%s)\n", record.WorkstreamID, record.TmuxSession)
 	return nil
 }

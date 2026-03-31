@@ -61,13 +61,21 @@ func (c Controller) EnsureSession(ctx context.Context, session, cwd string) (boo
 
 // AttachOrSwitch moves the current operator terminal into the target session.
 func (c Controller) AttachOrSwitch(ctx context.Context, session string) error {
-	args := []string{"attach-session", "-t", session}
-	if os.Getenv("TMUX") != "" {
-		args = []string{"switch-client", "-t", session}
+	if os.Getenv("TMUX") == "" {
+		if err := c.runner.Run(ctx, "tmux", "attach-session", "-t", session); err != nil {
+			return fmt.Errorf("tmux attach-session %q: %w", session, err)
+		}
+		return nil
 	}
 
-	if err := c.runner.Run(ctx, "tmux", args...); err != nil {
-		return fmt.Errorf("tmux %s %q: %w", args[0], session, err)
+	if err := c.runner.Run(ctx, "tmux", "switch-client", "-t", session); err != nil {
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			if fallbackErr := c.runner.Run(ctx, "tmux", "attach-session", "-t", session); fallbackErr == nil {
+				return nil
+			}
+		}
+		return fmt.Errorf("tmux switch-client %q: %w", session, err)
 	}
 	return nil
 }

@@ -4,7 +4,7 @@ buildGoModule {
   pname = "pi-harness";
   version = "0.0.0";
   src = ../.;
-  vendorHash = null;
+  vendorHash = "sha256-g+yaVIx4jxpAQ/+WrGKxhVeliYx7nLQe/zsGpxV4Fn4=";
   subPackages = [ "./cmd/pi-harness" ];
 
   postInstall = ''

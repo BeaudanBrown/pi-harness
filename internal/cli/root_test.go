@@ -71,7 +71,8 @@ func TestRunUnknownCommand(t *testing.T) {
 }
 
 func TestRunNewCreatesManifest(t *testing.T) {
-	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
+	app, roots, sessions := testApplication(t, fakeSessions{}, fixedNow())
+	t.Setenv("TMUX", "")
 
 	var stdout bytes.Buffer
 	var stderr bytes.Buffer
@@ -93,6 +94,15 @@ func TestRunNewCreatesManifest(t *testing.T) {
 	}
 	if record.CreatedAt != "2026-03-31T02:00:00Z" || record.UpdatedAt != "2026-03-31T02:00:00Z" {
 		t.Fatalf("manifest timestamps = (%q, %q)", record.CreatedAt, record.UpdatedAt)
+	}
+	if len(sessions.ensureCalls) != 1 {
+		t.Fatalf("EnsureSession() calls = %d, want 1", len(sessions.ensureCalls))
+	}
+	if got := sessions.ensureCalls[0]; got.session != "ph:focus-bugfix" {
+		t.Fatalf("EnsureSession() call = %#v", got)
+	}
+	if got := sessions.attachCalls; len(got) != 1 || got[0] != "ph:focus-bugfix" {
+		t.Fatalf("AttachOrSwitch() calls = %#v", got)
 	}
 }
 

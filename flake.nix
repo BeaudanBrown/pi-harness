@@ -120,6 +120,7 @@
             pkgs.jq
             pkgs.just
             pkgs.nodejs
+            piHarnessPackage
             pkgs.tmux
           ];
           shellHook = ''
