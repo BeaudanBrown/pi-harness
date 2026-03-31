@@ -5,12 +5,12 @@ export interface SharedProject {
   guestPath: string;
 }
 
-export interface TrackedProject {
+export interface ProjectMetadata {
   id: string;
   name: string;
   defaultBaseBranch: string | null;
   repoPath: string | null;
-  stateFile: string | null;
+  metadataFile: string | null;
   toolingFile: string | null;
   notesFile: string | null;
   active: boolean;
@@ -37,14 +37,14 @@ export interface SessionRecord {
   worktree: string | null;
 }
 
-export type ProjectVisibility = "tracked-only" | "shared-only" | "tracked-and-shared";
+export type ProjectVisibility = "metadata-only" | "shared-only" | "metadata-and-shared";
 
 export interface HubProjectRecord {
   key: string;
   projectId: string | null;
   displayName: string;
   share: SharedProject | null;
-  tracked: TrackedProject | null;
+  projectMetadata: ProjectMetadata | null;
   manifest: RepoManifest | null;
   session: SessionRecord | null;
   actionable: boolean;
@@ -54,7 +54,7 @@ export interface HubProjectRecord {
 export interface HubSnapshot {
   generatedAt: string;
   shares: SharedProject[];
-  trackedProjects: TrackedProject[];
+  projectMetadata: ProjectMetadata[];
   sessions: SessionRecord[];
   projects: HubProjectRecord[];
 }
