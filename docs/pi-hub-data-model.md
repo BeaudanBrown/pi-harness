@@ -277,6 +277,140 @@ Sync expectations:
 5. Inspect tmux session existence.
 6. Produce merged `HubWorkstreamRecord[]`.
 
+## Context Label Precedence
+
+When the harness needs one operator-visible context label for `ph list`,
+`ph menu`, or attach-time shortcuts, it should derive that label in this order:
+
+1. explicit context `displayName` already stored in the workstream manifest
+2. repo-local project metadata `name` for the attached repo
+3. shared-project registry `agentPath` for the attached guest path
+4. the attached path basename
+
+Additional rules:
+
+- `projectId` helps correlate records but does not supply a label by itself
+- a higher-precedence label wins even if a lower-precedence source disagrees
+- missing or invalid repo metadata skips step 2 and falls through without
+  blocking the attachment
+- shared-project data labels only guest-visible paths that actually match the
+  share registry entry
+- when two contexts resolve to the same final label, the harness should keep
+  both attachments and disambiguate in the surrounding row output with path or
+  mode details rather than inventing a different base label
+
+### Worked Examples
+
+#### Plain Path With No Share And No Repo Metadata
+
+Attached context:
+
+- path: `/home/beau/host/scratch/notes`
+- manifest `displayName`: unset
+- share-registry match: none
+- repo metadata: missing
+
+Result:
+
+- context label: `notes`
+
+Reason:
+
+- there is no stored label, no project metadata label, and no share label, so
+  the basename fallback wins
+
+#### Shared Project Without Repo Metadata
+
+Attached context:
+
+- path: `/home/beau/host/projects/pi-harness`
+- manifest `displayName`: unset
+- share-registry match: `projects/pi-harness`
+- repo metadata: missing
+
+Result:
+
+- context label: `projects/pi-harness`
+
+Reason:
+
+- repo metadata is absent, so the harness falls through to the share-registry
+  label instead of the basename `pi-harness`
+
+#### Repo With Metadata Overrides Share Label
+
+Attached context:
+
+- path: `/home/beau/host/projects/pi-harness`
+- manifest `displayName`: unset
+- share-registry match: `projects/pi-harness`
+- repo metadata: `id: pi-harness`, `name: Pi Harness`
+
+Result:
+
+- context label: `Pi Harness`
+
+Reason:
+
+- repo metadata outranks the share-registry label, so the operator sees the
+  repo-local project name instead of the share key
+
+#### Explicit Manifest Label Overrides Repo Metadata
+
+Attached context:
+
+- path: `/home/beau/host/projects/pi-harness`
+- manifest `displayName`: `Harness CLI`
+- share-registry match: `projects/pi-harness`
+- repo metadata: `name: Pi Harness`
+
+Result:
+
+- context label: `Harness CLI`
+
+Reason:
+
+- once a context stores an explicit `displayName`, later metadata imports do
+  not rewrite that operator choice
+
+#### Conflict Example: Two Contexts Resolve To The Same Metadata Name
+
+Attached contexts:
+
+- `/home/beau/host/projects/pi-harness` with repo metadata `name: Pi Harness`
+- `/home/beau/host/projects/pi-harness-alt` with repo metadata `name: Pi Harness`
+
+Result:
+
+- each context keeps the base label `Pi Harness`
+- list or menu rendering adds surrounding disambiguation from path, branch, or
+  sharing mode when needed
+
+Reason:
+
+- the precedence rule answers which source names the context; it does not force
+  the harness to mutate one context label just because another context resolved
+  to the same name
+
+#### Missing-Metadata Example: Invalid Repo Metadata Falls Back Cleanly
+
+Attached context:
+
+- path: `/home/beau/host/projects/pi-harness`
+- manifest `displayName`: unset
+- share-registry match: `projects/pi-harness`
+- repo metadata: invalid `.pi/project.yaml`
+
+Result:
+
+- context label: `projects/pi-harness`
+- operator-visible warning: repo metadata is invalid
+
+Reason:
+
+- invalid metadata drops out of the precedence chain for labeling, but the
+  attachment remains valid and still uses the next-best share-derived label
+
 ## First Commands Supported By This Model
 
 - `ph menu`
