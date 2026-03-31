@@ -18,3 +18,41 @@ func TestDefaultRootsUsesXDGOverrides(t *testing.T) {
 		t.Fatalf("Worktrees = %q, want %q", roots.Worktrees, "/tmp/share/pi-harness/worktrees")
 	}
 }
+
+func TestRootsDerivedPaths(t *testing.T) {
+	roots := Roots{
+		Workstreams: "/tmp/state/pi-harness/workstreams",
+		Runtime:     "/tmp/state/pi-harness/runtime",
+		Worktrees:   "/tmp/share/pi-harness/worktrees",
+	}
+
+	if got := roots.ManifestPath("focus-bugfix"); got != "/tmp/state/pi-harness/workstreams/focus-bugfix.json" {
+		t.Fatalf("ManifestPath() = %q", got)
+	}
+	if got := roots.RuntimePath("focus-bugfix"); got != "/tmp/state/pi-harness/runtime/focus-bugfix.json" {
+		t.Fatalf("RuntimePath() = %q", got)
+	}
+	if got := roots.WorktreePath("focus-bugfix", "ctx-main"); got != "/tmp/share/pi-harness/worktrees/focus-bugfix/ctx-main" {
+		t.Fatalf("WorktreePath() = %q", got)
+	}
+}
+
+func TestGenerateWorkstreamID(t *testing.T) {
+	existing := map[string]struct{}{
+		"fix-bug":   {},
+		"fix-bug-2": {},
+	}
+
+	if got := GenerateWorkstreamID("Fix bug", existing); got != "fix-bug-3" {
+		t.Fatalf("GenerateWorkstreamID() = %q, want %q", got, "fix-bug-3")
+	}
+	if got := GenerateWorkstreamID("   ", nil); got != "workstream" {
+		t.Fatalf("GenerateWorkstreamID() = %q, want %q", got, "workstream")
+	}
+}
+
+func TestTmuxSessionName(t *testing.T) {
+	if got := TmuxSessionName("focus-bugfix"); got != "ph:focus-bugfix" {
+		t.Fatalf("TmuxSessionName() = %q, want %q", got, "ph:focus-bugfix")
+	}
+}
