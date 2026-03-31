@@ -198,3 +198,16 @@ func TestProjectMetadataImportValidate(t *testing.T) {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
+
+func TestProjectMetadataValidateRejectsInvalidID(t *testing.T) {
+	project := ProjectMetadata{
+		ID:           "Pi Harness",
+		RepoPath:     "/home/beau/host/projects/pi-harness",
+		MetadataFile: "/home/beau/host/projects/pi-harness/.pi/project.yaml",
+		Active:       true,
+	}
+
+	if err := project.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want invalid id error")
+	}
+}

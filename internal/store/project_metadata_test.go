@@ -137,3 +137,69 @@ func TestReadProjectMetadataLoadsExistingCompanionFiles(t *testing.T) {
 		t.Fatalf("Warnings = %#v, want none", imported.Warnings)
 	}
 }
+
+func TestReadProjectMetadataRejectsAbsoluteCompanionPathsWithWarnings(t *testing.T) {
+	repoPath := t.TempDir()
+	metadataDir := filepath.Join(repoPath, ".pi")
+	metadataPath := filepath.Join(metadataDir, "project.yaml")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.pi) error = %v", err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(strings.Join([]string{
+		"id: alpha",
+		"toolingFile: /tmp/tooling.md",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(project.yaml) error = %v", err)
+	}
+
+	imported, err := ReadProjectMetadata(repoPath)
+	if err != nil {
+		t.Fatalf("ReadProjectMetadata() error = %v", err)
+	}
+	if imported.Status != models.ProjectMetadataImportStatusLoadedWithWarnings {
+		t.Fatalf("Status = %q, want loaded-with-warnings", imported.Status)
+	}
+	if imported.Metadata == nil {
+		t.Fatal("Metadata = nil, want parsed base metadata")
+	}
+	if imported.Metadata.ToolingFile != "" {
+		t.Fatalf("ToolingFile = %q, want empty rejected path", imported.Metadata.ToolingFile)
+	}
+	if len(imported.Warnings) != 1 || !strings.Contains(imported.Warnings[0], "must be relative to .pi/") {
+		t.Fatalf("Warnings = %#v, want absolute-path warning", imported.Warnings)
+	}
+}
+
+func TestReadProjectMetadataRejectsEscapingCompanionPathsWithWarnings(t *testing.T) {
+	repoPath := t.TempDir()
+	metadataDir := filepath.Join(repoPath, ".pi")
+	metadataPath := filepath.Join(metadataDir, "project.yaml")
+	if err := os.MkdirAll(metadataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(.pi) error = %v", err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(strings.Join([]string{
+		"id: alpha",
+		"notesFile: ../notes.md",
+		"",
+	}, "\n")), 0o644); err != nil {
+		t.Fatalf("WriteFile(project.yaml) error = %v", err)
+	}
+
+	imported, err := ReadProjectMetadata(repoPath)
+	if err != nil {
+		t.Fatalf("ReadProjectMetadata() error = %v", err)
+	}
+	if imported.Status != models.ProjectMetadataImportStatusLoadedWithWarnings {
+		t.Fatalf("Status = %q, want loaded-with-warnings", imported.Status)
+	}
+	if imported.Metadata == nil {
+		t.Fatal("Metadata = nil, want parsed base metadata")
+	}
+	if imported.Metadata.NotesFile != "" {
+		t.Fatalf("NotesFile = %q, want empty rejected path", imported.Metadata.NotesFile)
+	}
+	if len(imported.Warnings) != 1 || !strings.Contains(imported.Warnings[0], "must stay within .pi/") {
+		t.Fatalf("Warnings = %#v, want .pi containment warning", imported.Warnings)
+	}
+}

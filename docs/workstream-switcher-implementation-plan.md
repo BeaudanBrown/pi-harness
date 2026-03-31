@@ -232,6 +232,7 @@ Deliverables:
 
 - parser for `/home/beau/host/.pi-hub/shares.json`
 - parser for repo-local `.pi/project.yaml` metadata
+- repo-local metadata semantics locked by `docs/project-metadata-v1.md`
 - merged labels and attachment candidates
 - share-aware filtering for attachable contexts
 

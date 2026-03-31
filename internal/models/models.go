@@ -312,6 +312,11 @@ func (project SharedProject) Validate() error {
 }
 
 func (project ProjectMetadata) Validate() error {
+	if project.ID != "" {
+		if !workstreamIDPattern.MatchString(project.ID) {
+			return fmt.Errorf("id %q must match %s", project.ID, workstreamIDPattern.String())
+		}
+	}
 	if !filepath.IsAbs(project.RepoPath) {
 		return fmt.Errorf("repoPath %q must be absolute", project.RepoPath)
 	}

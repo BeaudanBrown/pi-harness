@@ -42,6 +42,7 @@ Imported project metadata owned by each repo:
 - primary source: repo-local `.pi/project.yaml`
 - optional companion sources: repo-local `.pi/` files referenced by that
   manifest
+- field contract: `docs/project-metadata-v1.md`
 - semantics: naming, tags, default branches, docs, and attachment hints
 
 Project metadata helps the hub label contexts and offer attachment shortcuts. It

@@ -103,11 +103,14 @@ func resolveOptionalCompanionFile(repoPath, rawPath, field string) (string, stri
 		return "", ""
 	}
 
-	resolved := trimmed
-	if !filepath.IsAbs(resolved) {
-		resolved = filepath.Join(repoPath, ".pi", trimmed)
+	if filepath.IsAbs(trimmed) {
+		return "", fmt.Sprintf("%s %q is referenced by %s but must be relative to .pi/", field, trimmed, projectMetadataRelativePath)
 	}
-	resolved = filepath.Clean(resolved)
+	resolved := filepath.Clean(filepath.Join(repoPath, ".pi", trimmed))
+	companionRoot := filepath.Clean(filepath.Join(repoPath, ".pi")) + string(filepath.Separator)
+	if resolved != filepath.Clean(filepath.Join(repoPath, ".pi")) && !strings.HasPrefix(resolved, companionRoot) {
+		return "", fmt.Sprintf("%s %q is referenced by %s but must stay within .pi/", field, trimmed, projectMetadataRelativePath)
+	}
 
 	info, err := os.Stat(resolved)
 	switch {
