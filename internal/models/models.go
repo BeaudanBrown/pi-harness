@@ -77,6 +77,36 @@ type SharedProject struct {
 	GuestPath  string `json:"guestPath"`
 }
 
+const (
+	ProjectMetadataImportStatusLoaded             = "loaded"
+	ProjectMetadataImportStatusLoadedWithWarnings = "loaded-with-warnings"
+	ProjectMetadataImportStatusMissing            = "missing"
+	ProjectMetadataImportStatusInvalid            = "invalid"
+)
+
+// ProjectMetadata is imported from a repo-local .pi/project.yaml manifest.
+type ProjectMetadata struct {
+	ID                string `json:"id,omitempty"`
+	Name              string `json:"name,omitempty"`
+	DefaultBaseBranch string `json:"defaultBaseBranch,omitempty"`
+	RepoPath          string `json:"repoPath"`
+	MetadataFile      string `json:"metadataFile"`
+	ToolingFile       string `json:"toolingFile,omitempty"`
+	NotesFile         string `json:"notesFile,omitempty"`
+	Active            bool   `json:"active"`
+}
+
+// ProjectMetadataImport records whether repo-local metadata loaded cleanly,
+// degraded with warnings, or fell back because the manifest was missing/invalid.
+type ProjectMetadataImport struct {
+	Status       string           `json:"status"`
+	RepoPath     string           `json:"repoPath"`
+	MetadataFile string           `json:"metadataFile"`
+	Metadata     *ProjectMetadata `json:"metadata,omitempty"`
+	Warnings     []string         `json:"warnings,omitempty"`
+	Error        string           `json:"error,omitempty"`
+}
+
 // WorkstreamRow is the merged operator-facing workstream view.
 type WorkstreamRow struct {
 	WorkstreamID    string              `json:"workstreamId"`
@@ -277,6 +307,46 @@ func (project SharedProject) Validate() error {
 	}
 	if !filepath.IsAbs(project.GuestPath) {
 		return fmt.Errorf("guestPath %q must be absolute", project.GuestPath)
+	}
+	return nil
+}
+
+func (project ProjectMetadata) Validate() error {
+	if !filepath.IsAbs(project.RepoPath) {
+		return fmt.Errorf("repoPath %q must be absolute", project.RepoPath)
+	}
+	if !filepath.IsAbs(project.MetadataFile) {
+		return fmt.Errorf("metadataFile %q must be absolute", project.MetadataFile)
+	}
+	if project.ToolingFile != "" && !filepath.IsAbs(project.ToolingFile) {
+		return fmt.Errorf("toolingFile %q must be absolute", project.ToolingFile)
+	}
+	if project.NotesFile != "" && !filepath.IsAbs(project.NotesFile) {
+		return fmt.Errorf("notesFile %q must be absolute", project.NotesFile)
+	}
+	return nil
+}
+
+func (imported ProjectMetadataImport) Validate() error {
+	if !filepath.IsAbs(imported.RepoPath) {
+		return fmt.Errorf("repoPath %q must be absolute", imported.RepoPath)
+	}
+	if !filepath.IsAbs(imported.MetadataFile) {
+		return fmt.Errorf("metadataFile %q must be absolute", imported.MetadataFile)
+	}
+	if !isAllowed(
+		imported.Status,
+		ProjectMetadataImportStatusLoaded,
+		ProjectMetadataImportStatusLoadedWithWarnings,
+		ProjectMetadataImportStatusMissing,
+		ProjectMetadataImportStatusInvalid,
+	) {
+		return fmt.Errorf("status %q is invalid", imported.Status)
+	}
+	if imported.Metadata != nil {
+		if err := imported.Metadata.Validate(); err != nil {
+			return err
+		}
 	}
 	return nil
 }

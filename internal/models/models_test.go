@@ -179,3 +179,22 @@ func TestSharedProjectValidateRejectsAbsoluteAgentPath(t *testing.T) {
 		t.Fatal("Validate() error = nil, want relative agentPath error")
 	}
 }
+
+func TestProjectMetadataImportValidate(t *testing.T) {
+	imported := ProjectMetadataImport{
+		Status:       ProjectMetadataImportStatusLoadedWithWarnings,
+		RepoPath:     "/home/beau/host/projects/pi-harness",
+		MetadataFile: "/home/beau/host/projects/pi-harness/.pi/project.yaml",
+		Metadata: &ProjectMetadata{
+			RepoPath:     "/home/beau/host/projects/pi-harness",
+			MetadataFile: "/home/beau/host/projects/pi-harness/.pi/project.yaml",
+			ToolingFile:  "/home/beau/host/projects/pi-harness/.pi/tooling.md",
+			Active:       true,
+		},
+		Warnings: []string{"toolingFile \"tooling.md\" is referenced but missing"},
+	}
+
+	if err := imported.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}

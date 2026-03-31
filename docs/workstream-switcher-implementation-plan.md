@@ -230,6 +230,14 @@ Deliverables:
 - merged labels and attachment candidates
 - share-aware filtering for attachable contexts
 
+Metadata import fallback contract for v1:
+
+- missing `.pi/project.yaml` is a clean fallback, not a fatal error
+- unreadable or invalid `.pi/project.yaml` is surfaced as invalid metadata
+  while attachment and workstream listing continue
+- missing companion files referenced by `.pi/project.yaml` downgrade only the
+  affected shortcut or note path; base metadata remains available
+
 ### Phase 5: End-To-End Verification
 
 Deliverables:

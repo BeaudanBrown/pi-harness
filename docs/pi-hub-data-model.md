@@ -48,6 +48,19 @@ Project metadata helps the hub label contexts and offer attachment shortcuts. It
 does not define workstream identity. The harness reads it directly from each
 project rather than from a separate cross-project index.
 
+Metadata import must degrade predictably:
+
+- if `.pi/project.yaml` is missing, import falls back to "no repo metadata" for
+  that project rather than failing the workstream row
+- if `.pi/project.yaml` is unreadable, invalid, or schema-incompatible, import
+  falls back to "invalid repo metadata" and surfaces an operator-visible error
+- if a referenced companion file under `.pi/` is missing or invalid, the base
+  metadata still imports and only that companion-backed shortcut is dropped with
+  a warning
+- incomplete metadata must not block path attachment; later implementation can
+  decide which labels, tags, or shortcuts remain available from the successfully
+  parsed subset
+
 ### 3. Workstream Plane
 
 Guest-local durable workstream manifests:
