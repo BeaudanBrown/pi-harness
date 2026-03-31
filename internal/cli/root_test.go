@@ -4,7 +4,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
+	"os/exec"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -257,6 +261,159 @@ func TestRunAttachUsesHomeDirectoryWithoutPrimaryContext(t *testing.T) {
 	}
 }
 
+func TestRunMenuOpensPopupAndAttachesSelectedWorkstream(t *testing.T) {
+	app, roots, sessions := testApplication(t, fakeSessions{
+		live: map[string]bool{"ph:beta": true},
+	}, fixedNow())
+	testStore := store.New(roots)
+	app.executable = func() (string, error) { return "/tmp/pi-harness", nil }
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "beta",
+		Title:         "Beta",
+		TmuxSession:   paths.TmuxSessionName("beta"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+	sessions.popupHook = func(command string) error {
+		path := selectorOutputPath(t, command)
+		return os.WriteFile(path, []byte("beta\n"), 0o600)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"menu"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(menu) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	if len(sessions.popupCalls) != 1 {
+		t.Fatalf("DisplayPopup() calls = %d, want 1", len(sessions.popupCalls))
+	}
+	if got := sessions.attachCalls; len(got) != 1 || got[0] != "ph:beta" {
+		t.Fatalf("AttachOrSwitch() calls = %#v", got)
+	}
+	if got := sessions.ensureCalls; len(got) != 1 || got[0].session != "ph:beta" {
+		t.Fatalf("EnsureSession() calls = %#v", got)
+	}
+}
+
+func TestRunMenuLeavesSessionUnchangedWhenSelectorCloses(t *testing.T) {
+	app, roots, sessions := testApplication(t, fakeSessions{}, fixedNow())
+	testStore := store.New(roots)
+	app.executable = func() (string, error) { return "/tmp/pi-harness", nil }
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "beta",
+		Title:         "Beta",
+		TmuxSession:   paths.TmuxSessionName("beta"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+	sessions.popupHook = func(command string) error {
+		path := selectorOutputPath(t, command)
+		return os.WriteFile(path, []byte("\n"), 0o600)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"menu"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(menu) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+	if len(sessions.attachCalls) != 0 {
+		t.Fatalf("AttachOrSwitch() calls = %#v, want none", sessions.attachCalls)
+	}
+	if len(sessions.ensureCalls) != 0 {
+		t.Fatalf("EnsureSession() calls = %#v, want none", sessions.ensureCalls)
+	}
+}
+
+func TestRunInternalMenuSelectWritesChosenWorkstreamID(t *testing.T) {
+	app, roots, _ := testApplication(t, fakeSessions{
+		live: map[string]bool{"ph:alpha": true},
+	}, fixedNow())
+	testStore := store.New(roots)
+	outputPath := t.TempDir() + "/selection.txt"
+	app.selector = fakeSelector{selected: "alpha"}
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "Main checkout",
+				Path:        "/tmp/alpha",
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	if err := app.runInternalMenuSelect([]string{outputPath}); err != nil {
+		t.Fatalf("runInternalMenuSelect() error = %v", err)
+	}
+	if got := strings.TrimSpace(string(mustReadFile(t, outputPath))); got != "alpha" {
+		t.Fatalf("selection file = %q, want alpha", got)
+	}
+}
+
+func TestCommandSelectorRendersRowsForFZFAndParsesSelection(t *testing.T) {
+	runner := &fakeCommandExecutor{output: "alpha\twaiting\tAlpha\tMain checkout\n"}
+	selector := commandSelector{runner: runner}
+
+	selected, err := selector.Select(context.Background(), []models.WorkstreamRow{
+		{
+			WorkstreamID: "alpha",
+			Title:        "Alpha",
+			Status:       models.RuntimeStateIdle,
+			PrimaryContext: &models.WorkstreamContext{
+				DisplayName: "Main checkout",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("Select() error = %v", err)
+	}
+	if selected != "alpha" {
+		t.Fatalf("Select() = %q, want alpha", selected)
+	}
+	if runner.name != "fzf" {
+		t.Fatalf("runner name = %q, want fzf", runner.name)
+	}
+	if got := strings.Join(runner.args, " "); !strings.Contains(got, "--with-nth=2,3,4") {
+		t.Fatalf("runner args = %#v", runner.args)
+	}
+	if got := runner.stdin; got != "alpha\twaiting\tAlpha\tMain checkout\n" {
+		t.Fatalf("selector stdin = %q", got)
+	}
+}
+
+func TestCommandSelectorTreatsAbortAsNoSelection(t *testing.T) {
+	selector := commandSelector{runner: &fakeCommandExecutor{err: exitCodeError(130)}}
+
+	selected, err := selector.Select(context.Background(), []models.WorkstreamRow{
+		{WorkstreamID: "alpha", Title: "Alpha", Status: models.RuntimeStateIdle},
+	})
+	if err != nil {
+		t.Fatalf("Select() error = %v", err)
+	}
+	if selected != "" {
+		t.Fatalf("Select() = %q, want empty selection", selected)
+	}
+}
+
 func TestHasCommand(t *testing.T) {
 	if !HasCommand("menu") {
 		t.Fatal("HasCommand(menu) = false, want true")
@@ -273,6 +430,9 @@ type fakeSessions struct {
 	attachErr   error
 	ensureCalls []ensureCall
 	attachCalls []string
+	popupErr    error
+	popupCalls  []string
+	popupHook   func(string) error
 }
 
 type ensureCall struct {
@@ -308,6 +468,47 @@ func (f *fakeSessions) AttachOrSwitch(_ context.Context, session string) error {
 	return f.attachErr
 }
 
+func (f *fakeSessions) DisplayPopup(_ context.Context, command string) error {
+	f.popupCalls = append(f.popupCalls, command)
+	if f.popupHook != nil {
+		return f.popupHook(command)
+	}
+	return f.popupErr
+}
+
+type fakeSelector struct {
+	selected string
+	err      error
+}
+
+func (f fakeSelector) Select(_ context.Context, _ []models.WorkstreamRow) (string, error) {
+	return f.selected, f.err
+}
+
+type fakeCommandExecutor struct {
+	name   string
+	args   []string
+	stdin  string
+	output string
+	err    error
+}
+
+func (f *fakeCommandExecutor) Run(_ context.Context, name string, args []string, stdin io.Reader, stdout io.Writer) error {
+	f.name = name
+	f.args = append([]string(nil), args...)
+	data, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	f.stdin = string(data)
+	if f.output != "" {
+		if _, err := io.WriteString(stdout, f.output); err != nil {
+			return err
+		}
+	}
+	return f.err
+}
+
 func testApplication(t *testing.T, sessions fakeSessions, now func() time.Time) (application, paths.Roots, *fakeSessions) {
 	t.Helper()
 	base := t.TempDir()
@@ -340,4 +541,44 @@ func mustWriteRuntime(t *testing.T, s store.Store, status models.RuntimeStatus) 
 	if err := s.WriteRuntime(status); err != nil {
 		t.Fatalf("WriteRuntime() error = %v", err)
 	}
+}
+
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("ReadFile(%q) error = %v", path, err)
+	}
+	return data
+}
+
+func selectorOutputPath(t *testing.T, command string) string {
+	t.Helper()
+	parts := strings.Split(command, "'")
+	if len(parts) < 4 {
+		t.Fatalf("popup command = %q, want quoted executable and output path", command)
+	}
+	return parts[3]
+}
+
+func exitCodeError(code int) error {
+	cmd := exec.Command(os.Args[0], "-test.run=TestHelperProcessExitCode")
+	cmd.Env = append(os.Environ(), "GO_WANT_HELPER_PROCESS=1", "GO_HELPER_EXIT_CODE="+strconv.Itoa(code))
+	err := cmd.Run()
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		panic("expected exec.ExitError")
+	}
+	return err
+}
+
+func TestHelperProcessExitCode(t *testing.T) {
+	if os.Getenv("GO_WANT_HELPER_PROCESS") != "1" {
+		return
+	}
+	code, err := strconv.Atoi(os.Getenv("GO_HELPER_EXIT_CODE"))
+	if err != nil {
+		code = 1
+	}
+	os.Exit(code)
 }

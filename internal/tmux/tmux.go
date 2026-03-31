@@ -71,3 +71,11 @@ func (c Controller) AttachOrSwitch(ctx context.Context, session string) error {
 	}
 	return nil
 }
+
+// DisplayPopup opens a blocking tmux popup and runs the provided shell command.
+func (c Controller) DisplayPopup(ctx context.Context, command string) error {
+	if err := c.runner.Run(ctx, "tmux", "display-popup", "-E", command); err != nil {
+		return fmt.Errorf("tmux display-popup: %w", err)
+	}
+	return nil
+}

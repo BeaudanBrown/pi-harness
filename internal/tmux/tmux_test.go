@@ -111,6 +111,20 @@ func TestAttachOrSwitchUsesSwitchClientInsideTmux(t *testing.T) {
 	}
 }
 
+func TestDisplayPopupRunsTmuxDisplayPopup(t *testing.T) {
+	runner := fakeRunner{}
+	client := Controller{runner: &runner}
+
+	if err := client.DisplayPopup(context.Background(), "pi-harness __menu-select /tmp/out"); err != nil {
+		t.Fatalf("DisplayPopup() error = %v", err)
+	}
+
+	want := []string{"tmux display-popup -E pi-harness __menu-select /tmp/out"}
+	if !reflect.DeepEqual(runner.calls, want) {
+		t.Fatalf("runner calls = %#v, want %#v", runner.calls, want)
+	}
+}
+
 type fakeRunner struct {
 	calls []string
 	errs  map[string]error

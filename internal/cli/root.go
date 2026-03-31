@@ -25,16 +25,19 @@ const (
 )
 
 type application struct {
-	store   store.Store
-	runtime hruntime.Service
-	tmux    tmuxController
-	now     func() time.Time
+	store      store.Store
+	runtime    hruntime.Service
+	tmux       tmuxController
+	selector   workstreamSelector
+	executable func() (string, error)
+	now        func() time.Time
 }
 
 type tmuxController interface {
 	hruntime.SessionInspector
 	EnsureSession(ctx context.Context, session, cwd string) (bool, error)
 	AttachOrSwitch(ctx context.Context, session string) error
+	DisplayPopup(ctx context.Context, command string) error
 }
 
 func newApplication(roots paths.Roots, sessions tmuxController, now func() time.Time) application {
@@ -46,10 +49,12 @@ func newApplication(roots paths.Roots, sessions tmuxController, now func() time.
 		sessions = controller
 	}
 	return application{
-		store:   store.New(roots),
-		runtime: hruntime.New(roots, sessions),
-		tmux:    sessions,
-		now:     now,
+		store:      store.New(roots),
+		runtime:    hruntime.New(roots, sessions),
+		tmux:       sessions,
+		selector:   newCommandSelector(),
+		executable: os.Executable,
+		now:        now,
 	}
 }
 
@@ -94,6 +99,18 @@ func run(args []string, stdout, stderr io.Writer, app application) int {
 	case "attach":
 		if err := app.runAttach(args[1:], stdout); err != nil {
 			fmt.Fprintf(stderr, "attach: %v\n", err)
+			return 1
+		}
+		return 0
+	case "menu":
+		if err := app.runMenu(args[1:], stdout); err != nil {
+			fmt.Fprintf(stderr, "menu: %v\n", err)
+			return 1
+		}
+		return 0
+	case internalMenuSelectCommand:
+		if err := app.runInternalMenuSelect(args[1:]); err != nil {
+			fmt.Fprintf(stderr, "%s: %v\n", internalMenuSelectCommand, err)
 			return 1
 		}
 		return 0
