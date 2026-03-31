@@ -400,7 +400,9 @@ func TestShareAttachmentCandidatesUseGuestPathsOnly(t *testing.T) {
 	s := store.New(testRoots(t))
 	base := t.TempDir()
 	repoPath := filepath.Join(base, "pi-harness")
-	writeRepoMetadata(t, repoPath, "id: pi-harness\nname: Pi Harness\n")
+	writeRepoMetadata(t, repoPath, "id: pi-harness\nname: Pi Harness\ndefaultBaseBranch: main\ntoolingFile: tooling.md\nnotesFile: notes.md\n")
+	writeMetadataCompanionFile(t, repoPath, "tooling.md", "# Tooling\n")
+	writeMetadataCompanionFile(t, repoPath, "notes.md", "# Notes\n")
 	registryPath := filepath.Join(base, "shares.json")
 	if err := os.WriteFile(registryPath, []byte(`[
   {
@@ -426,11 +428,26 @@ func TestShareAttachmentCandidatesUseGuestPathsOnly(t *testing.T) {
 	if candidates[0].DisplayName != "Pi Harness" {
 		t.Fatalf("DisplayName = %q, want metadata-backed label", candidates[0].DisplayName)
 	}
+	if candidates[0].Detail != "projects/pi-harness | base main | tooling | notes" {
+		t.Fatalf("Detail = %q, want metadata-backed share detail", candidates[0].Detail)
+	}
 	if candidates[0].Path != repoPath {
 		t.Fatalf("Path = %q, want guest path", candidates[0].Path)
 	}
 	if candidates[0].Path == candidates[0].Share.SourcePath || candidates[0].Path == candidates[0].Share.HostPath {
 		t.Fatalf("Path = %q, want guest path only", candidates[0].Path)
+	}
+	if candidates[0].ProjectID != "pi-harness" {
+		t.Fatalf("ProjectID = %q, want metadata project id", candidates[0].ProjectID)
+	}
+	if candidates[0].DefaultBaseBranch != "main" {
+		t.Fatalf("DefaultBaseBranch = %q, want metadata branch hint", candidates[0].DefaultBaseBranch)
+	}
+	if candidates[0].ToolingFile != filepath.Join(repoPath, ".pi", "tooling.md") {
+		t.Fatalf("ToolingFile = %q, want resolved tooling path", candidates[0].ToolingFile)
+	}
+	if candidates[0].NotesFile != filepath.Join(repoPath, ".pi", "notes.md") {
+		t.Fatalf("NotesFile = %q, want resolved notes path", candidates[0].NotesFile)
 	}
 	if candidates[0].MetadataImport == nil {
 		t.Fatal("MetadataImport = nil, want surfaced metadata import")
@@ -543,6 +560,70 @@ func TestShareAttachmentCandidatesSurfaceMetadataFallbackStatuses(t *testing.T) 
 	}
 }
 
+func TestShareAttachmentCandidatesKeepShareFallbacksWithoutMetadataHints(t *testing.T) {
+	s := store.New(testRoots(t))
+	base := t.TempDir()
+
+	missingPath := filepath.Join(base, "missing")
+	if err := os.MkdirAll(missingPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(missing) error = %v", err)
+	}
+
+	inactivePath := filepath.Join(base, "inactive")
+	writeRepoMetadata(t, inactivePath, "id: inactive\nname: Inactive Repo\ndefaultBaseBranch: main\nactive: false\n")
+
+	registryPath := filepath.Join(base, "shares.json")
+	if err := os.WriteFile(registryPath, []byte(`[
+  {
+    "agentPath": "projects/missing",
+    "sourcePath": "/srv/repos/missing",
+    "hostPath": "/home/beau/agent/projects/missing",
+    "guestPath": "`+missingPath+`"
+  },
+  {
+    "agentPath": "projects/inactive",
+    "sourcePath": "/srv/repos/inactive",
+    "hostPath": "/home/beau/agent/projects/inactive",
+    "guestPath": "`+inactivePath+`"
+  }
+]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares) error = %v", err)
+	}
+
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+	attacher.ShareRegistryPath = registryPath
+
+	candidates, err := attacher.ShareAttachmentCandidates()
+	if err != nil {
+		t.Fatalf("ShareAttachmentCandidates() error = %v", err)
+	}
+
+	got := map[string]ShareAttachmentCandidate{}
+	for _, candidate := range candidates {
+		got[candidate.Share.AgentPath] = candidate
+	}
+
+	if got["projects/missing"].DisplayName != "projects/missing" {
+		t.Fatalf("missing DisplayName = %q, want share fallback", got["projects/missing"].DisplayName)
+	}
+	if got["projects/missing"].Detail != "" {
+		t.Fatalf("missing Detail = %q, want no metadata hints", got["projects/missing"].Detail)
+	}
+	if got["projects/missing"].ProjectID != "" || got["projects/missing"].DefaultBaseBranch != "" || got["projects/missing"].ToolingFile != "" || got["projects/missing"].NotesFile != "" {
+		t.Fatalf("missing candidate hints = %+v, want empty metadata hints", got["projects/missing"])
+	}
+
+	if got["projects/inactive"].DisplayName != "projects/inactive" {
+		t.Fatalf("inactive DisplayName = %q, want share fallback", got["projects/inactive"].DisplayName)
+	}
+	if got["projects/inactive"].Detail != "" {
+		t.Fatalf("inactive Detail = %q, want no inactive metadata hints", got["projects/inactive"].Detail)
+	}
+	if got["projects/inactive"].ProjectID != "" || got["projects/inactive"].DefaultBaseBranch != "" || got["projects/inactive"].ToolingFile != "" || got["projects/inactive"].NotesFile != "" {
+		t.Fatalf("inactive candidate hints = %+v, want empty inactive metadata hints", got["projects/inactive"])
+	}
+}
+
 func fixedNow() func() time.Time {
 	return func() time.Time {
 		return time.Date(2026, 3, 31, 2, 0, 0, 0, time.UTC)
@@ -614,5 +695,16 @@ func writeRepoMetadata(t *testing.T, repoPath, manifest string) {
 	}
 	if err := os.WriteFile(metadataPath, []byte(manifest), 0o644); err != nil {
 		t.Fatalf("WriteFile(project.yaml) error = %v", err)
+	}
+}
+
+func writeMetadataCompanionFile(t *testing.T, repoPath, name, contents string) {
+	t.Helper()
+	path := filepath.Join(repoPath, ".pi", name)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll(companion) error = %v", err)
+	}
+	if err := os.WriteFile(path, []byte(contents), 0o644); err != nil {
+		t.Fatalf("WriteFile(companion) error = %v", err)
 	}
 }

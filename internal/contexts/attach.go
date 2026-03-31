@@ -87,10 +87,15 @@ func NewAttacher(roots paths.Roots, s store.Store, now func() time.Time) Attache
 }
 
 type ShareAttachmentCandidate struct {
-	DisplayName    string
-	Path           string
-	Share          models.SharedProject
-	MetadataImport *models.ProjectMetadataImport
+	DisplayName       string
+	Detail            string
+	Path              string
+	ProjectID         string
+	DefaultBaseBranch string
+	ToolingFile       string
+	NotesFile         string
+	Share             models.SharedProject
+	MetadataImport    *models.ProjectMetadataImport
 }
 
 func (a Attacher) ShareAttachmentCandidates() ([]ShareAttachmentCandidate, error) {
@@ -107,23 +112,64 @@ func (a Attacher) ShareAttachmentCandidates() ([]ShareAttachmentCandidate, error
 		}
 
 		displayName := project.AgentPath
-		if imported.Metadata != nil && imported.Metadata.Active &&
-			(imported.Status == models.ProjectMetadataImportStatusLoaded ||
-				imported.Status == models.ProjectMetadataImportStatusLoadedWithWarnings) {
-			if label := strings.TrimSpace(imported.Metadata.Name); label != "" {
+		projectID := ""
+		defaultBaseBranch := ""
+		toolingFile := ""
+		notesFile := ""
+		if metadata := activeCandidateMetadata(imported); metadata != nil {
+			projectID = metadata.ID
+			defaultBaseBranch = metadata.DefaultBaseBranch
+			toolingFile = metadata.ToolingFile
+			notesFile = metadata.NotesFile
+			if label := strings.TrimSpace(metadata.Name); label != "" {
 				displayName = label
 			}
 		}
 
 		importedCopy := imported
 		candidates = append(candidates, ShareAttachmentCandidate{
-			DisplayName:    displayName,
-			Path:           project.GuestPath,
-			Share:          project,
-			MetadataImport: &importedCopy,
+			DisplayName:       displayName,
+			Detail:            shareAttachmentCandidateDetail(displayName, project, importedCopy),
+			Path:              project.GuestPath,
+			ProjectID:         projectID,
+			DefaultBaseBranch: defaultBaseBranch,
+			ToolingFile:       toolingFile,
+			NotesFile:         notesFile,
+			Share:             project,
+			MetadataImport:    &importedCopy,
 		})
 	}
 	return candidates, nil
+}
+
+func activeCandidateMetadata(imported models.ProjectMetadataImport) *models.ProjectMetadata {
+	if imported.Status != models.ProjectMetadataImportStatusLoaded &&
+		imported.Status != models.ProjectMetadataImportStatusLoadedWithWarnings {
+		return nil
+	}
+	if imported.Metadata == nil || !imported.Metadata.Active {
+		return nil
+	}
+	return imported.Metadata
+}
+
+func shareAttachmentCandidateDetail(displayName string, project models.SharedProject, imported models.ProjectMetadataImport) string {
+	details := make([]string, 0, 4)
+	if shareLabel := strings.TrimSpace(project.AgentPath); shareLabel != "" && shareLabel != displayName {
+		details = append(details, shareLabel)
+	}
+	if metadata := activeCandidateMetadata(imported); metadata != nil {
+		if branch := strings.TrimSpace(metadata.DefaultBaseBranch); branch != "" {
+			details = append(details, "base "+branch)
+		}
+		if metadata.ToolingFile != "" {
+			details = append(details, "tooling")
+		}
+		if metadata.NotesFile != "" {
+			details = append(details, "notes")
+		}
+	}
+	return strings.Join(details, " | ")
 }
 
 func (a Attacher) Attach(ctx context.Context, workstreamID string, input AttachPathInput) (models.WorkstreamRecord, error) {
