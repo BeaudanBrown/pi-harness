@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/beaudanbrown/pi-harness/internal/models"
@@ -227,6 +228,77 @@ func TestUpdateManifestLeavesStoredRecordOnFailure(t *testing.T) {
 	}
 }
 
+func TestReadShareRegistryNormalizesAndSortsProjects(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shares.json")
+	if err := os.WriteFile(path, []byte(`[
+  {
+    "agentPath": " projects/zeta ",
+    "sourcePath": " /srv/repos/../repos/zeta ",
+    "hostPath": " /home/beau/agent/projects/../projects/zeta ",
+    "guestPath": " /home/beau/host/projects/../projects/zeta "
+  },
+  {
+    "agentPath": "projects/alpha",
+    "sourcePath": "/srv/repos/alpha",
+    "hostPath": "/home/beau/agent/projects/alpha",
+    "guestPath": "/home/beau/host/projects/alpha"
+  }
+]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares) error = %v", err)
+	}
+
+	projects, err := ReadShareRegistry(path)
+	if err != nil {
+		t.Fatalf("ReadShareRegistry() error = %v", err)
+	}
+	if len(projects) != 2 {
+		t.Fatalf("len(projects) = %d, want 2", len(projects))
+	}
+	if projects[0].AgentPath != "projects/alpha" || projects[0].GuestPath != "/home/beau/host/projects/alpha" {
+		t.Fatalf("projects[0] = %#v, want sorted normalized alpha entry", projects[0])
+	}
+	if projects[1].AgentPath != "projects/zeta" || projects[1].SourcePath != "/srv/repos/zeta" {
+		t.Fatalf("projects[1] = %#v, want normalized zeta entry", projects[1])
+	}
+}
+
+func TestReadShareRegistryReportsEntryValidationFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shares.json")
+	if err := os.WriteFile(path, []byte(`[
+  {
+    "agentPath": "/projects/bad",
+    "sourcePath": "/srv/repos/bad",
+    "hostPath": "/home/beau/agent/projects/bad",
+    "guestPath": "/home/beau/host/projects/bad"
+  }
+]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares) error = %v", err)
+	}
+
+	_, err := ReadShareRegistry(path)
+	if err == nil {
+		t.Fatal("ReadShareRegistry() error = nil, want validation error")
+	}
+	if got := err.Error(); got == "" || !containsAll(got, []string{"read share registry", "entry 0", "agentPath", "relative"}) {
+		t.Fatalf("ReadShareRegistry() error = %q, want clear validation details", got)
+	}
+}
+
+func TestReadShareRegistryReportsDecodeFailureClearly(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "shares.json")
+	if err := os.WriteFile(path, []byte(`{"agentPath":"projects/alpha"}`), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares) error = %v", err)
+	}
+
+	_, err := ReadShareRegistry(path)
+	if err == nil {
+		t.Fatal("ReadShareRegistry() error = nil, want decode error")
+	}
+	if got := err.Error(); got == "" || !containsAll(got, []string{"read share registry", "decode", path}) {
+		t.Fatalf("ReadShareRegistry() error = %q, want clear decode details", got)
+	}
+}
+
 func testRoots(t *testing.T) paths.Roots {
 	t.Helper()
 	base := t.TempDir()
@@ -237,4 +309,13 @@ func testRoots(t *testing.T) paths.Roots {
 		ShareRoot:   filepath.Join(base, "share", "pi-harness"),
 		Worktrees:   filepath.Join(base, "share", "pi-harness", "worktrees"),
 	}
+}
+
+func containsAll(value string, expected []string) bool {
+	for _, fragment := range expected {
+		if !strings.Contains(value, fragment) {
+			return false
+		}
+	}
+	return true
 }

@@ -69,6 +69,14 @@ type RuntimeStatus struct {
 	ActiveModel      string `json:"activeModel,omitempty"`
 }
 
+// SharedProject is one host-managed directory exposed into the guest VM.
+type SharedProject struct {
+	AgentPath  string `json:"agentPath"`
+	SourcePath string `json:"sourcePath"`
+	HostPath   string `json:"hostPath"`
+	GuestPath  string `json:"guestPath"`
+}
+
 // WorkstreamRow is the merged operator-facing workstream view.
 type WorkstreamRow struct {
 	WorkstreamID    string              `json:"workstreamId"`
@@ -243,6 +251,36 @@ func (status RuntimeStatus) Validate() error {
 	return nil
 }
 
+func (project SharedProject) Normalize() SharedProject {
+	project.AgentPath = normalizeAgentPath(project.AgentPath)
+	project.SourcePath = normalizeAbsolutePath(project.SourcePath)
+	project.HostPath = normalizeAbsolutePath(project.HostPath)
+	project.GuestPath = normalizeAbsolutePath(project.GuestPath)
+	return project
+}
+
+func (project SharedProject) Validate() error {
+	if strings.TrimSpace(project.AgentPath) == "" {
+		return errors.New("agentPath is required")
+	}
+	if filepath.IsAbs(project.AgentPath) {
+		return fmt.Errorf("agentPath %q must be relative", project.AgentPath)
+	}
+	if normalized := strings.Trim(strings.TrimSpace(filepath.Clean(project.AgentPath)), "/."); normalized == "" {
+		return fmt.Errorf("agentPath %q must not resolve to empty", project.AgentPath)
+	}
+	if !filepath.IsAbs(project.SourcePath) {
+		return fmt.Errorf("sourcePath %q must be absolute", project.SourcePath)
+	}
+	if !filepath.IsAbs(project.HostPath) {
+		return fmt.Errorf("hostPath %q must be absolute", project.HostPath)
+	}
+	if !filepath.IsAbs(project.GuestPath) {
+		return fmt.Errorf("guestPath %q must be absolute", project.GuestPath)
+	}
+	return nil
+}
+
 func parseTimestamp(field, value string) (time.Time, error) {
 	if strings.TrimSpace(value) == "" {
 		return time.Time{}, fmt.Errorf("%s is required", field)
@@ -252,6 +290,26 @@ func parseTimestamp(field, value string) (time.Time, error) {
 		return time.Time{}, fmt.Errorf("%s %q must be RFC3339: %w", field, value, err)
 	}
 	return parsed, nil
+}
+
+func normalizeAbsolutePath(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	return filepath.Clean(trimmed)
+}
+
+func normalizeAgentPath(value string) string {
+	trimmed := strings.TrimSpace(value)
+	if trimmed == "" {
+		return ""
+	}
+	cleaned := filepath.Clean(trimmed)
+	if filepath.IsAbs(cleaned) {
+		return cleaned
+	}
+	return strings.TrimPrefix(cleaned, "./")
 }
 
 func isAllowed(value string, allowed ...string) bool {

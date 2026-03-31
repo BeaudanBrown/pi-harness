@@ -56,3 +56,11 @@ func TestTmuxSessionName(t *testing.T) {
 		t.Fatalf("TmuxSessionName() = %q, want %q", got, "ph:focus-bugfix")
 	}
 }
+
+func TestShareRegistryPathUsesOverride(t *testing.T) {
+	t.Setenv("PI_HARNESS_SHARE_REGISTRY", "/tmp/custom-shares.json")
+
+	if got := ShareRegistryPath(); got != "/tmp/custom-shares.json" {
+		t.Fatalf("ShareRegistryPath() = %q, want %q", got, "/tmp/custom-shares.json")
+	}
+}

@@ -51,10 +51,11 @@ func (execGitRunner) Run(ctx context.Context, dir string, args ...string) error 
 
 // Attacher provisions durable workstream attachments.
 type Attacher struct {
-	Roots   paths.Roots
-	Store   store.Store
-	Manager Manager
-	Git     gitRunner
+	Roots             paths.Roots
+	Store             store.Store
+	Manager           Manager
+	Git               gitRunner
+	ShareRegistryPath string
 }
 
 type AttachGitWorktreeInput struct {
@@ -77,11 +78,35 @@ type AttachPathInput struct {
 
 func NewAttacher(roots paths.Roots, s store.Store, now func() time.Time) Attacher {
 	return Attacher{
-		Roots:   roots,
-		Store:   s,
-		Manager: New(s, now),
-		Git:     execGitRunner{},
+		Roots:             roots,
+		Store:             s,
+		Manager:           New(s, now),
+		Git:               execGitRunner{},
+		ShareRegistryPath: paths.ShareRegistryPath(),
 	}
+}
+
+type ShareAttachmentCandidate struct {
+	DisplayName string
+	Path        string
+	Share       models.SharedProject
+}
+
+func (a Attacher) ShareAttachmentCandidates() ([]ShareAttachmentCandidate, error) {
+	projects, err := store.ReadShareRegistry(a.ShareRegistryPath)
+	if err != nil {
+		return nil, err
+	}
+
+	candidates := make([]ShareAttachmentCandidate, 0, len(projects))
+	for _, project := range projects {
+		candidates = append(candidates, ShareAttachmentCandidate{
+			DisplayName: project.AgentPath,
+			Path:        project.GuestPath,
+			Share:       project,
+		})
+	}
+	return candidates, nil
 }
 
 func (a Attacher) Attach(ctx context.Context, workstreamID string, input AttachPathInput) (models.WorkstreamRecord, error) {

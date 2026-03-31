@@ -141,3 +141,41 @@ func TestWorkstreamContextAttachmentLabel(t *testing.T) {
 		t.Fatalf("AttachmentLabel() = %q, want shared read-write directory", got)
 	}
 }
+
+func TestSharedProjectNormalizeAndValidate(t *testing.T) {
+	project := SharedProject{
+		AgentPath:  " ./projects/pi-harness/ ",
+		SourcePath: " /srv/repos/../repos/pi-harness ",
+		HostPath:   " /home/beau/agent/projects/../projects/pi-harness ",
+		GuestPath:  " /home/beau/host/projects/../projects/pi-harness ",
+	}.Normalize()
+
+	if project.AgentPath != "projects/pi-harness" {
+		t.Fatalf("Normalize().AgentPath = %q, want projects/pi-harness", project.AgentPath)
+	}
+	if project.SourcePath != "/srv/repos/pi-harness" {
+		t.Fatalf("Normalize().SourcePath = %q, want cleaned absolute path", project.SourcePath)
+	}
+	if project.HostPath != "/home/beau/agent/projects/pi-harness" {
+		t.Fatalf("Normalize().HostPath = %q, want cleaned absolute path", project.HostPath)
+	}
+	if project.GuestPath != "/home/beau/host/projects/pi-harness" {
+		t.Fatalf("Normalize().GuestPath = %q, want cleaned absolute path", project.GuestPath)
+	}
+	if err := project.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestSharedProjectValidateRejectsAbsoluteAgentPath(t *testing.T) {
+	project := SharedProject{
+		AgentPath:  "/projects/pi-harness",
+		SourcePath: "/srv/repos/pi-harness",
+		HostPath:   "/home/beau/agent/projects/pi-harness",
+		GuestPath:  "/home/beau/host/projects/pi-harness",
+	}
+
+	if err := project.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want relative agentPath error")
+	}
+}

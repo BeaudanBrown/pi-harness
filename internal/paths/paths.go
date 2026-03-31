@@ -9,6 +9,7 @@ import (
 )
 
 const appName = "pi-harness"
+const defaultShareRegistryPath = "/home/beau/host/.pi-hub/shares.json"
 
 // Roots describes the XDG-managed directories used by the harness.
 type Roots struct {
@@ -32,6 +33,11 @@ func DefaultRoots() Roots {
 		ShareRoot:   filepath.Join(dataHome, appName),
 		Worktrees:   filepath.Join(dataHome, appName, "worktrees"),
 	}
+}
+
+// ShareRegistryPath returns the host-managed share registry visible inside the guest.
+func ShareRegistryPath() string {
+	return envOrDefault("PI_HARNESS_SHARE_REGISTRY", defaultShareRegistryPath)
 }
 
 // ManifestPath returns the durable workstream manifest path for one workstream.

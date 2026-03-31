@@ -106,6 +106,31 @@ func (s Store) ListWorkstreamIDs() ([]string, error) {
 	return ids, nil
 }
 
+func ReadShareRegistry(path string) ([]models.SharedProject, error) {
+	var projects []models.SharedProject
+	if err := readJSON(path, &projects); err != nil {
+		return nil, fmt.Errorf("read share registry %q: %w", path, err)
+	}
+
+	normalized := make([]models.SharedProject, 0, len(projects))
+	for i, project := range projects {
+		project = project.Normalize()
+		if err := project.Validate(); err != nil {
+			return nil, fmt.Errorf("read share registry %q: entry %d: %w", path, i, err)
+		}
+		normalized = append(normalized, project)
+	}
+
+	sort.Slice(normalized, func(i, j int) bool {
+		if normalized[i].GuestPath == normalized[j].GuestPath {
+			return normalized[i].AgentPath < normalized[j].AgentPath
+		}
+		return normalized[i].GuestPath < normalized[j].GuestPath
+	})
+
+	return normalized, nil
+}
+
 func writeJSONAtomically(path string, value any) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create parent dir: %w", err)

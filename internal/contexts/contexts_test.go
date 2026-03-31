@@ -396,6 +396,67 @@ func TestAttachGitWorktreeRejectsSharedMode(t *testing.T) {
 	}
 }
 
+func TestShareAttachmentCandidatesUseGuestPathsOnly(t *testing.T) {
+	s := store.New(testRoots(t))
+	registryPath := filepath.Join(t.TempDir(), "shares.json")
+	if err := os.WriteFile(registryPath, []byte(`[
+  {
+    "agentPath": "projects/pi-harness",
+    "sourcePath": "/srv/repos/pi-harness",
+    "hostPath": "/home/beau/agent/projects/pi-harness",
+    "guestPath": "/home/beau/host/projects/pi-harness"
+  }
+]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares) error = %v", err)
+	}
+
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+	attacher.ShareRegistryPath = registryPath
+
+	candidates, err := attacher.ShareAttachmentCandidates()
+	if err != nil {
+		t.Fatalf("ShareAttachmentCandidates() error = %v", err)
+	}
+	if len(candidates) != 1 {
+		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
+	}
+	if candidates[0].DisplayName != "projects/pi-harness" {
+		t.Fatalf("DisplayName = %q, want projects/pi-harness", candidates[0].DisplayName)
+	}
+	if candidates[0].Path != "/home/beau/host/projects/pi-harness" {
+		t.Fatalf("Path = %q, want guest path", candidates[0].Path)
+	}
+	if candidates[0].Path == candidates[0].Share.SourcePath || candidates[0].Path == candidates[0].Share.HostPath {
+		t.Fatalf("Path = %q, want guest path only", candidates[0].Path)
+	}
+}
+
+func TestShareAttachmentCandidatesSurfaceRegistryErrors(t *testing.T) {
+	s := store.New(testRoots(t))
+	registryPath := filepath.Join(t.TempDir(), "shares.json")
+	if err := os.WriteFile(registryPath, []byte(`[
+  {
+    "agentPath": "/projects/bad",
+    "sourcePath": "/srv/repos/bad",
+    "hostPath": "/home/beau/agent/projects/bad",
+    "guestPath": "/home/beau/host/projects/bad"
+  }
+]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares) error = %v", err)
+	}
+
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+	attacher.ShareRegistryPath = registryPath
+
+	_, err := attacher.ShareAttachmentCandidates()
+	if err == nil {
+		t.Fatal("ShareAttachmentCandidates() error = nil, want registry parse error")
+	}
+	if !strings.Contains(err.Error(), "read share registry") {
+		t.Fatalf("ShareAttachmentCandidates() error = %q, want share registry context", err)
+	}
+}
+
 func fixedNow() func() time.Time {
 	return func() time.Time {
 		return time.Date(2026, 3, 31, 2, 0, 0, 0, time.UTC)
