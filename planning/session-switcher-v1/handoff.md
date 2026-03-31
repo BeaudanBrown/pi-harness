@@ -23,6 +23,10 @@
   tmux still exists.
 - The first test target is workflow alpha in the normal agent ssh plus tmux
   flow.
+- `docs/workflow-alpha-command-transcript.md` now includes a compact
+  workflow-alpha scenario matrix covering zero-context creation, outside-tmux
+  menu entry, isolated-by-default git attachment, plain-directory attachment,
+  and reattach behavior.
 - The first post-v1 priority is repair and recovery commands.
 - The first post-v1 recovery-command outline now names concrete candidate
   groups: `ph doctor` inspection, dead-session repair, stale-runtime
