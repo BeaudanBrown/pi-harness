@@ -1,5 +1,5 @@
 {
   "extensions": [
-    "./extensions/pi-harness"
+    "./extensions/pi-harness-runtime"
   ]
 }

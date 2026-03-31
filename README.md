@@ -37,3 +37,4 @@ The Go-specific checks behind those commands are:
 - `go vet ./...`
 - `staticcheck ./...`
 - `go test ./...`
+- `node --test ./.pi/extensions/pi-harness-runtime/runtime-status.test.mjs`

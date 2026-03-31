@@ -10,3 +10,5 @@ if [ ! -f go.mod ]; then
 fi
 
 go test ./...
+
+node --test ./.pi/extensions/pi-harness-runtime/runtime-status.test.mjs

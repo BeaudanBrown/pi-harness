@@ -64,6 +64,7 @@
           fi
 
           go test ./...
+          node --test ./.pi/extensions/pi-harness-runtime/runtime-status.test.mjs
         '';
         lintApp = pkgs.writeShellApplication {
           name = "lint";
@@ -85,6 +86,7 @@
             pkgs.coreutils
             pkgs.git
             pkgs.go
+            pkgs.nodejs
           ];
           text = testBody;
         };
