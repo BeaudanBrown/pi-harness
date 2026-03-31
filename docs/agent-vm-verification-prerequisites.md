@@ -10,7 +10,8 @@ Keep this setup-focused:
 - tmux entry assumptions
 - required operator tooling before any workflow-alpha commands run
 
-The step-by-step runbook belongs in a later document.
+The step-by-step runbook now lives in
+[`docs/agent-vm-verification-runbook.md`](/home/beau/host/projects/pi-harness/docs/agent-vm-verification-runbook.md).
 
 ## Required Share Exposure
 
@@ -116,7 +117,7 @@ Successful preflight means:
 
 This prerequisite document does not define the operator command transcript.
 
-The later workflow-alpha runbook should build on this setup and then capture:
+The workflow-alpha runbook builds on this setup and captures:
 
 - exact commands
 - expected operator-visible outcomes

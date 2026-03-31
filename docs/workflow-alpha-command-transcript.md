@@ -138,8 +138,11 @@ Checkpoint:
 
 ## Scope Boundary For The Later Runbook
 
-Before expanding this into the full runbook, satisfy the environment contract
-in `docs/agent-vm-verification-prerequisites.md`.
+Before expanding or rerunning this flow, satisfy the environment contract in
+[`docs/agent-vm-verification-prerequisites.md`](/home/beau/host/projects/pi-harness/docs/agent-vm-verification-prerequisites.md)
+and use
+[`docs/agent-vm-verification-runbook.md`](/home/beau/host/projects/pi-harness/docs/agent-vm-verification-runbook.md)
+for the concrete ordered operator sequence.
 
 The later verification runbook can expand this skeleton with:
 

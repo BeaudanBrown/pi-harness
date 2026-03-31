@@ -35,6 +35,9 @@
   for the later manual workflow-alpha run inside the agent VM, including share
   exposure, guest path expectations, tmux assumptions, required tools, and a
   `nix run .#verify` preflight.
+- `docs/agent-vm-verification-runbook.md` now turns the prerequisites and
+  workflow-alpha transcript into one concrete ordered runbook with expected
+  outcomes, runtime-state checks, and inside/outside-tmux reattach checks.
 - The first post-v1 priority is repair and recovery commands.
 - The first post-v1 recovery-command outline now names concrete candidate
   groups: `ph doctor` inspection, dead-session repair, stale-runtime
