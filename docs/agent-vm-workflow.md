@@ -70,6 +70,10 @@ primary operator interface.
 
 In this setup, `pi-harness` is installed from the flake input on the agent and should be available in PATH after you rebuild/deploy the host, so you do not need `./bin/pi-harness` anymore.
 
+Before running the manual workflow-alpha verification path, use
+`docs/agent-vm-verification-prerequisites.md` as the setup gate for share
+exposure, guest paths, tmux assumptions, and required tools such as `fzf`.
+
 ## Non-Goal
 
 Do not maintain a separate guest-local copy of `pi-harness` under

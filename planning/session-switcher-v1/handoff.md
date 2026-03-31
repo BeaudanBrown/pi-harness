@@ -27,6 +27,10 @@
   workflow-alpha scenario matrix covering zero-context creation, outside-tmux
   menu entry, isolated-by-default git attachment, plain-directory attachment,
   and reattach behavior.
+- `docs/agent-vm-verification-prerequisites.md` now locks the setup contract
+  for the later manual workflow-alpha run inside the agent VM, including share
+  exposure, guest path expectations, tmux assumptions, required tools, and a
+  `nix run .#verify` preflight.
 - The first post-v1 priority is repair and recovery commands.
 - The first post-v1 recovery-command outline now names concrete candidate
   groups: `ph doctor` inspection, dead-session repair, stale-runtime

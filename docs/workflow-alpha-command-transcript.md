@@ -124,6 +124,9 @@ Checkpoint:
 
 ## Scope Boundary For The Later Runbook
 
+Before expanding this into the full runbook, satisfy the environment contract
+in `docs/agent-vm-verification-prerequisites.md`.
+
 The later verification runbook can expand this skeleton with:
 
 - exact sample ids captured from a real run
