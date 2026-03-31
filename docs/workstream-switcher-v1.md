@@ -49,6 +49,29 @@ Attachment summary rules for both `ph list` and `ph menu`:
 - the same summary rules apply in both surfaces
 - multi-path summaries must not imply that one context is primary
 
+Worked examples:
+
+```text
+ph list
+
+ID      STATUS      TITLE                  ATTACHMENTS
+alpha   waiting     Inbox triage           no paths
+beta    processing  Metadata import        Pi harness repo
+gamma   unknown     Session switcher docs  2 paths
+```
+
+```text
+ph menu
+
+alpha   waiting     Inbox triage           no paths
+beta    processing  Metadata import        Pi harness repo
+gamma   unknown     Session switcher docs  2 paths
+```
+
+In the multi-path example above, `2 paths` means the workstream has multiple
+attached contexts and the v1 UI is intentionally not naming any one of them as
+primary.
+
 The menu should be a tmux popup first. That keeps the current ssh and tmux
 workflow intact and avoids requiring Pi to own window management.
 

@@ -84,6 +84,14 @@ Checkpoint:
 
 - a tmux popup selector opens inside the current tmux client
 - the selector shows at least the two workflow-alpha workstreams
+- the selector uses the same attachment-summary contract as `ph list`, for
+  example:
+
+```text
+workflow-alpha       waiting     Workflow Alpha       no paths
+workflow-alpha-peer  processing  Workflow Alpha Peer  2 paths
+```
+
 - choosing the other workstream closes the popup and switches the client into its tmux session
 
 ### 6. Reattach directly by workstream id
@@ -106,5 +114,12 @@ The later verification runbook can expand this skeleton with:
 - exact sample ids captured from a real run
 - outside-tmux entry coverage for `ph attach`
 - plain-directory attachment coverage
-- `ph list` and status checks
+- `ph list` and status checks, including output such as:
+
+```text
+ID                  STATUS      TITLE                ATTACHMENTS
+workflow-alpha      waiting     Workflow Alpha       no paths
+workflow-alpha-peer processing  Workflow Alpha Peer  2 paths
+```
+
 - stale-runtime and dead-session verification

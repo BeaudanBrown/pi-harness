@@ -34,6 +34,9 @@ func TestWorkflowAlphaTranscriptCoversRequiredCommandSequence(t *testing.T) {
 		"bootstrapped <workstream-id> (ph:<workstream-id>)",
 		"attached <context-id> to <workstream-id> at <path> (...)",
 		"tmux popup selector opens",
+		"workflow-alpha       waiting     Workflow Alpha       no paths",
+		"workflow-alpha-peer  processing  Workflow Alpha Peer  2 paths",
+		"ID                  STATUS      TITLE                ATTACHMENTS",
 	}
 
 	for _, snippet := range requiredSnippets {
