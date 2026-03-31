@@ -16,7 +16,7 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         lib = pkgs.lib;
-        piCommand = lib.getExe nix-ai-tools.packages.${system}.pi;
+        piHarnessPackage = pkgs.callPackage ./nix/package.nix { };
         lintBody = ''
           set -euo pipefail
 
@@ -99,17 +99,14 @@
         };
       in
       {
-        packages.default = pkgs.writeShellApplication {
-          name = "pi-harness";
-          runtimeInputs = [ pkgs.bash ];
-          text = ''
-            exec ${lib.escapeShellArg piCommand} "$@"
-          '';
-        };
+        packages.pi-harness = piHarnessPackage;
+        packages.default = piHarnessPackage;
 
         apps.lint = flake-utils.lib.mkApp { drv = lintApp; };
         apps.test = flake-utils.lib.mkApp { drv = testApp; };
         apps.verify = flake-utils.lib.mkApp { drv = verifyApp; };
+        apps.default = flake-utils.lib.mkApp { drv = piHarnessPackage; };
+        apps.pi-harness = flake-utils.lib.mkApp { drv = piHarnessPackage; };
 
         devShells.default = pkgs.mkShell {
           packages = [

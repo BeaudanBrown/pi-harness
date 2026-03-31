@@ -8,21 +8,15 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.writeShellApplication {
-        name = "pi-harness";
-        runtimeInputs = [ pkgs.bash ];
-        text = ''
-          echo "pi-harness skeleton package: install dependencies and set package via services.pi-harness.package"
-        '';
-      };
-      defaultText = lib.literalExpression "pkgs.writeShellApplication { ... }";
+      default = pkgs.callPackage ./package.nix { };
+      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
       description = "The pi-harness package to install.";
     };
 
     installAlias = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Whether to add a `ph` shell alias.";
+      description = "Whether to add a `ph` shell alias in interactive bash shells.";
     };
   };
 

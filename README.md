@@ -22,3 +22,18 @@ Current workstream planning context lives in `planning/session-switcher-v1/`.
 The temporary local implementation loop is documented in
 `docs/implementation-loop.md` and driven by
 `scripts/session-switcher-local-loop.sh`.
+
+## Verification
+
+Use the repo-managed Nix commands:
+
+- `nix run .#lint`
+- `nix run .#test`
+- `nix run .#verify`
+
+The Go-specific checks behind those commands are:
+
+- `gofmt -l`
+- `go vet ./...`
+- `staticcheck ./...`
+- `go test ./...`

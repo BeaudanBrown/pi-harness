@@ -1,17 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if command -v pi >/dev/null 2>&1; then
-  exec pi "$@"
-fi
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${repo_root}"
 
-if [ -x /run/current-system/sw/bin/pi ]; then
-  exec /run/current-system/sw/bin/pi "$@"
-fi
-
-if [ -x /nix/var/nix/profiles/default/bin/pi ]; then
-  exec /nix/var/nix/profiles/default/bin/pi "$@"
-fi
-
-echo "pi executable not found in PATH or common Nix bin locations" >&2
-  exit 1
+exec nix run .#pi-harness -- "$@"
