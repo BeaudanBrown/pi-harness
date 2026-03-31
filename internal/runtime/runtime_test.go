@@ -267,10 +267,8 @@ func TestGetDerivesMetadataBackedContextLabelInMergedRows(t *testing.T) {
 				Path:        repoPath,
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
@@ -283,17 +281,14 @@ func TestGetDerivesMetadataBackedContextLabelInMergedRows(t *testing.T) {
 	if got := row.Contexts[0].DisplayName; got != "Pi Harness" {
 		t.Fatalf("row.Contexts[0].DisplayName = %q, want Pi Harness", got)
 	}
-	if row.PrimaryContext == nil || row.PrimaryContext.DisplayName != "Pi Harness" {
-		t.Fatalf("row.PrimaryContext = %#v, want derived metadata label", row.PrimaryContext)
-	}
 	if row.Contexts[0].MetadataImport == nil {
 		t.Fatal("row.Contexts[0].MetadataImport = nil, want loaded metadata import")
 	}
 	if row.Contexts[0].MetadataImport.Status != models.ProjectMetadataImportStatusLoaded {
 		t.Fatalf("row.Contexts[0].MetadataImport.Status = %q, want loaded", row.Contexts[0].MetadataImport.Status)
 	}
-	if row.PrimaryContext == nil || row.PrimaryContext.MetadataImport == nil {
-		t.Fatalf("row.PrimaryContext = %#v, want metadata import", row.PrimaryContext)
+	if row.Contexts[0].MetadataImport.Metadata == nil || row.Contexts[0].MetadataImport.Metadata.Name != "Pi Harness" {
+		t.Fatalf("row.Contexts[0].MetadataImport = %#v, want metadata payload", row.Contexts[0].MetadataImport)
 	}
 }
 
@@ -326,24 +321,20 @@ func TestGetSurfacesMetadataImportStatusForWarningMissingAndInvalidCases(t *test
 				Path:      warningsPath,
 				Kind:      models.ContextKindCheckout,
 				Mode:      models.ContextModeIsolated,
-				Role:      models.ContextRolePrimary,
 			},
 			{
 				ContextID: "ctx-missing",
 				Path:      missingPath,
 				Kind:      models.ContextKindCheckout,
 				Mode:      models.ContextModeIsolated,
-				Role:      models.ContextRoleSecondary,
 			},
 			{
 				ContextID: "ctx-invalid",
 				Path:      invalidPath,
 				Kind:      models.ContextKindCheckout,
 				Mode:      models.ContextModeIsolated,
-				Role:      models.ContextRoleSecondary,
 			},
 		},
-		PrimaryContextID: "ctx-warnings",
 	})
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
@@ -392,10 +383,8 @@ func TestGetKeepsExplicitDisplayNameAheadOfRepoMetadata(t *testing.T) {
 				Path:        repoPath,
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
@@ -431,10 +420,8 @@ func TestGetFallsBackToShareLabelWhenRepoMetadataIsInvalid(t *testing.T) {
 				Path:        repoPath,
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
@@ -472,10 +459,8 @@ func TestGetFallsBackToBasenameWhenNoMetadataOrShareLabelExists(t *testing.T) {
 				Path:        path,
 				Kind:        models.ContextKindDirectory,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
@@ -512,7 +497,6 @@ func TestGetKeepsDuplicateMetadataLabelsForDistinctContexts(t *testing.T) {
 				Path:        repoA,
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 			{
 				ContextID:   "ctx-b",
@@ -520,10 +504,8 @@ func TestGetKeepsDuplicateMetadataLabelsForDistinctContexts(t *testing.T) {
 				Path:        repoB,
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeSharedReadonly,
-				Role:        models.ContextRoleSecondary,
 			},
 		},
-		PrimaryContextID: "ctx-a",
 	})
 
 	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})

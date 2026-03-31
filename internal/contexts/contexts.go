@@ -1,7 +1,6 @@
 package contexts
 
 import (
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -24,7 +23,6 @@ type AddInput struct {
 	Path              string
 	Kind              string
 	Mode              string
-	Role              string
 	Branch            string
 	OwnerWorkstreamID string
 }
@@ -35,7 +33,6 @@ type UpdateInput struct {
 	Path              *string
 	Kind              *string
 	Mode              *string
-	Role              *string
 	Branch            *string
 	OwnerWorkstreamID *string
 }
@@ -51,10 +48,6 @@ func New(s store.Store, now func() time.Time) Manager {
 }
 
 func (m Manager) AddContext(workstreamID string, input AddInput) (models.WorkstreamRecord, error) {
-	if err := validateRequestedRole(input.Role); err != nil {
-		return models.WorkstreamRecord{}, err
-	}
-
 	return m.Store.UpdateManifest(workstreamID, func(record *models.WorkstreamRecord) error {
 		context := models.WorkstreamContext{
 			ContextID:         strings.TrimSpace(input.ContextID),
@@ -63,7 +56,6 @@ func (m Manager) AddContext(workstreamID string, input AddInput) (models.Workstr
 			Path:              normalizePath(input.Path),
 			Kind:              strings.TrimSpace(input.Kind),
 			Mode:              strings.TrimSpace(input.Mode),
-			Role:              input.Role,
 			Branch:            strings.TrimSpace(input.Branch),
 			OwnerWorkstreamID: strings.TrimSpace(input.OwnerWorkstreamID),
 		}
@@ -72,9 +64,6 @@ func (m Manager) AddContext(workstreamID string, input AddInput) (models.Workstr
 		}
 
 		record.Contexts = append(record.Contexts, context)
-		if err := applyRole(record, context.ContextID, input.Role); err != nil {
-			return err
-		}
 		record.UpdatedAt = m.Now().UTC().Format(time.RFC3339)
 		return nil
 	})
@@ -115,64 +104,14 @@ func (m Manager) UpdateContext(workstreamID, contextID string, input UpdateInput
 		if input.OwnerWorkstreamID != nil {
 			context.OwnerWorkstreamID = strings.TrimSpace(*input.OwnerWorkstreamID)
 		}
-		if input.Role != nil {
-			role := strings.TrimSpace(*input.Role)
-			if err := validateRequestedRole(role); err != nil {
-				return err
-			}
-			context.Role = role
-		}
 		if err := context.Validate(); err != nil {
 			return err
 		}
 
 		record.Contexts[index] = context
-		if input.Role != nil {
-			if err := applyRole(record, contextID, context.Role); err != nil {
-				return err
-			}
-		}
 		record.UpdatedAt = m.Now().UTC().Format(time.RFC3339)
 		return nil
 	})
-}
-
-func applyRole(record *models.WorkstreamRecord, contextID, role string) error {
-	switch role {
-	case models.ContextRolePrimary:
-		for i := range record.Contexts {
-			record.Contexts[i].Role = models.ContextRoleSecondary
-			if record.Contexts[i].ContextID == contextID {
-				record.Contexts[i].Role = models.ContextRolePrimary
-			}
-		}
-		record.PrimaryContextID = contextID
-		return nil
-	case models.ContextRoleSecondary:
-		for i := range record.Contexts {
-			if record.Contexts[i].ContextID == contextID {
-				record.Contexts[i].Role = models.ContextRoleSecondary
-				break
-			}
-		}
-		if record.PrimaryContextID == contextID {
-			record.PrimaryContextID = ""
-		}
-		return nil
-	default:
-		return fmt.Errorf("role %q is invalid", role)
-	}
-}
-
-func validateRequestedRole(role string) error {
-	switch role {
-	case models.ContextRolePrimary, models.ContextRoleSecondary:
-		return nil
-	case "":
-		return errors.New("role is required")
-	default:
-		return fmt.Errorf("role %q is invalid", role)
-	}
 }
 
 func normalizePath(path string) string {

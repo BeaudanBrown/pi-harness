@@ -64,7 +64,6 @@ type AttachGitWorktreeInput struct {
 	DisplayName string
 	Path        string
 	Mode        string
-	Role        string
 }
 
 type AttachPathInput struct {
@@ -73,7 +72,6 @@ type AttachPathInput struct {
 	DisplayName string
 	Path        string
 	Mode        string
-	Role        string
 }
 
 func NewAttacher(roots paths.Roots, s store.Store, now func() time.Time) Attacher {
@@ -192,7 +190,6 @@ func (a Attacher) Attach(ctx context.Context, workstreamID string, input AttachP
 			DisplayName: input.DisplayName,
 			Path:        sourcePath,
 			Mode:        mode,
-			Role:        input.Role,
 		})
 	case err == nil && repoRoot == sourcePath:
 		input.Path = sourcePath
@@ -248,11 +245,6 @@ func (a Attacher) AttachGitWorktree(ctx context.Context, workstreamID string, in
 		return models.WorkstreamRecord{}, err
 	}
 
-	role := strings.TrimSpace(input.Role)
-	if role == "" {
-		role = defaultRole(record)
-	}
-
 	targetPath := a.Roots.WorktreePath(workstreamID, contextID)
 	if _, err := os.Stat(targetPath); err == nil {
 		return models.WorkstreamRecord{}, fmt.Errorf("target worktree path %q already exists", targetPath)
@@ -288,7 +280,6 @@ func (a Attacher) AttachGitWorktree(ctx context.Context, workstreamID string, in
 		Path:              targetPath,
 		Kind:              models.ContextKindWorktree,
 		Mode:              mode,
-		Role:              role,
 		Branch:            branch,
 		OwnerWorkstreamID: workstreamID,
 	})
@@ -333,11 +324,6 @@ func (a Attacher) AttachPath(ctx context.Context, workstreamID string, input Att
 		return models.WorkstreamRecord{}, err
 	}
 
-	role := strings.TrimSpace(input.Role)
-	if role == "" {
-		role = defaultRole(record)
-	}
-
 	mode := strings.TrimSpace(input.Mode)
 	if mode == "" {
 		mode = models.ContextModeIsolated
@@ -359,7 +345,6 @@ func (a Attacher) AttachPath(ctx context.Context, workstreamID string, input Att
 		Path:        sourcePath,
 		Kind:        kind,
 		Mode:        mode,
-		Role:        role,
 	})
 }
 
@@ -406,13 +391,6 @@ func (a Attacher) branchExists(ctx context.Context, repoRoot, branch string) (bo
 		return false, nil
 	}
 	return false, fmt.Errorf("check branch %q: %w", branch, err)
-}
-
-func defaultRole(record models.WorkstreamRecord) string {
-	if record.PrimaryContextID == "" {
-		return models.ContextRolePrimary
-	}
-	return models.ContextRoleSecondary
 }
 
 func chooseContextID(explicit, displayName string, existing []models.WorkstreamContext) (string, error) {

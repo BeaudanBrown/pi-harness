@@ -95,15 +95,6 @@ func (s Service) Get(ctx context.Context, workstreamID string) (models.Workstrea
 		RuntimeSource:   RuntimeSourceOK,
 		TmuxSessionLive: sessionLive,
 	}
-	if record.PrimaryContextID != "" {
-		for i := range record.Contexts {
-			if record.Contexts[i].ContextID == record.PrimaryContextID {
-				contextCopy := record.Contexts[i]
-				row.PrimaryContext = &contextCopy
-				break
-			}
-		}
-	}
 
 	status, runtimeSource, runtimeErr := s.readRuntime(record.WorkstreamID)
 	row.RuntimeSource = runtimeSource
@@ -147,10 +138,6 @@ func (s Service) applyMergedContextLabels(row *models.WorkstreamRow) {
 	for i := range row.Contexts {
 		row.Contexts[i].MetadataImport = deriver.MetadataImport(row.Contexts[i].Path)
 		row.Contexts[i].DisplayName = deriver.Derive(row.Contexts[i])
-	}
-	if row.PrimaryContext != nil {
-		row.PrimaryContext.MetadataImport = deriver.MetadataImport(row.PrimaryContext.Path)
-		row.PrimaryContext.DisplayName = deriver.Derive(*row.PrimaryContext)
 	}
 }
 

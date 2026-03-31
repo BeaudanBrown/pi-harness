@@ -14,7 +14,7 @@ import (
 	"github.com/beaudanbrown/pi-harness/internal/store"
 )
 
-func TestAddContextPromotesRequestedPrimary(t *testing.T) {
+func TestAddContextAppendsContextAndUpdatesTimestamp(t *testing.T) {
 	s := store.New(testRoots(t))
 	mgr := New(s, fixedNow())
 	mustWriteManifest(t, s, models.WorkstreamRecord{
@@ -31,10 +31,8 @@ func TestAddContextPromotesRequestedPrimary(t *testing.T) {
 				Path:        "/tmp/old",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-old",
 	})
 
 	record, err := mgr.AddContext("alpha", AddInput{
@@ -43,23 +41,19 @@ func TestAddContextPromotesRequestedPrimary(t *testing.T) {
 		Path:        "/tmp/new",
 		Kind:        models.ContextKindWorktree,
 		Mode:        models.ContextModeIsolated,
-		Role:        models.ContextRolePrimary,
 	})
 	if err != nil {
 		t.Fatalf("AddContext() error = %v", err)
 	}
 
-	if record.PrimaryContextID != "ctx-new" {
-		t.Fatalf("PrimaryContextID = %q, want %q", record.PrimaryContextID, "ctx-new")
-	}
 	if record.UpdatedAt != "2026-03-31T02:00:00Z" {
 		t.Fatalf("UpdatedAt = %q, want fixed timestamp", record.UpdatedAt)
 	}
-	if record.Contexts[0].Role != models.ContextRoleSecondary {
-		t.Fatalf("old context role = %q, want secondary", record.Contexts[0].Role)
+	if len(record.Contexts) != 2 {
+		t.Fatalf("len(Contexts) = %d, want 2", len(record.Contexts))
 	}
-	if record.Contexts[1].Role != models.ContextRolePrimary {
-		t.Fatalf("new context role = %q, want primary", record.Contexts[1].Role)
+	if record.Contexts[0].ContextID != "ctx-old" || record.Contexts[1].ContextID != "ctx-new" {
+		t.Fatalf("Contexts = %#v, want appended ctx-new entry", record.Contexts)
 	}
 }
 
@@ -80,7 +74,6 @@ func TestAddContextRejectsDuplicateNormalizedPath(t *testing.T) {
 				Path:        "/tmp/project",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRoleSecondary,
 			},
 		},
 	})
@@ -91,7 +84,6 @@ func TestAddContextRejectsDuplicateNormalizedPath(t *testing.T) {
 		Path:        "/tmp/../tmp/project",
 		Kind:        models.ContextKindDirectory,
 		Mode:        models.ContextModeSharedReadonly,
-		Role:        models.ContextRoleSecondary,
 	}); err == nil || !strings.Contains(err.Error(), "duplicated") {
 		t.Fatalf("AddContext() error = %v, want duplicate path error", err)
 	}
@@ -105,7 +97,7 @@ func TestAddContextRejectsDuplicateNormalizedPath(t *testing.T) {
 	}
 }
 
-func TestUpdateContextCanPromoteAndDemotePrimaryExplicitly(t *testing.T) {
+func TestUpdateContextMutatesStoredFields(t *testing.T) {
 	s := store.New(testRoots(t))
 	mgr := New(s, fixedNow())
 	mustWriteManifest(t, s, models.WorkstreamRecord{
@@ -122,7 +114,6 @@ func TestUpdateContextCanPromoteAndDemotePrimaryExplicitly(t *testing.T) {
 				Path:        "/tmp/main",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 			{
 				ContextID:   "ctx-side",
@@ -130,28 +121,24 @@ func TestUpdateContextCanPromoteAndDemotePrimaryExplicitly(t *testing.T) {
 				Path:        "/tmp/side",
 				Kind:        models.ContextKindDirectory,
 				Mode:        models.ContextModeSharedReadonly,
-				Role:        models.ContextRoleSecondary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
-	primary := models.ContextRolePrimary
-	record, err := mgr.UpdateContext("alpha", "ctx-side", UpdateInput{Role: &primary})
+	displayName := "Side notes"
+	mode := models.ContextModeSharedReadwrite
+	record, err := mgr.UpdateContext("alpha", "ctx-side", UpdateInput{
+		DisplayName: &displayName,
+		Mode:        &mode,
+	})
 	if err != nil {
-		t.Fatalf("UpdateContext(promote) error = %v", err)
+		t.Fatalf("UpdateContext() error = %v", err)
 	}
-	if record.PrimaryContextID != "ctx-side" {
-		t.Fatalf("PrimaryContextID after promote = %q, want ctx-side", record.PrimaryContextID)
+	if record.Contexts[1].DisplayName != "Side notes" {
+		t.Fatalf("DisplayName = %q, want Side notes", record.Contexts[1].DisplayName)
 	}
-
-	secondary := models.ContextRoleSecondary
-	record, err = mgr.UpdateContext("alpha", "ctx-side", UpdateInput{Role: &secondary})
-	if err != nil {
-		t.Fatalf("UpdateContext(demote) error = %v", err)
-	}
-	if record.PrimaryContextID != "" {
-		t.Fatalf("PrimaryContextID after demote = %q, want empty", record.PrimaryContextID)
+	if record.Contexts[1].Mode != models.ContextModeSharedReadwrite {
+		t.Fatalf("Mode = %q, want shared-readwrite", record.Contexts[1].Mode)
 	}
 }
 
@@ -172,7 +159,6 @@ func TestUpdateContextRejectsInvalidModeAndPreservesManifest(t *testing.T) {
 				Path:        "/tmp/main",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRoleSecondary,
 			},
 		},
 	})
@@ -235,10 +221,6 @@ func TestAttachGitWorktreeCreatesIsolatedAttachment(t *testing.T) {
 	if attached.Branch == "" {
 		t.Fatal("branch = empty, want branch metadata")
 	}
-	if record.PrimaryContextID != attached.ContextID {
-		t.Fatalf("PrimaryContextID = %q, want %q", record.PrimaryContextID, attached.ContextID)
-	}
-
 	if _, err := os.Stat(filepath.Join(attached.Path, ".git")); err != nil {
 		t.Fatalf("worktree .git missing: %v", err)
 	}

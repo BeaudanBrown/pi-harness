@@ -20,9 +20,6 @@ const (
 	ContextModeSharedReadonly  = "shared-readonly"
 	ContextModeSharedReadwrite = "shared-readwrite"
 
-	ContextRolePrimary   = "primary"
-	ContextRoleSecondary = "secondary"
-
 	RuntimeStateProcessing = "processing"
 	RuntimeStateIdle       = "idle"
 	RuntimeStateDead       = "dead"
@@ -39,7 +36,6 @@ type WorkstreamContext struct {
 	Path              string                 `json:"path"`
 	Kind              string                 `json:"kind"`
 	Mode              string                 `json:"mode"`
-	Role              string                 `json:"role"`
 	Branch            string                 `json:"branch,omitempty"`
 	OwnerWorkstreamID string                 `json:"ownerWorkstreamId,omitempty"`
 	MetadataImport    *ProjectMetadataImport `json:"metadataImport,omitempty"`
@@ -47,15 +43,14 @@ type WorkstreamContext struct {
 
 // WorkstreamRecord is the durable manifest shape for a workstream.
 type WorkstreamRecord struct {
-	SchemaVersion    int                 `json:"schemaVersion"`
-	WorkstreamID     string              `json:"workstreamId"`
-	Title            string              `json:"title"`
-	TmuxSession      string              `json:"tmuxSession"`
-	CreatedAt        string              `json:"createdAt"`
-	UpdatedAt        string              `json:"updatedAt"`
-	PrimaryContextID string              `json:"primaryContextId,omitempty"`
-	Contexts         []WorkstreamContext `json:"contexts"`
-	Notes            string              `json:"notes"`
+	SchemaVersion int                 `json:"schemaVersion"`
+	WorkstreamID  string              `json:"workstreamId"`
+	Title         string              `json:"title"`
+	TmuxSession   string              `json:"tmuxSession"`
+	CreatedAt     string              `json:"createdAt"`
+	UpdatedAt     string              `json:"updatedAt"`
+	Contexts      []WorkstreamContext `json:"contexts"`
+	Notes         string              `json:"notes"`
 }
 
 // RuntimeStatus is the live state contract merged with tmux discovery.
@@ -116,7 +111,6 @@ type WorkstreamRow struct {
 	CreatedAt       string              `json:"createdAt"`
 	UpdatedAt       string              `json:"updatedAt"`
 	Status          string              `json:"status"`
-	PrimaryContext  *WorkstreamContext  `json:"primaryContext,omitempty"`
 	Contexts        []WorkstreamContext `json:"contexts"`
 	LastSeenAt      string              `json:"lastSeenAt,omitempty"`
 	Runtime         *RuntimeStatus      `json:"runtime,omitempty"`
@@ -175,9 +169,6 @@ func (ctx WorkstreamContext) Validate() error {
 	if !isAllowed(ctx.Mode, ContextModeIsolated, ContextModeSharedReadonly, ContextModeSharedReadwrite) {
 		return fmt.Errorf("context %q mode %q is invalid", ctx.ContextID, ctx.Mode)
 	}
-	if !isAllowed(ctx.Role, ContextRolePrimary, ContextRoleSecondary) {
-		return fmt.Errorf("context %q role %q is invalid", ctx.ContextID, ctx.Role)
-	}
 	return nil
 }
 
@@ -208,7 +199,6 @@ func (record WorkstreamRecord) Validate() error {
 
 	seenContextIDs := map[string]struct{}{}
 	seenPaths := map[string]string{}
-	primaryCount := 0
 	for _, context := range record.Contexts {
 		if err := context.Validate(); err != nil {
 			return err
@@ -222,26 +212,6 @@ func (record WorkstreamRecord) Validate() error {
 			return fmt.Errorf("context path %q is duplicated by %q and %q", normalizedPath, existingContextID, context.ContextID)
 		}
 		seenPaths[normalizedPath] = context.ContextID
-		if context.Role == ContextRolePrimary {
-			primaryCount++
-			if record.PrimaryContextID != context.ContextID {
-				return fmt.Errorf("primary context %q must match primaryContextId %q", context.ContextID, record.PrimaryContextID)
-			}
-		}
-	}
-
-	if record.PrimaryContextID == "" {
-		if primaryCount > 0 {
-			return errors.New("primaryContextId is required when a primary context exists")
-		}
-		return nil
-	}
-
-	if _, exists := seenContextIDs[record.PrimaryContextID]; !exists {
-		return fmt.Errorf("primaryContextId %q does not match any context", record.PrimaryContextID)
-	}
-	if primaryCount != 1 {
-		return fmt.Errorf("exactly one primary context is required when primaryContextId is set, got %d", primaryCount)
 	}
 	return nil
 }

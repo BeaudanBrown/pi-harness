@@ -4,13 +4,12 @@ import "testing"
 
 func TestWorkstreamRecordValidate(t *testing.T) {
 	record := WorkstreamRecord{
-		SchemaVersion:    CurrentSchemaVersion,
-		WorkstreamID:     "focus-bugfix",
-		Title:            "Focus bugfix",
-		TmuxSession:      "ph:focus-bugfix",
-		CreatedAt:        "2026-03-31T01:00:00Z",
-		UpdatedAt:        "2026-03-31T01:05:00Z",
-		PrimaryContextID: "ctx-main",
+		SchemaVersion: CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
 		Contexts: []WorkstreamContext{
 			{
 				ContextID:   "ctx-main",
@@ -18,7 +17,6 @@ func TestWorkstreamRecordValidate(t *testing.T) {
 				Path:        "/tmp/project",
 				Kind:        ContextKindWorktree,
 				Mode:        ContextModeIsolated,
-				Role:        ContextRolePrimary,
 			},
 		},
 	}
@@ -28,15 +26,51 @@ func TestWorkstreamRecordValidate(t *testing.T) {
 	}
 }
 
-func TestWorkstreamRecordValidateRejectsPrimaryMismatch(t *testing.T) {
+func TestWorkstreamRecordValidateAllowsZeroAndMultipleContexts(t *testing.T) {
 	record := WorkstreamRecord{
-		SchemaVersion:    CurrentSchemaVersion,
-		WorkstreamID:     "focus-bugfix",
-		Title:            "Focus bugfix",
-		TmuxSession:      "ph:focus-bugfix",
-		CreatedAt:        "2026-03-31T01:00:00Z",
-		UpdatedAt:        "2026-03-31T01:05:00Z",
-		PrimaryContextID: "missing",
+		SchemaVersion: CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts:      []WorkstreamContext{},
+	}
+
+	if err := record.Validate(); err != nil {
+		t.Fatalf("Validate() zero-context error = %v", err)
+	}
+
+	record.Contexts = []WorkstreamContext{
+		{
+			ContextID:   "ctx-main",
+			DisplayName: "Main checkout",
+			Path:        "/tmp/project",
+			Kind:        ContextKindWorktree,
+			Mode:        ContextModeIsolated,
+		},
+		{
+			ContextID:   "ctx-docs",
+			DisplayName: "Docs",
+			Path:        "/tmp/docs",
+			Kind:        ContextKindDirectory,
+			Mode:        ContextModeSharedReadonly,
+		},
+	}
+
+	if err := record.Validate(); err != nil {
+		t.Fatalf("Validate() multi-context error = %v", err)
+	}
+}
+
+func TestWorkstreamRecordValidateRejectsDuplicateContextIDs(t *testing.T) {
+	record := WorkstreamRecord{
+		SchemaVersion: CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
 		Contexts: []WorkstreamContext{
 			{
 				ContextID:   "ctx-main",
@@ -44,13 +78,19 @@ func TestWorkstreamRecordValidateRejectsPrimaryMismatch(t *testing.T) {
 				Path:        "/tmp/project",
 				Kind:        ContextKindWorktree,
 				Mode:        ContextModeIsolated,
-				Role:        ContextRolePrimary,
+			},
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "Scratch notes",
+				Path:        "/tmp/notes",
+				Kind:        ContextKindDirectory,
+				Mode:        ContextModeSharedReadonly,
 			},
 		},
 	}
 
 	if err := record.Validate(); err == nil {
-		t.Fatal("Validate() error = nil, want mismatch error")
+		t.Fatal("Validate() error = nil, want duplicate context id error")
 	}
 }
 
@@ -69,7 +109,6 @@ func TestWorkstreamRecordValidateRejectsDuplicateNormalizedPaths(t *testing.T) {
 				Path:        "/tmp/project",
 				Kind:        ContextKindWorktree,
 				Mode:        ContextModeIsolated,
-				Role:        ContextRoleSecondary,
 			},
 			{
 				ContextID:   "ctx-shadow",
@@ -77,7 +116,6 @@ func TestWorkstreamRecordValidateRejectsDuplicateNormalizedPaths(t *testing.T) {
 				Path:        "/tmp/../tmp/project",
 				Kind:        ContextKindCheckout,
 				Mode:        ContextModeSharedReadonly,
-				Role:        ContextRoleSecondary,
 			},
 		},
 	}
@@ -148,7 +186,6 @@ func TestWorkstreamContextValidateAllowsEmptyDisplayName(t *testing.T) {
 		Path:      "/tmp/project",
 		Kind:      ContextKindCheckout,
 		Mode:      ContextModeIsolated,
-		Role:      ContextRolePrimary,
 	}
 
 	if err := context.Validate(); err != nil {

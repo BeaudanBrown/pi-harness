@@ -14,13 +14,12 @@ import (
 func TestWriteAndReadManifest(t *testing.T) {
 	store := New(testRoots(t))
 	record := models.WorkstreamRecord{
-		SchemaVersion:    models.CurrentSchemaVersion,
-		WorkstreamID:     "focus-bugfix",
-		Title:            "Focus bugfix",
-		TmuxSession:      paths.TmuxSessionName("focus-bugfix"),
-		CreatedAt:        "2026-03-31T01:00:00Z",
-		UpdatedAt:        "2026-03-31T01:05:00Z",
-		PrimaryContextID: "ctx-main",
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   paths.TmuxSessionName("focus-bugfix"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
 		Contexts: []models.WorkstreamContext{
 			{
 				ContextID:   "ctx-main",
@@ -28,7 +27,6 @@ func TestWriteAndReadManifest(t *testing.T) {
 				Path:        "/tmp/project",
 				Kind:        models.ContextKindWorktree,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
 		Notes: "Tracked locally",

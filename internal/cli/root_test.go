@@ -114,10 +114,8 @@ func TestRunListJSONReturnsMergedRows(t *testing.T) {
 				Path:        "/tmp/alpha",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 	mustWriteRuntime(t, testStore, models.RuntimeStatus{
 		SchemaVersion: models.CurrentSchemaVersion,
@@ -145,8 +143,8 @@ func TestRunListJSONReturnsMergedRows(t *testing.T) {
 	if rows[0].Status != models.RuntimeStateIdle {
 		t.Fatalf("rows[0].Status = %q, want idle", rows[0].Status)
 	}
-	if rows[0].PrimaryContext == nil || rows[0].PrimaryContext.DisplayName != "Main checkout" {
-		t.Fatalf("rows[0].PrimaryContext = %#v", rows[0].PrimaryContext)
+	if len(rows[0].Contexts) != 1 || rows[0].Contexts[0].DisplayName != "Main checkout" {
+		t.Fatalf("rows[0].Contexts = %#v", rows[0].Contexts)
 	}
 	if rows[0].RuntimeSource != "ok" {
 		t.Fatalf("rows[0].RuntimeSource = %q, want ok", rows[0].RuntimeSource)
@@ -186,10 +184,8 @@ func TestRunListShowsAttachmentSummaryWithoutPrimaryContextColumn(t *testing.T) 
 				Path:        "/tmp/beta",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-beta",
 	})
 	mustWriteManifest(t, testStore, models.WorkstreamRecord{
 		SchemaVersion: models.CurrentSchemaVersion,
@@ -205,7 +201,6 @@ func TestRunListShowsAttachmentSummaryWithoutPrimaryContextColumn(t *testing.T) 
 				Path:        "/tmp/gamma-1",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 			{
 				ContextID:   "ctx-gamma-2",
@@ -213,10 +208,8 @@ func TestRunListShowsAttachmentSummaryWithoutPrimaryContextColumn(t *testing.T) 
 				Path:        "/tmp/gamma-2",
 				Kind:        models.ContextKindDirectory,
 				Mode:        models.ContextModeSharedReadonly,
-				Role:        models.ContextRoleSecondary,
 			},
 		},
-		PrimaryContextID: "ctx-gamma-1",
 	})
 
 	var stdout bytes.Buffer
@@ -263,10 +256,8 @@ func TestRunListUsesMergedMetadataBackedAttachmentLabel(t *testing.T) {
 				Path:        repoPath,
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	var stdout bytes.Buffer
@@ -306,10 +297,8 @@ func TestRunListJSONIncludesMetadataImportStatus(t *testing.T) {
 				Path:      repoPath,
 				Kind:      models.ContextKindCheckout,
 				Mode:      models.ContextModeIsolated,
-				Role:      models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	var stdout bytes.Buffer
@@ -365,6 +354,12 @@ func TestRunStatusReportsDerivedDeadState(t *testing.T) {
 	if !strings.Contains(output, "Runtime source: missing") {
 		t.Fatalf("status output = %q, want missing runtime source", output)
 	}
+	if !strings.Contains(output, "Attachments: no paths") {
+		t.Fatalf("status output = %q, want attachment summary", output)
+	}
+	if strings.Contains(output, "Primary context:") {
+		t.Fatalf("status output = %q, want no primary-context wording", output)
+	}
 }
 
 func TestRunAttachBootstrapsMissingSessionAndSwitches(t *testing.T) {
@@ -388,10 +383,8 @@ func TestRunAttachBootstrapsMissingSessionAndSwitches(t *testing.T) {
 				Path:        "/tmp/alpha",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	var stdout bytes.Buffer
@@ -416,7 +409,7 @@ func TestRunAttachBootstrapsMissingSessionAndSwitches(t *testing.T) {
 	}
 }
 
-func TestRunAttachUsesHomeDirectoryWithoutPrimaryContext(t *testing.T) {
+func TestRunAttachUsesHomeDirectoryWithoutAttachments(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("TMUX", "/tmp/tmux-1000/default,123,0")
 	app, roots, sessions := testApplication(t, fakeSessions{}, fixedNow())
@@ -680,10 +673,8 @@ func TestRunInternalMenuSelectWritesChosenWorkstreamID(t *testing.T) {
 				Path:        "/tmp/alpha",
 				Kind:        models.ContextKindCheckout,
 				Mode:        models.ContextModeIsolated,
-				Role:        models.ContextRolePrimary,
 			},
 		},
-		PrimaryContextID: "ctx-main",
 	})
 
 	if err := app.runInternalMenuSelect([]string{outputPath}); err != nil {

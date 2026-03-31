@@ -208,11 +208,6 @@ func (app application) runStatus(args []string, stdout io.Writer) error {
 		return fmt.Errorf("load workstream %q: %w", args[0], err)
 	}
 
-	primary := "-"
-	if row.PrimaryContext != nil {
-		primary = fmt.Sprintf("%s (%s)", row.PrimaryContext.DisplayName, row.PrimaryContext.Path)
-	}
-
 	runtimeState := row.RuntimeSource
 	lastSeen := "-"
 	lastProcessing := "-"
@@ -239,7 +234,7 @@ func (app application) runStatus(args []string, stdout io.Writer) error {
 	fmt.Fprintf(stdout, "Tmux session live: %t\n", row.TmuxSessionLive)
 	fmt.Fprintf(stdout, "Created at: %s\n", row.CreatedAt)
 	fmt.Fprintf(stdout, "Updated at: %s\n", row.UpdatedAt)
-	fmt.Fprintf(stdout, "Primary context: %s\n", primary)
+	fmt.Fprintf(stdout, "Attachments: %s\n", attachmentSummary(row.Contexts))
 	fmt.Fprintf(stdout, "Contexts: %d\n", len(row.Contexts))
 	fmt.Fprintf(stdout, "Runtime source: %s\n", row.RuntimeSource)
 	fmt.Fprintf(stdout, "Runtime state: %s\n", runtimeState)
@@ -293,12 +288,11 @@ func (app application) runAddContext(args []string, stdout io.Writer) error {
 	displayName := flags.String("display-name", "", "display name")
 	projectID := flags.String("project-id", "", "project id")
 	mode := flags.String("mode", "", "attachment mode")
-	role := flags.String("role", "", "role")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 2 {
-		return errors.New("usage: pi-harness add-context [--context-id id] [--display-name name] [--project-id id] [--mode isolated|shared-readonly|shared-readwrite] [--role primary|secondary] <workstream> <path>")
+		return errors.New("usage: pi-harness add-context [--context-id id] [--display-name name] [--project-id id] [--mode isolated|shared-readonly|shared-readwrite] <workstream> <path>")
 	}
 
 	record, err := app.contexts.Attach(context.Background(), flags.Arg(0), contexts.AttachPathInput{
@@ -307,7 +301,6 @@ func (app application) runAddContext(args []string, stdout io.Writer) error {
 		ProjectID:   *projectID,
 		Path:        flags.Arg(1),
 		Mode:        *mode,
-		Role:        *role,
 	})
 	if err != nil {
 		return err
@@ -319,12 +312,8 @@ func (app application) runAddContext(args []string, stdout io.Writer) error {
 }
 
 func bootstrapCWD(record models.WorkstreamRecord) (string, error) {
-	if record.PrimaryContextID != "" {
-		for _, context := range record.Contexts {
-			if context.ContextID == record.PrimaryContextID {
-				return context.Path, nil
-			}
-		}
+	if len(record.Contexts) > 0 {
+		return record.Contexts[0].Path, nil
 	}
 
 	home, err := os.UserHomeDir()
