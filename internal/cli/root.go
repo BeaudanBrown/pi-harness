@@ -191,13 +191,9 @@ func (app application) runList(args []string, stdout io.Writer) error {
 	}
 
 	tw := tabwriter.NewWriter(stdout, 0, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "WORKSTREAM\tSTATUS\tTITLE\tPRIMARY CONTEXT")
+	fmt.Fprintln(tw, "WORKSTREAM\tSTATUS\tTITLE\tATTACHMENTS")
 	for _, row := range rows {
-		primary := "-"
-		if row.PrimaryContext != nil {
-			primary = row.PrimaryContext.DisplayName
-		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", row.WorkstreamID, row.Status, row.Title, primary)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", row.WorkstreamID, row.Status, row.Title, attachmentSummary(row.Contexts))
 	}
 	return tw.Flush()
 }

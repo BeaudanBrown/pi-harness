@@ -67,11 +67,7 @@ func (s commandSelector) Select(ctx context.Context, rows []models.WorkstreamRow
 func renderSelectorInput(rows []models.WorkstreamRow) string {
 	var b strings.Builder
 	for _, row := range rows {
-		primary := "-"
-		if row.PrimaryContext != nil && row.PrimaryContext.DisplayName != "" {
-			primary = row.PrimaryContext.DisplayName
-		}
-		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", row.WorkstreamID, menuStatusLabel(row.Status), row.Title, primary)
+		fmt.Fprintf(&b, "%s\t%s\t%s\t%s\n", row.WorkstreamID, menuStatusLabel(row.Status), row.Title, attachmentSummary(row.Contexts))
 	}
 	return b.String()
 }

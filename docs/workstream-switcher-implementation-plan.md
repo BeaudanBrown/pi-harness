@@ -180,6 +180,11 @@ required.
 - Selecting an entry switches the client into the full workstream session
 - Creating a new workstream from the menu should route through the same Go
   creation path as `ph new`
+- `ph list` and `ph menu` should share one attachment-summary rule:
+  - `no paths` for zero contexts
+  - the context display label for one context
+  - `<count> paths` for multiple contexts
+  - no primary-context wording or implied primary selection in the summary
 
 ## Detailed Implementation Sequence
 

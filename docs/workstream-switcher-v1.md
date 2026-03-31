@@ -41,6 +41,14 @@ Behavior:
 5. Close the menu after switching.
 6. Allow reopening the same menu from any workstream session.
 
+Attachment summary rules for both `ph list` and `ph menu`:
+
+- zero attached paths renders as `no paths`
+- one attached path renders as that context's display label
+- multiple attached paths render as `<count> paths`
+- the same summary rules apply in both surfaces
+- multi-path summaries must not imply that one context is primary
+
 The menu should be a tmux popup first. That keeps the current ssh and tmux
 workflow intact and avoids requiring Pi to own window management.
 

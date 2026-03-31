@@ -16,6 +16,9 @@
   scaffold.
 - Attached paths are now documented as an optional set with no primary-context
   requirement.
+- `ph list` and `ph menu` now share one attachment-summary rule: `no paths`
+  for zero contexts, the context label for one context, and `<count> paths`
+  for multiple contexts.
 - Runtime state older than 12 hours is now part of the `unknown` contract when
   tmux still exists.
 - The first test target is workflow alpha in the normal agent ssh plus tmux

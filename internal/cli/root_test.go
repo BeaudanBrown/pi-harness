@@ -153,6 +153,93 @@ func TestRunListJSONReturnsMergedRows(t *testing.T) {
 	}
 }
 
+func TestRunListShowsAttachmentSummaryWithoutPrimaryContextColumn(t *testing.T) {
+	app, roots, _ := testApplication(t, fakeSessions{
+		live: map[string]bool{
+			"ph:alpha": true,
+			"ph:beta":  true,
+			"ph:gamma": true,
+		},
+	}, fixedNow())
+	testStore := store.New(roots)
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "beta",
+		Title:         "Beta",
+		TmuxSession:   paths.TmuxSessionName("beta"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-beta",
+				DisplayName: "Pi harness repo",
+				Path:        "/tmp/beta",
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-beta",
+	})
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "gamma",
+		Title:         "Gamma",
+		TmuxSession:   paths.TmuxSessionName("gamma"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-gamma-1",
+				DisplayName: "Pi harness repo",
+				Path:        "/tmp/gamma-1",
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+			{
+				ContextID:   "ctx-gamma-2",
+				DisplayName: "Scratch notes",
+				Path:        "/tmp/gamma-2",
+				Kind:        models.ContextKindDirectory,
+				Mode:        models.ContextModeSharedReadonly,
+				Role:        models.ContextRoleSecondary,
+			},
+		},
+		PrimaryContextID: "ctx-gamma-1",
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"list"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(list) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "ATTACHMENTS") {
+		t.Fatalf("list output = %q, want ATTACHMENTS column", output)
+	}
+	if strings.Contains(output, "PRIMARY CONTEXT") {
+		t.Fatalf("list output = %q, want no PRIMARY CONTEXT column", output)
+	}
+	for _, want := range []string{"alpha", "no paths", "beta", "Pi harness repo", "gamma", "2 paths"} {
+		if !strings.Contains(output, want) {
+			t.Fatalf("list output = %q, want %q", output, want)
+		}
+	}
+}
+
 func TestRunStatusReportsDerivedDeadState(t *testing.T) {
 	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
 	testStore := store.New(roots)
@@ -475,8 +562,11 @@ func TestCommandSelectorRendersRowsForFZFAndParsesSelection(t *testing.T) {
 			WorkstreamID: "alpha",
 			Title:        "Alpha",
 			Status:       models.RuntimeStateIdle,
-			PrimaryContext: &models.WorkstreamContext{
-				DisplayName: "Main checkout",
+			Contexts: []models.WorkstreamContext{
+				{
+					DisplayName: "Main checkout",
+					Path:        "/tmp/alpha",
+				},
 			},
 		},
 	})
@@ -494,6 +584,45 @@ func TestCommandSelectorRendersRowsForFZFAndParsesSelection(t *testing.T) {
 	}
 	if got := runner.stdin; got != "alpha\twaiting\tAlpha\tMain checkout\n" {
 		t.Fatalf("selector stdin = %q", got)
+	}
+}
+
+func TestRenderSelectorInputUsesAttachmentSummaryRules(t *testing.T) {
+	got := renderSelectorInput([]models.WorkstreamRow{
+		{
+			WorkstreamID: "alpha",
+			Title:        "Alpha",
+			Status:       models.RuntimeStateIdle,
+			Contexts:     []models.WorkstreamContext{},
+		},
+		{
+			WorkstreamID: "beta",
+			Title:        "Beta",
+			Status:       models.RuntimeStateProcessing,
+			Contexts: []models.WorkstreamContext{
+				{
+					DisplayName: "Pi harness repo",
+					Path:        "/tmp/beta",
+				},
+			},
+		},
+		{
+			WorkstreamID: "gamma",
+			Title:        "Gamma",
+			Status:       models.RuntimeStateUnknown,
+			Contexts: []models.WorkstreamContext{
+				{DisplayName: "Pi harness repo", Path: "/tmp/gamma-1"},
+				{DisplayName: "Scratch notes", Path: "/tmp/gamma-2"},
+			},
+		},
+	})
+
+	want := "" +
+		"alpha\twaiting\tAlpha\tno paths\n" +
+		"beta\tprocessing\tBeta\tPi harness repo\n" +
+		"gamma\tunknown\tGamma\t2 paths\n"
+	if got != want {
+		t.Fatalf("renderSelectorInput() = %q, want %q", got, want)
 	}
 }
 
