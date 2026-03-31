@@ -142,6 +142,20 @@ func TestWorkstreamContextAttachmentLabel(t *testing.T) {
 	}
 }
 
+func TestWorkstreamContextValidateAllowsEmptyDisplayName(t *testing.T) {
+	context := WorkstreamContext{
+		ContextID: "ctx-main",
+		Path:      "/tmp/project",
+		Kind:      ContextKindCheckout,
+		Mode:      ContextModeIsolated,
+		Role:      ContextRolePrimary,
+	}
+
+	if err := context.Validate(); err != nil {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestSharedProjectNormalizeAndValidate(t *testing.T) {
 	project := SharedProject{
 		AgentPath:  " ./projects/pi-harness/ ",

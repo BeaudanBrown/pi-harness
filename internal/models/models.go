@@ -165,9 +165,6 @@ func (ctx WorkstreamContext) Validate() error {
 	if strings.TrimSpace(ctx.ContextID) == "" {
 		return errors.New("contextId is required")
 	}
-	if strings.TrimSpace(ctx.DisplayName) == "" {
-		return fmt.Errorf("context %q displayName is required", ctx.ContextID)
-	}
 	if !filepath.IsAbs(ctx.Path) {
 		return fmt.Errorf("context %q path %q must be absolute", ctx.ContextID, ctx.Path)
 	}

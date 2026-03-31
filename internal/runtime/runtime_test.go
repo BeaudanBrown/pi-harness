@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -246,6 +247,221 @@ func TestGetPropagatesTmuxErrors(t *testing.T) {
 	}
 }
 
+func TestGetDerivesMetadataBackedContextLabelInMergedRows(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	repoPath := filepath.Join(t.TempDir(), "pi-harness")
+	writeRepoMetadata(t, repoPath, "id: pi-harness\nname: Pi Harness\n")
+
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "",
+				Path:        repoPath,
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if got := row.Contexts[0].DisplayName; got != "Pi Harness" {
+		t.Fatalf("row.Contexts[0].DisplayName = %q, want Pi Harness", got)
+	}
+	if row.PrimaryContext == nil || row.PrimaryContext.DisplayName != "Pi Harness" {
+		t.Fatalf("row.PrimaryContext = %#v, want derived metadata label", row.PrimaryContext)
+	}
+}
+
+func TestGetKeepsExplicitDisplayNameAheadOfRepoMetadata(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	repoPath := filepath.Join(t.TempDir(), "pi-harness")
+	writeRepoMetadata(t, repoPath, "id: pi-harness\nname: Pi Harness\n")
+
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "Harness CLI",
+				Path:        repoPath,
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if got := row.Contexts[0].DisplayName; got != "Harness CLI" {
+		t.Fatalf("row.Contexts[0].DisplayName = %q, want explicit manifest label", got)
+	}
+}
+
+func TestGetFallsBackToShareLabelWhenRepoMetadataIsInvalid(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	repoPath := filepath.Join(t.TempDir(), "pi-harness")
+	writeRepoMetadata(t, repoPath, "id: pi-harness\nunknownField: true\n")
+	shareRegistryPath := writeShareRegistry(t, repoPath, "projects/pi-harness")
+
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "",
+				Path:        repoPath,
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.ShareRegistryPath = shareRegistryPath
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if got := row.Contexts[0].DisplayName; got != "projects/pi-harness" {
+		t.Fatalf("row.Contexts[0].DisplayName = %q, want share-registry label", got)
+	}
+}
+
+func TestGetFallsBackToBasenameWhenNoMetadataOrShareLabelExists(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	path := filepath.Join(t.TempDir(), "notes")
+	if err := os.MkdirAll(path, 0o755); err != nil {
+		t.Fatalf("MkdirAll(notes) error = %v", err)
+	}
+
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "",
+				Path:        path,
+				Kind:        models.ContextKindDirectory,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if got := row.Contexts[0].DisplayName; got != "notes" {
+		t.Fatalf("row.Contexts[0].DisplayName = %q, want basename fallback", got)
+	}
+}
+
+func TestGetKeepsDuplicateMetadataLabelsForDistinctContexts(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	repoA := filepath.Join(t.TempDir(), "pi-harness")
+	repoB := filepath.Join(t.TempDir(), "pi-harness-alt")
+	writeRepoMetadata(t, repoA, "id: pi-harness\nname: Pi Harness\n")
+	writeRepoMetadata(t, repoB, "id: pi-harness-alt\nname: Pi Harness\n")
+
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-a",
+				DisplayName: "",
+				Path:        repoA,
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+			{
+				ContextID:   "ctx-b",
+				DisplayName: "",
+				Path:        repoB,
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeSharedReadonly,
+				Role:        models.ContextRoleSecondary,
+			},
+		},
+		PrimaryContextID: "ctx-a",
+	})
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	if len(row.Contexts) != 2 {
+		t.Fatalf("len(row.Contexts) = %d, want 2", len(row.Contexts))
+	}
+	for i := range row.Contexts {
+		if got := row.Contexts[i].DisplayName; got != "Pi Harness" {
+			t.Fatalf("row.Contexts[%d].DisplayName = %q, want shared metadata label", i, got)
+		}
+	}
+	if row.Contexts[0].Path == row.Contexts[1].Path {
+		t.Fatalf("row.Contexts paths = %#v, want distinct attachments preserved", row.Contexts)
+	}
+}
+
 type fakeSessions struct {
 	live map[string]bool
 	err  error
@@ -307,4 +523,35 @@ func writeSchemaMismatchedRuntime(path string) error {
 
 func fixedNow() time.Time {
 	return time.Date(2026, time.March, 31, 3, 21, 25, 0, time.UTC)
+}
+
+func writeRepoMetadata(t *testing.T, repoPath, body string) {
+	t.Helper()
+	metadataPath := filepath.Join(repoPath, ".pi", "project.yaml")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.pi) error = %v", err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile(project.yaml) error = %v", err)
+	}
+}
+
+func writeShareRegistry(t *testing.T, guestPath, agentPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "shares.json")
+	content := strings.Join([]string{
+		"[",
+		"  {",
+		"    \"agentPath\": \"" + agentPath + "\",",
+		"    \"sourcePath\": \"/srv/repos/" + filepath.Base(guestPath) + "\",",
+		"    \"hostPath\": \"/home/beau/agent/" + filepath.Base(guestPath) + "\",",
+		"    \"guestPath\": \"" + guestPath + "\"",
+		"  }",
+		"]",
+		"",
+	}, "\n")
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares.json) error = %v", err)
+	}
+	return path
 }

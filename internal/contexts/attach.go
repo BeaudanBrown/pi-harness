@@ -175,11 +175,12 @@ func (a Attacher) AttachGitWorktree(ctx context.Context, workstreamID string, in
 	}
 
 	displayName := strings.TrimSpace(input.DisplayName)
-	if displayName == "" {
-		displayName = filepath.Base(repoRoot)
+	contextName := displayName
+	if contextName == "" {
+		contextName = filepath.Base(repoRoot)
 	}
 
-	contextID, err := chooseContextID(strings.TrimSpace(input.ContextID), displayName, record.Contexts)
+	contextID, err := chooseContextID(strings.TrimSpace(input.ContextID), contextName, record.Contexts)
 	if err != nil {
 		return models.WorkstreamRecord{}, err
 	}
@@ -259,11 +260,12 @@ func (a Attacher) AttachPath(ctx context.Context, workstreamID string, input Att
 	}
 
 	displayName := strings.TrimSpace(input.DisplayName)
-	if displayName == "" {
-		displayName = filepath.Base(sourcePath)
+	contextName := displayName
+	if contextName == "" {
+		contextName = filepath.Base(sourcePath)
 	}
 
-	contextID, err := chooseContextID(strings.TrimSpace(input.ContextID), displayName, record.Contexts)
+	contextID, err := chooseContextID(strings.TrimSpace(input.ContextID), contextName, record.Contexts)
 	if err != nil {
 		return models.WorkstreamRecord{}, err
 	}

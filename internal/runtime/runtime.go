@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/beaudanbrown/pi-harness/internal/models"
@@ -32,10 +34,11 @@ type SessionInspector interface {
 
 // Service merges durable manifests with runtime state and tmux inspection.
 type Service struct {
-	Roots    paths.Roots
-	Store    store.Store
-	Sessions SessionInspector
-	Now      func() time.Time
+	Roots             paths.Roots
+	Store             store.Store
+	Sessions          SessionInspector
+	ShareRegistryPath string
+	Now               func() time.Time
 }
 
 // New returns a runtime service.
@@ -44,10 +47,11 @@ func New(roots paths.Roots, sessions SessionInspector) Service {
 		sessions = tmux.New()
 	}
 	return Service{
-		Roots:    roots,
-		Store:    store.New(roots),
-		Sessions: sessions,
-		Now:      time.Now,
+		Roots:             roots,
+		Store:             store.New(roots),
+		Sessions:          sessions,
+		ShareRegistryPath: paths.ShareRegistryPath(),
+		Now:               time.Now,
 	}
 }
 
@@ -111,6 +115,7 @@ func (s Service) Get(ctx context.Context, workstreamID string) (models.Workstrea
 		row.LastSeenAt = status.LastSeenAt
 	}
 	row.Status = deriveStatus(sessionLive, status, runtimeSource, s.now())
+	s.applyMergedContextLabels(&row)
 
 	return row, nil
 }
@@ -131,6 +136,112 @@ func (s Service) readRuntime(workstreamID string) (*models.RuntimeStatus, string
 		return nil, RuntimeSourceMissing, ""
 	}
 	return nil, RuntimeSourceInvalid, err.Error()
+}
+
+func (s Service) applyMergedContextLabels(row *models.WorkstreamRow) {
+	if row == nil || len(row.Contexts) == 0 {
+		return
+	}
+
+	deriver := newContextLabelDeriver(s.shareRegistryPath())
+	for i := range row.Contexts {
+		row.Contexts[i].DisplayName = deriver.Derive(row.Contexts[i])
+	}
+	if row.PrimaryContext != nil {
+		row.PrimaryContext.DisplayName = deriver.Derive(*row.PrimaryContext)
+	}
+}
+
+func (s Service) shareRegistryPath() string {
+	if strings.TrimSpace(s.ShareRegistryPath) != "" {
+		return s.ShareRegistryPath
+	}
+	return paths.ShareRegistryPath()
+}
+
+type contextLabelDeriver struct {
+	shares        []models.SharedProject
+	metadataCache map[string]models.ProjectMetadataImport
+}
+
+func newContextLabelDeriver(shareRegistryPath string) contextLabelDeriver {
+	deriver := contextLabelDeriver{
+		metadataCache: make(map[string]models.ProjectMetadataImport),
+	}
+	projects, err := store.ReadShareRegistry(shareRegistryPath)
+	if err == nil {
+		deriver.shares = projects
+	}
+	return deriver
+}
+
+func (d *contextLabelDeriver) Derive(ctx models.WorkstreamContext) string {
+	if label := strings.TrimSpace(ctx.DisplayName); label != "" {
+		return label
+	}
+	if label := d.repoMetadataLabel(ctx.Path); label != "" {
+		return label
+	}
+	if label := d.shareLabel(ctx.Path); label != "" {
+		return label
+	}
+	return filepath.Base(filepath.Clean(ctx.Path))
+}
+
+func (d *contextLabelDeriver) repoMetadataLabel(path string) string {
+	repoRoot := findMetadataRoot(path)
+	if repoRoot == "" {
+		return ""
+	}
+	if imported, ok := d.metadataCache[repoRoot]; ok {
+		return metadataImportLabel(imported)
+	}
+
+	imported, err := store.ReadProjectMetadata(repoRoot)
+	if err != nil {
+		return ""
+	}
+	d.metadataCache[repoRoot] = imported
+	return metadataImportLabel(imported)
+}
+
+func metadataImportLabel(imported models.ProjectMetadataImport) string {
+	if imported.Metadata == nil || !imported.Metadata.Active {
+		return ""
+	}
+	if imported.Status != models.ProjectMetadataImportStatusLoaded &&
+		imported.Status != models.ProjectMetadataImportStatusLoadedWithWarnings {
+		return ""
+	}
+	return strings.TrimSpace(imported.Metadata.Name)
+}
+
+func (d *contextLabelDeriver) shareLabel(path string) string {
+	cleanPath := filepath.Clean(path)
+	for _, project := range d.shares {
+		if cleanPath == filepath.Clean(project.GuestPath) {
+			return project.AgentPath
+		}
+	}
+	return ""
+}
+
+func findMetadataRoot(path string) string {
+	current := filepath.Clean(path)
+	for {
+		if _, err := os.Stat(filepath.Join(current, ".pi", "project.yaml")); err == nil {
+			return current
+		}
+		if _, err := os.Stat(filepath.Join(current, ".git")); err == nil {
+			return current
+		}
+
+		parent := filepath.Dir(current)
+		if parent == current {
+			return ""
+		}
+		current = parent
+	}
 }
 
 func deriveStatus(sessionLive bool, status *models.RuntimeStatus, runtimeSource string, now time.Time) string {

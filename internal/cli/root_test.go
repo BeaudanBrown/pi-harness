@@ -240,6 +240,51 @@ func TestRunListShowsAttachmentSummaryWithoutPrimaryContextColumn(t *testing.T) 
 	}
 }
 
+func TestRunListUsesMergedMetadataBackedAttachmentLabel(t *testing.T) {
+	app, roots, _ := testApplication(t, fakeSessions{
+		live: map[string]bool{"ph:alpha": true},
+	}, fixedNow())
+	testStore := store.New(roots)
+	repoPath := filepath.Join(t.TempDir(), "pi-harness")
+	writeRepoMetadata(t, repoPath, "id: pi-harness\nname: Pi Harness\n")
+	app.runtime.ShareRegistryPath = writeShareRegistry(t, repoPath, "projects/pi-harness")
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "",
+				Path:        repoPath,
+				Kind:        models.ContextKindCheckout,
+				Mode:        models.ContextModeIsolated,
+				Role:        models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"list"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(list) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	output := stdout.String()
+	if !strings.Contains(output, "Pi Harness") {
+		t.Fatalf("list output = %q, want metadata-backed attachment label", output)
+	}
+	if strings.Contains(output, "projects/pi-harness") {
+		t.Fatalf("list output = %q, want metadata label to outrank share label", output)
+	}
+}
+
 func TestRunStatusReportsDerivedDeadState(t *testing.T) {
 	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
 	testStore := store.New(roots)
@@ -800,6 +845,35 @@ func fixedNow() func() time.Time {
 	return func() time.Time {
 		return time.Date(2026, time.March, 31, 2, 0, 0, 0, time.UTC)
 	}
+}
+
+func writeRepoMetadata(t *testing.T, repoPath, body string) {
+	t.Helper()
+	metadataPath := filepath.Join(repoPath, ".pi", "project.yaml")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.pi) error = %v", err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(body), 0o644); err != nil {
+		t.Fatalf("WriteFile(project.yaml) error = %v", err)
+	}
+}
+
+func writeShareRegistry(t *testing.T, guestPath, agentPath string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "shares.json")
+	content := "" +
+		"[\n" +
+		"  {\n" +
+		"    \"agentPath\": \"" + agentPath + "\",\n" +
+		"    \"sourcePath\": \"/srv/repos/" + filepath.Base(guestPath) + "\",\n" +
+		"    \"hostPath\": \"/home/beau/agent/" + filepath.Base(guestPath) + "\",\n" +
+		"    \"guestPath\": \"" + guestPath + "\"\n" +
+		"  }\n" +
+		"]\n"
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares.json) error = %v", err)
+	}
+	return path
 }
 
 func mustWriteManifest(t *testing.T, s store.Store, record models.WorkstreamRecord) {
