@@ -242,6 +242,7 @@ Metadata import fallback contract for v1:
 
 Deliverables:
 
+- workflow-alpha command transcript skeleton for the normal ssh-plus-tmux path
 - agent-VM verification runbook
 - proof that `ph menu`, `ph new`, `ph attach`, and runtime status changes work
   in the real ssh/tmux workflow
