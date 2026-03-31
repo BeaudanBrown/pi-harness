@@ -244,6 +244,12 @@ The status contract is:
   the tmux session still exists, or the newest trusted runtime record is older
   than 12 hours
 
+The 12-hour threshold is a v1 operator tradeoff: it keeps overnight or
+half-day-away sessions from flipping to `unknown` too aggressively, while still
+stopping the UI from presenting day-old runtime data as trustworthy. Once the
+newest trusted runtime record crosses that age, the harness should prefer the
+derived `unknown` contract over stale-but-plausible `idle` or `processing`.
+
 For v1, only `processing` and `idle` need to be written directly. `dead` and
 `unknown` should be derived by the Go harness when it merges runtime files
 with tmux session discovery.

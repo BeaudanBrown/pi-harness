@@ -31,6 +31,9 @@ func TestWorkstreamSwitcherSpecIncludesAttachmentSummaryExamples(t *testing.T) {
 		"ph menu",
 		"ph list",
 		"intentionally not naming any one of them as",
+		"That 12-hour cutoff is a v1 operator tradeoff:",
+		"without turning healthy sessions into `unknown` too quickly",
+		"current `idle` or `processing` signal",
 	}
 
 	for _, snippet := range requiredSnippets {

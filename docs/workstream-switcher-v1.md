@@ -142,6 +142,11 @@ For v1, "waiting" in the UI simply means `idle`.
 If the tmux session still exists but the newest trusted runtime state is older
 than 12 hours, the harness should render the workstream as `unknown`.
 
+That 12-hour cutoff is a v1 operator tradeoff: it tolerates normal overnight
+gaps without turning healthy sessions into `unknown` too quickly, but it still
+forces the UI to stop trusting stale runtime records before they read as a
+current `idle` or `processing` signal.
+
 ## Proposed Local Layout
 
 - `~/.local/state/pi-harness/workstreams/<workstream-id>.json`
