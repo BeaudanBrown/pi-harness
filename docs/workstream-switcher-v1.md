@@ -84,6 +84,29 @@ The operator-visible message for that path should be:
 
 After bootstrap, the operator lands in the shared `default` tmux session with the popup open there.
 
+### Attach And Menu Entry Table
+
+The operator-visible bootstrap behavior for the v1 session-control commands is:
+
+| Command | Invocation context | Bootstrap action | Operator-visible result |
+| --- | --- | --- | --- |
+| `ph menu` | inside a tmux client | no tmux bootstrap; open the popup in the current client | the popup opens over the current tmux client and stays anchored to that client until the operator cancels or switches sessions |
+| `ph menu` | outside tmux after the normal `ssh agent` entrypoint | join the shared `default` tmux session first, then open the popup there | prints `Outside tmux: joining the shared default tmux session, then opening the workstream menu.` and lands in the shared `default` tmux session with the popup open there |
+| `ph menu` | outside tmux from any other shell in the VM | same as the default `ssh agent` path: join the shared `default` tmux session first, then open the popup there | the outside-tmux menu path is intentionally normalized to the same shared `default` landing point instead of opening a detached popup from the bare shell |
+| `ph attach <workstream-id>` | inside a tmux client | no shared-session bootstrap; switch the current client directly into `ph:<workstream-id>` | the operator leaves the current tmux session and lands directly in the requested workstream session |
+| `ph attach <workstream-id>` | outside tmux after the normal `ssh agent` entrypoint | join tmux and attach straight to `ph:<workstream-id>` instead of stopping in `default` first | prints `Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).` and lands directly in the requested workstream session |
+| `ph attach <workstream-id>` | outside tmux from any other shell in the VM | same as the default `ssh agent` path: join tmux and attach straight to `ph:<workstream-id>` | the outside-tmux attach path is intentionally a direct workstream attach, not a two-step `default` session hop followed by manual switching |
+
+This table is meant to keep the implementation contract closed for v1:
+
+- `ph menu` outside tmux always uses the shared `default` tmux session as the
+  bootstrap landing point
+- `ph attach` outside tmux always lands directly in the requested workstream
+  session
+- the normal `ssh agent` path stays the default way to enter the VM, but the
+  command behavior above should not depend on whether the operator came from
+  that exact entrypoint or another shell in the same VM
+
 ## Session Model
 
 - one tmux session per workstream

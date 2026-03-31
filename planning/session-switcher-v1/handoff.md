@@ -21,6 +21,10 @@
   for multiple contexts.
 - Runtime state older than 12 hours is now part of the `unknown` contract when
   tmux still exists.
+- The session-control bootstrap contract is now locked in a decision table:
+  `ph menu` outside tmux always joins the shared `default` tmux session before
+  opening the popup, while `ph attach <workstream>` outside tmux always lands
+  directly in the requested workstream session.
 - The first test target is workflow alpha in the normal agent ssh plus tmux
   flow.
 - `docs/workflow-alpha-command-transcript.md` now includes a compact

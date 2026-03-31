@@ -38,6 +38,15 @@ func TestWorkstreamSwitcherSpecIncludesAttachmentSummaryExamples(t *testing.T) {
 		"After bootstrap, the operator lands in the shared `default` tmux session with the popup open there.",
 		"Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).",
 		"After bootstrap, the operator lands directly in the requested workstream session.",
+		"### Attach And Menu Entry Table",
+		"| `ph menu` | inside a tmux client | no tmux bootstrap; open the popup in the current client |",
+		"| `ph menu` | outside tmux after the normal `ssh agent` entrypoint | join the shared `default` tmux session first, then open the popup there |",
+		"| `ph menu` | outside tmux from any other shell in the VM | same as the default `ssh agent` path: join the shared `default` tmux session first, then open the popup there |",
+		"| `ph attach <workstream-id>` | inside a tmux client | no shared-session bootstrap; switch the current client directly into `ph:<workstream-id>` |",
+		"| `ph attach <workstream-id>` | outside tmux after the normal `ssh agent` entrypoint | join tmux and attach straight to `ph:<workstream-id>` instead of stopping in `default` first |",
+		"| `ph attach <workstream-id>` | outside tmux from any other shell in the VM | same as the default `ssh agent` path: join tmux and attach straight to `ph:<workstream-id>` |",
+		"`ph menu` outside tmux always uses the shared `default` tmux session as the",
+		"`ph attach` outside tmux always lands directly in the requested workstream",
 	}
 
 	for _, snippet := range requiredSnippets {

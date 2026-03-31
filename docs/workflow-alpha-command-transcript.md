@@ -33,6 +33,20 @@ done gate.
 | Reattach inside tmux | `ph attach <workstream-id>` after switching away | Returns the operator to the requested `ph:<workstream-id>` session by exact workstream id. |
 | Reattach from outside tmux | `ph attach <workstream-id>` from a shell outside tmux | Prints `Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).` and lands directly in the requested workstream session. |
 
+## Session-Control Decision Table
+
+This table makes the bootstrap contract explicit enough to implement without
+reopening the operator interaction model during the later tmux-control slice.
+
+| Command | Invocation context | Bootstrap action | Successful checkpoint |
+| --- | --- | --- | --- |
+| `ph menu` | inside tmux | open the popup in the current tmux client | the selector opens over the current client and can switch directly to another workstream session |
+| `ph menu` | outside tmux from the default `ssh agent` entry path | join the shared `default` tmux session first, then open the popup there | the command prints `Outside tmux: joining the shared default tmux session, then opening the workstream menu.` and the operator lands in `default` with the popup open |
+| `ph menu` | outside tmux from any other shell in the VM | use the same bootstrap as the default `ssh agent` path | the outside-tmux menu path still lands in the shared `default` tmux session instead of opening a popup from the bare shell |
+| `ph attach <workstream-id>` | inside tmux | switch the current client directly into `ph:<workstream-id>` | the operator lands in the requested workstream session without a `default`-session stop |
+| `ph attach <workstream-id>` | outside tmux from the default `ssh agent` entry path | join tmux and attach directly to `ph:<workstream-id>` | the command prints `Outside tmux: joining tmux and attaching <workstream-id> (ph:<workstream-id>).` and the operator lands in the requested workstream session |
+| `ph attach <workstream-id>` | outside tmux from any other shell in the VM | use the same bootstrap as the default `ssh agent` path | the outside-tmux attach path remains a direct workstream attach rather than a two-step hop through `default` |
+
 ## Transcript
 
 ### 1. Create a new workstream
