@@ -152,6 +152,7 @@ func (record WorkstreamRecord) Validate() error {
 	}
 
 	seenContextIDs := map[string]struct{}{}
+	seenPaths := map[string]string{}
 	primaryCount := 0
 	for _, context := range record.Contexts {
 		if err := context.Validate(); err != nil {
@@ -161,6 +162,11 @@ func (record WorkstreamRecord) Validate() error {
 			return fmt.Errorf("contextId %q is duplicated", context.ContextID)
 		}
 		seenContextIDs[context.ContextID] = struct{}{}
+		normalizedPath := filepath.Clean(context.Path)
+		if existingContextID, exists := seenPaths[normalizedPath]; exists {
+			return fmt.Errorf("context path %q is duplicated by %q and %q", normalizedPath, existingContextID, context.ContextID)
+		}
+		seenPaths[normalizedPath] = context.ContextID
 		if context.Role == ContextRolePrimary {
 			primaryCount++
 			if record.PrimaryContextID != context.ContextID {

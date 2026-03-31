@@ -54,6 +54,39 @@ func TestWorkstreamRecordValidateRejectsPrimaryMismatch(t *testing.T) {
 	}
 }
 
+func TestWorkstreamRecordValidateRejectsDuplicateNormalizedPaths(t *testing.T) {
+	record := WorkstreamRecord{
+		SchemaVersion: CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts: []WorkstreamContext{
+			{
+				ContextID:   "ctx-main",
+				DisplayName: "Main checkout",
+				Path:        "/tmp/project",
+				Kind:        ContextKindWorktree,
+				Mode:        ContextModeIsolated,
+				Role:        ContextRoleSecondary,
+			},
+			{
+				ContextID:   "ctx-shadow",
+				DisplayName: "Shadow checkout",
+				Path:        "/tmp/../tmp/project",
+				Kind:        ContextKindCheckout,
+				Mode:        ContextModeSharedReadonly,
+				Role:        ContextRoleSecondary,
+			},
+		},
+	}
+
+	if err := record.Validate(); err == nil {
+		t.Fatal("Validate() error = nil, want duplicate path error")
+	}
+}
+
 func TestRuntimeStatusValidate(t *testing.T) {
 	status := RuntimeStatus{
 		SchemaVersion:    CurrentSchemaVersion,

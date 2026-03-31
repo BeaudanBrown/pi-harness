@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -155,6 +156,74 @@ func TestListWorkstreamIDs(t *testing.T) {
 	}
 	if ids[0] != "alpha" || ids[1] != "beta" {
 		t.Fatalf("ListWorkstreamIDs() = %v, want [alpha beta]", ids)
+	}
+}
+
+func TestUpdateManifestWritesMutatedRecord(t *testing.T) {
+	store := New(testRoots(t))
+	record := models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   paths.TmuxSessionName("focus-bugfix"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	}
+	if err := store.WriteManifest(record); err != nil {
+		t.Fatalf("WriteManifest() error = %v", err)
+	}
+
+	updated, err := store.UpdateManifest(record.WorkstreamID, func(record *models.WorkstreamRecord) error {
+		record.Title = "Focus bugfix v2"
+		record.UpdatedAt = "2026-03-31T01:06:00Z"
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("UpdateManifest() error = %v", err)
+	}
+	if updated.Title != "Focus bugfix v2" {
+		t.Fatalf("UpdateManifest().Title = %q, want %q", updated.Title, "Focus bugfix v2")
+	}
+
+	reread, err := store.ReadManifest(record.WorkstreamID)
+	if err != nil {
+		t.Fatalf("ReadManifest() error = %v", err)
+	}
+	if reread.Title != "Focus bugfix v2" {
+		t.Fatalf("ReadManifest().Title = %q, want %q", reread.Title, "Focus bugfix v2")
+	}
+}
+
+func TestUpdateManifestLeavesStoredRecordOnFailure(t *testing.T) {
+	store := New(testRoots(t))
+	record := models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   paths.TmuxSessionName("focus-bugfix"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	}
+	if err := store.WriteManifest(record); err != nil {
+		t.Fatalf("WriteManifest() error = %v", err)
+	}
+
+	wantErr := errors.New("stop")
+	if _, err := store.UpdateManifest(record.WorkstreamID, func(record *models.WorkstreamRecord) error {
+		record.Title = ""
+		return wantErr
+	}); !errors.Is(err, wantErr) {
+		t.Fatalf("UpdateManifest() error = %v, want %v", err, wantErr)
+	}
+
+	reread, err := store.ReadManifest(record.WorkstreamID)
+	if err != nil {
+		t.Fatalf("ReadManifest() error = %v", err)
+	}
+	if reread.Title != "Focus bugfix" {
+		t.Fatalf("ReadManifest().Title = %q, want original title", reread.Title)
 	}
 }
 

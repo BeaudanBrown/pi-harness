@@ -41,6 +41,29 @@ func (s Store) ReadManifest(workstreamID string) (models.WorkstreamRecord, error
 	return record, nil
 }
 
+func (s Store) UpdateManifest(workstreamID string, mutate func(*models.WorkstreamRecord) error) (models.WorkstreamRecord, error) {
+	if mutate == nil {
+		return models.WorkstreamRecord{}, errors.New("mutate function is required")
+	}
+
+	record, err := s.ReadManifest(workstreamID)
+	if err != nil {
+		return models.WorkstreamRecord{}, err
+	}
+
+	record.Contexts = append([]models.WorkstreamContext(nil), record.Contexts...)
+	if err := mutate(&record); err != nil {
+		return models.WorkstreamRecord{}, err
+	}
+	if err := record.Validate(); err != nil {
+		return models.WorkstreamRecord{}, fmt.Errorf("validate manifest: %w", err)
+	}
+	if err := writeJSONAtomically(s.Roots.ManifestPath(workstreamID), record); err != nil {
+		return models.WorkstreamRecord{}, err
+	}
+	return record, nil
+}
+
 func (s Store) WriteRuntime(status models.RuntimeStatus) error {
 	if err := status.Validate(); err != nil {
 		return fmt.Errorf("validate runtime: %w", err)
