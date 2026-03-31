@@ -286,6 +286,90 @@ func TestGetDerivesMetadataBackedContextLabelInMergedRows(t *testing.T) {
 	if row.PrimaryContext == nil || row.PrimaryContext.DisplayName != "Pi Harness" {
 		t.Fatalf("row.PrimaryContext = %#v, want derived metadata label", row.PrimaryContext)
 	}
+	if row.Contexts[0].MetadataImport == nil {
+		t.Fatal("row.Contexts[0].MetadataImport = nil, want loaded metadata import")
+	}
+	if row.Contexts[0].MetadataImport.Status != models.ProjectMetadataImportStatusLoaded {
+		t.Fatalf("row.Contexts[0].MetadataImport.Status = %q, want loaded", row.Contexts[0].MetadataImport.Status)
+	}
+	if row.PrimaryContext == nil || row.PrimaryContext.MetadataImport == nil {
+		t.Fatalf("row.PrimaryContext = %#v, want metadata import", row.PrimaryContext)
+	}
+}
+
+func TestGetSurfacesMetadataImportStatusForWarningMissingAndInvalidCases(t *testing.T) {
+	roots := testRoots(t)
+	s := store.New(roots)
+	base := t.TempDir()
+
+	warningsPath := filepath.Join(base, "warnings")
+	writeRepoMetadata(t, warningsPath, "id: warnings\nname: Warning Repo\ntoolingFile: missing.md\n")
+
+	missingPath := filepath.Join(base, "missing")
+	if err := os.MkdirAll(filepath.Join(missingPath, ".git"), 0o755); err != nil {
+		t.Fatalf("MkdirAll(missing/.git) error = %v", err)
+	}
+
+	invalidPath := filepath.Join(base, "invalid")
+	writeRepoMetadata(t, invalidPath, "id: invalid\nunknownField: true\n")
+
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "focus-bugfix",
+		Title:         "Focus bugfix",
+		TmuxSession:   "ph:focus-bugfix",
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:05:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID: "ctx-warnings",
+				Path:      warningsPath,
+				Kind:      models.ContextKindCheckout,
+				Mode:      models.ContextModeIsolated,
+				Role:      models.ContextRolePrimary,
+			},
+			{
+				ContextID: "ctx-missing",
+				Path:      missingPath,
+				Kind:      models.ContextKindCheckout,
+				Mode:      models.ContextModeIsolated,
+				Role:      models.ContextRoleSecondary,
+			},
+			{
+				ContextID: "ctx-invalid",
+				Path:      invalidPath,
+				Kind:      models.ContextKindCheckout,
+				Mode:      models.ContextModeIsolated,
+				Role:      models.ContextRoleSecondary,
+			},
+		},
+		PrimaryContextID: "ctx-warnings",
+	})
+
+	service := New(roots, fakeSessions{live: map[string]bool{"ph:focus-bugfix": true}})
+	service.Now = fixedNow
+	row, err := service.Get(context.Background(), "focus-bugfix")
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+
+	gotStatuses := map[string]string{}
+	for _, ctx := range row.Contexts {
+		if ctx.MetadataImport == nil {
+			t.Fatalf("context %q metadata import = nil, want surfaced fallback status", ctx.ContextID)
+		}
+		gotStatuses[ctx.ContextID] = ctx.MetadataImport.Status
+	}
+
+	if gotStatuses["ctx-warnings"] != models.ProjectMetadataImportStatusLoadedWithWarnings {
+		t.Fatalf("warnings status = %q, want loaded-with-warnings", gotStatuses["ctx-warnings"])
+	}
+	if gotStatuses["ctx-missing"] != models.ProjectMetadataImportStatusMissing {
+		t.Fatalf("missing status = %q, want missing", gotStatuses["ctx-missing"])
+	}
+	if gotStatuses["ctx-invalid"] != models.ProjectMetadataImportStatusInvalid {
+		t.Fatalf("invalid status = %q, want invalid", gotStatuses["ctx-invalid"])
+	}
 }
 
 func TestGetKeepsExplicitDisplayNameAheadOfRepoMetadata(t *testing.T) {

@@ -398,13 +398,16 @@ func TestAttachGitWorktreeRejectsSharedMode(t *testing.T) {
 
 func TestShareAttachmentCandidatesUseGuestPathsOnly(t *testing.T) {
 	s := store.New(testRoots(t))
-	registryPath := filepath.Join(t.TempDir(), "shares.json")
+	base := t.TempDir()
+	repoPath := filepath.Join(base, "pi-harness")
+	writeRepoMetadata(t, repoPath, "id: pi-harness\nname: Pi Harness\n")
+	registryPath := filepath.Join(base, "shares.json")
 	if err := os.WriteFile(registryPath, []byte(`[
   {
     "agentPath": "projects/pi-harness",
     "sourcePath": "/srv/repos/pi-harness",
     "hostPath": "/home/beau/agent/projects/pi-harness",
-    "guestPath": "/home/beau/host/projects/pi-harness"
+    "guestPath": "`+repoPath+`"
   }
 ]`), 0o644); err != nil {
 		t.Fatalf("WriteFile(shares) error = %v", err)
@@ -420,14 +423,20 @@ func TestShareAttachmentCandidatesUseGuestPathsOnly(t *testing.T) {
 	if len(candidates) != 1 {
 		t.Fatalf("len(candidates) = %d, want 1", len(candidates))
 	}
-	if candidates[0].DisplayName != "projects/pi-harness" {
-		t.Fatalf("DisplayName = %q, want projects/pi-harness", candidates[0].DisplayName)
+	if candidates[0].DisplayName != "Pi Harness" {
+		t.Fatalf("DisplayName = %q, want metadata-backed label", candidates[0].DisplayName)
 	}
-	if candidates[0].Path != "/home/beau/host/projects/pi-harness" {
+	if candidates[0].Path != repoPath {
 		t.Fatalf("Path = %q, want guest path", candidates[0].Path)
 	}
 	if candidates[0].Path == candidates[0].Share.SourcePath || candidates[0].Path == candidates[0].Share.HostPath {
 		t.Fatalf("Path = %q, want guest path only", candidates[0].Path)
+	}
+	if candidates[0].MetadataImport == nil {
+		t.Fatal("MetadataImport = nil, want surfaced metadata import")
+	}
+	if candidates[0].MetadataImport.Status != models.ProjectMetadataImportStatusLoaded {
+		t.Fatalf("MetadataImport.Status = %q, want loaded", candidates[0].MetadataImport.Status)
 	}
 }
 
@@ -454,6 +463,83 @@ func TestShareAttachmentCandidatesSurfaceRegistryErrors(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "read share registry") {
 		t.Fatalf("ShareAttachmentCandidates() error = %q, want share registry context", err)
+	}
+}
+
+func TestShareAttachmentCandidatesSurfaceMetadataFallbackStatuses(t *testing.T) {
+	s := store.New(testRoots(t))
+	base := t.TempDir()
+
+	warningsPath := filepath.Join(base, "warnings")
+	writeRepoMetadata(t, warningsPath, "id: warnings\nname: Warning Repo\nnotesFile: missing.md\n")
+
+	missingPath := filepath.Join(base, "missing")
+	if err := os.MkdirAll(missingPath, 0o755); err != nil {
+		t.Fatalf("MkdirAll(missing) error = %v", err)
+	}
+
+	invalidPath := filepath.Join(base, "invalid")
+	writeRepoMetadata(t, invalidPath, "id: invalid\nunknownField: true\n")
+
+	registryPath := filepath.Join(base, "shares.json")
+	if err := os.WriteFile(registryPath, []byte(`[
+  {
+    "agentPath": "projects/warnings",
+    "sourcePath": "/srv/repos/warnings",
+    "hostPath": "/home/beau/agent/projects/warnings",
+    "guestPath": "`+warningsPath+`"
+  },
+  {
+    "agentPath": "projects/missing",
+    "sourcePath": "/srv/repos/missing",
+    "hostPath": "/home/beau/agent/projects/missing",
+    "guestPath": "`+missingPath+`"
+  },
+  {
+    "agentPath": "projects/invalid",
+    "sourcePath": "/srv/repos/invalid",
+    "hostPath": "/home/beau/agent/projects/invalid",
+    "guestPath": "`+invalidPath+`"
+  }
+]`), 0o644); err != nil {
+		t.Fatalf("WriteFile(shares) error = %v", err)
+	}
+
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+	attacher.ShareRegistryPath = registryPath
+
+	candidates, err := attacher.ShareAttachmentCandidates()
+	if err != nil {
+		t.Fatalf("ShareAttachmentCandidates() error = %v", err)
+	}
+
+	gotStatuses := map[string]string{}
+	gotLabels := map[string]string{}
+	for _, candidate := range candidates {
+		if candidate.MetadataImport == nil {
+			t.Fatalf("candidate %q metadata import = nil, want surfaced fallback status", candidate.Path)
+		}
+		gotStatuses[candidate.Share.AgentPath] = candidate.MetadataImport.Status
+		gotLabels[candidate.Share.AgentPath] = candidate.DisplayName
+	}
+
+	if gotStatuses["projects/warnings"] != models.ProjectMetadataImportStatusLoadedWithWarnings {
+		t.Fatalf("warnings status = %q, want loaded-with-warnings", gotStatuses["projects/warnings"])
+	}
+	if gotLabels["projects/warnings"] != "Warning Repo" {
+		t.Fatalf("warnings label = %q, want metadata-backed label", gotLabels["projects/warnings"])
+	}
+	if gotStatuses["projects/missing"] != models.ProjectMetadataImportStatusMissing {
+		t.Fatalf("missing status = %q, want missing", gotStatuses["projects/missing"])
+	}
+	if gotLabels["projects/missing"] != "projects/missing" {
+		t.Fatalf("missing label = %q, want share label fallback", gotLabels["projects/missing"])
+	}
+	if gotStatuses["projects/invalid"] != models.ProjectMetadataImportStatusInvalid {
+		t.Fatalf("invalid status = %q, want invalid", gotStatuses["projects/invalid"])
+	}
+	if gotLabels["projects/invalid"] != "projects/invalid" {
+		t.Fatalf("invalid label = %q, want share label fallback", gotLabels["projects/invalid"])
 	}
 }
 
@@ -518,4 +604,15 @@ func gitOutput(t *testing.T, dir string, args ...string) string {
 		t.Fatalf("git %s error = %v", strings.Join(args, " "), err)
 	}
 	return strings.TrimSpace(string(output))
+}
+
+func writeRepoMetadata(t *testing.T, repoPath, manifest string) {
+	t.Helper()
+	metadataPath := filepath.Join(repoPath, ".pi", "project.yaml")
+	if err := os.MkdirAll(filepath.Dir(metadataPath), 0o755); err != nil {
+		t.Fatalf("MkdirAll(.pi) error = %v", err)
+	}
+	if err := os.WriteFile(metadataPath, []byte(manifest), 0o644); err != nil {
+		t.Fatalf("WriteFile(project.yaml) error = %v", err)
+	}
 }

@@ -285,6 +285,55 @@ func TestRunListUsesMergedMetadataBackedAttachmentLabel(t *testing.T) {
 	}
 }
 
+func TestRunListJSONIncludesMetadataImportStatus(t *testing.T) {
+	app, roots, _ := testApplication(t, fakeSessions{
+		live: map[string]bool{"ph:alpha": true},
+	}, fixedNow())
+	testStore := store.New(roots)
+	repoPath := filepath.Join(t.TempDir(), "pi-harness")
+	writeRepoMetadata(t, repoPath, "id: pi-harness\nname: Pi Harness\ntoolingFile: missing.md\n")
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:10:00Z",
+		Contexts: []models.WorkstreamContext{
+			{
+				ContextID: "ctx-main",
+				Path:      repoPath,
+				Kind:      models.ContextKindCheckout,
+				Mode:      models.ContextModeIsolated,
+				Role:      models.ContextRolePrimary,
+			},
+		},
+		PrimaryContextID: "ctx-main",
+	})
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"list", "--json"}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(list --json) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	var rows []models.WorkstreamRow
+	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
+		t.Fatalf("json.Unmarshal() error = %v", err)
+	}
+	if len(rows) != 1 || len(rows[0].Contexts) != 1 {
+		t.Fatalf("rows = %#v, want one row with one context", rows)
+	}
+	if rows[0].Contexts[0].MetadataImport == nil {
+		t.Fatal("rows[0].Contexts[0].MetadataImport = nil, want surfaced metadata import")
+	}
+	if rows[0].Contexts[0].MetadataImport.Status != models.ProjectMetadataImportStatusLoadedWithWarnings {
+		t.Fatalf("rows[0].Contexts[0].MetadataImport.Status = %q, want loaded-with-warnings", rows[0].Contexts[0].MetadataImport.Status)
+	}
+}
+
 func TestRunStatusReportsDerivedDeadState(t *testing.T) {
 	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
 	testStore := store.New(roots)

@@ -145,9 +145,11 @@ func (s Service) applyMergedContextLabels(row *models.WorkstreamRow) {
 
 	deriver := newContextLabelDeriver(s.shareRegistryPath())
 	for i := range row.Contexts {
+		row.Contexts[i].MetadataImport = deriver.MetadataImport(row.Contexts[i].Path)
 		row.Contexts[i].DisplayName = deriver.Derive(row.Contexts[i])
 	}
 	if row.PrimaryContext != nil {
+		row.PrimaryContext.MetadataImport = deriver.MetadataImport(row.PrimaryContext.Path)
 		row.PrimaryContext.DisplayName = deriver.Derive(*row.PrimaryContext)
 	}
 }
@@ -179,7 +181,7 @@ func (d *contextLabelDeriver) Derive(ctx models.WorkstreamContext) string {
 	if label := strings.TrimSpace(ctx.DisplayName); label != "" {
 		return label
 	}
-	if label := d.repoMetadataLabel(ctx.Path); label != "" {
+	if label := d.repoMetadataLabel(ctx.MetadataImport); label != "" {
 		return label
 	}
 	if label := d.shareLabel(ctx.Path); label != "" {
@@ -188,21 +190,11 @@ func (d *contextLabelDeriver) Derive(ctx models.WorkstreamContext) string {
 	return filepath.Base(filepath.Clean(ctx.Path))
 }
 
-func (d *contextLabelDeriver) repoMetadataLabel(path string) string {
-	repoRoot := findMetadataRoot(path)
-	if repoRoot == "" {
+func (d *contextLabelDeriver) repoMetadataLabel(imported *models.ProjectMetadataImport) string {
+	if imported == nil {
 		return ""
 	}
-	if imported, ok := d.metadataCache[repoRoot]; ok {
-		return metadataImportLabel(imported)
-	}
-
-	imported, err := store.ReadProjectMetadata(repoRoot)
-	if err != nil {
-		return ""
-	}
-	d.metadataCache[repoRoot] = imported
-	return metadataImportLabel(imported)
+	return metadataImportLabel(*imported)
 }
 
 func metadataImportLabel(imported models.ProjectMetadataImport) string {
@@ -224,6 +216,25 @@ func (d *contextLabelDeriver) shareLabel(path string) string {
 		}
 	}
 	return ""
+}
+
+func (d *contextLabelDeriver) MetadataImport(path string) *models.ProjectMetadataImport {
+	repoRoot := findMetadataRoot(path)
+	if repoRoot == "" {
+		return nil
+	}
+	if imported, ok := d.metadataCache[repoRoot]; ok {
+		importedCopy := imported
+		return &importedCopy
+	}
+
+	imported, err := store.ReadProjectMetadata(repoRoot)
+	if err != nil {
+		return nil
+	}
+	d.metadataCache[repoRoot] = imported
+	importedCopy := imported
+	return &importedCopy
 }
 
 func findMetadataRoot(path string) string {

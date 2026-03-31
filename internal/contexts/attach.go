@@ -87,9 +87,10 @@ func NewAttacher(roots paths.Roots, s store.Store, now func() time.Time) Attache
 }
 
 type ShareAttachmentCandidate struct {
-	DisplayName string
-	Path        string
-	Share       models.SharedProject
+	DisplayName    string
+	Path           string
+	Share          models.SharedProject
+	MetadataImport *models.ProjectMetadataImport
 }
 
 func (a Attacher) ShareAttachmentCandidates() ([]ShareAttachmentCandidate, error) {
@@ -100,10 +101,26 @@ func (a Attacher) ShareAttachmentCandidates() ([]ShareAttachmentCandidate, error
 
 	candidates := make([]ShareAttachmentCandidate, 0, len(projects))
 	for _, project := range projects {
+		imported, err := store.ReadProjectMetadata(project.GuestPath)
+		if err != nil {
+			return nil, fmt.Errorf("read project metadata for %q: %w", project.GuestPath, err)
+		}
+
+		displayName := project.AgentPath
+		if imported.Metadata != nil && imported.Metadata.Active &&
+			(imported.Status == models.ProjectMetadataImportStatusLoaded ||
+				imported.Status == models.ProjectMetadataImportStatusLoadedWithWarnings) {
+			if label := strings.TrimSpace(imported.Metadata.Name); label != "" {
+				displayName = label
+			}
+		}
+
+		importedCopy := imported
 		candidates = append(candidates, ShareAttachmentCandidate{
-			DisplayName: project.AgentPath,
-			Path:        project.GuestPath,
-			Share:       project,
+			DisplayName:    displayName,
+			Path:           project.GuestPath,
+			Share:          project,
+			MetadataImport: &importedCopy,
 		})
 	}
 	return candidates, nil

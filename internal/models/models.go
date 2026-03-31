@@ -33,15 +33,16 @@ var workstreamIDPattern = regexp.MustCompile(`^[a-z0-9]+(?:-[a-z0-9]+)*$`)
 
 // WorkstreamContext is the durable attachment record for one workstream path.
 type WorkstreamContext struct {
-	ContextID         string `json:"contextId"`
-	ProjectID         string `json:"projectId,omitempty"`
-	DisplayName       string `json:"displayName"`
-	Path              string `json:"path"`
-	Kind              string `json:"kind"`
-	Mode              string `json:"mode"`
-	Role              string `json:"role"`
-	Branch            string `json:"branch,omitempty"`
-	OwnerWorkstreamID string `json:"ownerWorkstreamId,omitempty"`
+	ContextID         string                 `json:"contextId"`
+	ProjectID         string                 `json:"projectId,omitempty"`
+	DisplayName       string                 `json:"displayName"`
+	Path              string                 `json:"path"`
+	Kind              string                 `json:"kind"`
+	Mode              string                 `json:"mode"`
+	Role              string                 `json:"role"`
+	Branch            string                 `json:"branch,omitempty"`
+	OwnerWorkstreamID string                 `json:"ownerWorkstreamId,omitempty"`
+	MetadataImport    *ProjectMetadataImport `json:"metadataImport,omitempty"`
 }
 
 // WorkstreamRecord is the durable manifest shape for a workstream.
