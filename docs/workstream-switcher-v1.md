@@ -35,7 +35,7 @@ The main entrypoint is:
 Behavior:
 
 1. Open a small menu window from the current tmux session.
-2. Show all known workstreams with status, title, and primary context.
+2. Show all known workstreams with status, title, and attached-path summary.
 3. Allow fuzzy filtering plus Vim-style movement.
 4. Press `Enter` on a workstream to switch the client into that tmux session.
 5. Close the menu after switching.
@@ -43,6 +43,9 @@ Behavior:
 
 The menu should be a tmux popup first. That keeps the current ssh and tmux
 workflow intact and avoids requiring Pi to own window management.
+
+If `ph menu` is invoked outside tmux, the harness should first start or join
+tmux and then open the popup from there.
 
 ## Session Model
 
@@ -60,7 +63,6 @@ Each context has:
 
 - a path
 - an optional `projectId` from repo-local metadata
-- a role (`primary` or `secondary`)
 - a mode (`isolated`, `shared-readonly`, or `shared-readwrite`)
 
 Defaults:
@@ -68,6 +70,9 @@ Defaults:
 - for git-backed project attachments, prefer an isolated worktree
 - for plain directories, attach the directory directly
 - shared modes are explicit opt-in
+
+For v1, a workstream does not require any primary context. Attached paths are
+treated as a set and may be empty.
 
 ## Sync Model
 
@@ -103,6 +108,9 @@ The first status model is:
 
 For v1, "waiting" in the UI simply means `idle`.
 
+If the tmux session still exists but the newest trusted runtime state is older
+than 12 hours, the harness should render the workstream as `unknown`.
+
 ## Proposed Local Layout
 
 - `~/.local/state/pi-harness/workstreams/<workstream-id>.json`
@@ -120,6 +128,12 @@ keep their original paths.
 - `ph attach`
 - `ph add-context`
 - `ph status`
+
+`ph new <title>` should create the workstream and immediately switch the
+operator into the new managed tmux session.
+
+If `ph attach <workstream>` is invoked outside tmux, the harness should first
+start or join tmux and then attach to the target session.
 
 In v1, commands that take `<workstream>` should resolve only exact
 `workstreamId` matches. Prefix, fuzzy, or title-based resolution can land after
@@ -140,3 +154,24 @@ the durable registry and popup selector are stable.
 - automatic project worktree provisioning outside explicit attach actions
 - multi-project orchestration in one ambient prompt
 - Pi-native deep UI integration before the tmux-backed control plane is stable
+- automatic cleanup or deletion of detached worktrees
+
+## Alpha Target
+
+The first meaningful test milestone is workflow alpha.
+
+Workflow alpha means the operator can use the normal `ssh agent` plus tmux flow
+to:
+
+- run `ph new <title>` and land in the new workstream session
+- run `ph menu` and switch between at least two workstreams
+- run `ph attach <workstream>` from inside or outside tmux
+- attach a git-backed path with isolated-by-default behavior
+- attach a plain directory
+- see usable labels and status in `ph list` and the popup menu
+- recover normal operation by reattaching to existing tmux sessions
+
+## Post-V1 Direction
+
+The first priority after v1 should be repair and recovery commands for dead
+sessions, stale runtime state, and abandoned harness-owned worktrees.

@@ -85,7 +85,6 @@ Required manifest fields for v1:
 - `tmuxSession`
 - `createdAt`
 - `updatedAt`
-- `primaryContextId` optional
 - `contexts`
 - `notes`
 
@@ -113,6 +112,8 @@ Go reader:
 - `dead` when the manifest exists but tmux session lookup fails
 - `unknown` when runtime state is missing, unreadable, or schema-incompatible
   while the tmux session still exists
+- `unknown` when the tmux session still exists but the newest trusted runtime
+  record is older than 12 hours based on `lastSeenAt`
 
 ### Worktrees
 
@@ -135,6 +136,7 @@ Initial managed launch flow:
 4. The harness starts `pi` inside the session with the project-local runtime
    extension enabled.
 5. The harness injects environment variables needed by the runtime extension.
+6. The harness switches the operator into the new tmux session immediately.
 
 Required environment variables:
 
@@ -160,9 +162,15 @@ For v1, `<workstream>` resolves by exact `workstreamId` only.
 - `ph attach <workstream>`
 - `ph menu`
 
+If either command is invoked outside tmux, the harness should first start or
+join tmux and then continue with the requested attach or popup behavior.
+
 ### Context Commands
 
 - `ph add-context <workstream> <path-or-project>`
+
+For v1, attached paths are modeled as a set. No primary-context command is
+required.
 
 ## UI Contract
 
@@ -229,6 +237,8 @@ Deliverables:
 - agent-VM verification runbook
 - proof that `ph menu`, `ph new`, `ph attach`, and runtime status changes work
   in the real ssh/tmux workflow
+- workflow-alpha acceptance criteria covering zero-context workstreams,
+  outside-tmux entry, and stale runtime handling
 
 ## Non-Goals
 
@@ -238,3 +248,4 @@ Deliverables:
 - replacing tmux as the transport
 - rebuilding Pi's interactive UI in JSON or RPC mode for v1
 - editing repo-local project metadata from inside the harness UI
+- automatic deletion of worktrees in v1

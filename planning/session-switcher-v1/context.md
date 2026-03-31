@@ -24,11 +24,14 @@ The first product slice is:
 
 - The primary unit is the workstream, not the project.
 - A workstream may exist without any attached project.
+- A workstream may exist without any attached path at all.
 - Projects and directories are incidental scope attachments.
 - Git-backed project attachments should default to isolated worktrees.
 - Shared contexts are allowed but must remain explicit.
 - Runtime state should distinguish `processing`, `idle`, `dead`, and
   `unknown`.
+- A workstream does not require a primary context; attached paths are just a
+  set that may be empty.
 - The first switcher UI should be tmux-backed rather than Pi-native.
 - The core harness implementation should be Go, not a Node or TypeScript
   application.
@@ -39,6 +42,13 @@ The first product slice is:
   hooks such as `agent_start` and `agent_end`.
 - V1 command arguments that take `<workstream>` resolve exact `workstreamId`
   matches only.
+- `ph new <title>` should immediately switch into the new workstream session.
+- `ph menu` and `ph attach <workstream>` should start or join tmux when invoked
+  outside tmux.
+- If the tmux session still exists but the newest trusted runtime file is older
+  than 12 hours, status should become `unknown`.
+- The first meaningful test milestone is workflow alpha.
+- The first post-v1 priority is repair and recovery commands.
 
 ## Primary Docs
 

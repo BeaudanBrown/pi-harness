@@ -53,8 +53,8 @@ project rather than from a separate cross-project index.
 Guest-local durable workstream manifests:
 
 - path: `~/.local/state/pi-harness/workstreams/`
-- semantics: workstream identity, title, attached contexts, primary context,
-  launch metadata, and operator intent
+- semantics: workstream identity, title, attached contexts, launch metadata,
+  and operator intent
 
 This plane is local to the machine and should not be versioned in git.
 
@@ -86,6 +86,8 @@ The key rules are:
 - attachable to a project only if that project path is shared into the VM
 - project browsing is a secondary index over attached contexts, not the primary
   list view
+- a workstream may have zero, one, or many attached contexts with no required
+  primary designation
 
 ## Identity Rules
 
@@ -102,7 +104,6 @@ Recommended shape:
 The workstream keeps the same id even if:
 
 - its title changes
-- its primary context changes
 - attached projects are added or removed
 
 ### Context Identity
@@ -156,7 +157,6 @@ Fields:
 - `path`
 - `kind` (`worktree`, `checkout`, or `directory`)
 - `mode` (`isolated`, `shared-readonly`, or `shared-readwrite`)
-- `role` (`primary` or `secondary`)
 - `branch` optional
 - `ownerWorkstreamId` optional
 
@@ -179,7 +179,6 @@ Fields:
 - `tmuxSession`
 - `createdAt`
 - `updatedAt`
-- `primaryContextId` optional
 - `contexts`
 - `notes`
 
@@ -206,7 +205,6 @@ Fields:
 - `title`
 - `tmuxSession`
 - `status`
-- `primaryContext`
 - `contexts`
 - `sharedContexts`
 - `projectMetadata`
@@ -229,7 +227,8 @@ The status contract is:
 - `idle`: the session exists but Pi is not currently processing
 - `dead`: the workstream manifest exists but the tmux session no longer does
 - `unknown`: runtime state is missing, unreadable, or schema-incompatible while
-  the tmux session still exists
+  the tmux session still exists, or the newest trusted runtime record is older
+  than 12 hours
 
 For v1, only `processing` and `idle` need to be written directly. `dead` and
 `unknown` should be derived by the Go harness when it merges runtime files

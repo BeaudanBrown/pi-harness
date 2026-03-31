@@ -14,6 +14,13 @@
 - No implementation code exists yet for the registry, popup switcher, or
   context attachment flow beyond the placeholder wrapper and extension
   scaffold.
+- Attached paths are now documented as an optional set with no primary-context
+  requirement.
+- Runtime state older than 12 hours is now part of the `unknown` contract when
+  tmux still exists.
+- The first test target is workflow alpha in the normal agent ssh plus tmux
+  flow.
+- The first post-v1 priority is repair and recovery commands.
 
 ## Next Recommended Slice
 
@@ -25,6 +32,8 @@ Start with Phase 0 and Phase 1 from
 - implement runtime status files
 - add a thin Pi lifecycle extension for `processing` vs `idle`
 - keep tmux inspection as a verification aid, not the source of identity
+- keep outside-tmux invocation behavior explicit for `ph menu` and `ph attach`
+- do not reintroduce primary-context assumptions in CLI or data model docs
 
 ## Constraints
 
@@ -39,3 +48,5 @@ Start with Phase 0 and Phase 1 from
 - Keep the popup selector tmux plus `fzf`, not a separate UI framework.
 - Keep the local Codex loop and Beads tracker treated as implementation
   scaffolding, not product shape.
+- Keep worktree cleanup manual or detach-only in v1; do not add automatic
+  deletion behavior.
