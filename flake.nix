@@ -1,7 +1,7 @@
 {
-  description = "pi-harness workspace (skeleton)";
+  description = "pi-harness workspace";
 
-    inputs = {
+  inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     nix-ai-tools = {
@@ -11,24 +11,121 @@
   };
 
   outputs = { nixpkgs, flake-utils, nix-ai-tools, ... }:
-    flake-utils.lib.eachDefaultSystem (system:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = nixpkgs.legacyPackages.${system};
-        piCommand = pkgs.lib.getExe nix-ai-tools.packages.${system}.pi;
+        lib = pkgs.lib;
+        piCommand = lib.getExe nix-ai-tools.packages.${system}.pi;
+        lintBody = ''
+          set -euo pipefail
+
+          repo_root="$(git rev-parse --show-toplevel)"
+          cd "''${repo_root}"
+
+          git diff --check
+
+          if [ ! -f go.mod ]; then
+            echo "lint: no go.mod yet; skipping Go-specific checks"
+            exit 0
+          fi
+
+          mapfile -t go_files < <(
+            find . -type f -name '*.go' \
+              -not -path './.git/*' \
+              -not -path './vendor/*' \
+              | sort
+          )
+
+          if [ "''${#go_files[@]}" -eq 0 ]; then
+            echo "lint: go.mod exists but no Go files were found"
+            exit 0
+          fi
+
+          unformatted="$(gofmt -l "''${go_files[@]}")"
+          if [ -n "''${unformatted}" ]; then
+            echo "gofmt needs to run on:" >&2
+            printf '%s\n' "''${unformatted}" >&2
+            exit 1
+          fi
+
+          go vet ./...
+          staticcheck ./...
+        '';
+        testBody = ''
+          set -euo pipefail
+
+          repo_root="$(git rev-parse --show-toplevel)"
+          cd "''${repo_root}"
+
+          if [ ! -f go.mod ]; then
+            echo "test: no go.mod yet; skipping Go tests"
+            exit 0
+          fi
+
+          go test ./...
+        '';
+        lintApp = pkgs.writeShellApplication {
+          name = "lint";
+          runtimeInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.findutils
+            pkgs.git
+            pkgs.go
+            pkgs.go-tools
+            pkgs.gnugrep
+          ];
+          text = lintBody;
+        };
+        testApp = pkgs.writeShellApplication {
+          name = "test";
+          runtimeInputs = [
+            pkgs.bash
+            pkgs.coreutils
+            pkgs.git
+            pkgs.go
+          ];
+          text = testBody;
+        };
+        verifyApp = pkgs.writeShellApplication {
+          name = "verify";
+          runtimeInputs = [ lintApp testApp ];
+          text = ''
+            set -euo pipefail
+            ${lib.getExe lintApp}
+            ${lib.getExe testApp}
+          '';
+        };
       in
       {
         packages.default = pkgs.writeShellApplication {
           name = "pi-harness";
           runtimeInputs = [ pkgs.bash ];
           text = ''
-            exec ${pkgs.lib.escapeShellArg piCommand} "$@"
+            exec ${lib.escapeShellArg piCommand} "$@"
           '';
         };
 
+        apps.lint = flake-utils.lib.mkApp { drv = lintApp; };
+        apps.test = flake-utils.lib.mkApp { drv = testApp; };
+        apps.verify = flake-utils.lib.mkApp { drv = verifyApp; };
+
         devShells.default = pkgs.mkShell {
-          packages = [ pkgs.bash pkgs.nodejs ];
+          packages = [
+            pkgs.bash
+            pkgs.fzf
+            pkgs.go
+            pkgs.go-tools
+            pkgs.gopls
+            pkgs.jq
+            pkgs.just
+            pkgs.nodejs
+            pkgs.tmux
+          ];
           shellHook = ''
             echo "pi-harness shell"
+            echo "quality gate: nix run .#verify"
           '';
         };
       }

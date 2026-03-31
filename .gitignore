@@ -3,3 +3,8 @@
 .dolt/
 *.db
 .beads-credential-key
+
+# Local developer/runtime artifacts
+.direnv/
+.envrc
+.loom/
