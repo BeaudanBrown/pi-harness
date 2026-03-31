@@ -282,6 +282,120 @@ func TestAttachGitWorktreeAddsDistinctWorktreesForSameRepo(t *testing.T) {
 	}
 }
 
+func TestAttachPathCreatesDirectDirectoryAttachment(t *testing.T) {
+	s := store.New(testRoots(t))
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:00:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	dir := filepath.Join(t.TempDir(), "notes")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(notes) error = %v", err)
+	}
+
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+	record, err := attacher.AttachPath(context.Background(), "alpha", AttachPathInput{
+		Path: dir,
+		Mode: models.ContextModeSharedReadonly,
+	})
+	if err != nil {
+		t.Fatalf("AttachPath() error = %v", err)
+	}
+
+	attached := record.Contexts[0]
+	if attached.Path != dir {
+		t.Fatalf("attached path = %q, want %q", attached.Path, dir)
+	}
+	if attached.Kind != models.ContextKindDirectory {
+		t.Fatalf("kind = %q, want directory", attached.Kind)
+	}
+	if attached.Mode != models.ContextModeSharedReadonly {
+		t.Fatalf("mode = %q, want shared-readonly", attached.Mode)
+	}
+	if attached.OwnerWorkstreamID != "" {
+		t.Fatalf("ownerWorkstreamId = %q, want empty", attached.OwnerWorkstreamID)
+	}
+	if attached.Branch != "" {
+		t.Fatalf("branch = %q, want empty", attached.Branch)
+	}
+}
+
+func TestAttachPathKeepsSharedGitCheckoutDirect(t *testing.T) {
+	s := store.New(testRoots(t))
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:00:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	repoRoot := createGitRepo(t)
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+	record, err := attacher.Attach(context.Background(), "alpha", AttachPathInput{
+		Path: repoRoot,
+		Mode: models.ContextModeSharedReadwrite,
+	})
+	if err != nil {
+		t.Fatalf("Attach() error = %v", err)
+	}
+
+	attached := record.Contexts[0]
+	if attached.Path != repoRoot {
+		t.Fatalf("attached path = %q, want repo root %q", attached.Path, repoRoot)
+	}
+	if attached.Kind != models.ContextKindCheckout {
+		t.Fatalf("kind = %q, want checkout", attached.Kind)
+	}
+	if attached.Mode != models.ContextModeSharedReadwrite {
+		t.Fatalf("mode = %q, want shared-readwrite", attached.Mode)
+	}
+	if attached.OwnerWorkstreamID != "" {
+		t.Fatalf("ownerWorkstreamId = %q, want empty", attached.OwnerWorkstreamID)
+	}
+	if attached.Branch != "" {
+		t.Fatalf("branch = %q, want empty", attached.Branch)
+	}
+}
+
+func TestAttachGitWorktreeRejectsSharedMode(t *testing.T) {
+	s := store.New(testRoots(t))
+	mustWriteManifest(t, s, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:00:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	repoRoot := createGitRepo(t)
+	attacher := NewAttacher(s.Roots, s, fixedNow())
+	if _, err := attacher.AttachGitWorktree(context.Background(), "alpha", AttachGitWorktreeInput{
+		Path: repoRoot,
+		Mode: models.ContextModeSharedReadwrite,
+	}); err == nil {
+		t.Fatal("AttachGitWorktree() error = nil, want shared-mode rejection")
+	}
+
+	record, err := s.ReadManifest("alpha")
+	if err != nil {
+		t.Fatalf("ReadManifest() error = %v", err)
+	}
+	if len(record.Contexts) != 0 {
+		t.Fatalf("len(Contexts) = %d, want 0", len(record.Contexts))
+	}
+}
+
 func fixedNow() func() time.Time {
 	return func() time.Time {
 		return time.Date(2026, 3, 31, 2, 0, 0, 0, time.UTC)

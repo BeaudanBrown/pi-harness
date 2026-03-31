@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -306,6 +307,54 @@ func TestRunAddContextCreatesIsolatedGitWorktreeManifestEntry(t *testing.T) {
 	}
 	if context.Branch == "" {
 		t.Fatal("context.Branch = empty, want owned branch metadata")
+	}
+	if !strings.Contains(stdout.String(), "isolated worktree") {
+		t.Fatalf("run(add-context) stdout = %q, want attachment label", stdout.String())
+	}
+}
+
+func TestRunAddContextAddsSharedDirectoryAttachment(t *testing.T) {
+	app, roots, _ := testApplication(t, fakeSessions{}, fixedNow())
+	testStore := store.New(roots)
+
+	mustWriteManifest(t, testStore, models.WorkstreamRecord{
+		SchemaVersion: models.CurrentSchemaVersion,
+		WorkstreamID:  "alpha",
+		Title:         "Alpha",
+		TmuxSession:   paths.TmuxSessionName("alpha"),
+		CreatedAt:     "2026-03-31T01:00:00Z",
+		UpdatedAt:     "2026-03-31T01:00:00Z",
+		Contexts:      []models.WorkstreamContext{},
+	})
+
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(shared) error = %v", err)
+	}
+
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	exitCode := run([]string{"add-context", "--mode", "shared-readwrite", "alpha", dir}, &stdout, &stderr, app)
+	if exitCode != 0 {
+		t.Fatalf("run(add-context shared dir) exit code = %d, stderr=%q", exitCode, stderr.String())
+	}
+
+	record, err := testStore.ReadManifest("alpha")
+	if err != nil {
+		t.Fatalf("ReadManifest(alpha) error = %v", err)
+	}
+	context := record.Contexts[0]
+	if context.Path != dir {
+		t.Fatalf("context.Path = %q, want %q", context.Path, dir)
+	}
+	if context.Kind != models.ContextKindDirectory {
+		t.Fatalf("context.Kind = %q, want directory", context.Kind)
+	}
+	if context.Mode != models.ContextModeSharedReadwrite {
+		t.Fatalf("context.Mode = %q, want shared-readwrite", context.Mode)
+	}
+	if !strings.Contains(stdout.String(), "shared read-write directory") {
+		t.Fatalf("run(add-context) stdout = %q, want shared label", stdout.String())
 	}
 }
 

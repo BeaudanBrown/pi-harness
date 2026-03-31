@@ -292,19 +292,21 @@ func (app application) runAddContext(args []string, stdout io.Writer) error {
 	contextID := flags.String("context-id", "", "context id")
 	displayName := flags.String("display-name", "", "display name")
 	projectID := flags.String("project-id", "", "project id")
+	mode := flags.String("mode", "", "attachment mode")
 	role := flags.String("role", "", "role")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
 	if flags.NArg() != 2 {
-		return errors.New("usage: pi-harness add-context [--context-id id] [--display-name name] [--project-id id] [--role primary|secondary] <workstream> <path>")
+		return errors.New("usage: pi-harness add-context [--context-id id] [--display-name name] [--project-id id] [--mode isolated|shared-readonly|shared-readwrite] [--role primary|secondary] <workstream> <path>")
 	}
 
-	record, err := app.contexts.AttachGitWorktree(context.Background(), flags.Arg(0), contexts.AttachGitWorktreeInput{
+	record, err := app.contexts.Attach(context.Background(), flags.Arg(0), contexts.AttachPathInput{
 		ContextID:   *contextID,
 		DisplayName: *displayName,
 		ProjectID:   *projectID,
 		Path:        flags.Arg(1),
+		Mode:        *mode,
 		Role:        *role,
 	})
 	if err != nil {
@@ -312,7 +314,7 @@ func (app application) runAddContext(args []string, stdout io.Writer) error {
 	}
 
 	context := record.Contexts[len(record.Contexts)-1]
-	fmt.Fprintf(stdout, "attached %s to %s at %s\n", context.ContextID, record.WorkstreamID, context.Path)
+	fmt.Fprintf(stdout, "attached %s to %s at %s (%s)\n", context.ContextID, record.WorkstreamID, context.Path, context.AttachmentLabel())
 	return nil
 }
 

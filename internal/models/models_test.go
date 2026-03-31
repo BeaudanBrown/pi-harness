@@ -127,3 +127,17 @@ func TestValidateTmuxSession(t *testing.T) {
 		t.Fatal("ValidateTmuxSession() error = nil, want mismatch error")
 	}
 }
+
+func TestWorkstreamContextAttachmentLabel(t *testing.T) {
+	context := WorkstreamContext{
+		Kind: ContextKindDirectory,
+		Mode: ContextModeSharedReadwrite,
+	}
+
+	if got := context.ModeLabel(); got != "shared read-write" {
+		t.Fatalf("ModeLabel() = %q, want shared read-write", got)
+	}
+	if got := context.AttachmentLabel(); got != "shared read-write directory" {
+		t.Fatalf("AttachmentLabel() = %q, want shared read-write directory", got)
+	}
+}

@@ -86,6 +86,25 @@ type WorkstreamRow struct {
 	TmuxSessionLive bool                `json:"tmuxSessionLive"`
 }
 
+func (ctx WorkstreamContext) ModeLabel() string {
+	switch ctx.Mode {
+	case ContextModeSharedReadonly:
+		return "shared read-only"
+	case ContextModeSharedReadwrite:
+		return "shared read-write"
+	default:
+		return "isolated"
+	}
+}
+
+func (ctx WorkstreamContext) AttachmentLabel() string {
+	kind := ctx.Kind
+	if kind == "" {
+		kind = "context"
+	}
+	return ctx.ModeLabel() + " " + kind
+}
+
 func ValidateWorkstreamID(id string) error {
 	if !workstreamIDPattern.MatchString(id) {
 		return fmt.Errorf("workstreamId %q must match %s", id, workstreamIDPattern.String())

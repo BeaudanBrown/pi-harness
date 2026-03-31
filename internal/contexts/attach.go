@@ -62,6 +62,16 @@ type AttachGitWorktreeInput struct {
 	ProjectID   string
 	DisplayName string
 	Path        string
+	Mode        string
+	Role        string
+}
+
+type AttachPathInput struct {
+	ContextID   string
+	ProjectID   string
+	DisplayName string
+	Path        string
+	Mode        string
 	Role        string
 }
 
@@ -74,9 +84,55 @@ func NewAttacher(roots paths.Roots, s store.Store, now func() time.Time) Attache
 	}
 }
 
+func (a Attacher) Attach(ctx context.Context, workstreamID string, input AttachPathInput) (models.WorkstreamRecord, error) {
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = models.ContextModeIsolated
+	}
+
+	sourcePath, err := filepath.Abs(strings.TrimSpace(input.Path))
+	if err != nil {
+		return models.WorkstreamRecord{}, fmt.Errorf("resolve source path: %w", err)
+	}
+
+	repoRoot, err := a.gitTopLevel(ctx, sourcePath)
+	switch {
+	case err == nil && repoRoot == sourcePath && mode == models.ContextModeIsolated:
+		return a.AttachGitWorktree(ctx, workstreamID, AttachGitWorktreeInput{
+			ContextID:   input.ContextID,
+			ProjectID:   input.ProjectID,
+			DisplayName: input.DisplayName,
+			Path:        sourcePath,
+			Mode:        mode,
+			Role:        input.Role,
+		})
+	case err == nil && repoRoot == sourcePath:
+		input.Path = sourcePath
+		input.Mode = mode
+		return a.AttachPath(ctx, workstreamID, input)
+	case err == nil:
+		input.Path = sourcePath
+		input.Mode = mode
+		return a.AttachPath(ctx, workstreamID, input)
+	case errors.Is(err, errNotGitRepository):
+		input.Path = sourcePath
+		input.Mode = mode
+		return a.AttachPath(ctx, workstreamID, input)
+	default:
+		return models.WorkstreamRecord{}, err
+	}
+}
+
 func (a Attacher) AttachGitWorktree(ctx context.Context, workstreamID string, input AttachGitWorktreeInput) (models.WorkstreamRecord, error) {
 	if strings.TrimSpace(workstreamID) == "" {
 		return models.WorkstreamRecord{}, errors.New("workstream is required")
+	}
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = models.ContextModeIsolated
+	}
+	if mode != models.ContextModeIsolated {
+		return models.WorkstreamRecord{}, fmt.Errorf("isolated worktree attach only supports mode %q", models.ContextModeIsolated)
 	}
 	sourcePath, err := filepath.Abs(strings.TrimSpace(input.Path))
 	if err != nil {
@@ -142,7 +198,7 @@ func (a Attacher) AttachGitWorktree(ctx context.Context, workstreamID string, in
 		DisplayName:       displayName,
 		Path:              targetPath,
 		Kind:              models.ContextKindWorktree,
-		Mode:              models.ContextModeIsolated,
+		Mode:              mode,
 		Role:              role,
 		Branch:            branch,
 		OwnerWorkstreamID: workstreamID,
@@ -153,6 +209,68 @@ func (a Attacher) AttachGitWorktree(ctx context.Context, workstreamID string, in
 
 	attached = true
 	return record, nil
+}
+
+func (a Attacher) AttachPath(ctx context.Context, workstreamID string, input AttachPathInput) (models.WorkstreamRecord, error) {
+	if strings.TrimSpace(workstreamID) == "" {
+		return models.WorkstreamRecord{}, errors.New("workstream is required")
+	}
+
+	sourcePath, err := filepath.Abs(strings.TrimSpace(input.Path))
+	if err != nil {
+		return models.WorkstreamRecord{}, fmt.Errorf("resolve source path: %w", err)
+	}
+	info, err := os.Stat(sourcePath)
+	if err != nil {
+		return models.WorkstreamRecord{}, fmt.Errorf("stat path: %w", err)
+	}
+	if !info.IsDir() {
+		return models.WorkstreamRecord{}, fmt.Errorf("path %q must be a directory", sourcePath)
+	}
+
+	record, err := a.Store.ReadManifest(workstreamID)
+	if err != nil {
+		return models.WorkstreamRecord{}, err
+	}
+
+	displayName := strings.TrimSpace(input.DisplayName)
+	if displayName == "" {
+		displayName = filepath.Base(sourcePath)
+	}
+
+	contextID, err := chooseContextID(strings.TrimSpace(input.ContextID), displayName, record.Contexts)
+	if err != nil {
+		return models.WorkstreamRecord{}, err
+	}
+
+	role := strings.TrimSpace(input.Role)
+	if role == "" {
+		role = defaultRole(record)
+	}
+
+	mode := strings.TrimSpace(input.Mode)
+	if mode == "" {
+		mode = models.ContextModeIsolated
+	}
+
+	kind := models.ContextKindDirectory
+	if repoRoot, err := a.gitTopLevel(ctx, sourcePath); err == nil {
+		if repoRoot == sourcePath {
+			kind = models.ContextKindCheckout
+		}
+	} else if !errors.Is(err, errNotGitRepository) {
+		return models.WorkstreamRecord{}, err
+	}
+
+	return a.Manager.AddContext(workstreamID, AddInput{
+		ContextID:   contextID,
+		ProjectID:   strings.TrimSpace(input.ProjectID),
+		DisplayName: displayName,
+		Path:        sourcePath,
+		Kind:        kind,
+		Mode:        mode,
+		Role:        role,
+	})
 }
 
 func (a Attacher) gitTopLevel(ctx context.Context, path string) (string, error) {
