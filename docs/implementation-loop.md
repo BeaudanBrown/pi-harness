@@ -102,8 +102,7 @@ The loop defaults to:
 
 - model `gpt-5.4`
 - reasoning effort `medium`
-- `danger-full-access` sandbox for generated shell commands
-- `--full-auto` mode
+- `danger-full-access` sandbox for generated shell commands (override with `CODEX_SANDBOX` if needed)
 - bounded iterations from `MAX_ITERATIONS` / `LOCAL_MAX_ITERATIONS` /
   `ITERATIONS`
 - Beads issue selection from the current repository

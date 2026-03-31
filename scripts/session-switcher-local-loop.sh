@@ -10,7 +10,6 @@ sandbox="${CODEX_SANDBOX:-danger-full-access}"
 dry_run="${DRY_RUN:-0}"
 run_verify="${PI_HARNESS_LOOP_VERIFY:-1}"
 require_clean="${PI_HARNESS_LOOP_REQUIRE_CLEAN:-0}"
-full_auto="${PI_HARNESS_LOOP_FULL_AUTO:-1}"
 resume_in_progress="${PI_HARNESS_LOOP_RESUME_IN_PROGRESS:-1}"
 reopen_stale_in_progress="${PI_HARNESS_LOOP_REOPEN_STALE_IN_PROGRESS:-1}"
 beads_label="${BEADS_WORK_LABEL:-session-switcher-v1}"
@@ -272,9 +271,6 @@ for ((iteration = 1; iteration <= max_iterations; iteration++)); do
   } >> "${iteration_prompt}"
 
   codex_command=(codex exec --json --model "${model}" -c model_reasoning_effort="${reasoning}" --cd "${repo_root}" --sandbox "${sandbox}")
-  if [ "${full_auto}" = "1" ]; then
-    codex_command+=(--full-auto)
-  fi
 
   if ! PI_HARNESS_LOOP_ACTIVE=1 "${codex_command[@]}" < "${iteration_prompt}"; then
     echo "iteration ${iteration}/${max_iterations}: codex execution failed" >&2
