@@ -24,6 +24,9 @@
 - The first test target is workflow alpha in the normal agent ssh plus tmux
   flow.
 - The first post-v1 priority is repair and recovery commands.
+- The first post-v1 recovery-command outline now names concrete candidate
+  groups: `ph doctor` inspection, dead-session repair, stale-runtime
+  reconciliation, cleanup and reclamation, and deeper state repair.
 
 ## Next Recommended Slice
 
@@ -37,6 +40,9 @@ Start with Phase 0 and Phase 1 from
 - keep tmux inspection as a verification aid, not the source of identity
 - keep outside-tmux invocation behavior explicit for `ph menu` and `ph attach`
 - do not reintroduce primary-context assumptions in CLI or data model docs
+- use the recovery-command outline in `docs/workstream-switcher-v1.md` as the
+  starting point for later roadmap or issue decomposition work rather than
+  reopening recovery scope from scratch
 
 ## Constraints
 

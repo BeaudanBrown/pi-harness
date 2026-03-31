@@ -49,6 +49,9 @@ The first product slice is:
   than 12 hours, status should become `unknown`.
 - The first meaningful test milestone is workflow alpha.
 - The first post-v1 priority is repair and recovery commands.
+- The first post-v1 recovery candidates are grouped into runtime inspection,
+  dead-session repair, stale-runtime reconciliation, cleanup and reclamation,
+  and deeper state repair.
 
 ## Primary Docs
 

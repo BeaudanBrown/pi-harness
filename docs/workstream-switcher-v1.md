@@ -183,3 +183,98 @@ to:
 
 The first priority after v1 should be repair and recovery commands for dead
 sessions, stale runtime state, and abandoned harness-owned worktrees.
+
+The first command groups to evaluate after v1 are:
+
+### Runtime Inspection
+
+- `ph doctor`
+- `ph doctor <workstream>`
+
+Intent:
+
+- inspect one workstream or the whole registry for mismatches between durable
+  manifests, runtime files, tmux sessions, and attached paths
+- explain whether a workstream is healthy, dead, stale, unknown, or missing
+  expected artifacts
+- surface operator-visible repair suggestions before any mutation happens
+
+This should be the main read-only entrypoint before repair commands grow.
+
+### Session Repair
+
+- `ph repair session <workstream>`
+- `ph revive <workstream>`
+
+Intent:
+
+- repair a dead-session state where the manifest still exists but the tmux
+  session is gone
+- recreate or relaunch the managed tmux session without changing the
+  workstream identity
+- preserve the existing manifest, contexts, and runtime history where possible
+
+This group covers the common case where the operator or host lost the tmux
+session but the workstream itself should continue.
+
+### Runtime Reconciliation
+
+- `ph repair runtime <workstream>`
+- `ph refresh-runtime <workstream>`
+
+Intent:
+
+- recover from stale or missing runtime files when the tmux session still
+  exists
+- recompute the merged harness view so an `unknown` status caused by stale
+  runtime can return to a trustworthy state
+- restore runtime tracking after crashes, extension failures, or operator
+  mistakes without forcing session recreation
+
+This group should treat stale runtime repair separately from dead-session
+repair because the tmux session may still be healthy.
+
+### Cleanup And Reclamation
+
+- `ph cleanup worktrees`
+- `ph cleanup runtime`
+- `ph prune <workstream>`
+
+Intent:
+
+- identify and optionally remove abandoned harness-owned worktrees
+- remove obsolete runtime files for deleted or superseded workstreams
+- reclaim leftover state after a workstream has been intentionally retired
+
+These commands should stay explicit and operator-confirmed. V1 should not gain
+automatic deletion behavior.
+
+### State Repair
+
+- `ph repair manifest <workstream>`
+- `ph rebind <workstream>`
+
+Intent:
+
+- repair broken references between manifests, session names, runtime files, and
+  attached context metadata
+- fix state after partial manual edits, interrupted commands, or crashes in the
+  harness control flow
+- prefer targeted repairs over broad reset-style commands
+
+This group is for structural consistency problems rather than simple stale
+status recovery.
+
+### Roadmap Shape
+
+For roadmap and issue-decomposition purposes, the likely post-v1 order is:
+
+1. read-only inspection with `ph doctor`
+2. dead-session recovery
+3. stale-runtime reconciliation
+4. cleanup and reclamation for harness-owned leftovers
+5. deeper manifest or reference repair for partial corruption
+
+Naming can still change later. The important shape is that post-v1 recovery
+should cover inspection first, then targeted repair paths for dead sessions,
+stale runtime state, and cleanup-oriented maintenance.
