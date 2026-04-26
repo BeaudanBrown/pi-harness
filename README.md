@@ -14,9 +14,11 @@ layout is handled outside Pi with regular tmux.
 - a Nix package named `pi-harness`
 - a NixOS module named `nixosModules.pi-harness`
 - shared Pi config under `config/agent/`
-- empty extension, skill, prompt, and theme directories for future additions
+- a small web search extension under `config/agent/extensions/web-search`
+- empty skill, prompt, and theme directories for future additions
 
-The starting configuration loads no extensions.
+The starting configuration loads the web search extension and no other
+extensions.
 
 ## NixOS Usage
 
@@ -53,6 +55,21 @@ shared files into:
 ~/.pi/agent/prompts
 ~/.pi/agent/themes
 ```
+
+## Web Search
+
+The included `web_search` extension registers a Pi tool for current web
+research. It calls the OpenAI Responses API with `gpt-5-mini` by default and
+can be pointed at a compatible proxy with environment variables:
+
+```text
+PI_WEB_SEARCH_BASE_URL
+PI_WEB_SEARCH_MODEL
+PI_WEB_SEARCH_API_KEY
+PI_WEB_SEARCH_API_KEY_COMMAND
+```
+
+If no Pi-specific key is set, the extension falls back to `OPENAI_API_KEY`.
 
 ## Local Workflow
 

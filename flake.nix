@@ -36,6 +36,7 @@
             test -f config/agent/settings.json
             jq empty config/agent/settings.json
             test -d config/agent/extensions
+            test -f config/agent/extensions/web-search/index.ts
             test -d config/agent/skills
             test -d config/agent/prompts
             test -d config/agent/themes
