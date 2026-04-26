@@ -3,20 +3,11 @@
   config,
   options,
   pkgs,
-  inputs ? null,
   ...
 }:
 let
   cfg = config.services.pi-harness;
   hasHomeManager = options ? home-manager && options.home-manager ? users;
-  fallbackPackage = pkgs.callPackage ./package.nix {
-    piPackage = pkgs.pi or (throw "services.pi-harness.package must be set to the flake package");
-  };
-  defaultPackage =
-    if inputs != null then
-      inputs.pi-harness.packages.${pkgs.system}.default or fallbackPackage
-    else
-      fallbackPackage;
 in
 {
   options.services.pi-harness = {
@@ -24,7 +15,9 @@ in
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = defaultPackage;
+      default = pkgs.callPackage ./package.nix {
+        piPackage = pkgs.pi or (throw "services.pi-harness.package must be set to the flake package");
+      };
       defaultText = lib.literalExpression "inputs.pi-harness.packages.${pkgs.system}.default";
       description = "The pi-harness package containing the Pi binary and shared agent config.";
     };
