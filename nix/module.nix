@@ -1,30 +1,60 @@
-{ lib, config, pkgs, ... }:
+{
+  lib,
+  config,
+  options,
+  pkgs,
+  inputs ? null,
+  ...
+}:
 let
   cfg = config.services.pi-harness;
+  hasHomeManager = options ? home-manager && options.home-manager ? users;
+  fallbackPackage = pkgs.callPackage ./package.nix {
+    piPackage = pkgs.pi or (throw "services.pi-harness.package must be set to the flake package");
+  };
+  defaultPackage =
+    if inputs != null then
+      inputs.pi-harness.packages.${pkgs.system}.default or fallbackPackage
+    else
+      fallbackPackage;
 in
 {
   options.services.pi-harness = {
-    enable = lib.mkEnableOption "Install the pi-harness command via this module";
+    enable = lib.mkEnableOption "shared Pi coding-agent configuration";
 
     package = lib.mkOption {
       type = lib.types.package;
-      default = pkgs.callPackage ./package.nix { };
-      defaultText = lib.literalExpression "pkgs.callPackage ./package.nix { }";
-      description = "The pi-harness package to install.";
+      default = defaultPackage;
+      defaultText = lib.literalExpression "inputs.pi-harness.packages.${pkgs.system}.default";
+      description = "The pi-harness package containing the Pi binary and shared agent config.";
     };
 
-    installAlias = lib.mkOption {
+    user = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "beau";
+      description = "Home Manager user that should receive the shared Pi config.";
+    };
+
+    installConfig = lib.mkOption {
       type = lib.types.bool;
       default = true;
-      description = "Whether to add a `ph` shell alias in interactive bash shells.";
+      description = "Whether to install the shared Pi config into the selected user's home.";
     };
   };
 
-  config = lib.mkIf cfg.enable {
-    environment.systemPackages = [ cfg.package ];
-
-    programs.bash.interactiveShellInit = lib.mkIf cfg.installAlias ''
-      alias ph='pi-harness'
-    '';
-  };
+  config = lib.mkIf cfg.enable (
+    {
+      environment.systemPackages = [ cfg.package ];
+    }
+    // lib.optionalAttrs (cfg.installConfig && cfg.user != null && hasHomeManager) {
+      home-manager.users.${cfg.user}.home.file = {
+        ".pi/agent/settings.json".source = "${cfg.package}/share/pi-harness/agent/settings.json";
+        ".pi/agent/extensions".source = "${cfg.package}/share/pi-harness/agent/extensions";
+        ".pi/agent/skills".source = "${cfg.package}/share/pi-harness/agent/skills";
+        ".pi/agent/prompts".source = "${cfg.package}/share/pi-harness/agent/prompts";
+        ".pi/agent/themes".source = "${cfg.package}/share/pi-harness/agent/themes";
+      };
+    }
+  );
 }

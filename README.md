@@ -1,40 +1,82 @@
 # pi-harness
 
-Minimal local project for your pi-based coding-workstream harness.
+Thin shared configuration for the Pi coding agent.
 
-The goal is to provide:
+This repository is intentionally small. It does not implement a workstream
+manager, tmux switcher, TUI, runtime registry, or context attachment model.
+Pi already provides the interactive agent UI, session storage, branching,
+compaction, tools, extensions, skills, prompt templates, and themes. Session
+layout is handled outside Pi with regular tmux.
 
-- A place for Pi customization, extensions, prompts, and launch helpers
-- A primary Linux-only operator CLI (`pi-harness`, with `ph` alias) for agentic coding
-- A Go-based local control plane for workstream state, tmux orchestration, and attachment management
-- A thin Pi lifecycle extension only where the Pi hook system is the cleanest integration boundary
-- A Nix flake and NixOS module for integration into `nix-dotfiles`
-- A workstream-first session switcher that sits on top of tmux and Pi
-- A local workstream registry with optional project and directory attachments
+## What This Flake Provides
 
-No production behavior is implemented yet.
+- the upstream `pi` CLI from `llm-agents.nix`
+- a Nix package named `pi-harness`
+- a NixOS module named `nixosModules.pi-harness`
+- shared Pi config under `config/agent/`
+- empty extension, skill, prompt, and theme directories for future additions
 
-Current design notes live in `docs/pi-hub-data-model.md`.
-Agent VM workflow notes live in `docs/agent-vm-workflow.md`.
-The first concrete product spec lives in `docs/workstream-switcher-v1.md`.
-The locked implementation plan lives in `docs/workstream-switcher-implementation-plan.md`.
-Current workstream planning context lives in `planning/session-switcher-v1/`.
-The temporary local implementation loop is documented in
-`docs/implementation-loop.md` and driven by
-`scripts/session-switcher-local-loop.sh`.
+The starting configuration loads no extensions.
+
+## NixOS Usage
+
+In a consuming flake such as `nix-dotfiles`:
+
+```nix
+{
+  inputs.pi-harness.url = "github:BeaudanBrown/pi-harness";
+
+  outputs = { inputs, ... }: {
+    nixosConfigurations.my-host = nixpkgs.lib.nixosSystem {
+      modules = [
+        inputs.pi-harness.nixosModules.pi-harness
+        {
+          services.pi-harness = {
+            enable = true;
+            package = inputs.pi-harness.packages.${pkgs.system}.default;
+            user = "beau";
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+When Home Manager is available in the NixOS module graph, the module links the
+shared files into:
+
+```text
+~/.pi/agent/settings.json
+~/.pi/agent/extensions
+~/.pi/agent/skills
+~/.pi/agent/prompts
+~/.pi/agent/themes
+```
+
+## Local Workflow
+
+Use external tmux sessions directly:
+
+```bash
+tmux new -s pi-my-task
+cd /path/to/project
+pi
+/name "my-task"
+```
+
+Use Pi's built-in session commands for conversation state:
+
+- `pi -c` to continue the latest session
+- `pi -r` to browse previous sessions
+- `/new` to start a new session
+- `/resume` to switch sessions
+- `/tree` to navigate branches
+- `/fork` to fork from a point in the conversation
+- `/compact` to compact long context
 
 ## Verification
 
-Use the repo-managed Nix commands:
-
-- `nix run .#lint`
-- `nix run .#test`
-- `nix run .#verify`
-
-The Go-specific checks behind those commands are:
-
-- `gofmt -l`
-- `go vet ./...`
-- `staticcheck ./...`
-- `go test ./...`
-- `node --test ./.pi/extensions/pi-harness-runtime/runtime-status.test.mjs`
+```bash
+nix run .#verify
+```

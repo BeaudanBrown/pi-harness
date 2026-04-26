@@ -1,19 +1,31 @@
-{ buildGoModule, lib }:
+{ stdenvNoCC, lib, piPackage }:
 
-buildGoModule {
+stdenvNoCC.mkDerivation {
   pname = "pi-harness";
-  version = "0.0.0";
+  version = "0.1.0";
   src = ../.;
-  vendorHash = "sha256-g+yaVIx4jxpAQ/+WrGKxhVeliYx7nLQe/zsGpxV4Fn4=";
-  subPackages = [ "./cmd/pi-harness" ];
 
-  postInstall = ''
-    ln -s "$out/bin/pi-harness" "$out/bin/ph"
+  dontBuild = true;
+
+  installPhase = ''
+    runHook preInstall
+
+    mkdir -p "$out/share/pi-harness/agent"
+    cp -R config/agent/. "$out/share/pi-harness/agent/"
+
+    mkdir -p "$out/bin"
+    ln -s "${lib.getExe piPackage}" "$out/bin/pi"
+
+    runHook postInstall
   '';
 
+  passthru = {
+    pi = piPackage;
+  };
+
   meta = {
-    description = "Local workstream-first tmux and Pi harness";
-    mainProgram = "pi-harness";
-    platforms = lib.platforms.linux;
+    description = "Shared Pi coding-agent configuration for Beau's machines";
+    mainProgram = "pi";
+    platforms = lib.platforms.linux ++ lib.platforms.darwin;
   };
 }
