@@ -6,5 +6,4 @@
 
 # Local developer/runtime artifacts
 .direnv/
-.envrc
 .loom/

@@ -20,6 +20,12 @@ layout is handled outside Pi with regular tmux.
 The starting configuration loads the web search extension and no other
 extensions.
 
+The packaged `pi-harness` binary is intentionally just the upstream `pi` CLI.
+Installed/system usage loads this repository's shared resources through Pi's
+normal configuration files, which the NixOS module links into `~/.pi/agent`.
+This keeps package execution and Pi's own auto-discovery from loading the same
+extension twice.
+
 ## NixOS Usage
 
 In a consuming flake such as `nix-dotfiles`:
@@ -72,6 +78,18 @@ PI_WEB_SEARCH_API_KEY_COMMAND
 If no Pi-specific key is set, the extension falls back to `OPENAI_API_KEY`.
 
 ## Local Workflow
+
+For extension and prompt iteration in this repository, enter the development
+shell:
+
+```bash
+nix develop
+pi
+```
+
+Inside `nix develop`, `pi` is a wrapper around the upstream CLI that points at
+the working-tree `config/agent` resources. This lets edits to extensions,
+skills, prompts, and themes take effect without rebuilding the package.
 
 Use external tmux sessions directly:
 
