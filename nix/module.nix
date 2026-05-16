@@ -47,7 +47,7 @@ in
 
       wrapperName = lib.mkOption {
         type = lib.types.str;
-        default = "pi-agentgraph";
+        default = "pi";
         description = "Name of the Pi wrapper that sources services.pi-harness.agentgraph.environmentFile.";
       };
     };
@@ -55,7 +55,9 @@ in
 
   config = lib.mkIf cfg.enable {
     environment.systemPackages =
-      [ cfg.package ]
-      ++ lib.optionals (cfg.agentgraph.environmentFile != null) [ agentgraphWrapper ];
+      if cfg.agentgraph.environmentFile == null then
+        [ cfg.package ]
+      else
+        [ agentgraphWrapper ];
   };
 }

@@ -79,17 +79,17 @@ are maintained in the AgentGraph repo, not duplicated here.
 
 AgentGraph LLM execution happens inside `ag agent run-cycle`, so provider
 secrets must be available as runtime environment variables to the `ag` process.
-The NixOS module can install a wrapper that sources a SOPS-managed env file
-before launching Pi:
+The NixOS module can make `pi` source a SOPS-managed env file before launching
+Pi:
 
 ```nix
 services.pi-harness.agentgraph.environmentFile =
   config.sops.templates."agentgraph-litellm.env".path;
 ```
 
-When set, this installs `pi-agentgraph` by default. Launching `pi-agentgraph`
-lets the AgentGraph extension's `agentgraph_run_cycle` tool inherit variables
-such as `LITELLM_BASE_URL`, `LITELLM_API_KEY`, and
+When set, the installed `pi` command sources that env file and then launches the
+packaged Pi CLI. This lets the AgentGraph extension's `agentgraph_run_cycle`
+tool inherit variables such as `LITELLM_BASE_URL`, `LITELLM_API_KEY`, and
 `AG_LITELLM_DEFAULT_MODEL` without storing secrets in the Nix store.
 
 ## Web Search
