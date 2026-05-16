@@ -54,7 +54,13 @@ JSON
     ''}
 
     mkdir -p "$out/bin"
-    ln -s "${lib.getExe piPackage}" "$out/bin/pi"
+    cat > "$out/bin/pi" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:''${NODE_PATH:-}"
+exec "${lib.getExe piPackage}" "$@"
+EOF
+    chmod +x "$out/bin/pi"
     ${lib.optionalString (agentgraphPackage != null) ''
       ln -s "${agentgraphPackage}/bin/ag" "$out/bin/ag"
     ''}
