@@ -75,6 +75,8 @@ JSON
 #!/usr/bin/env bash
 set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:''${NODE_PATH:-}"
+${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="${agentgraphPackage}/bin/ag"''}
+${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="${agentgraphPostgresPackage}/bin/agentgraph-postgres"''}
 exec "${lib.getExe piPackage}" "$@"
 EOF
     chmod +x "$out/bin/pi"
