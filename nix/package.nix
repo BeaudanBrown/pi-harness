@@ -53,6 +53,10 @@ stdenvNoCC.mkDerivation {
 JSON
     ''}
 
+    mkdir -p "$out/share/pi-harness/agent/extensions/node_modules"
+    ln -s "${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox" \
+      "$out/share/pi-harness/agent/extensions/node_modules/typebox"
+
     mkdir -p "$out/bin"
     cat > "$out/bin/pi" <<'EOF'
 #!/usr/bin/env bash
