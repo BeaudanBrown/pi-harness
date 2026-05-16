@@ -44,7 +44,6 @@ In a consuming flake such as `nix-dotfiles`:
           services.pi-harness = {
             enable = true;
             package = inputs.pi-harness.packages.${pkgs.system}.default;
-            user = "beau";
           };
         }
       ];
@@ -53,8 +52,8 @@ In a consuming flake such as `nix-dotfiles`:
 }
 ```
 
-When Home Manager is available in the NixOS module graph, the module links the
-shared files into:
+The module installs the packaged `pi` binary. In this setup, Home Manager can
+link the packaged shared resources into Pi's normal config directory:
 
 ```text
 ~/.pi/agent/settings.json
@@ -77,6 +76,21 @@ local PostgreSQL server with per-project databases via `agentgraph-postgres`.
 
 The reusable extension, prompts, PostgreSQL helper, and AgentGraph operator skill
 are maintained in the AgentGraph repo, not duplicated here.
+
+AgentGraph LLM execution happens inside `ag agent run-cycle`, so provider
+secrets must be available as runtime environment variables to the `ag` process.
+The NixOS module can install a wrapper that sources a SOPS-managed env file
+before launching Pi:
+
+```nix
+services.pi-harness.agentgraph.environmentFile =
+  config.sops.templates."agentgraph-litellm.env".path;
+```
+
+When set, this installs `pi-agentgraph` by default. Launching `pi-agentgraph`
+lets the AgentGraph extension's `agentgraph_run_cycle` tool inherit variables
+such as `LITELLM_BASE_URL`, `LITELLM_API_KEY`, and
+`AG_LITELLM_DEFAULT_MODEL` without storing secrets in the Nix store.
 
 ## Web Search
 
