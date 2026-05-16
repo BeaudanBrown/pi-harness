@@ -15,6 +15,10 @@
       url = "github:numtide/llm-agents.nix";
       inputs.bun2nix.url = "https://codeload.github.com/nix-community/bun2nix/tar.gz/2499dedd70744dba1815875b854818a3019e9e4c";
     };
+    agentgraph = {
+      url = "git+ssh://git@github.com/BeaudanBrown/agentgraph.git";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
   };
 
   outputs =
@@ -22,6 +26,7 @@
       nixpkgs,
       flake-utils,
       nix-ai-tools,
+      agentgraph,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -30,8 +35,11 @@
         pkgs = nixpkgs.legacyPackages.${system};
         inherit (pkgs) lib;
         piPackage = nix-ai-tools.packages.${system}.pi;
+        agentgraphPackage = agentgraph.packages.${system}.ag-unchecked;
+        agentgraphPostgresPackage = agentgraph.packages.${system}.agentgraph-postgres;
+        agentgraphPiResources = agentgraph.packages.${system}.agentgraph-pi-resources;
         piHarnessPackage = pkgs.callPackage ./nix/package.nix {
-          inherit piPackage;
+          inherit piPackage agentgraphPackage agentgraphPostgresPackage agentgraphPiResources;
         };
         piDevWrapper = pkgs.writeShellApplication {
           name = "pi";
@@ -43,8 +51,11 @@
               *)
                 exec ${lib.getExe piPackage} \
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
+                  --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
                   --skill "$PWD/config/agent/skills" \
+                  --skill "${agentgraphPiResources}/share/agentgraph-pi/skills" \
                   --prompt-template "$PWD/config/agent/prompts" \
+                  --prompt-template "${agentgraphPiResources}/share/agentgraph-pi/prompts" \
                   --theme "$PWD/config/agent/themes" \
                   "$@"
                 ;;
@@ -66,6 +77,13 @@
             test -d config/agent/skills
             test -d config/agent/prompts
             test -d config/agent/themes
+            test -f ${piHarnessPackage}/share/pi-harness/agent/extensions/agentgraph/index.ts
+            test -f ${piHarnessPackage}/share/pi-harness/agent/skills/agentgraph-operator/SKILL.md
+            test -f ${piHarnessPackage}/share/pi-harness/agent/prompts/graph-change.md
+            test -e ${piHarnessPackage}/bin/ag
+            test -e ${piHarnessPackage}/bin/agentgraph-postgres
+            jq -e '.extensions | index("./extensions/agentgraph/index.ts")' \
+              ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
           '';
         };
       in
@@ -87,6 +105,8 @@
         devShells.default = pkgs.mkShell {
           packages = [
             piDevWrapper
+            agentgraphPackage
+            agentgraphPostgresPackage
             pkgs.jq
             pkgs.tmux
           ];

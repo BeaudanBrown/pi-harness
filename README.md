@@ -15,10 +15,12 @@ layout is handled outside Pi with regular tmux.
 - a NixOS module named `nixosModules.pi-harness`
 - shared Pi config under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
+- the AgentGraph pi resources imported from the AgentGraph flake input
 - empty skill, prompt, and theme directories for future additions
 
-The starting configuration loads the web search extension and no other
-extensions.
+The packaged configuration loads web search plus the AgentGraph mode extension.
+The working-tree development wrapper loads the AgentGraph resources directly
+from the flake input so the extension source stays in the AgentGraph repo.
 
 The packaged `pi-harness` binary is intentionally just the upstream `pi` CLI.
 Installed/system usage loads this repository's shared resources through Pi's
@@ -61,6 +63,20 @@ shared files into:
 ~/.pi/agent/prompts
 ~/.pi/agent/themes
 ```
+
+## AgentGraph Mode
+
+The AgentGraph extension is sourced from the `agentgraph` flake input and wired
+into the packaged Pi config. It exposes `/ag on`, `/ag off`, `/ag status`,
+`/ag init`, and `/ag db`.
+
+`/ag on` switches the current Pi session into graph mode: direct `edit`,
+`write`, and unrestricted `bash` tools are disabled, while read-only inspection
+and `agentgraph_*` tools remain available. The extension also starts a shared
+local PostgreSQL server with per-project databases via `agentgraph-postgres`.
+
+The reusable extension, prompts, PostgreSQL helper, and AgentGraph operator skill
+are maintained in the AgentGraph repo, not duplicated here.
 
 ## Web Search
 

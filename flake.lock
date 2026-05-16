@@ -1,5 +1,25 @@
 {
   "nodes": {
+    "agentgraph": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1778902749,
+        "narHash": "sha256-V6Q7xQvik1m5mlLgi0VqopogTfeZrKsvbZlH22Y9O+A=",
+        "ref": "refs/heads/master",
+        "rev": "58922d121a352d1dbc9981625d26c832691daea0",
+        "revCount": 46,
+        "type": "git",
+        "url": "ssh://git@github.com/BeaudanBrown/agentgraph.git"
+      },
+      "original": {
+        "type": "git",
+        "url": "ssh://git@github.com/BeaudanBrown/agentgraph.git"
+      }
+    },
     "blueprint": {
       "inputs": {
         "nixpkgs": [
@@ -151,6 +171,7 @@
     },
     "root": {
       "inputs": {
+        "agentgraph": "agentgraph",
         "flake-utils": "flake-utils",
         "nix-ai-tools": "nix-ai-tools",
         "nixpkgs": "nixpkgs_2"
