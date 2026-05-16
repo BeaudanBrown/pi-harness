@@ -54,14 +54,27 @@ JSON
     ''}
 
     mkdir -p "$out/share/pi-harness/agent/extensions/node_modules"
-    cp -R "${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox" \
-      "$out/share/pi-harness/agent/extensions/node_modules/typebox"
+    typebox_dir=""
+    for candidate in \
+      "${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox" \
+      "${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/typebox"
+    do
+      if [ -d "$candidate" ]; then
+        typebox_dir="$candidate"
+        break
+      fi
+    done
+    if [ -z "$typebox_dir" ]; then
+      echo "Could not find Pi-bundled typebox in ${piPackage}" >&2
+      exit 1
+    fi
+    cp -R "$typebox_dir" "$out/share/pi-harness/agent/extensions/node_modules/typebox"
 
     mkdir -p "$out/bin"
     cat > "$out/bin/pi" <<'EOF'
 #!/usr/bin/env bash
 set -euo pipefail
-export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:''${NODE_PATH:-}"
+export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:''${NODE_PATH:-}"
 exec "${lib.getExe piPackage}" "$@"
 EOF
     chmod +x "$out/bin/pi"
