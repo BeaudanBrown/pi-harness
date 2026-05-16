@@ -7,11 +7,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1778919658,
-        "narHash": "sha256-a8IAmvuxnWJnMHXqYrv3dUEgmaVF0vgT1+eVvDXrCt0=",
+        "lastModified": 1778950322,
+        "narHash": "sha256-MfWjctJIynw+uZIH3Rxxf8Qm39XnuDVS4+xLyfgaKEw=",
         "ref": "refs/heads/master",
-        "rev": "fa23582f3aa78b5fc08ef8594a4a3d8575231c75",
-        "revCount": 48,
+        "rev": "136008282209b3aa367fc2b27cc92a886aebc404",
+        "revCount": 58,
         "type": "git",
         "url": "ssh://git@github.com/BeaudanBrown/agentgraph.git"
       },
