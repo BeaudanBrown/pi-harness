@@ -10,6 +10,7 @@ let
   piWithAgentGraphEnv = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
     set -a
+    # shellcheck disable=SC1090,SC1091
     . ${lib.escapeShellArg cfg.agentgraph.environmentFile}
     set +a
     export PATH=${lib.makeBinPath [ cfg.package ]}:"$PATH"
