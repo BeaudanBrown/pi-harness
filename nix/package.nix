@@ -24,9 +24,11 @@ stdenvNoCC.mkDerivation {
       mkdir -p "$out/share/pi-harness/agent/extensions"
       mkdir -p "$out/share/pi-harness/agent/skills"
       mkdir -p "$out/share/pi-harness/agent/prompts"
+      mkdir -p "$out/share/pi-harness/agent/sql"
       cp -R ${agentgraphPiResources}/share/agentgraph-pi/extensions/. "$out/share/pi-harness/agent/extensions/"
       cp -R ${agentgraphPiResources}/share/agentgraph-pi/skills/. "$out/share/pi-harness/agent/skills/"
       cp -R ${agentgraphPiResources}/share/agentgraph-pi/prompts/. "$out/share/pi-harness/agent/prompts/"
+      cp -R ${agentgraphPiResources}/share/agentgraph-pi/sql/. "$out/share/pi-harness/agent/sql/"
       cat > "$out/share/pi-harness/agent/settings.json" <<'JSON'
 {
   "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/core/settings-schema.json",
@@ -71,13 +73,14 @@ JSON
     cp -R "$typebox_dir" "$out/share/pi-harness/agent/extensions/node_modules/typebox"
 
     mkdir -p "$out/bin"
-    cat > "$out/bin/pi" <<'EOF'
+    cat > "$out/bin/pi" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
-export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:''${NODE_PATH:-}"
+export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
+export AG_DEV_ROOT="$out/share/pi-harness/agent"
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="${agentgraphPackage}/bin/ag"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="${agentgraphPostgresPackage}/bin/agentgraph-postgres"''}
-exec "${lib.getExe piPackage}" "$@"
+exec "${lib.getExe piPackage}" "\$@"
 EOF
     chmod +x "$out/bin/pi"
     ${lib.optionalString (agentgraphPackage != null) ''
