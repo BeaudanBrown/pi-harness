@@ -169,12 +169,30 @@
         "type": "github"
       }
     },
+    "pi-lsp-extension-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778770914,
+        "narHash": "sha256-kkMfO+GJdLOwX6o8tCSMaFaWmk3zl10EdarO+M4TTN4=",
+        "owner": "samfoy",
+        "repo": "pi-lsp-extension",
+        "rev": "73251632ad116c973844cc28fb1210417295c6fe",
+        "type": "github"
+      },
+      "original": {
+        "owner": "samfoy",
+        "repo": "pi-lsp-extension",
+        "rev": "73251632ad116c973844cc28fb1210417295c6fe",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "agentgraph": "agentgraph",
         "flake-utils": "flake-utils",
         "nix-ai-tools": "nix-ai-tools",
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": "nixpkgs_2",
+        "pi-lsp-extension-src": "pi-lsp-extension-src"
       }
     },
     "systems": {

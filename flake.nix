@@ -19,6 +19,10 @@
       url = "git+ssh://git@github.com/BeaudanBrown/agentgraph.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    pi-lsp-extension-src = {
+      url = "github:samfoy/pi-lsp-extension/73251632ad116c973844cc28fb1210417295c6fe";
+      flake = false;
+    };
   };
 
   outputs =
@@ -27,6 +31,7 @@
       flake-utils,
       nix-ai-tools,
       agentgraph,
+      pi-lsp-extension-src,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -38,9 +43,33 @@
         agentgraphPackage = agentgraph.packages.${system}.ag-unchecked;
         agentgraphPostgresPackage = agentgraph.packages.${system}.agentgraph-postgres;
         agentgraphPiResources = agentgraph.packages.${system}.agentgraph-pi-resources;
-        piHarnessPackage = pkgs.callPackage ./nix/package.nix {
-          inherit piPackage agentgraphPackage agentgraphPostgresPackage agentgraphPiResources;
+        piLspExtension = pkgs.callPackage ./nix/pi-lsp-extension.nix {
+          piLspExtensionSrc = pi-lsp-extension-src;
         };
+        piHarnessPackage = pkgs.callPackage ./nix/package.nix {
+          inherit piPackage agentgraphPackage agentgraphPostgresPackage agentgraphPiResources piLspExtension;
+        };
+        lspPackages = with pkgs; [
+          nodejs
+          nil
+          nixd
+          typescript-language-server
+          typescript
+          pyright
+          ruff
+          rust-analyzer
+          gopls
+          clang-tools
+          lua-language-server
+          marksman
+          taplo
+          yaml-language-server
+          vscode-langservers-extracted
+          bash-language-server
+          dockerfile-language-server
+          terraform-ls
+          tailwindcss-language-server
+        ];
         piDevWrapper = pkgs.writeShellApplication {
           name = "pi";
           text = ''
@@ -52,6 +81,7 @@
                 exec ${lib.getExe piPackage} \
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
                   --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
+                  --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
                   --skill "$PWD/config/agent/skills" \
                   --skill "${agentgraphPiResources}/share/agentgraph-pi/skills" \
                   --prompt-template "$PWD/config/agent/prompts" \
@@ -82,6 +112,7 @@
             test -f ${piHarnessPackage}/share/pi-harness/agent/prompts/graph-change.md
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
+            test -f ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/index.ts
             jq -e '.extensions | index("./extensions/agentgraph/index.ts")' \
               ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
           '';
@@ -89,6 +120,7 @@
       in
       {
         packages.pi-harness = piHarnessPackage;
+        packages.pi-lsp-extension = piLspExtension;
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
 
@@ -109,7 +141,7 @@
             agentgraphPostgresPackage
             pkgs.jq
             pkgs.tmux
-          ];
+          ] ++ lspPackages;
         };
       }
     )

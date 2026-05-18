@@ -5,6 +5,7 @@
   agentgraphPackage ? null,
   agentgraphPostgresPackage ? null,
   agentgraphPiResources ? null,
+  piLspExtension ? null,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -98,6 +99,7 @@ EOF
     agentgraph = agentgraphPackage;
     agentgraphPostgres = agentgraphPostgresPackage;
     agentgraphPiResources = agentgraphPiResources;
+    piLspExtension = piLspExtension;
   };
 
   meta = {

@@ -7,14 +7,51 @@
 let
   cfg = config.services.pi-harness;
 
+  defaultLspPackages = with pkgs; [
+    nodejs
+    nil
+    nixd
+    typescript-language-server
+    typescript
+    pyright
+    ruff
+    rust-analyzer
+    gopls
+    clang-tools
+    lua-language-server
+    marksman
+    taplo
+    yaml-language-server
+    vscode-langservers-extracted
+    bash-language-server
+    dockerfile-language-server
+    terraform-ls
+    tailwindcss-language-server
+  ];
+
+  runtimePackages = [ cfg.package ] ++ lib.optionals cfg.lsp.enable cfg.lsp.packages;
+  lspExtensionArray =
+    if cfg.lsp.enable then
+      ''extension_args=(--extension "${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts")''
+    else
+      ''extension_args=()'';
+
   piWithAgentGraphEnv = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
     set -a
     # shellcheck disable=SC1090,SC1091
     . ${lib.escapeShellArg cfg.agentgraph.environmentFile}
     set +a
-    export PATH=${lib.makeBinPath [ cfg.package ]}:"$PATH"
-    exec ${cfg.package}/bin/pi "$@"
+    export PATH=${lib.makeBinPath runtimePackages}:"$PATH"
+    ${lspExtensionArray}
+    exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
+  '';
+
+  piWithRuntimePath = pkgs.writeShellScriptBin "pi" ''
+    set -euo pipefail
+    export PATH=${lib.makeBinPath runtimePackages}:"$PATH"
+    ${lspExtensionArray}
+    exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
   '';
 in
 {
@@ -40,11 +77,40 @@ in
         LITELLM_BASE_URL, LITELLM_API_KEY, and AG_LITELLM_DEFAULT_MODEL.
       '';
     };
+
+    lsp.enable = lib.mkEnableOption "Language Server Protocol tools for Pi";
+
+    lsp.packages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = defaultLspPackages;
+      defaultText = lib.literalExpression "a broad set of common language servers";
+      description = ''
+        Language server packages exposed on PATH for Pi extensions such as
+        pi-lsp-extension. Override or extend this list per host for heavier
+        language stacks.
+      '';
+    };
+
+    lsp.extension = lib.mkOption {
+      type = lib.types.package;
+      default = cfg.package.piLspExtension;
+      defaultText = lib.literalExpression "services.pi-harness.package.piLspExtension";
+      description = "Nix-packaged pi-lsp-extension loaded with --extension.";
+    };
   };
 
   config = lib.mkIf cfg.enable {
+    assertions = [
+      {
+        assertion = !cfg.lsp.enable || cfg.lsp.extension != null;
+        message = "services.pi-harness.lsp.enable requires a pi-lsp-extension package.";
+      }
+    ];
+
     environment.systemPackages =
-      if cfg.agentgraph.environmentFile == null then
+      if cfg.agentgraph.environmentFile == null && cfg.lsp.enable then
+        [ piWithRuntimePath ]
+      else if cfg.agentgraph.environmentFile == null then
         [ cfg.package ]
       else
         [ piWithAgentGraphEnv ];
