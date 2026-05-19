@@ -82,7 +82,7 @@ interface IterationSummary {
 	result: string;
 }
 
-interface TicketMeta {
+export interface TicketMeta {
 	id: string;
 	title?: string;
 	summary?: string;
@@ -292,23 +292,86 @@ function depsResolved(ticket: TicketMeta, byId: Map<string, TicketMeta>): boolea
 	return true;
 }
 
-function openChildTickets(root: TicketMeta, tickets: TicketMeta[]): TicketMeta[] {
-	if (root.type !== "epic") return [];
-	return tickets
-		.filter((ticket) => ticket.parent === root.id)
-		.filter((ticket) => ticket.type !== "epic")
-		.filter((ticket) => ticket.status !== "closed");
+export function hasChildTickets(root: TicketMeta, tickets: TicketMeta[]): boolean {
+	return tickets.some((ticket) => ticket.parent === root.id);
 }
 
-function pickReadyTicket(root: TicketMeta, tickets: TicketMeta[]): TicketMeta | undefined {
-	const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
-	if (root.type !== "epic") {
-		return root.status === "closed" || !depsResolved(root, byId) ? undefined : root;
+export function isLoopContainer(root: TicketMeta, tickets: TicketMeta[]): boolean {
+	return root.type === "epic" || hasChildTickets(root, tickets);
+}
+
+export function descendantTickets(root: TicketMeta, tickets: TicketMeta[]): TicketMeta[] {
+	const childrenByParent = new Map<string, TicketMeta[]>();
+	for (const ticket of tickets) {
+		if (!ticket.parent) continue;
+		const children = childrenByParent.get(ticket.parent) ?? [];
+		children.push(ticket);
+		childrenByParent.set(ticket.parent, children);
 	}
 
-	return openChildTickets(root, tickets)
-		.filter((ticket) => depsResolved(ticket, byId))
-		.sort((a, b) => normalizePriority(a) - normalizePriority(b) || (a.created ?? "").localeCompare(b.created ?? ""))[0];
+	const descendants: TicketMeta[] = [];
+	const queue = [...(childrenByParent.get(root.id) ?? [])];
+	const seen = new Set<string>();
+	while (queue.length > 0) {
+		const ticket = queue.shift()!;
+		if (seen.has(ticket.id)) continue;
+		seen.add(ticket.id);
+		descendants.push(ticket);
+		queue.push(...(childrenByParent.get(ticket.id) ?? []));
+	}
+	return descendants;
+}
+
+function sortReadyTickets(tickets: TicketMeta[]): TicketMeta[] {
+	return [...tickets].sort((a, b) => normalizePriority(a) - normalizePriority(b) || (a.created ?? "").localeCompare(b.created ?? ""));
+}
+
+export function actionableTickets(root: TicketMeta, tickets: TicketMeta[]): TicketMeta[] {
+	if (!isLoopContainer(root, tickets)) return root.status === "closed" ? [] : [root];
+	return descendantTickets(root, tickets)
+		.filter((ticket) => ticket.status !== "closed")
+		.filter((ticket) => !isLoopContainer(ticket, tickets));
+}
+
+function openDescendantTickets(root: TicketMeta, tickets: TicketMeta[]): TicketMeta[] {
+	return descendantTickets(root, tickets).filter((ticket) => ticket.status !== "closed");
+}
+
+export function pickReadyTicket(root: TicketMeta, tickets: TicketMeta[]): TicketMeta | undefined {
+	const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+	return sortReadyTickets(actionableTickets(root, tickets).filter((ticket) => depsResolved(ticket, byId)))[0];
+}
+
+function formatTicketRef(ticket: TicketMeta): string {
+	const title = ticket.title ?? ticket.summary ?? ticket.name;
+	return title ? `${ticket.id} ${title}` : ticket.id;
+}
+
+export function formatLoopStatus(root: TicketMeta, tickets: TicketMeta[]): string {
+	const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+	const container = isLoopContainer(root, tickets);
+	const descendants = descendantTickets(root, tickets);
+	const actionable = actionableTickets(root, tickets);
+	const ready = sortReadyTickets(actionable.filter((ticket) => depsResolved(ticket, byId)));
+	const blocked = sortReadyTickets(actionable.filter((ticket) => !depsResolved(ticket, byId)));
+	const reason = root.type === "epic"
+		? "type: epic"
+		: container
+			? `${descendants.filter((ticket) => ticket.status !== "closed").length} open descendants`
+			: "no children";
+	const blockedLines = blocked.map((ticket) => {
+		const deps = (ticket.deps ?? []).filter((dep) => byId.get(dep)?.status !== "closed");
+		return `- ${formatTicketRef(ticket)}${deps.length > 0 ? ` <- ${deps.join(", ")}` : ""}`;
+	});
+
+	return [
+		`Root: ${formatTicketRef(root)}`,
+		`Mode: ${container ? "container" : "leaf"}, because ${reason}`,
+		"Ready next:",
+		...(ready.length > 0 ? ready.map((ticket) => `- ${formatTicketRef(ticket)}`) : ["(none)"]),
+		"Blocked:",
+		...(blockedLines.length > 0 ? blockedLines : ["(none)"]),
+	].join("\n");
 }
 
 function extractTextContent(message: any): string {
@@ -643,7 +706,7 @@ Your job in this single iteration:
 7. ${verifyLine}
 8. Update tk with concise notes: tk add-note ${selectedTicket.id} "..."
 9. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
-10. If this closes the final open child under epic ${rootTicket.id}, verify the epic acceptance criteria, add a concise closeout note to the epic, and close the epic.
+10. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
 11. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
 
 Hard requirements:
@@ -655,7 +718,7 @@ Hard requirements:
 
 Finish your final response with these exact footer lines:
 ALOOP_RESULT: continue|stop|blocked
-EPIC: ${rootTicket.id}
+LOOP_ROOT: ${rootTicket.id}
 TICKET: ${selectedTicket.id}
 COMMIT: <new commit hash, or none>
 VERIFY: <commands run and pass/fail result>
@@ -773,30 +836,50 @@ async function finalizeRootEpicIfComplete(cwd: string, root: TicketMeta, selecte
 
 	const tickets = await allTickets(cwd);
 	const updatedRoot = tickets.find((ticket) => ticket.id === root.id) ?? root;
-	if (updatedRoot.status === "closed" || openChildTickets(updatedRoot, tickets).length > 0) return undefined;
+	if (updatedRoot.status === "closed" || openDescendantTickets(updatedRoot, tickets).length > 0) return undefined;
 
-	await tk(cwd, ["add-note", updatedRoot.id, `All child tickets are closed; closing epic after ${selected.id}.`]);
+	await tk(cwd, ["add-note", updatedRoot.id, `All descendant tickets are closed; closing epic after ${selected.id}.`]);
 	await tk(cwd, ["close", updatedRoot.id]);
 	await git(cwd, ["add", ".tickets"]);
 	await git(cwd, ["commit", "-m", `Close completed epic ${updatedRoot.id}`]);
 	return await git(cwd, ["rev-parse", "HEAD"]);
 }
 
-async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<void> {
+function buildLoopSummaryPrompt(root: TicketMeta, options: LoopOptions, summaries: IterationSummary[]): string {
+	return `The supervised /aloop command has finished for root ticket ${root.id}.
+
+Requested iterations: ${options.iterations}
+Completed iterations: ${summaries.length}
+
+Iteration results:
+${formatSummaries(summaries)}
+
+Please summarize for the user what the loop accomplished, which tickets changed, verification results, notable blockers or risks, and the recommended next step. Keep it concise and grounded in the iteration results.`;
+}
+
+async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: ExtensionAPI): Promise<void> {
 	const options = parseLoopArgs(rawArgs);
 	await tk(ctx.cwd, ["help"]);
 	const repoRoot = await git(ctx.cwd, ["rev-parse", "--show-toplevel"]);
 	if (!options.allowDirty) await requireCleanWorktree(repoRoot);
 
+	let root = await ticketById(repoRoot, options.ticketId);
+	const initialTickets = await allTickets(repoRoot);
+	const structuralContainer = root.type !== "epic" && hasChildTickets(root, initialTickets);
 	const summaries: IterationSummary[] = [];
 	const progress = createLoopProgress(MAX_PROGRESS_LINES, ctx.model?.contextWindow);
 	setLoopStatus(ctx, progress, `aloop 0/${options.iterations}`);
 	pushLoopProgress(ctx, progress, `> starting ${options.iterations} iteration(s) for ${options.ticketId}`);
+	if (structuralContainer) {
+		const message = `${root.id} is type: ${root.type ?? "unknown"} but has children; treating it as a loop container.`;
+		ctx.ui.notify(message, "warning");
+		pushLoopProgress(ctx, progress, `> warning: ${message}`);
+	}
 
 	try {
 		for (let i = 1; i <= options.iterations; i++) {
 			const tickets = await allTickets(repoRoot);
-			const root = await ticketById(repoRoot, options.ticketId);
+			root = await ticketById(repoRoot, options.ticketId);
 			const selected = pickReadyTicket(root, tickets);
 			if (!selected) {
 				ctx.ui.notify(`No ready ticket found for ${root.id}. Use tk blocked or tk dep tree ${root.id} for details.`, "info");
@@ -869,6 +952,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 	}
 
 	ctx.ui.notify(`Agent loop finished.\n${formatSummaries(summaries)}`, "info");
+	pi?.sendUserMessage(buildLoopSummaryPrompt(root, options, summaries));
 }
 
 function buildPlanPrompt(rawArgs: string): string {
@@ -891,11 +975,12 @@ Planning workflow:
 4. Ask high-leverage clarification questions before creating tickets unless the user explicitly provided enough detail or invoked create mode.
 5. Capture shared language, decisions, non-goals, risks, verification strategy, and chunk boundaries.
 6. Create one tk epic for the whole unit of work and child tk tickets for implementation chunks. Use --parent for children, --design for decisions/approach, --acceptance for done criteria, and tk dep for ordering dependencies.
-7. Commit the ticket plan after creating or materially updating tickets: stage only .tickets changes and commit them with a message like "plan <feature> tickets". Do not include unrelated dirty work in that commit.
-8. After committing the ticket plan, check git status --short. If there are any remaining dirty changes, stop and ask the user what to do with them before suggesting /aloop, because /aloop expects a clean worktree unless --allow-dirty is explicitly used.
-9. Treat the epic as a container: once the final child is closed, verify the epic acceptance criteria, add a closeout note, and close the epic.
-10. Make chunks large enough for meaningful commits but small enough for one fresh /aloop worker iteration.
-11. End by listing the epic id, child ticket ids, dependency notes, the ticket-plan commit hash, whether the worktree is clean, and the exact command the user can run next: /aloop <n> <epic-id>.
+7. For nested plans, use type: epic for any container users should pass to /aloop; use feature, task, bug, or chore for leaf implementation tickets. If a ticket gains children later, either convert it to epic or expect /aloop to treat it as a structural container.
+8. Commit the ticket plan after creating or materially updating tickets: stage only .tickets changes and commit them with a message like "plan <feature> tickets". Do not include unrelated dirty work in that commit.
+9. After committing the ticket plan, check git status --short. If there are any remaining dirty changes, stop and ask the user what to do with them before suggesting /aloop, because /aloop expects a clean worktree unless --allow-dirty is explicitly used.
+10. Treat the epic as a container: once the final descendant is closed, verify the epic acceptance criteria, add a closeout note, and close the epic.
+11. Make chunks large enough for meaningful commits but small enough for one fresh /aloop worker iteration.
+12. End by listing the epic id, child ticket ids, dependency notes, the ticket-plan commit hash, whether the worktree is clean, and the exact command the user can run next: /aloop <n> <epic-id>.
 
 ${createNow ? "The user requested create mode. If enough information is present, create the tk epic and child tickets now; otherwise ask only the blocking questions." : "Do not create tickets yet if important product/domain decisions are unclear. Ask concise clarification questions first, then create tickets after the user answers."}`;
 }
@@ -910,12 +995,11 @@ async function showStatus(rawArgs: string, ctx: ExtensionCommandContext): Promis
 	const args = splitArgs(rawArgs);
 	const id = args[1] ?? args[0];
 	if (!id) throw new Error("Usage: /aloop status <ticket-or-epic-id>");
-	const show = await tk(ctx.cwd, ["show", id]);
-	let ready = "";
-	let blocked = "";
-	try { ready = await tk(ctx.cwd, ["ready"]); } catch {}
-	try { blocked = await tk(ctx.cwd, ["blocked"]); } catch {}
-	ctx.ui.notify(`tk status for ${id}\n\n${truncate(show, 2500)}\n\nReady:\n${ready || "(none)"}\n\nBlocked:\n${blocked || "(none)"}`, "info");
+	const repoRoot = await git(ctx.cwd, ["rev-parse", "--show-toplevel"]);
+	const root = await ticketById(repoRoot, id);
+	const tickets = await allTickets(repoRoot);
+	const show = await tk(ctx.cwd, ["show", root.id]);
+	ctx.ui.notify(`tk status for ${root.id}\n\n${formatLoopStatus(root, tickets)}\n\n${truncate(show, 2500)}`, "info");
 }
 
 export default function registerAgentLoop(pi: ExtensionAPI): void {
@@ -927,7 +1011,7 @@ export default function registerAgentLoop(pi: ExtensionAPI): void {
 			try {
 				const first = splitArgs(args)[0];
 				if (first === "status") return await showStatus(args, ctx);
-				return await runLoop(args, ctx);
+				return await runLoop(args, ctx, pi);
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}

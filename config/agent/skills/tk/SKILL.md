@@ -27,7 +27,7 @@ tk link <id1> <id2>      # related tickets
 
 ## Planning Workflow
 
-For larger work, create one epic ticket and child tickets:
+For larger work, create one epic ticket and child tickets. Use `type: epic` for anything users should normally pass to `/aloop`; keep `feature`, `task`, `bug`, and `chore` for leaf implementation tickets unless a ticket intentionally becomes a subtree root.
 
 ```bash
 epic=$(tk create "Feature name" -t epic -d "Objective" --design "Decisions and context" --acceptance "Success criteria" --tags agent-loop)
@@ -52,7 +52,7 @@ During work:
 After work:
 1. Run relevant verification.
 2. Close the ticket only when acceptance criteria are satisfied: `tk close <id>`.
-3. If this closes the final child under an epic, verify the epic acceptance criteria, add a closeout note, and close the epic.
+3. If this closes the final descendant under an epic, verify the epic acceptance criteria, add a closeout note, and close the epic.
 4. Commit code changes and `.tickets/` updates together.
 5. Never push unless the user explicitly asks in the current session.
 
@@ -60,5 +60,5 @@ After work:
 
 - `/aplan <rough idea>` starts a clarification/specification flow and should create a tk epic plus child tickets after decisions are clear.
 - `/aplan create <rough idea>` may create tickets immediately if enough detail is available.
-- `/aloop <iterations> <ticket-or-epic-id>` runs fresh-agent implementation iterations over ready tk tickets.
-- `/aloop status <ticket-or-epic-id>` summarizes tk state.
+- `/aloop <iterations> <ticket-or-epic-id>` runs fresh-agent implementation iterations over ready tk tickets in the selected subtree. Epics are preferred for multi-ticket work; any ticket with children is treated as a container.
+- `/aloop status <ticket-or-epic-id>` summarizes subtree mode, ready tickets, and blocked tickets.

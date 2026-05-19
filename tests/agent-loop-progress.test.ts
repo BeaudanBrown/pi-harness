@@ -1,14 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
+	actionableTickets,
 	childActivityFromJsonEvent,
 	createLoopProgress,
+	descendantTickets,
 	formatChildActivity,
+	formatLoopStatus,
+	isLoopContainer,
 	parseChildProgressLine,
 	parseDiffNumstat,
+	pickReadyTicket,
 	pushLoopProgress,
 	shortTicketSummary,
 	titleFromTkShow,
+	type TicketMeta,
 } from "../config/agent/extensions/agent-loop/index.js";
 
 test("progress widget keeps a rolling ten-line window", () => {
@@ -128,4 +134,52 @@ test("unknown, duplicate lifecycle, and empty child output are ignored", () => {
 	assert.equal(childActivityFromJsonEvent({ type: "tool_call_result", toolName: "bash", input: { command: "tk show abc123" } }), undefined);
 	assert.equal(childActivityFromJsonEvent({ type: "tool_call_delta", toolName: "bash", input: { command: "tk show abc123" } }), undefined);
 	assert.equal(childActivityFromJsonEvent({ type: "tool_call", toolName: "bash", input: {} }), undefined);
+});
+
+test("loop selection treats tickets with children as containers", () => {
+	const tickets: TicketMeta[] = [
+		{ id: "root", type: "feature", status: "open" },
+		{ id: "blocked", parent: "root", type: "task", status: "open", deps: ["ready"] },
+		{ id: "ready", parent: "root", type: "task", status: "open", priority: 2, created: "2026-01-02" },
+	];
+
+	assert.equal(isLoopContainer(tickets[0]!, tickets), true);
+	assert.deepEqual(actionableTickets(tickets[0]!, tickets).map((ticket) => ticket.id), ["blocked", "ready"]);
+	assert.equal(pickReadyTicket(tickets[0]!, tickets)?.id, "ready");
+});
+
+test("loop selection walks nested descendants and skips container tickets", () => {
+	const tickets: TicketMeta[] = [
+		{ id: "epic", type: "epic", status: "open" },
+		{ id: "sub", parent: "epic", type: "feature", status: "open" },
+		{ id: "later", parent: "sub", type: "task", status: "open", priority: 3, created: "2026-01-03" },
+		{ id: "first", parent: "sub", type: "task", status: "open", priority: 1, created: "2026-01-04" },
+	];
+
+	assert.deepEqual(descendantTickets(tickets[0]!, tickets).map((ticket) => ticket.id), ["sub", "later", "first"]);
+	assert.deepEqual(actionableTickets(tickets[0]!, tickets).map((ticket) => ticket.id), ["later", "first"]);
+	assert.equal(pickReadyTicket(tickets[0]!, tickets)?.id, "first");
+});
+
+test("leaf tickets remain directly actionable when dependencies are resolved", () => {
+	const tickets: TicketMeta[] = [
+		{ id: "leaf", type: "feature", status: "open", deps: ["dep"] },
+		{ id: "dep", type: "task", status: "closed" },
+	];
+
+	assert.equal(isLoopContainer(tickets[0]!, tickets), false);
+	assert.equal(pickReadyTicket(tickets[0]!, tickets)?.id, "leaf");
+});
+
+test("loop status summarizes subtree readiness", () => {
+	const tickets: TicketMeta[] = [
+		{ id: "root", type: "feature", status: "open", title: "Container" },
+		{ id: "ready", parent: "root", type: "task", status: "open", title: "Ready task" },
+		{ id: "blocked", parent: "root", type: "task", status: "open", deps: ["ready"], title: "Blocked task" },
+	];
+
+	const status = formatLoopStatus(tickets[0]!, tickets);
+	assert.match(status, /Mode: container/);
+	assert.match(status, /- ready Ready task/);
+	assert.match(status, /- blocked Blocked task <- ready/);
 });

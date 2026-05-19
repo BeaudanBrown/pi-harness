@@ -119,17 +119,20 @@ The included `agent-loop` extension registers `/aplan` and `/aloop`:
 ```text
 /aplan "Add pitch support to the course manager"
 /aplan create "Small well-understood cleanup"
-/aloop 5 <epic-ticket-id> --verify "nix run .#verify"
-/aloop status <epic-ticket-id>
+/aloop 5 <epic-or-subtree-root-id> --verify "nix run .#verify"
+/aloop status <epic-or-subtree-root-id>
 ```
 
 `/aplan` starts a clarification and specification workflow inspired by
 `/grill-with-docs`: it inspects docs and code, sharpens fuzzy language, asks
 high-value questions, and then creates a `tk` epic plus child tickets when the
 plan is ready. `/aloop` supervises fresh child Pi processes one at a time. Each
-iteration selects a ready `tk` child ticket, implements only that ticket, updates
-`tk`, verifies, commits code plus `.tickets/` changes, closes the root epic once
-all children are complete, and leaves the worktree clean before continuing.
+iteration selects a ready `tk` ticket from the requested subtree, implements only
+that ticket, updates `tk`, verifies, commits code plus `.tickets/` changes,
+closes a root epic once all descendants are complete, and leaves the worktree
+clean before continuing. Epics are preferred for planned multi-ticket work, but
+`/aloop` treats any ticket with children as a subtree container and warns when a
+non-epic ticket is used that way.
 
 Useful `/aloop` options are `--timeout 45m`, `--model provider/model`,
 `--verify <cmd>`, and `--allow-dirty`. The extension refuses a dirty worktree by
