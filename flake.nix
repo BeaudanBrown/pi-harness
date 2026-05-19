@@ -99,6 +99,7 @@
           runtimeInputs = [
             pkgs.coreutils
             pkgs.jq
+            pkgs.typescript
           ];
           text = ''
             set -euo pipefail
@@ -122,6 +123,16 @@
               ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
               ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
+
+            types_root=.pi-types/node_modules
+            mkdir -p "$types_root/@earendil-works" "$types_root/@types"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$types_root/@earendil-works/pi-coding-agent"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core "$types_root/@earendil-works/pi-agent-core"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$types_root/@earendil-works/pi-ai"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui "$types_root/@earendil-works/pi-tui"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
+            tsc --noEmit --project tsconfig.json
           '';
         };
       in
@@ -151,6 +162,17 @@
             pkgs.jq
             pkgs.tmux
           ] ++ lspPackages;
+
+          shellHook = ''
+            types_root=.pi-types/node_modules
+            mkdir -p "$types_root/@earendil-works" "$types_root/@types"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$types_root/@earendil-works/pi-coding-agent"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core "$types_root/@earendil-works/pi-agent-core"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$types_root/@earendil-works/pi-ai"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui "$types_root/@earendil-works/pi-tui"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
+            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
+          '';
         };
       }
     )

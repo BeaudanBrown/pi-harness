@@ -7,3 +7,4 @@
 # Local developer/runtime artifacts
 .direnv/
 .loom/
+.pi-types/
