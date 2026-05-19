@@ -4,14 +4,15 @@
       "inputs": {
         "nixpkgs": [
           "nixpkgs"
-        ]
+        ],
+        "pi-lsp-extension-src": "pi-lsp-extension-src"
       },
       "locked": {
-        "lastModified": 1778950322,
-        "narHash": "sha256-MfWjctJIynw+uZIH3Rxxf8Qm39XnuDVS4+xLyfgaKEw=",
+        "lastModified": 1779167887,
+        "narHash": "sha256-GKPuzFczq5u2ebqGzcdPftUjda6tfnyQ7ALEykr2FDk=",
         "ref": "refs/heads/master",
-        "rev": "136008282209b3aa367fc2b27cc92a886aebc404",
-        "revCount": 58,
+        "rev": "5ab52b486586377d237cba7208dba403d5ecc7f6",
+        "revCount": 167,
         "type": "git",
         "url": "ssh://git@github.com/BeaudanBrown/agentgraph.git"
       },
@@ -186,13 +187,30 @@
         "type": "github"
       }
     },
+    "pi-lsp-extension-src_2": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1778770914,
+        "narHash": "sha256-kkMfO+GJdLOwX6o8tCSMaFaWmk3zl10EdarO+M4TTN4=",
+        "owner": "samfoy",
+        "repo": "pi-lsp-extension",
+        "rev": "73251632ad116c973844cc28fb1210417295c6fe",
+        "type": "github"
+      },
+      "original": {
+        "owner": "samfoy",
+        "repo": "pi-lsp-extension",
+        "rev": "73251632ad116c973844cc28fb1210417295c6fe",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "agentgraph": "agentgraph",
         "flake-utils": "flake-utils",
         "nix-ai-tools": "nix-ai-tools",
         "nixpkgs": "nixpkgs_2",
-        "pi-lsp-extension-src": "pi-lsp-extension-src"
+        "pi-lsp-extension-src": "pi-lsp-extension-src_2"
       }
     },
     "systems": {
