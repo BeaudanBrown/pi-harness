@@ -6,6 +6,7 @@
   agentgraphPostgresPackage ? null,
   agentgraphPiResources ? null,
   piLspExtension ? null,
+  ticketPackage ? null,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -35,6 +36,7 @@ stdenvNoCC.mkDerivation {
   "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/core/settings-schema.json",
   "extensions": [
     "./extensions/web-search/index.ts",
+    "./extensions/agent-loop/index.ts",
     "./extensions/agentgraph/index.ts"
   ],
   "skills": [
@@ -81,6 +83,7 @@ export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/
 export AG_DEV_ROOT="$out/share/pi-harness/agent"
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="${agentgraphPackage}/bin/ag"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="${agentgraphPostgresPackage}/bin/agentgraph-postgres"''}
+${lib.optionalString (ticketPackage != null) ''export PATH="${ticketPackage}/bin:\$PATH"''}
 exec "${lib.getExe piPackage}" "\$@"
 EOF
     chmod +x "$out/bin/pi"
@@ -89,6 +92,9 @@ EOF
     ''}
     ${lib.optionalString (agentgraphPostgresPackage != null) ''
       ln -s "${agentgraphPostgresPackage}/bin/agentgraph-postgres" "$out/bin/agentgraph-postgres"
+    ''}
+    ${lib.optionalString (ticketPackage != null) ''
+      ln -s "${ticketPackage}/bin/tk" "$out/bin/tk"
     ''}
 
     runHook postInstall
@@ -100,6 +106,7 @@ EOF
     agentgraphPostgres = agentgraphPostgresPackage;
     agentgraphPiResources = agentgraphPiResources;
     piLspExtension = piLspExtension;
+    ticket = ticketPackage;
   };
 
   meta = {

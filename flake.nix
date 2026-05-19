@@ -46,8 +46,9 @@
         piLspExtension = pkgs.callPackage ./nix/pi-lsp-extension.nix {
           piLspExtensionSrc = pi-lsp-extension-src;
         };
+        ticketPackage = pkgs.callPackage ./nix/ticket.nix { };
         piHarnessPackage = pkgs.callPackage ./nix/package.nix {
-          inherit piPackage agentgraphPackage agentgraphPostgresPackage agentgraphPiResources piLspExtension;
+          inherit piPackage agentgraphPackage agentgraphPostgresPackage agentgraphPiResources piLspExtension ticketPackage;
         };
         lspPackages = with pkgs; [
           nodejs
@@ -80,6 +81,7 @@
               *)
                 exec ${lib.getExe piPackage} \
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
+                  --extension "$PWD/config/agent/extensions/agent-loop/index.ts" \
                   --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
                   --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
                   --skill "$PWD/config/agent/skills" \
@@ -104,6 +106,7 @@
             jq empty config/agent/settings.json
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
+            test -f config/agent/extensions/agent-loop/index.ts
             test -d config/agent/skills
             test -d config/agent/prompts
             test -d config/agent/themes
@@ -112,8 +115,12 @@
             test -f ${piHarnessPackage}/share/pi-harness/agent/prompts/graph-change.md
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
+            test -e ${piHarnessPackage}/bin/tk
+            ${piHarnessPackage}/bin/tk help >/dev/null
             test -f ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/index.ts
             jq -e '.extensions | index("./extensions/agentgraph/index.ts")' \
+              ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
               ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
           '';
         };
@@ -121,6 +128,7 @@
       {
         packages.pi-harness = piHarnessPackage;
         packages.pi-lsp-extension = piLspExtension;
+        packages.tk = ticketPackage;
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
 
@@ -139,6 +147,7 @@
             piDevWrapper
             agentgraphPackage
             agentgraphPostgresPackage
+            ticketPackage
             pkgs.jq
             pkgs.tmux
           ] ++ lspPackages;

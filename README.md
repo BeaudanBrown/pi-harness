@@ -15,6 +15,8 @@ layout is handled outside Pi with regular tmux.
 - a NixOS module named `nixosModules.pi-harness`
 - shared Pi config under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
+- the `tk` git-backed ticket CLI for agent task tracking
+- supervised `/aplan` and `/aloop` commands under `config/agent/extensions/agent-loop`
 - the AgentGraph pi resources imported from the AgentGraph flake input
 - empty skill, prompt, and theme directories for future additions
 
@@ -105,6 +107,33 @@ PI_WEB_SEARCH_API_KEY_COMMAND
 ```
 
 If no Pi-specific key is set, the extension falls back to `OPENAI_API_KEY`.
+
+## Agent Planning And Loops
+
+The packaged harness includes `tk`, the git-backed ticket CLI from
+`wedow/ticket`. Tickets live as Markdown files under `.tickets/`, which keeps
+large task graphs readable to agents and reviewable in git.
+
+The included `agent-loop` extension registers `/aplan` and `/aloop`:
+
+```text
+/aplan "Add pitch support to the course manager"
+/aplan create "Small well-understood cleanup"
+/aloop 5 <epic-ticket-id> --verify "nix run .#verify"
+/aloop status <epic-ticket-id>
+```
+
+`/aplan` starts a clarification and specification workflow inspired by
+`/grill-with-docs`: it inspects docs and code, sharpens fuzzy language, asks
+high-value questions, and then creates a `tk` epic plus child tickets when the
+plan is ready. `/aloop` supervises fresh child Pi processes one at a time. Each
+iteration selects a ready `tk` child ticket, implements only that ticket, updates
+`tk`, verifies, commits code plus `.tickets/` changes, and leaves the worktree
+clean before continuing.
+
+Useful `/aloop` options are `--timeout 45m`, `--model provider/model`,
+`--verify <cmd>`, and `--allow-dirty`. The extension refuses a dirty worktree by
+default and never pushes; the child prompt also instructs workers never to push.
 
 ## Local Workflow
 
