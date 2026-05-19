@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "allowImportingTsExtensions": false,
+    "outDir": ".pi-test-build"
+  },
+  "include": ["config/agent/extensions/**/*.ts", "tests/**/*.ts"]
+}

@@ -99,6 +99,7 @@
           runtimeInputs = [
             pkgs.coreutils
             pkgs.jq
+            pkgs.nodejs
             pkgs.typescript
           ];
           text = ''
@@ -133,6 +134,9 @@
             ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
             ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
             tsc --noEmit --project tsconfig.json
+            test_build_dir=$(mktemp -d)
+            tsc --project tsconfig.test.json --outDir "$test_build_dir"
+            node --test "$test_build_dir/tests/agent-loop-progress.test.js"
           '';
         };
       in
@@ -155,7 +159,7 @@
 
         devShells.default = pkgs.mkShell {
           packages = [
-            piDevWrapper
+            # piDevWrapper
             agentgraphPackage
             agentgraphPostgresPackage
             ticketPackage

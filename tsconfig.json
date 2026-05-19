@@ -18,5 +18,5 @@
       "typebox": [".pi-types/node_modules/typebox"]
     }
   },
-  "include": ["config/agent/extensions/**/*.ts"]
+  "include": ["config/agent/extensions/**/*.ts", "tests/**/*.ts"]
 }

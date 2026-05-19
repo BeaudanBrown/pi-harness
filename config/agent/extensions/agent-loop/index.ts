@@ -22,6 +22,32 @@ interface ChildResult {
 	timedOut: boolean;
 }
 
+export type ChildActivity =
+	| { kind: "phase"; text: string }
+	| { kind: "tool"; tool: string; summary: string }
+	| { kind: "bash"; command: string }
+	| { kind: "file"; action: string; path: string }
+	| { kind: "assistant"; text: string }
+	| { kind: "error"; text: string };
+
+interface RunChildHooks {
+	onProgress?: (activity: ChildActivity) => void;
+}
+
+interface LoopProgress {
+	widgetId: string;
+	statusId: string;
+	lines: string[];
+	maxLines: number;
+}
+
+interface ProgressUiContext {
+	ui: {
+		setWidget: (id: string, lines: string[] | undefined) => void;
+		setStatus: (id: string, text: string | undefined) => void;
+	};
+}
+
 interface IterationSummary {
 	iteration: number;
 	ticket: string;
@@ -43,6 +69,9 @@ interface TicketMeta {
 
 const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const LOOP_CHILD_ENV = "PI_AGENT_LOOP_CHILD";
+const LOOP_WIDGET_ID = "agent-loop-progress";
+const LOOP_STATUS_ID = "agent-loop";
+const MAX_PROGRESS_LINES = 10;
 
 function splitArgs(input: string): string[] {
 	const args: string[] = [];
@@ -235,16 +264,21 @@ function depsResolved(ticket: TicketMeta, byId: Map<string, TicketMeta>): boolea
 	return true;
 }
 
+function openChildTickets(root: TicketMeta, tickets: TicketMeta[]): TicketMeta[] {
+	if (root.type !== "epic") return [];
+	return tickets
+		.filter((ticket) => ticket.parent === root.id)
+		.filter((ticket) => ticket.type !== "epic")
+		.filter((ticket) => ticket.status !== "closed");
+}
+
 function pickReadyTicket(root: TicketMeta, tickets: TicketMeta[]): TicketMeta | undefined {
 	const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
 	if (root.type !== "epic") {
 		return root.status === "closed" || !depsResolved(root, byId) ? undefined : root;
 	}
 
-	return tickets
-		.filter((ticket) => ticket.parent === root.id)
-		.filter((ticket) => ticket.status !== "closed")
-		.filter((ticket) => ticket.type !== "epic")
+	return openChildTickets(root, tickets)
 		.filter((ticket) => depsResolved(ticket, byId))
 		.sort((a, b) => normalizePriority(a) - normalizePriority(b) || (a.created ?? "").localeCompare(b.created ?? ""))[0];
 }
@@ -273,6 +307,119 @@ function truncate(value: string, max = 4000): string {
 	return `${value.slice(0, max)}\n...[truncated ${value.length - max} chars]`;
 }
 
+function compactOneLine(value: string, max = 110): string {
+	const cleaned = value.replace(/\s+/g, " ").trim();
+	if (cleaned.length <= max) return cleaned;
+	return `${cleaned.slice(0, Math.max(0, max - 3))}...`;
+}
+
+function redactProgress(value: string): string {
+	return value
+		.replace(/(authorization\s*:\s*bearer\s+)[^\s"']+/gi, "$1[redacted]")
+		.replace(/\b(api[_-]?key|token|password|secret)\s*=\s*[^\s"']+/gi, "$1=[redacted]")
+		.replace(/\b(api[_-]?key|token|password|secret)\s*:\s*[^\s"']+/gi, "$1: [redacted]");
+}
+
+function progressLine(value: string): string {
+	return compactOneLine(redactProgress(value));
+}
+
+export function createLoopProgress(maxLines = MAX_PROGRESS_LINES): LoopProgress {
+	return { widgetId: LOOP_WIDGET_ID, statusId: LOOP_STATUS_ID, lines: [], maxLines };
+}
+
+export function pushLoopProgress(ctx: ProgressUiContext, progress: LoopProgress, line: string): void {
+	const cleaned = progressLine(line);
+	if (!cleaned) return;
+	progress.lines = [...progress.lines, cleaned].slice(-progress.maxLines);
+	ctx.ui.setWidget(progress.widgetId, progress.lines);
+}
+
+function setLoopStatus(ctx: ProgressUiContext, progress: LoopProgress, text: string | undefined): void {
+	ctx.ui.setStatus(progress.statusId, text);
+}
+
+function clearLoopProgress(ctx: ProgressUiContext, progress: LoopProgress): void {
+	ctx.ui.setStatus(progress.statusId, undefined);
+	ctx.ui.setWidget(progress.widgetId, undefined);
+}
+
+function summarizeValue(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (value === undefined || value === null) return "";
+	try {
+		return JSON.stringify(value);
+	} catch {
+		return String(value);
+	}
+}
+
+function eventType(event: any): string {
+	return String(event?.type ?? event?.event ?? event?.kind ?? "");
+}
+
+function eventToolName(event: any): string | undefined {
+	const candidate = event?.toolName ?? event?.tool_name ?? event?.tool?.name ?? event?.toolCall?.name ?? event?.call?.name ?? event?.name;
+	return typeof candidate === "string" && candidate ? candidate : undefined;
+}
+
+function eventInput(event: any): any {
+	return event?.input ?? event?.args ?? event?.arguments ?? event?.tool?.input ?? event?.toolCall?.input ?? event?.call?.input ?? {};
+}
+
+function inputPath(input: any): string {
+	return summarizeValue(input?.path ?? input?.file ?? input?.filePath ?? input?.file_path ?? input?.target ?? input?.targetPath);
+}
+
+function isToolEvent(event: any): boolean {
+	const type = eventType(event).toLowerCase();
+	return Boolean(eventToolName(event)) && (type.includes("tool") || type.includes("call") || type === "");
+}
+
+export function childActivityFromJsonEvent(event: any): ChildActivity | undefined {
+	const type = eventType(event).toLowerCase();
+	if (type === "message_end" && event?.message?.role === "assistant") {
+		return { kind: "assistant", text: "final response received" };
+	}
+
+	if (!isToolEvent(event)) return undefined;
+	const tool = eventToolName(event)!;
+	const input = eventInput(event);
+	const lowerTool = tool.toLowerCase();
+
+	if (lowerTool === "bash" || lowerTool === "shell") {
+		const command = summarizeValue(input?.command ?? input?.cmd ?? input);
+		return { kind: "bash", command };
+	}
+
+	if (["read", "edit", "write"].includes(lowerTool) || lowerTool.includes("file")) {
+		const file = inputPath(input);
+		if (file) return { kind: "file", action: lowerTool, path: file };
+	}
+
+	const fallbackPath = inputPath(input);
+	const summary = summarizeValue(input?.command ?? (fallbackPath || input));
+	return { kind: "tool", tool, summary };
+}
+
+export function formatChildActivity(activity: ChildActivity): string {
+	if (activity.kind === "phase") return `> ${activity.text}`;
+	if (activity.kind === "bash") return `> bash: ${activity.command}`;
+	if (activity.kind === "file") return `> ${activity.action}: ${activity.path}`;
+	if (activity.kind === "tool") return activity.summary ? `> ${activity.tool}: ${activity.summary}` : `> ${activity.tool}`;
+	if (activity.kind === "assistant") return `> child: ${activity.text}`;
+	return `> error: ${activity.text}`;
+}
+
+export function parseChildProgressLine(line: string): ChildActivity | undefined {
+	if (!line.trim()) return undefined;
+	try {
+		return childActivityFromJsonEvent(JSON.parse(line));
+	} catch {
+		return undefined;
+	}
+}
+
 function buildWorkerPrompt(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta): string {
 	const verifyLine = options.verify
 		? `Run this verification command unless a narrower failing-focused check is necessary first: ${options.verify}`
@@ -296,7 +443,8 @@ Your job in this single iteration:
 7. ${verifyLine}
 8. Update tk with concise notes: tk add-note ${selectedTicket.id} "..."
 9. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
-10. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
+10. If this closes the final open child under epic ${rootTicket.id}, verify the epic acceptance criteria, add a concise closeout note to the epic, and close the epic.
+11. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
 
 Hard requirements:
 - You must leave the worktree clean by committing successful changes.
@@ -323,7 +471,7 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
-async function runChild(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta): Promise<ChildResult> {
+async function runChild(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, hooks: RunChildHooks = {}): Promise<ChildResult> {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-loop-"));
 	const promptPath = path.join(tmpDir, "system-prompt.md");
 	fs.writeFileSync(promptPath, buildWorkerPrompt(options, repoRoot, rootTicket, selectedTicket), { encoding: "utf-8", mode: 0o600 });
@@ -334,6 +482,7 @@ async function runChild(options: LoopOptions, repoRoot: string, rootTicket: Tick
 
 	return await new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
+		hooks.onProgress?.({ kind: "phase", text: `spawning child for ${selectedTicket.id}` });
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: repoRoot,
 			shell: false,
@@ -357,6 +506,8 @@ async function runChild(options: LoopOptions, repoRoot: string, rootTicket: Tick
 
 		const processLine = (line: string) => {
 			if (!line.trim()) return;
+			const activity = parseChildProgressLine(line);
+			if (activity) hooks.onProgress?.(activity);
 			try {
 				const event = JSON.parse(line);
 				if (event.type === "message_end" && event.message?.role === "assistant") {
@@ -376,7 +527,12 @@ async function runChild(options: LoopOptions, repoRoot: string, rootTicket: Tick
 			buffer = lines.pop() ?? "";
 			for (const line of lines) processLine(line);
 		});
-		proc.stderr.on("data", (chunk: any) => { stderr += chunk.toString(); });
+		proc.stderr.on("data", (chunk: any) => {
+			const text = chunk.toString();
+			stderr += text;
+			const firstLine = text.split("\n").find((line: string) => line.trim());
+			if (firstLine) hooks.onProgress?.({ kind: "error", text: firstLine });
+		});
 		proc.on("error", (error: Error) => {
 			if (settled) return;
 			settled = true;
@@ -412,6 +568,20 @@ async function ticketById(cwd: string, id: string): Promise<TicketMeta> {
 	throw new Error(`Ticket not found: ${id}`);
 }
 
+async function finalizeRootEpicIfComplete(cwd: string, root: TicketMeta, selected: TicketMeta): Promise<string | undefined> {
+	if (root.type !== "epic") return undefined;
+
+	const tickets = await allTickets(cwd);
+	const updatedRoot = tickets.find((ticket) => ticket.id === root.id) ?? root;
+	if (updatedRoot.status === "closed" || openChildTickets(updatedRoot, tickets).length > 0) return undefined;
+
+	await tk(cwd, ["add-note", updatedRoot.id, `All child tickets are closed; closing epic after ${selected.id}.`]);
+	await tk(cwd, ["close", updatedRoot.id]);
+	await git(cwd, ["add", ".tickets"]);
+	await git(cwd, ["commit", "-m", `Close completed epic ${updatedRoot.id}`]);
+	return await git(cwd, ["rev-parse", "HEAD"]);
+}
+
 async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<void> {
 	const options = parseLoopArgs(rawArgs);
 	await tk(ctx.cwd, ["help"]);
@@ -419,7 +589,9 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 	if (!options.allowDirty) await requireCleanWorktree(repoRoot);
 
 	const summaries: IterationSummary[] = [];
-	ctx.ui.setStatus("agent-loop", `aloop 0/${options.iterations}`);
+	const progress = createLoopProgress();
+	setLoopStatus(ctx, progress, `aloop 0/${options.iterations}`);
+	pushLoopProgress(ctx, progress, `> starting ${options.iterations} iteration(s) for ${options.ticketId}`);
 
 	try {
 		for (let i = 1; i <= options.iterations; i++) {
@@ -431,12 +603,15 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 				break;
 			}
 
-			ctx.ui.setStatus("agent-loop", `aloop ${i}/${options.iterations} ${selected.id}`);
-			ctx.ui.setWidget("agent-loop", [`Agent loop iteration ${i}/${options.iterations}`, `Root: ${root.id}`, `Ticket: ${selected.id}`]);
+			setLoopStatus(ctx, progress, `aloop ${i}/${options.iterations} ${selected.id}`);
+			pushLoopProgress(ctx, progress, `> selected: ${selected.id} (${root.id})`);
 
 			const beforeHead = await git(repoRoot, ["rev-parse", "HEAD"]);
 			const beforeTickets = ticketsFingerprint(repoRoot);
-			const child = await runChild(options, repoRoot, root, selected);
+			const child = await runChild(options, repoRoot, root, selected, {
+				onProgress: (activity) => pushLoopProgress(ctx, progress, formatChildActivity(activity)),
+			});
+			pushLoopProgress(ctx, progress, `> validate: checking ${selected.id}`);
 			const footer = parseFooter(child.finalText);
 
 			if (child.timedOut) throw new Error(`Iteration ${i} timed out after ${Math.round(options.timeoutMs / 1000)}s.`);
@@ -444,7 +619,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 				throw new Error(`Iteration ${i} child exited ${child.exitCode}.\n${truncate(child.stderr || child.finalText || child.stdout)}`);
 			}
 
-			const afterHead = await git(repoRoot, ["rev-parse", "HEAD"]);
+			let afterHead = await git(repoRoot, ["rev-parse", "HEAD"]);
 			const afterTickets = ticketsFingerprint(repoRoot);
 			const result = footer.aloop_result ?? "continue";
 			const tkUpdated = footer.tk_updated?.toLowerCase();
@@ -466,6 +641,13 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 				throw new Error(`Iteration ${i} did not close selected ticket ${selected.id}.`);
 			}
 			if (!options.allowDirty) await requireCleanWorktree(repoRoot);
+			const epicCloseCommit = await finalizeRootEpicIfComplete(repoRoot, root, selected);
+			if (epicCloseCommit) {
+				afterHead = epicCloseCommit;
+				pushLoopProgress(ctx, progress, `> closed epic: ${root.id} ${afterHead.slice(0, 12)}`);
+			}
+			if (!options.allowDirty) await requireCleanWorktree(repoRoot);
+			pushLoopProgress(ctx, progress, `> done: ${selected.id} ${afterHead.slice(0, 12)}`);
 
 			summaries.push({
 				iteration: i,
@@ -479,8 +661,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 			if (result === "stop") break;
 		}
 	} finally {
-		ctx.ui.setStatus("agent-loop", undefined);
-		ctx.ui.setWidget("agent-loop", undefined);
+		clearLoopProgress(ctx, progress);
 	}
 
 	ctx.ui.notify(`Agent loop finished.\n${formatSummaries(summaries)}`, "info");
@@ -506,8 +687,9 @@ Planning workflow:
 4. Ask high-leverage clarification questions before creating tickets unless the user explicitly provided enough detail or invoked create mode.
 5. Capture shared language, decisions, non-goals, risks, verification strategy, and chunk boundaries.
 6. Create one tk epic for the whole unit of work and child tk tickets for implementation chunks. Use --parent for children, --design for decisions/approach, --acceptance for done criteria, and tk dep for ordering dependencies.
-7. Make chunks large enough for meaningful commits but small enough for one fresh /aloop worker iteration.
-8. End by listing the epic id, child ticket ids, dependency notes, and the exact command the user can run next: /aloop <n> <epic-id>.
+7. Treat the epic as a container: once the final child is closed, verify the epic acceptance criteria, add a closeout note, and close the epic.
+8. Make chunks large enough for meaningful commits but small enough for one fresh /aloop worker iteration.
+9. End by listing the epic id, child ticket ids, dependency notes, and the exact command the user can run next: /aloop <n> <epic-id>.
 
 ${createNow ? "The user requested create mode. If enough information is present, create the tk epic and child tickets now; otherwise ask only the blocking questions." : "Do not create tickets yet if important product/domain decisions are unclear. Ask concise clarification questions first, then create tickets after the user answers."}`;
 }

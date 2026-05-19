@@ -8,3 +8,4 @@
 .direnv/
 .loom/
 .pi-types/
+.pi-test-build/
