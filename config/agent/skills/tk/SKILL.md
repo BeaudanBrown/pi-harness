@@ -1,3 +1,7 @@
+---
+description: Use tk, the git-backed ticket system, for task planning, dependency tracking, and /aplan or /aloop workflows.
+---
+
 # tk Ticket Workflow
 
 Use this skill when working with tasks, tickets, issues, implementation plans, `/aplan`, or `/aloop` in this project.
