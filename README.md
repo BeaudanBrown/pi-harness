@@ -24,11 +24,17 @@ The packaged configuration loads web search plus the AgentGraph mode extension.
 The working-tree development wrapper loads the AgentGraph resources directly
 from the flake input so the extension source stays in the AgentGraph repo.
 
-The packaged `pi-harness` binary is intentionally just the upstream `pi` CLI.
-Installed/system usage loads this repository's shared resources through Pi's
-normal configuration files, which the NixOS module links into `~/.pi/agent`.
-This keeps package execution and Pi's own auto-discovery from loading the same
-extension twice.
+The packaged `pi-harness` binary is intentionally just the upstream `pi` CLI
+with harness defaults for AgentGraph helpers. Installed/system usage loads this
+repository's shared resources through Pi's normal configuration files, which the
+NixOS module links into `~/.pi/agent`. This keeps package execution and Pi's own
+auto-discovery from loading the same extension twice.
+
+The harness defaults do not overwrite pre-set `AG_DEV_ROOT`, `AGENTGRAPH_CLI`,
+or `AGENTGRAPH_POSTGRES`. Development launchers such as AgentGraph's `pi-ag`
+can therefore keep web search, agent-loop, tk, prompts/themes, models, and LSP
+from the global harness while shadowing only the packaged AgentGraph runtime and
+resources for that process.
 
 ## NixOS Usage
 

@@ -80,9 +80,9 @@ JSON
 #!/usr/bin/env bash
 set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
-export AG_DEV_ROOT="$out/share/pi-harness/agent"
-${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="${agentgraphPackage}/bin/ag"''}
-${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="${agentgraphPostgresPackage}/bin/agentgraph-postgres"''}
+export AG_DEV_ROOT="\''${AG_DEV_ROOT:-$out/share/pi-harness/agent}"
+${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
+${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
 ${lib.optionalString (ticketPackage != null) ''export PATH="${ticketPackage}/bin:\$PATH"''}
 exec "${lib.getExe piPackage}" "\$@"
 EOF

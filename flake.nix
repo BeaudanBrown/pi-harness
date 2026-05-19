@@ -119,6 +119,9 @@
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -e ${piHarnessPackage}/bin/tk
+            grep -F "export AG_DEV_ROOT=\"\''${AG_DEV_ROOT:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export AGENTGRAPH_CLI=\"\''${AGENTGRAPH_CLI:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export AGENTGRAPH_POSTGRES=\"\''${AGENTGRAPH_POSTGRES:-" ${piHarnessPackage}/bin/pi >/dev/null
             ${piHarnessPackage}/bin/tk help >/dev/null
             test -f ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/index.ts
             jq -e '.extensions | index("./extensions/agentgraph/index.ts")' \
