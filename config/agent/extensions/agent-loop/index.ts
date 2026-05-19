@@ -331,6 +331,7 @@ export function createLoopProgress(maxLines = MAX_PROGRESS_LINES): LoopProgress 
 export function pushLoopProgress(ctx: ProgressUiContext, progress: LoopProgress, line: string): void {
 	const cleaned = progressLine(line);
 	if (!cleaned) return;
+	if (progress.lines.slice(-5).includes(cleaned)) return;
 	progress.lines = [...progress.lines, cleaned].slice(-progress.maxLines);
 	ctx.ui.setWidget(progress.widgetId, progress.lines);
 }
@@ -354,6 +355,15 @@ function summarizeValue(value: unknown): string {
 	}
 }
 
+function emptyObject(value: unknown): boolean {
+	return value !== null && typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0;
+}
+
+function meaningfulSummary(value: string): string {
+	const trimmed = value.trim();
+	return trimmed === "{}" || trimmed === "[]" ? "" : trimmed;
+}
+
 function eventType(event: any): string {
 	return String(event?.type ?? event?.event ?? event?.kind ?? "");
 }
@@ -373,7 +383,11 @@ function inputPath(input: any): string {
 
 function isToolEvent(event: any): boolean {
 	const type = eventType(event).toLowerCase();
-	return Boolean(eventToolName(event)) && (type.includes("tool") || type.includes("call") || type === "");
+	const status = String(event?.status ?? event?.state ?? "").toLowerCase();
+	if (!eventToolName(event)) return false;
+	if (["result", "end", "finish", "finished", "complete", "completed", "delta", "update", "output"].some((part) => type.includes(part))) return false;
+	if (["result", "end", "finish", "finished", "complete", "completed"].includes(status)) return false;
+	return type.includes("tool") || type.includes("call") || type === "";
 }
 
 export function childActivityFromJsonEvent(event: any): ChildActivity | undefined {
@@ -388,8 +402,9 @@ export function childActivityFromJsonEvent(event: any): ChildActivity | undefine
 	const lowerTool = tool.toLowerCase();
 
 	if (lowerTool === "bash" || lowerTool === "shell") {
-		const command = summarizeValue(input?.command ?? input?.cmd ?? input);
-		return { kind: "bash", command };
+		if (input?.command === undefined && input?.cmd === undefined && emptyObject(input)) return undefined;
+		const command = meaningfulSummary(summarizeValue(input?.command ?? input?.cmd ?? input));
+		return command ? { kind: "bash", command } : undefined;
 	}
 
 	if (["read", "edit", "write"].includes(lowerTool) || lowerTool.includes("file")) {
@@ -398,8 +413,8 @@ export function childActivityFromJsonEvent(event: any): ChildActivity | undefine
 	}
 
 	const fallbackPath = inputPath(input);
-	const summary = summarizeValue(input?.command ?? (fallbackPath || input));
-	return { kind: "tool", tool, summary };
+	const summary = meaningfulSummary(summarizeValue(input?.command ?? (fallbackPath || input)));
+	return summary ? { kind: "tool", tool, summary } : undefined;
 }
 
 export function formatChildActivity(activity: ChildActivity): string {
@@ -687,9 +702,11 @@ Planning workflow:
 4. Ask high-leverage clarification questions before creating tickets unless the user explicitly provided enough detail or invoked create mode.
 5. Capture shared language, decisions, non-goals, risks, verification strategy, and chunk boundaries.
 6. Create one tk epic for the whole unit of work and child tk tickets for implementation chunks. Use --parent for children, --design for decisions/approach, --acceptance for done criteria, and tk dep for ordering dependencies.
-7. Treat the epic as a container: once the final child is closed, verify the epic acceptance criteria, add a closeout note, and close the epic.
-8. Make chunks large enough for meaningful commits but small enough for one fresh /aloop worker iteration.
-9. End by listing the epic id, child ticket ids, dependency notes, and the exact command the user can run next: /aloop <n> <epic-id>.
+7. Commit the ticket plan after creating or materially updating tickets: stage only .tickets changes and commit them with a message like "plan <feature> tickets". Do not include unrelated dirty work in that commit.
+8. After committing the ticket plan, check git status --short. If there are any remaining dirty changes, stop and ask the user what to do with them before suggesting /aloop, because /aloop expects a clean worktree unless --allow-dirty is explicitly used.
+9. Treat the epic as a container: once the final child is closed, verify the epic acceptance criteria, add a closeout note, and close the epic.
+10. Make chunks large enough for meaningful commits but small enough for one fresh /aloop worker iteration.
+11. End by listing the epic id, child ticket ids, dependency notes, the ticket-plan commit hash, whether the worktree is clean, and the exact command the user can run next: /aloop <n> <epic-id>.
 
 ${createNow ? "The user requested create mode. If enough information is present, create the tk epic and child tickets now; otherwise ask only the blocking questions." : "Do not create tickets yet if important product/domain decisions are unclear. Ask concise clarification questions first, then create tickets after the user answers."}`;
 }

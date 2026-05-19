@@ -34,7 +34,7 @@ test("progress widget keeps a rolling ten-line window", () => {
 	]);
 });
 
-test("progress lines are one-line, truncated, and redacted", () => {
+test("progress lines are one-line, truncated, redacted, and deduplicated", () => {
 	const widgetCalls: Array<string[] | undefined> = [];
 	const ctx = {
 		ui: {
@@ -45,11 +45,13 @@ test("progress lines are one-line, truncated, and redacted", () => {
 	const progress = createLoopProgress();
 
 	pushLoopProgress(ctx, progress, `> bash: echo token=super-secret ${"x".repeat(160)}\nsecond line`);
+	pushLoopProgress(ctx, progress, `> bash: echo token=super-secret ${"x".repeat(160)}\nsecond line`);
 
 	const line = widgetCalls.at(-1)?.[0] ?? "";
 	assert.match(line, /token=\[redacted\]/);
 	assert.equal(line.includes("\n"), false);
 	assert.ok(line.length <= 110);
+	assert.equal(widgetCalls.length, 1);
 });
 
 test("child JSON tool events are summarized into brief actions", () => {
@@ -68,7 +70,10 @@ test("child JSON tool events are summarized into brief actions", () => {
 	assert.equal(formatChildActivity({ kind: "file", action: "edit", path: "src/Auth.hs" }), "> edit: src/Auth.hs");
 });
 
-test("unknown or non-json child output is ignored", () => {
+test("unknown, duplicate lifecycle, and empty child output are ignored", () => {
 	assert.equal(parseChildProgressLine("not json"), undefined);
 	assert.equal(childActivityFromJsonEvent({ type: "usage", inputTokens: 1 }), undefined);
+	assert.equal(childActivityFromJsonEvent({ type: "tool_call_result", toolName: "bash", input: { command: "tk show abc123" } }), undefined);
+	assert.equal(childActivityFromJsonEvent({ type: "tool_call_delta", toolName: "bash", input: { command: "tk show abc123" } }), undefined);
+	assert.equal(childActivityFromJsonEvent({ type: "tool_call", toolName: "bash", input: {} }), undefined);
 });
