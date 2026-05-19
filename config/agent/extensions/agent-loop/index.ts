@@ -99,7 +99,7 @@ const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
 const LOOP_CHILD_ENV = "PI_AGENT_LOOP_CHILD";
 const LOOP_WIDGET_ID = "agent-loop-progress";
 const LOOP_STATUS_ID = "agent-loop";
-const MAX_PROGRESS_LINES = 10;
+const MAX_PROGRESS_LINES = 9;
 
 function splitArgs(input: string): string[] {
 	const args: string[] = [];

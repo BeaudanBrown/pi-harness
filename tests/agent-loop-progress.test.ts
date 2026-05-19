@@ -17,7 +17,7 @@ import {
 	type TicketMeta,
 } from "../config/agent/extensions/agent-loop/index.js";
 
-test("progress widget keeps a rolling ten-line window", () => {
+test("progress widget keeps header plus a rolling nine-line window", () => {
 	const widgetCalls: Array<string[] | undefined> = [];
 	const ctx = {
 		ui: {
@@ -25,14 +25,14 @@ test("progress widget keeps a rolling ten-line window", () => {
 			setStatus: () => undefined,
 		},
 	};
-	const progress = createLoopProgress(10);
+	const progress = createLoopProgress();
 
 	for (let i = 1; i <= 12; i++) pushLoopProgress(ctx, progress, `> step ${i}`);
 
 	const lastWidget = widgetCalls.at(-1) ?? [];
+	assert.equal(lastWidget.length, 10);
 	assert.match(lastWidget[0] ?? "", /^aloop 0:00/);
 	assert.deepEqual(lastWidget.slice(1), [
-		"> step 3",
 		"> step 4",
 		"> step 5",
 		"> step 6",
