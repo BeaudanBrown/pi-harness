@@ -141,8 +141,11 @@ clean before continuing. Epics are preferred for planned multi-ticket work, but
 non-epic ticket is used that way.
 
 Useful `/aloop` options are `--timeout 45m`, `--model provider/model`,
-`--verify <cmd>`, and `--allow-dirty`. The extension refuses a dirty worktree by
-default and never pushes; the child prompt also instructs workers never to push.
+`--verify <cmd>`, and `--allow-dirty`. Iterations default to a 30 minute timeout;
+on timeout the supervisor terminates the child process group and runs a best-effort
+`bash ./bin/in-env dev-stop` when the repo provides that wrapper. The extension
+refuses a dirty worktree by default and never pushes; the child prompt also
+instructs workers never to push.
 
 ## Local Workflow
 

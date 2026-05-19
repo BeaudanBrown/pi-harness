@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -95,7 +95,7 @@ export interface TicketMeta {
 	created?: string;
 }
 
-const DEFAULT_TIMEOUT_MS = 60 * 60 * 1000;
+const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const LOOP_CHILD_ENV = "PI_AGENT_LOOP_CHILD";
 const LOOP_WIDGET_ID = "agent-loop-progress";
 const LOOP_STATUS_ID = "agent-loop";
@@ -734,6 +734,25 @@ function getPiInvocation(args: string[]): { command: string; args: string[] } {
 	return { command: "pi", args };
 }
 
+function signalChildGroup(proc: ChildProcess, signal: NodeJS.Signals): void {
+	if (!proc.pid) return;
+	try {
+		process.kill(-proc.pid, signal);
+	} catch {
+		try { proc.kill(signal); } catch { /* best effort */ }
+	}
+}
+
+function maybeStopRepoDevEnvironment(repoRoot: string): void {
+	const wrapper = path.join(repoRoot, "bin", "in-env");
+	if (!fs.existsSync(wrapper)) return;
+	try {
+		spawn("bash", [wrapper, "dev-stop"], { cwd: repoRoot, shell: false, stdio: "ignore", detached: true }).unref();
+	} catch {
+		// Timeout cleanup is best effort; the supervisor still reports the failure.
+	}
+}
+
 async function runChild(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, hooks: RunChildHooks = {}): Promise<ChildResult> {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-loop-"));
 	const promptPath = path.join(tmpDir, "system-prompt.md");
@@ -749,6 +768,7 @@ async function runChild(options: LoopOptions, repoRoot: string, rootTicket: Tick
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: repoRoot,
 			shell: false,
+			detached: true,
 			stdio: ["ignore", "pipe", "pipe"],
 			env: { ...process.env, [LOOP_CHILD_ENV]: "1" },
 		});
@@ -761,8 +781,9 @@ async function runChild(options: LoopOptions, repoRoot: string, rootTicket: Tick
 
 		const timeout = setTimeout(() => {
 			timedOut = true;
-			proc.kill("SIGTERM");
-			const hardKill = setTimeout(() => proc.kill("SIGKILL"), 5000);
+			signalChildGroup(proc, "SIGTERM");
+			maybeStopRepoDevEnvironment(repoRoot);
+			const hardKill = setTimeout(() => signalChildGroup(proc, "SIGKILL"), 5000);
 			(hardKill as any).unref?.();
 		}, options.timeoutMs);
 		(timeout as any).unref?.();
