@@ -76,6 +76,10 @@ buildNpmPackage {
 
   postPatch = ''
     cp ${packageLock} package-lock.json
+    substituteInPlace src/shared/language-map.ts \
+      --replace-fail '  ".rs": "rust",' $'  ".rs": "rust",\n  ".ml": "ocaml",\n  ".mli": "ocaml",'
+    substituteInPlace src/lsp-manager.ts \
+      --replace-fail '  rust: { command: "rust-analyzer", args: [] },' $'  rust: { command: "rust-analyzer", args: [] },\n  ocaml: { command: "ocamllsp", args: [] },'
     cat > package.json <<'JSON'
     {
       "name": "pi-lsp-extension",

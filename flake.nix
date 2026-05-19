@@ -59,6 +59,7 @@
           pyright
           ruff
           rust-analyzer
+          ocamlPackages.ocaml-lsp
           gopls
           clang-tools
           lua-language-server
