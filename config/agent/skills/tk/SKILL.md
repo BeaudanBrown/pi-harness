@@ -52,8 +52,9 @@ During work:
 After work:
 1. Run relevant verification.
 2. Close the ticket only when acceptance criteria are satisfied: `tk close <id>`.
-3. Commit code changes and `.tickets/` updates together.
-4. Never push unless the user explicitly asks in the current session.
+3. If this closes the final child under an epic, verify the epic acceptance criteria, add a closeout note, and close the epic.
+4. Commit code changes and `.tickets/` updates together.
+5. Never push unless the user explicitly asks in the current session.
 
 ## Agent Loop Commands
 

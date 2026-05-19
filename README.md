@@ -128,8 +128,8 @@ The included `agent-loop` extension registers `/aplan` and `/aloop`:
 high-value questions, and then creates a `tk` epic plus child tickets when the
 plan is ready. `/aloop` supervises fresh child Pi processes one at a time. Each
 iteration selects a ready `tk` child ticket, implements only that ticket, updates
-`tk`, verifies, commits code plus `.tickets/` changes, and leaves the worktree
-clean before continuing.
+`tk`, verifies, commits code plus `.tickets/` changes, closes the root epic once
+all children are complete, and leaves the worktree clean before continuing.
 
 Useful `/aloop` options are `--timeout 45m`, `--model provider/model`,
 `--verify <cmd>`, and `--allow-dirty`. The extension refuses a dirty worktree by
