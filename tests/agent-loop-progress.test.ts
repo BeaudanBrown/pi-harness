@@ -7,6 +7,8 @@ import {
 	parseChildProgressLine,
 	parseDiffNumstat,
 	pushLoopProgress,
+	shortTicketSummary,
+	titleFromTkShow,
 } from "../config/agent/extensions/agent-loop/index.js";
 
 test("progress widget keeps a rolling ten-line window", () => {
@@ -55,6 +57,18 @@ test("progress lines are one-line, truncated, redacted, and deduplicated", () =>
 	assert.equal(line.includes("\n"), false);
 	assert.ok(line.length <= 110);
 	assert.equal(widgetCalls.length, 1);
+});
+
+test("ticket titles are extracted from tk show output", () => {
+	const show = `---
+id: tmp-jn7d
+status: open
+---
+# Add provenance detail mode to context output
+
+Body`;
+	assert.equal(titleFromTkShow(show), "Add provenance detail mode to context output");
+	assert.equal(shortTicketSummary(titleFromTkShow(show)), "Add provenance detail mode");
 });
 
 test("child model and assistant usage events are extracted", () => {

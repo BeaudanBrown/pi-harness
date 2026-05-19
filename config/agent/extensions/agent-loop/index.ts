@@ -352,13 +352,14 @@ function progressLine(value: string): string {
 	return compactOneLine(redactProgress(value));
 }
 
-export function createLoopProgress(maxLines = MAX_PROGRESS_LINES): LoopProgress {
+export function createLoopProgress(maxLines = MAX_PROGRESS_LINES, contextWindow?: number): LoopProgress {
 	return {
 		widgetId: LOOP_WIDGET_ID,
 		statusId: LOOP_STATUS_ID,
 		lines: [],
 		maxLines,
 		startedAt: Date.now(),
+		contextWindow,
 	};
 }
 
@@ -409,18 +410,50 @@ function setLoopStatus(ctx: ProgressUiContext, progress: LoopProgress, text: str
 	ctx.ui.setStatus(progress.statusId, text);
 }
 
-function setProgressTicket(progress: LoopProgress, iteration: number, totalIterations: number, ticket: TicketMeta): void {
+function setProgressTicket(progress: LoopProgress, iteration: number, totalIterations: number, ticket: TicketMeta, summary?: string): void {
 	progress.iteration = iteration;
 	progress.totalIterations = totalIterations;
 	progress.ticketId = ticket.id;
-	progress.summary = ticketSummary(ticket);
+	progress.summary = summary ?? ticketSummary(ticket);
 	progress.diff = undefined;
 }
 
 function ticketSummary(ticket: TicketMeta): string | undefined {
-	const title = (ticket.title ?? ticket.summary ?? ticket.name ?? "").replace(/\s+/g, " ").trim();
-	if (!title) return undefined;
-	return title.split(" ").slice(0, 4).join(" ");
+	return shortTicketSummary(ticket.title ?? ticket.summary ?? ticket.name);
+}
+
+export function shortTicketSummary(title: string | undefined): string | undefined {
+	const cleaned = title?.replace(/\s+/g, " ").trim();
+	if (!cleaned) return undefined;
+	return cleaned.split(" ").slice(0, 4).join(" ");
+}
+
+export function titleFromTkShow(raw: string): string | undefined {
+	let inFrontmatter = false;
+	for (const line of raw.split("\n")) {
+		const trimmed = line.trim();
+		if (trimmed === "---") {
+			inFrontmatter = !inFrontmatter;
+			continue;
+		}
+		if (inFrontmatter || !trimmed) continue;
+		const heading = trimmed.match(/^#\s+(.+)$/);
+		if (heading) return heading[1]!.trim();
+		const field = trimmed.match(/^title:\s*(.+)$/i);
+		if (field) return field[1]!.trim();
+		return trimmed;
+	}
+	return undefined;
+}
+
+async function ticketDisplaySummary(cwd: string, ticket: TicketMeta): Promise<string | undefined> {
+	const fromQuery = ticketSummary(ticket);
+	if (fromQuery) return fromQuery;
+	try {
+		return shortTicketSummary(titleFromTkShow(await tk(cwd, ["show", ticket.id])));
+	} catch {
+		return undefined;
+	}
 }
 
 export function parseDiffNumstat(raw: string): DiffStat | undefined {
@@ -570,7 +603,11 @@ function applyChildProgress(ctx: ProgressUiContext, progress: LoopProgress, acti
 		renderLoopProgress(ctx, progress);
 		return;
 	}
-	if (activity.kind === "assistant" && activity.usage) progress.usage = activity.usage;
+	if (activity.kind === "assistant") {
+		if (activity.usage) progress.usage = activity.usage;
+		renderLoopProgress(ctx, progress);
+		return;
+	}
 	pushLoopProgress(ctx, progress, formatChildActivity(activity));
 }
 
@@ -752,7 +789,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 	if (!options.allowDirty) await requireCleanWorktree(repoRoot);
 
 	const summaries: IterationSummary[] = [];
-	const progress = createLoopProgress();
+	const progress = createLoopProgress(MAX_PROGRESS_LINES, ctx.model?.contextWindow);
 	setLoopStatus(ctx, progress, `aloop 0/${options.iterations}`);
 	pushLoopProgress(ctx, progress, `> starting ${options.iterations} iteration(s) for ${options.ticketId}`);
 
@@ -766,9 +803,10 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 				break;
 			}
 
-			setProgressTicket(progress, i, options.iterations, selected);
+			const summary = await ticketDisplaySummary(repoRoot, selected);
+			setProgressTicket(progress, i, options.iterations, selected, summary);
 			setLoopStatus(ctx, progress, `aloop ${i}/${options.iterations} ${selected.id}`);
-			pushLoopProgress(ctx, progress, `> selected: ${selected.id} (${root.id})`);
+			pushLoopProgress(ctx, progress, root.id === selected.id ? `> selected: ${selected.id}` : `> selected: ${selected.id} from ${root.id}`);
 
 			const beforeHead = await git(repoRoot, ["rev-parse", "HEAD"]);
 			const beforeTickets = ticketsFingerprint(repoRoot);
