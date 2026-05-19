@@ -20,7 +20,9 @@ test("progress widget keeps a rolling ten-line window", () => {
 
 	for (let i = 1; i <= 12; i++) pushLoopProgress(ctx, progress, `> step ${i}`);
 
-	assert.deepEqual(widgetCalls.at(-1), [
+	const lastWidget = widgetCalls.at(-1) ?? [];
+	assert.match(lastWidget[0] ?? "", /^aloop starting/);
+	assert.deepEqual(lastWidget.slice(1), [
 		"> step 3",
 		"> step 4",
 		"> step 5",
@@ -47,18 +49,44 @@ test("progress lines are one-line, truncated, redacted, and deduplicated", () =>
 	pushLoopProgress(ctx, progress, `> bash: echo token=super-secret ${"x".repeat(160)}\nsecond line`);
 	pushLoopProgress(ctx, progress, `> bash: echo token=super-secret ${"x".repeat(160)}\nsecond line`);
 
-	const line = widgetCalls.at(-1)?.[0] ?? "";
+	const line = widgetCalls.at(-1)?.[1] ?? "";
 	assert.match(line, /token=\[redacted\]/);
 	assert.equal(line.includes("\n"), false);
 	assert.ok(line.length <= 110);
 	assert.equal(widgetCalls.length, 1);
 });
 
+test("child model and assistant usage events are extracted", () => {
+	assert.deepEqual(childActivityFromJsonEvent({
+		type: "model_select",
+		model: { id: "sub-gpt-5.5", contextWindow: 272000 },
+	}), { kind: "model", model: "sub-gpt-5.5", contextWindow: 272000 });
+
+	assert.deepEqual(childActivityFromJsonEvent({
+		type: "message_end",
+		message: {
+			role: "assistant",
+			usage: {
+				input: 1000,
+				output: 200,
+				cacheRead: 50,
+				cacheWrite: 0,
+				totalTokens: 1250,
+				cost: { total: 0.0123 },
+			},
+		},
+	}), {
+		kind: "assistant",
+		text: "final response received",
+		usage: { input: 1000, output: 200, cacheRead: 50, cacheWrite: 0, totalTokens: 1250, costTotal: 0.0123 },
+	});
+});
+
 test("child JSON tool events are summarized into brief actions", () => {
 	assert.deepEqual(parseChildProgressLine(JSON.stringify({
-		type: "tool_call",
+		type: "tool_execution_start",
 		toolName: "bash",
-		input: { command: "tk show abc123" },
+		args: { command: "tk show abc123" },
 	})), { kind: "bash", command: "tk show abc123" });
 
 	assert.deepEqual(childActivityFromJsonEvent({
