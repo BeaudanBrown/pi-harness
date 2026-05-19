@@ -5,6 +5,7 @@ import {
 	createLoopProgress,
 	formatChildActivity,
 	parseChildProgressLine,
+	parseDiffNumstat,
 	pushLoopProgress,
 } from "../config/agent/extensions/agent-loop/index.js";
 
@@ -21,7 +22,7 @@ test("progress widget keeps a rolling ten-line window", () => {
 	for (let i = 1; i <= 12; i++) pushLoopProgress(ctx, progress, `> step ${i}`);
 
 	const lastWidget = widgetCalls.at(-1) ?? [];
-	assert.match(lastWidget[0] ?? "", /^aloop starting/);
+	assert.match(lastWidget[0] ?? "", /^aloop 0:00/);
 	assert.deepEqual(lastWidget.slice(1), [
 		"> step 3",
 		"> step 4",
@@ -78,7 +79,7 @@ test("child model and assistant usage events are extracted", () => {
 	}), {
 		kind: "assistant",
 		text: "final response received",
-		usage: { input: 1000, output: 200, cacheRead: 50, cacheWrite: 0, totalTokens: 1250, costTotal: 0.0123 },
+		usage: { input: 1000, output: 200, cacheRead: 50, cacheWrite: 0, totalTokens: 1250 },
 	});
 });
 
@@ -96,6 +97,15 @@ test("child JSON tool events are summarized into brief actions", () => {
 	}), { kind: "file", action: "edit", path: "src/Auth.hs" });
 
 	assert.equal(formatChildActivity({ kind: "file", action: "edit", path: "src/Auth.hs" }), "> edit: src/Auth.hs");
+});
+
+test("diff numstat is summarized as additions, deletions, and binary files", () => {
+	assert.deepEqual(parseDiffNumstat("10\t2\tsrc/a.ts\n-\t-\timage.png\n3\t0\tREADME.md\n"), {
+		additions: 13,
+		deletions: 2,
+		binary: 1,
+	});
+	assert.equal(parseDiffNumstat(""), undefined);
 });
 
 test("unknown, duplicate lifecycle, and empty child output are ignored", () => {

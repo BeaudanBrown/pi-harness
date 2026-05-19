@@ -28,7 +28,12 @@ interface ChildUsage {
 	cacheRead?: number;
 	cacheWrite?: number;
 	totalTokens?: number;
-	costTotal?: number;
+}
+
+interface DiffStat {
+	additions: number;
+	deletions: number;
+	binary: number;
 }
 
 export type ChildActivity =
@@ -54,12 +59,11 @@ interface LoopProgress {
 	iteration?: number;
 	totalIterations?: number;
 	ticketId?: string;
-	phase: string;
-	toolCount: number;
-	editedFiles: string[];
+	summary?: string;
 	model?: string;
 	contextWindow?: number;
 	usage?: ChildUsage;
+	diff?: DiffStat;
 }
 
 interface ProgressUiContext {
@@ -80,6 +84,9 @@ interface IterationSummary {
 
 interface TicketMeta {
 	id: string;
+	title?: string;
+	summary?: string;
+	name?: string;
 	status?: string;
 	type?: string;
 	priority?: string | number;
@@ -352,16 +359,7 @@ export function createLoopProgress(maxLines = MAX_PROGRESS_LINES): LoopProgress 
 		lines: [],
 		maxLines,
 		startedAt: Date.now(),
-		phase: "starting",
-		toolCount: 0,
-		editedFiles: [],
 	};
-}
-
-function formatCount(value: number): string {
-	if (value >= 1_000_000) return `${(value / 1_000_000).toFixed(1)}m`;
-	if (value >= 1_000) return `${Math.round(value / 100) / 10}k`;
-	return String(value);
 }
 
 function formatElapsed(ms: number): string {
@@ -376,19 +374,20 @@ function usageTotal(usage: ChildUsage | undefined): number | undefined {
 	return usage.totalTokens ?? [usage.input, usage.output, usage.cacheRead, usage.cacheWrite].reduce<number>((sum, value) => sum + (value ?? 0), 0);
 }
 
+function formatDiffStat(diff: DiffStat): string {
+	const base = `diff +${diff.additions}/-${diff.deletions}`;
+	return diff.binary > 0 ? `${base} bin ${diff.binary}` : base;
+}
+
 function renderProgressHeader(progress: LoopProgress): string {
 	const parts = ["aloop"];
 	if (progress.iteration && progress.totalIterations) parts.push(`${progress.iteration}/${progress.totalIterations}`);
 	if (progress.ticketId) parts.push(progress.ticketId);
-	parts.push(progress.phase);
+	if (progress.summary) parts.push(progress.summary);
 	parts.push(formatElapsed(Date.now() - progress.startedAt));
-	if (progress.model) parts.push(progress.model);
 	const total = usageTotal(progress.usage);
 	if (total && progress.contextWindow) parts.push(`ctx ${Math.round((total / progress.contextWindow) * 100)}%`);
-	if (total) parts.push(`${formatCount(total)} tok`);
-	if (progress.usage?.costTotal !== undefined) parts.push(`$${progress.usage.costTotal.toFixed(3)}`);
-	parts.push(`tools ${progress.toolCount}`);
-	if (progress.editedFiles.length > 0) parts.push(`edits ${progress.editedFiles.slice(-2).join(",")}`);
+	if (progress.diff) parts.push(formatDiffStat(progress.diff));
 	return progressLine(parts.join(" "));
 }
 
@@ -410,10 +409,41 @@ function setLoopStatus(ctx: ProgressUiContext, progress: LoopProgress, text: str
 	ctx.ui.setStatus(progress.statusId, text);
 }
 
-function setProgressTicket(progress: LoopProgress, iteration: number, totalIterations: number, ticketId: string): void {
+function setProgressTicket(progress: LoopProgress, iteration: number, totalIterations: number, ticket: TicketMeta): void {
 	progress.iteration = iteration;
 	progress.totalIterations = totalIterations;
-	progress.ticketId = ticketId;
+	progress.ticketId = ticket.id;
+	progress.summary = ticketSummary(ticket);
+	progress.diff = undefined;
+}
+
+function ticketSummary(ticket: TicketMeta): string | undefined {
+	const title = (ticket.title ?? ticket.summary ?? ticket.name ?? "").replace(/\s+/g, " ").trim();
+	if (!title) return undefined;
+	return title.split(" ").slice(0, 4).join(" ");
+}
+
+export function parseDiffNumstat(raw: string): DiffStat | undefined {
+	let additions = 0;
+	let deletions = 0;
+	let binary = 0;
+	for (const line of raw.split("\n")) {
+		if (!line.trim()) continue;
+		const [added, deleted] = line.split("\t");
+		if (added === "-" || deleted === "-") {
+			binary += 1;
+			continue;
+		}
+		const add = Number(added);
+		const del = Number(deleted);
+		if (Number.isFinite(add)) additions += add;
+		if (Number.isFinite(del)) deletions += del;
+	}
+	return additions || deletions || binary ? { additions, deletions, binary } : undefined;
+}
+
+async function committedDiffStat(cwd: string, before: string, after: string): Promise<DiffStat | undefined> {
+	return parseDiffNumstat(await git(cwd, ["diff", "--numstat", before, after]));
 }
 
 function clearLoopProgress(ctx: ProgressUiContext, progress: LoopProgress): void {
@@ -479,7 +509,6 @@ function usageFromMessage(message: any): ChildUsage | undefined {
 		cacheRead: numberField(usage.cacheRead),
 		cacheWrite: numberField(usage.cacheWrite),
 		totalTokens: numberField(usage.totalTokens),
-		costTotal: numberField(usage.cost?.total),
 	};
 	return Object.values(result).some((value) => value !== undefined) ? result : undefined;
 }
@@ -521,25 +550,12 @@ export function childActivityFromJsonEvent(event: any): ChildActivity | undefine
 export function formatChildActivity(activity: ChildActivity): string {
 	if (activity.kind === "phase") return `> ${activity.text}`;
 	if (activity.kind === "model") return `> model: ${activity.model}`;
-	if (activity.kind === "usage") return `> usage: ${formatCount(usageTotal(activity.usage) ?? 0)} tokens`;
+	if (activity.kind === "usage") return `> usage received`;
 	if (activity.kind === "bash") return `> bash: ${activity.command}`;
 	if (activity.kind === "file") return `> ${activity.action}: ${activity.path}`;
 	if (activity.kind === "tool") return activity.summary ? `> ${activity.tool}: ${activity.summary}` : `> ${activity.tool}`;
 	if (activity.kind === "assistant") return `> child: ${activity.text}`;
 	return `> error: ${activity.text}`;
-}
-
-function inferPhase(activity: ChildActivity): string | undefined {
-	if (activity.kind === "file" && ["edit", "write"].includes(activity.action)) return "editing";
-	if (activity.kind === "bash") {
-		const command = activity.command.toLowerCase();
-		if (command.includes("git commit") || command.includes("tk close") || command.includes("tk add-note")) return "committing";
-		if (command.includes("test") || command.includes("verify") || command.includes("nix run .#verify") || command.includes("npm test")) return "verifying";
-		if (command.includes("tk show") || command.includes("rg ") || command.includes("grep ")) return "reading";
-	}
-	if (activity.kind === "tool" && ["read", "grep", "find", "ls"].includes(activity.tool.toLowerCase())) return "reading";
-	if (activity.kind === "error") return "error";
-	return undefined;
 }
 
 function applyChildProgress(ctx: ProgressUiContext, progress: LoopProgress, activity: ChildActivity): void {
@@ -555,12 +571,6 @@ function applyChildProgress(ctx: ProgressUiContext, progress: LoopProgress, acti
 		return;
 	}
 	if (activity.kind === "assistant" && activity.usage) progress.usage = activity.usage;
-	const phase = inferPhase(activity);
-	if (phase) progress.phase = phase;
-	if (["bash", "file", "tool"].includes(activity.kind)) progress.toolCount += 1;
-	if (activity.kind === "file" && ["edit", "write"].includes(activity.action) && !progress.editedFiles.includes(activity.path)) {
-		progress.editedFiles = [...progress.editedFiles, activity.path].slice(-3);
-	}
 	pushLoopProgress(ctx, progress, formatChildActivity(activity));
 }
 
@@ -756,8 +766,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 				break;
 			}
 
-			setProgressTicket(progress, i, options.iterations, selected.id);
-			progress.phase = "selected";
+			setProgressTicket(progress, i, options.iterations, selected);
 			setLoopStatus(ctx, progress, `aloop ${i}/${options.iterations} ${selected.id}`);
 			pushLoopProgress(ctx, progress, `> selected: ${selected.id} (${root.id})`);
 
@@ -766,7 +775,6 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 			const child = await runChild(options, repoRoot, root, selected, {
 				onProgress: (activity) => applyChildProgress(ctx, progress, activity),
 			});
-			progress.phase = "validating";
 			pushLoopProgress(ctx, progress, `> validate: checking ${selected.id}`);
 			const footer = parseFooter(child.finalText);
 
@@ -803,7 +811,8 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext): Promise<v
 				pushLoopProgress(ctx, progress, `> closed epic: ${root.id} ${afterHead.slice(0, 12)}`);
 			}
 			if (!options.allowDirty) await requireCleanWorktree(repoRoot);
-			progress.phase = "done";
+			progress.diff = await committedDiffStat(repoRoot, beforeHead, afterHead);
+			renderLoopProgress(ctx, progress);
 			pushLoopProgress(ctx, progress, `> done: ${selected.id} ${afterHead.slice(0, 12)}`);
 
 			summaries.push({
