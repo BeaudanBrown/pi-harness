@@ -79,11 +79,15 @@ into the packaged Pi config. It exposes `/ag on`, `/ag off`, `/ag status`,
 
 `/ag on` switches the current Pi session into graph mode: direct `edit`,
 `write`, and unrestricted `bash` tools are disabled, while read-only inspection
-and `agentgraph_*` tools remain available. The extension also starts a shared
-local PostgreSQL server with per-project databases via `agentgraph-postgres`.
+and `agentgraph_*` tools remain available. The AgentGraph tool set includes a
+restricted `agentgraph_cli` tool for project-scoped `ag` argv calls and
+dedicated helpers such as `agentgraph_node_export` / `agentgraph_node_update`
+for dry-run-first node edits. The extension also starts a shared local
+PostgreSQL server with per-project databases via `agentgraph-postgres`.
 
 The reusable extension, prompts, PostgreSQL helper, and AgentGraph operator skill
-are maintained in the AgentGraph repo, not duplicated here.
+are maintained in the AgentGraph repo, not duplicated here; update the
+`agentgraph` flake input to pick up tool-surface changes.
 
 AgentGraph LLM execution happens inside `ag agent run-cycle`, so provider
 secrets must be available as runtime environment variables to the `ag` process.
