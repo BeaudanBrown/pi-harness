@@ -30,7 +30,7 @@ let
     tailwindcss-language-server
   ];
 
-  runtimePackages = [ cfg.package ] ++ lib.optionals cfg.lsp.enable cfg.lsp.packages;
+  fallbackRuntimePackages = [ cfg.package ] ++ lib.optionals cfg.lsp.enable cfg.lsp.packages;
   lspExtensionArray =
     if cfg.lsp.enable then
       ''extension_args=(--extension "${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts")''
@@ -43,14 +43,14 @@ let
     # shellcheck disable=SC1090,SC1091
     . ${lib.escapeShellArg cfg.agentgraph.environmentFile}
     set +a
-    export PATH=${lib.makeBinPath runtimePackages}:"$PATH"
+    export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspExtensionArray}
     exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
   '';
 
   piWithRuntimePath = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
-    export PATH=${lib.makeBinPath runtimePackages}:"$PATH"
+    export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspExtensionArray}
     exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
   '';
@@ -87,8 +87,8 @@ in
       defaultText = lib.literalExpression "a broad set of common language servers";
       description = ''
         Language server packages exposed on PATH for Pi extensions such as
-        pi-lsp-extension. Override or extend this list per host for heavier
-        language stacks.
+        pi-lsp-extension. These packages are appended after the caller's PATH so
+        project-local language servers from dev shells take precedence.
       '';
     };
 
