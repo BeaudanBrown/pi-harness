@@ -46,7 +46,8 @@ Before work:
 
 During work:
 - Keep scope limited to the selected ticket.
-- If prerequisite work is discovered, create/link a ticket and add a dependency instead of silently expanding scope.
+- If required prerequisite work is discovered, create/link a ticket and add a dependency instead of silently expanding scope.
+- If valuable follow-up work is discovered, create a small linked ticket or add a concise note rather than expanding the current ticket.
 - Add notes for important discoveries: `tk add-note <id> "..."`.
 
 After work:

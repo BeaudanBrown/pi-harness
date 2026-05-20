@@ -701,17 +701,22 @@ Your job in this single iteration:
 2. Read the selected ticket with: tk show ${selectedTicket.id}
 3. Start the selected ticket if it is open: tk start ${selectedTicket.id}
 4. Implement only the selected ticket. Do not broaden scope to sibling tickets.
-5. If you discover prerequisite work, create/link a tk ticket or dependency instead of silently expanding scope.
+5. If you discover additional work, capture it in tk instead of silently expanding scope:
+   - If it is required for this ticket to be correct, create/link a prerequisite ticket or dependency and block if needed.
+   - If it is valuable follow-up but not required now, create a small linked ticket under the loop root when appropriate.
+   - If it is speculative, add a concise note rather than growing the plan.
 6. Add or update tests when appropriate.
 7. ${verifyLine}
 8. Update tk with concise notes: tk add-note ${selectedTicket.id} "..."
-9. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
-10. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
-11. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
+9. Before closing, review whether any discovered follow-up work should be captured as linked tk tickets or notes.
+10. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
+11. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
+12. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
 
 Hard requirements:
 - You must leave the worktree clean by committing successful changes.
 - You must update tk on every successful or blocked iteration.
+- New tickets must be small, actionable, linked to the current/root ticket, and clearly marked as prerequisite or follow-up.
 - You must not push.
 - You must not start a long-running background process that survives your turn.
 - If no useful work can proceed, update tk with the blocker and report ALOOP_RESULT: blocked.
