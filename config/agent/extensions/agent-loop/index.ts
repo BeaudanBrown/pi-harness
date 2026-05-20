@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ExtensionAPI, ExtensionCommandContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 
 interface LoopOptions {
 	iterations: number;
@@ -48,6 +49,33 @@ export type ChildActivity =
 
 interface RunChildHooks {
 	onProgress?: (activity: ChildActivity) => void;
+}
+
+interface CommandOptions {
+	env?: NodeJS.ProcessEnv;
+	signal?: AbortSignal;
+	timeoutMs?: number;
+}
+
+export interface AgentLoopGitParams {
+	op: "status" | "diff" | "diff_stat" | "rev_parse_head" | "add_paths" | "add_tickets" | "commit" | "log";
+	paths?: string[];
+	message?: string;
+	limit?: number;
+}
+
+export interface AgentLoopTkParams {
+	op: "show" | "query" | "ready" | "blocked" | "start" | "add-note" | "create" | "dep" | "link" | "close";
+	id?: string;
+	id2?: string;
+	title?: string;
+	description?: string;
+	parent?: string;
+	type?: "epic" | "feature" | "task" | "bug" | "chore";
+	design?: string;
+	acceptance?: string;
+	tags?: string[];
+	note?: string;
 }
 
 interface LoopProgress {
@@ -97,9 +125,37 @@ export interface TicketMeta {
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
 const LOOP_CHILD_ENV = "PI_AGENT_LOOP_CHILD";
+const LOOP_GRAPH_ENV = "PI_AGENTGRAPH_MODE";
+const LOOP_VERIFY_ENV = "PI_AGENT_LOOP_VERIFY_COMMAND";
+const LOOP_VERIFY_TIMEOUT_ENV = "PI_AGENT_LOOP_VERIFY_TIMEOUT_MS";
 const LOOP_WIDGET_ID = "agent-loop-progress";
 const LOOP_STATUS_ID = "agent-loop";
 const MAX_PROGRESS_LINES = 9;
+
+function stringEnum(values: readonly string[]) {
+	return Type.Union(values.map((value) => Type.Literal(value)) as any);
+}
+
+const AgentLoopGitParamsSchema = Type.Object({
+	op: stringEnum(["status", "diff", "diff_stat", "rev_parse_head", "add_paths", "add_tickets", "commit", "log"] as const),
+	paths: Type.Optional(Type.Array(Type.String({ description: "Repository-relative paths for add_paths or diff operations." }))),
+	message: Type.Optional(Type.String({ description: "Commit message for commit operations." })),
+	limit: Type.Optional(Type.Number({ description: "Maximum commits for log operations. Clamped to 1..50." })),
+});
+
+const AgentLoopTkParamsSchema = Type.Object({
+	op: stringEnum(["show", "query", "ready", "blocked", "start", "add-note", "create", "dep", "link", "close"] as const),
+	id: Type.Optional(Type.String({ description: "Primary ticket id, query expression, or created dependency owner." })),
+	id2: Type.Optional(Type.String({ description: "Secondary ticket id for dep or link operations." })),
+	title: Type.Optional(Type.String({ description: "Ticket title for create operations." })),
+	description: Type.Optional(Type.String({ description: "Ticket description for create operations." })),
+	parent: Type.Optional(Type.String({ description: "Parent ticket id for create operations." })),
+	type: Type.Optional(stringEnum(["epic", "feature", "task", "bug", "chore"] as const)),
+	design: Type.Optional(Type.String({ description: "Design/context text for create operations." })),
+	acceptance: Type.Optional(Type.String({ description: "Acceptance criteria for create operations." })),
+	tags: Type.Optional(Type.Array(Type.String({ description: "Tags for create operations." }))),
+	note: Type.Optional(Type.String({ description: "Note text for add-note operations." })),
+});
 
 function splitArgs(input: string): string[] {
 	const args: string[] = [];
@@ -194,15 +250,35 @@ function parseLoopArgs(raw: string): LoopOptions {
 	return options;
 }
 
-function runCommand(command: string, args: string[], cwd: string): Promise<{ stdout: string; stderr: string; code: number }> {
+function runCommand(command: string, args: string[], cwd: string, options: CommandOptions = {}): Promise<{ stdout: string; stderr: string; code: number }> {
 	return new Promise((resolve) => {
-		const proc = spawn(command, args, { cwd, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+		const proc = spawn(command, args, {
+			cwd,
+			env: options.env ? { ...process.env, ...options.env } : process.env,
+			shell: false,
+			signal: options.signal,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
 		let stdout = "";
 		let stderr = "";
+		let timeout: NodeJS.Timeout | undefined;
+		let timedOut = false;
+		if (options.timeoutMs) {
+			timeout = setTimeout(() => {
+				timedOut = true;
+				proc.kill("SIGKILL");
+			}, options.timeoutMs);
+		}
 		proc.stdout.on("data", (chunk: any) => { stdout += chunk.toString(); });
 		proc.stderr.on("data", (chunk: any) => { stderr += chunk.toString(); });
-		proc.on("error", (error: Error) => resolve({ stdout, stderr: error.message, code: 1 }));
-		proc.on("close", (code: number | null) => resolve({ stdout, stderr, code: code ?? 0 }));
+		proc.on("error", (error: Error) => {
+			if (timeout) clearTimeout(timeout);
+			resolve({ stdout, stderr: error.message, code: 1 });
+		});
+		proc.on("close", (code: number | null) => {
+			if (timeout) clearTimeout(timeout);
+			resolve({ stdout, stderr: timedOut ? `${stderr}\nTimed out after ${options.timeoutMs}ms` : stderr, code: code ?? 0 });
+		});
 	});
 }
 
@@ -220,6 +296,86 @@ async function git(cwd: string, args: string[]): Promise<string> {
 
 async function tk(cwd: string, args: string[]): Promise<string> {
 	return checked("tk", args, cwd);
+}
+
+function requireField(value: string | undefined, name: string): string {
+	if (!value?.trim()) throw new Error(`${name} is required.`);
+	return value;
+}
+
+export function validateAgentLoopGitPath(input: string): string {
+	const stripped = input.replace(/^@/, "");
+	if (!stripped || stripped.includes("\0")) throw new Error("Git paths must be non-empty and must not contain NUL bytes.");
+	if (path.isAbsolute(stripped)) throw new Error("Git paths must be relative to the repository root.");
+	const normalized = path.normalize(stripped);
+	if (normalized === "." || normalized.startsWith(`..${path.sep}`) || normalized === "..") {
+		throw new Error("Git paths must stay inside the repository root.");
+	}
+	if (normalized.split(/[\\/]+/).includes(".git")) throw new Error("Git paths must not target .git.");
+	return normalized;
+}
+
+export function agentLoopGitArgs(params: AgentLoopGitParams): string[] {
+	switch (params.op) {
+		case "status":
+			return ["status", "--short"];
+		case "diff":
+			return ["diff", "--", ...(params.paths ?? []).map(validateAgentLoopGitPath)];
+		case "diff_stat":
+			return ["diff", "--numstat", "--", ...(params.paths ?? []).map(validateAgentLoopGitPath)];
+		case "rev_parse_head":
+			return ["rev-parse", "HEAD"];
+		case "add_paths": {
+			const paths = params.paths ?? [];
+			if (paths.length === 0) throw new Error("add_paths requires at least one path.");
+			return ["add", "--", ...paths.map(validateAgentLoopGitPath)];
+		}
+		case "add_tickets":
+			return ["add", ".tickets"];
+		case "commit":
+			return ["commit", "-m", requireField(params.message, "message")];
+		case "log": {
+			const limit = Math.max(1, Math.min(50, Math.trunc(params.limit ?? 10)));
+			return ["log", "--oneline", "-n", String(limit)];
+		}
+		default:
+			throw new Error(`Unsupported git operation: ${(params as { op?: string }).op ?? "unknown"}`);
+	}
+}
+
+export function agentLoopTkArgs(params: AgentLoopTkParams): string[] {
+	switch (params.op) {
+		case "show":
+			return ["show", requireField(params.id, "id")];
+		case "query":
+			return ["query", params.id ?? "."];
+		case "ready":
+			return ["ready"];
+		case "blocked":
+			return ["blocked"];
+		case "start":
+			return ["start", requireField(params.id, "id")];
+		case "add-note":
+			return ["add-note", requireField(params.id, "id"), requireField(params.note, "note")];
+		case "create": {
+			const args = ["create", requireField(params.title, "title")];
+			if (params.type) args.push("-t", params.type);
+			if (params.description) args.push("-d", params.description);
+			if (params.parent) args.push("--parent", params.parent);
+			if (params.design) args.push("--design", params.design);
+			if (params.acceptance) args.push("--acceptance", params.acceptance);
+			if (params.tags?.length) args.push("--tags", params.tags.join(","));
+			return args;
+		}
+		case "dep":
+			return ["dep", requireField(params.id, "id"), requireField(params.id2, "id2")];
+		case "link":
+			return ["link", requireField(params.id, "id"), requireField(params.id2, "id2")];
+		case "close":
+			return ["close", requireField(params.id, "id")];
+		default:
+			throw new Error(`Unsupported tk operation: ${(params as { op?: string }).op ?? "unknown"}`);
+	}
 }
 
 function porcelainPath(line: string): string {
@@ -1028,7 +1184,58 @@ async function showStatus(rawArgs: string, ctx: ExtensionCommandContext): Promis
 	ctx.ui.notify(`tk status for ${root.id}\n\n${formatLoopStatus(root, tickets)}\n\n${truncate(show, 2500)}`, "info");
 }
 
+function toolText(stdout: string, stderr = ""): string {
+	const parts = [stdout.trim(), stderr.trim() ? `stderr:\n${stderr.trim()}` : undefined].filter(Boolean);
+	return truncate(parts.join("\n\n") || "ok");
+}
+
+function registerAgentLoopTools(pi: ExtensionAPI): void {
+	pi.registerTool({
+		name: "agent_loop_tk",
+		label: "Agent Loop tk",
+		description: "Run restricted tk ticket operations for supervised /aloop workers. Does not expose arbitrary shell commands.",
+		promptSnippet: "Run restricted tk ticket operations: show, query, ready, blocked, start, add-note, create, dep, link, close.",
+		promptGuidelines: ["Use agent_loop_tk for ticket updates in AgentGraph mode because bash is unavailable."],
+		parameters: AgentLoopTkParamsSchema,
+		async execute(_id, params: AgentLoopTkParams, _signal, _onUpdate, ctx: ExtensionContext) {
+			const repoRoot = await git(ctx.cwd, ["rev-parse", "--show-toplevel"]);
+			return { content: [{ type: "text", text: toolText(await tk(repoRoot, agentLoopTkArgs(params))) }], details: { op: params.op } };
+		},
+	});
+
+	pi.registerTool({
+		name: "agent_loop_git",
+		label: "Agent Loop Git",
+		description: "Run restricted git lifecycle operations for supervised /aloop workers. Blocks destructive and network operations.",
+		promptSnippet: "Run restricted git operations for /aloop: status, diff, diff_stat, rev_parse_head, add_paths, add_tickets, commit, log.",
+		promptGuidelines: ["Use agent_loop_git for status, staging, and commits in AgentGraph mode; never use it for destructive git operations."],
+		parameters: AgentLoopGitParamsSchema,
+		async execute(_id, params: AgentLoopGitParams, _signal, _onUpdate, ctx: ExtensionContext) {
+			const repoRoot = await git(ctx.cwd, ["rev-parse", "--show-toplevel"]);
+			return { content: [{ type: "text", text: toolText(await git(repoRoot, agentLoopGitArgs(params))) }], details: { op: params.op } };
+		},
+	});
+
+	pi.registerTool({
+		name: "agent_loop_verify",
+		label: "Agent Loop Verify",
+		description: "Run only the verification command configured by the supervising /aloop process. Does not accept arbitrary shell input.",
+		promptSnippet: "Run the supervisor-provided /aloop verification command when one is configured.",
+		promptGuidelines: ["Use agent_loop_verify only for the verification command configured by the /aloop supervisor."],
+		parameters: Type.Object({}),
+		async execute(_id, _params, signal, _onUpdate, ctx: ExtensionContext) {
+			const command = process.env[LOOP_VERIFY_ENV];
+			if (!command) throw new Error("No /aloop verification command is configured. Use agentgraph_run_cycle when AgentGraph mode is active.");
+			const timeoutMs = Number(process.env[LOOP_VERIFY_TIMEOUT_ENV] ?? 20 * 60 * 1000);
+			const result = await runCommand("bash", ["-lc", command], ctx.cwd, { signal, timeoutMs: Number.isFinite(timeoutMs) ? timeoutMs : undefined });
+			if (result.code !== 0) throw new Error(toolText(result.stdout, result.stderr));
+			return { content: [{ type: "text", text: toolText(result.stdout, result.stderr) }], details: { command } };
+		},
+	});
+}
+
 export default function registerAgentLoop(pi: ExtensionAPI): void {
+	registerAgentLoopTools(pi);
 	if (process.env[LOOP_CHILD_ENV] === "1") return;
 
 	pi.registerCommand("aloop", {

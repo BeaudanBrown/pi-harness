@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import {
 	actionableTickets,
+	agentLoopGitArgs,
+	agentLoopTkArgs,
 	childActivityFromJsonEvent,
 	createLoopProgress,
 	descendantTickets,
@@ -14,6 +16,7 @@ import {
 	pushLoopProgress,
 	shortTicketSummary,
 	titleFromTkShow,
+	validateAgentLoopGitPath,
 	type TicketMeta,
 } from "../config/agent/extensions/agent-loop/index.js";
 
@@ -182,4 +185,29 @@ test("loop status summarizes subtree readiness", () => {
 	assert.match(status, /Mode: container/);
 	assert.match(status, /- ready Ready task/);
 	assert.match(status, /- blocked Blocked task <- ready/);
+});
+
+test("agent_loop_git maps only safe git operations", () => {
+	assert.deepEqual(agentLoopGitArgs({ op: "status" }), ["status", "--short"]);
+	assert.deepEqual(agentLoopGitArgs({ op: "add_tickets" }), ["add", ".tickets"]);
+	assert.deepEqual(agentLoopGitArgs({ op: "commit", message: "Complete tk-123" }), ["commit", "-m", "Complete tk-123"]);
+	assert.deepEqual(agentLoopGitArgs({ op: "add_paths", paths: ["src/app.ts", "@README.md"] }), ["add", "--", "src/app.ts", "README.md"]);
+	assert.throws(() => agentLoopGitArgs({ op: "add_paths", paths: [] }), /at least one path/);
+	assert.throws(() => validateAgentLoopGitPath("../secret"), /inside the repository/);
+	assert.throws(() => validateAgentLoopGitPath(".git/config"), /must not target \.git/);
+});
+
+test("agent_loop_tk maps ticket operations without arbitrary argv", () => {
+	assert.deepEqual(agentLoopTkArgs({ op: "show", id: "tk-123" }), ["show", "tk-123"]);
+	assert.deepEqual(agentLoopTkArgs({ op: "add-note", id: "tk-123", note: "blocked on dependency" }), ["add-note", "tk-123", "blocked on dependency"]);
+	assert.deepEqual(agentLoopTkArgs({
+		op: "create",
+		title: "Follow-up",
+		type: "task",
+		description: "Do later",
+		parent: "epic-1",
+		tags: ["agent-loop", "follow-up"],
+	}), ["create", "Follow-up", "-t", "task", "-d", "Do later", "--parent", "epic-1", "--tags", "agent-loop,follow-up"]);
+	assert.deepEqual(agentLoopTkArgs({ op: "dep", id: "later", id2: "first" }), ["dep", "later", "first"]);
+	assert.throws(() => agentLoopTkArgs({ op: "close" }), /id is required/);
 });
