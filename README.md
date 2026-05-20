@@ -151,6 +151,12 @@ on timeout the supervisor terminates the child process group and runs a best-eff
 refuses a dirty worktree by default and never pushes; the child prompt also
 instructs workers never to push.
 
+When `/ag on` is active in the supervising session, `/aloop` starts child Pi
+processes in AgentGraph-compatible loop mode. Those children cannot use direct
+`edit`, `write`, or `bash`; they use `agentgraph_*` tools for source changes,
+`agent_loop_tk` for ticket updates, `agent_loop_git` for status/staging/commits,
+and `agent_loop_verify` for the supervisor-provided `--verify` command.
+
 ## Local Workflow
 
 For extension and prompt iteration in this repository, enter the development
