@@ -4,12 +4,14 @@ import {
 	actionableTickets,
 	agentLoopGitArgs,
 	agentLoopTkArgs,
+	buildWorkerPrompt,
 	childActivityFromJsonEvent,
 	createLoopProgress,
 	descendantTickets,
 	formatChildActivity,
 	formatLoopStatus,
 	isLoopContainer,
+	latestAgentGraphModeEnabled,
 	parseChildProgressLine,
 	parseDiffNumstat,
 	pickReadyTicket,
@@ -210,4 +212,31 @@ test("agent_loop_tk maps ticket operations without arbitrary argv", () => {
 	}), ["create", "Follow-up", "-t", "task", "-d", "Do later", "--parent", "epic-1", "--tags", "agent-loop,follow-up"]);
 	assert.deepEqual(agentLoopTkArgs({ op: "dep", id: "later", id2: "first" }), ["dep", "later", "first"]);
 	assert.throws(() => agentLoopTkArgs({ op: "close" }), /id is required/);
+});
+
+test("latest AgentGraph mode entry controls aloop graph detection", () => {
+	assert.equal(latestAgentGraphModeEnabled([
+		{ type: "custom", customType: "agentgraph-mode", data: { enabled: true } },
+		{ type: "custom", customType: "agentgraph-mode", data: { enabled: false } },
+	]), false);
+	assert.equal(latestAgentGraphModeEnabled([
+		{ type: "custom", customType: "agentgraph-mode", data: { enabled: false } },
+		{ type: "custom", customType: "agentgraph-mode", data: { enabled: true } },
+	]), true);
+});
+
+test("graph-mode worker prompt uses restricted loop and AgentGraph tools", () => {
+	const prompt = buildWorkerPrompt(
+		{ iterations: 1, ticketId: "tk-123", allowDirty: false, timeoutMs: 1000, verify: "nix run .#verify" },
+		"/repo",
+		{ id: "epic-1", type: "epic" },
+		{ id: "tk-123" },
+		true,
+	);
+	assert.match(prompt, /AgentGraph mode is active/);
+	assert.match(prompt, /Do not use direct edit\/write\/bash workflows/);
+	assert.match(prompt, /Use agentgraph_\* tools/);
+	assert.match(prompt, /Use agent_loop_tk/);
+	assert.match(prompt, /Use agent_loop_git/);
+	assert.match(prompt, /Run agent_loop_verify/);
 });

@@ -6,7 +6,7 @@ import * as path from "node:path";
 import type { ExtensionAPI, ExtensionCommandContext, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-interface LoopOptions {
+export interface LoopOptions {
 	iterations: number;
 	ticketId: string;
 	allowDirty: boolean;
@@ -131,6 +131,29 @@ const LOOP_VERIFY_TIMEOUT_ENV = "PI_AGENT_LOOP_VERIFY_TIMEOUT_MS";
 const LOOP_WIDGET_ID = "agent-loop-progress";
 const LOOP_STATUS_ID = "agent-loop";
 const MAX_PROGRESS_LINES = 9;
+const GRAPH_LOOP_TOOLS = [
+	"read",
+	"grep",
+	"find",
+	"ls",
+	"web_search",
+	"agentgraph_context",
+	"agentgraph_db_ensure",
+	"agentgraph_cli",
+	"agentgraph_mutate",
+	"agentgraph_node_export",
+	"agentgraph_node_update",
+	"agentgraph_run_cycle",
+	"agentgraph_neighborhood",
+	"agentgraph_inspect_file",
+	"agentgraph_inspect_node",
+	"agentgraph_inspect_artifact",
+	"agentgraph_prompt_inputs",
+	"agentgraph_templates",
+	"agent_loop_tk",
+	"agent_loop_git",
+	"agent_loop_verify",
+];
 
 function stringEnum(values: readonly string[]) {
 	return Type.Union(values.map((value) => Type.Literal(value)) as any);
@@ -549,6 +572,26 @@ function parseFooter(text: string): Record<string, string> {
 	return fields;
 }
 
+export function latestAgentGraphModeEnabled(entries: readonly unknown[]): boolean {
+	let enabled = false;
+	for (const entry of entries) {
+		const record = entry as { type?: string; customType?: string; data?: { enabled?: unknown } };
+		if (record.type === "custom" && record.customType === "agentgraph-mode" && typeof record.data?.enabled === "boolean") {
+			enabled = record.data.enabled;
+		}
+	}
+	return enabled;
+}
+
+function isAgentGraphModeActive(ctx: ExtensionCommandContext): boolean {
+	return latestAgentGraphModeEnabled(ctx.sessionManager.getBranch());
+}
+
+function graphLoopToolNames(pi: ExtensionAPI): string[] {
+	const available = new Set(pi.getAllTools().map((tool) => tool.name));
+	return GRAPH_LOOP_TOOLS.filter((tool) => available.has(tool));
+}
+
 function truncate(value: string, max = 4000): string {
 	if (value.length <= max) return value;
 	return `${value.slice(0, max)}\n...[truncated ${value.length - max} chars]`;
@@ -839,10 +882,24 @@ export function parseChildProgressLine(line: string): ChildActivity | undefined 
 	}
 }
 
-function buildWorkerPrompt(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta): string {
-	const verifyLine = options.verify
-		? `Run this verification command unless a narrower failing-focused check is necessary first: ${options.verify}`
-		: "Run the most relevant focused tests or verification for the selected ticket. If repository instructions define a canonical gate, prefer that gate when practical.";
+export function buildWorkerPrompt(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, graphModeActive = false): string {
+	const verifyLine = graphModeActive
+		? options.verify
+			? "Run agent_loop_verify for the supervisor-provided verification command after AgentGraph validation."
+			: "Run agentgraph_run_cycle for AgentGraph validation. If repository instructions require another gate, report that it was unavailable without agent_loop_verify configuration."
+		: options.verify
+			? `Run this verification command unless a narrower failing-focused check is necessary first: ${options.verify}`
+			: "Run the most relevant focused tests or verification for the selected ticket. If repository instructions define a canonical gate, prefer that gate when practical.";
+	const graphModeSection = graphModeActive
+		? `
+
+AgentGraph mode is active for this iteration.
+- Do not use direct edit/write/bash workflows.
+- Use agentgraph_* tools for graph/source changes and treat generated/materialized files as derived state.
+- Use agent_loop_tk for ticket reads and updates.
+- Use agent_loop_git for git status, staging, and commits.
+- Use agent_loop_verify only for the supervisor-provided verification command; otherwise prefer agentgraph_run_cycle.`
+		: "";
 
 	return `You are an autonomous implementation worker running one iteration of a supervised agent loop.
 
@@ -850,7 +907,7 @@ Repository root: ${repoRoot}
 Loop root ticket: ${rootTicket.id} (${rootTicket.type ?? "unknown"})
 Selected ticket for this iteration: ${selectedTicket.id}
 
-This project uses tk, a git-backed ticket system. tk tickets are the source of truth for this loop. Run tk help if you need command details.
+This project uses tk, a git-backed ticket system. tk tickets are the source of truth for this loop. Run tk help if you need command details.${graphModeSection}
 
 Your job in this single iteration:
 1. Read the loop root ticket with: tk show ${rootTicket.id}
@@ -914,10 +971,10 @@ function maybeStopRepoDevEnvironment(repoRoot: string): void {
 	}
 }
 
-async function runChild(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, hooks: RunChildHooks = {}): Promise<ChildResult> {
+async function runChild(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, graphModeActive: boolean, hooks: RunChildHooks = {}): Promise<ChildResult> {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-loop-"));
 	const promptPath = path.join(tmpDir, "system-prompt.md");
-	fs.writeFileSync(promptPath, buildWorkerPrompt(options, repoRoot, rootTicket, selectedTicket), { encoding: "utf-8", mode: 0o600 });
+	fs.writeFileSync(promptPath, buildWorkerPrompt(options, repoRoot, rootTicket, selectedTicket, graphModeActive), { encoding: "utf-8", mode: 0o600 });
 
 	const args = ["--mode", "json", "-p", "--no-session", "--append-system-prompt", promptPath];
 	if (options.model) args.push("--model", options.model);
@@ -926,12 +983,18 @@ async function runChild(options: LoopOptions, repoRoot: string, rootTicket: Tick
 	return await new Promise((resolve) => {
 		const invocation = getPiInvocation(args);
 		hooks.onProgress?.({ kind: "phase", text: `spawning child for ${selectedTicket.id}` });
+		const childEnv: NodeJS.ProcessEnv = {
+			...process.env,
+			[LOOP_CHILD_ENV]: "1",
+			...(graphModeActive ? { [LOOP_GRAPH_ENV]: "1" } : {}),
+			...(options.verify ? { [LOOP_VERIFY_ENV]: options.verify, [LOOP_VERIFY_TIMEOUT_ENV]: String(options.timeoutMs) } : {}),
+		};
 		const proc = spawn(invocation.command, invocation.args, {
 			cwd: repoRoot,
 			shell: false,
 			detached: true,
 			stdio: ["ignore", "pipe", "pipe"],
-			env: { ...process.env, [LOOP_CHILD_ENV]: "1" },
+			env: childEnv,
 		});
 		let stdout = "";
 		let stderr = "";
@@ -1041,6 +1104,7 @@ Please summarize for the user what the loop accomplished, which tickets changed,
 
 async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: ExtensionAPI): Promise<void> {
 	const options = parseLoopArgs(rawArgs);
+	const graphModeActive = isAgentGraphModeActive(ctx);
 	await tk(ctx.cwd, ["help"]);
 	const repoRoot = await git(ctx.cwd, ["rev-parse", "--show-toplevel"]);
 	if (!options.allowDirty) await requireCleanWorktree(repoRoot);
@@ -1052,6 +1116,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: Exten
 	const progress = createLoopProgress(MAX_PROGRESS_LINES, ctx.model?.contextWindow);
 	setLoopStatus(ctx, progress, `aloop 0/${options.iterations}`);
 	pushLoopProgress(ctx, progress, `> starting ${options.iterations} iteration(s) for ${options.ticketId}`);
+	if (graphModeActive) pushLoopProgress(ctx, progress, "> graph mode: enabled for child");
 	if (structuralContainer) {
 		const message = `${root.id} is type: ${root.type ?? "unknown"} but has children; treating it as a loop container.`;
 		ctx.ui.notify(message, "warning");
@@ -1075,7 +1140,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: Exten
 
 			const beforeHead = await git(repoRoot, ["rev-parse", "HEAD"]);
 			const beforeTickets = ticketsFingerprint(repoRoot);
-			const child = await runChild(options, repoRoot, root, selected, {
+			const child = await runChild(options, repoRoot, root, selected, graphModeActive, {
 				onProgress: (activity) => applyChildProgress(ctx, progress, activity),
 			});
 			pushLoopProgress(ctx, progress, `> validate: checking ${selected.id}`);
@@ -1189,6 +1254,33 @@ function toolText(stdout: string, stderr = ""): string {
 	return truncate(parts.join("\n\n") || "ok");
 }
 
+function graphModeRequestedByEnvironment(): boolean {
+	return process.env[LOOP_GRAPH_ENV] === "1";
+}
+
+function registerLoopGraphMode(pi: ExtensionAPI): void {
+	if (!graphModeRequestedByEnvironment()) return;
+	const enableTools = () => pi.setActiveTools(graphLoopToolNames(pi));
+	pi.on("session_start", async (_event, ctx) => {
+		enableTools();
+		if (ctx.hasUI) ctx.ui.setStatus("agent-loop-graph", "graph loop");
+	});
+	pi.on("before_agent_start", async (event) => {
+		enableTools();
+		return {
+			systemPrompt:
+				event.systemPrompt +
+				"\n\nAgentGraph mode is active for this /aloop child. Direct edit/write/bash tools are unavailable. Use agentgraph_* tools for source changes, agent_loop_tk for ticket work, agent_loop_git for git lifecycle work, and agent_loop_verify only for the supervisor-provided verification command.",
+		};
+	});
+	pi.on("tool_call", async (event) => {
+		if (["edit", "write", "bash"].includes(event.toolName)) {
+			return { block: true, reason: "AgentGraph /aloop child mode requires graph and agent_loop_* tools instead of edit/write/bash." };
+		}
+		return undefined;
+	});
+}
+
 function registerAgentLoopTools(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "agent_loop_tk",
@@ -1236,6 +1328,7 @@ function registerAgentLoopTools(pi: ExtensionAPI): void {
 
 export default function registerAgentLoop(pi: ExtensionAPI): void {
 	registerAgentLoopTools(pi);
+	registerLoopGraphMode(pi);
 	if (process.env[LOOP_CHILD_ENV] === "1") return;
 
 	pi.registerCommand("aloop", {
