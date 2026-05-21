@@ -17,6 +17,7 @@ import {
 	pickReadyTicket,
 	pushLoopProgress,
 	shortTicketSummary,
+	shouldRegisterAgentLoopTools,
 	titleFromTkShow,
 	validateAgentLoopGitPath,
 	type TicketMeta,
@@ -239,4 +240,24 @@ test("graph-mode worker prompt uses restricted loop and AgentGraph tools", () =>
 	assert.match(prompt, /Use agent_loop_tk/);
 	assert.match(prompt, /Use agent_loop_git/);
 	assert.match(prompt, /Run agent_loop_verify/);
+});
+
+test("normal worker prompt keeps loop tools out of the context", () => {
+	const prompt = buildWorkerPrompt(
+		{ iterations: 1, ticketId: "tk-123", allowDirty: false, timeoutMs: 1000, verify: "nix run .#verify" },
+		"/repo",
+		{ id: "epic-1", type: "epic" },
+		{ id: "tk-123" },
+		false,
+	);
+	assert.match(prompt, /AgentGraph mode is not active/);
+	assert.match(prompt, /Use normal bash commands for tk, git, verification/);
+	assert.doesNotMatch(prompt, /agent_loop_/);
+	assert.doesNotMatch(prompt, /agentgraph_/);
+});
+
+test("restricted loop tools are only registered for AgentGraph loop children", () => {
+	assert.equal(shouldRegisterAgentLoopTools({ PI_AGENTGRAPH_MODE: "1" }), true);
+	assert.equal(shouldRegisterAgentLoopTools({ PI_AGENT_LOOP_CHILD: "1" }), false);
+	assert.equal(shouldRegisterAgentLoopTools({}), false);
 });

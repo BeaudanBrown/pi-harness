@@ -108,6 +108,9 @@ interface IterationSummary {
 	message: string;
 	verify: string;
 	result: string;
+	handoff?: string;
+	newTickets?: string;
+	blockers?: string;
 }
 
 export interface TicketMeta {
@@ -882,14 +885,14 @@ export function parseChildProgressLine(line: string): ChildActivity | undefined 
 	}
 }
 
-export function buildWorkerPrompt(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, graphModeActive = false): string {
+export function buildWorkerPrompt(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, graphModeActive = false, featureBrief = ""): string {
 	const verifyLine = graphModeActive
 		? options.verify
 			? "Run agent_loop_verify for the supervisor-provided verification command after AgentGraph validation."
 			: "Run agentgraph_run_cycle for AgentGraph validation. If repository instructions require another gate, report that it was unavailable without agent_loop_verify configuration."
 		: options.verify
-			? `Run this verification command unless a narrower failing-focused check is necessary first: ${options.verify}`
-			: "Run the most relevant focused tests or verification for the selected ticket. If repository instructions define a canonical gate, prefer that gate when practical.";
+			? `Run this verification command via bash unless a narrower failing-focused check is necessary first: ${options.verify}`
+			: "Run the most relevant focused tests or verification for the selected ticket via bash. If repository instructions define a canonical gate, prefer that gate when practical.";
 	const graphModeSection = graphModeActive
 		? `
 
@@ -899,7 +902,10 @@ AgentGraph mode is active for this iteration.
 - Use agent_loop_tk for ticket reads and updates.
 - Use agent_loop_git for git status, staging, and commits.
 - Use agent_loop_verify only for the supervisor-provided verification command; otherwise prefer agentgraph_run_cycle.`
-		: "";
+		: `
+
+AgentGraph mode is not active for this iteration.
+- Use normal bash commands for tk, git, verification, and local inspection when available.`;
 
 	return `You are an autonomous implementation worker running one iteration of a supervised agent loop.
 
@@ -909,7 +915,7 @@ Selected ticket for this iteration: ${selectedTicket.id}
 
 This project uses tk, a git-backed ticket system. tk tickets are the source of truth for this loop. Run tk help if you need command details.${graphModeSection}
 
-Your job in this single iteration:
+${featureBrief ? `${featureBrief}\n\n` : ""}Your job in this single iteration:
 1. Read the loop root ticket with: tk show ${rootTicket.id}
 2. Read the selected ticket with: tk show ${selectedTicket.id}
 3. Start the selected ticket if it is open: tk start ${selectedTicket.id}
@@ -920,11 +926,12 @@ Your job in this single iteration:
    - If it is speculative, add a concise note rather than growing the plan.
 6. Add or update tests when appropriate.
 7. ${verifyLine}
-8. Update tk with concise notes: tk add-note ${selectedTicket.id} "..."
-9. Before closing, review whether any discovered follow-up work should be captured as linked tk tickets or notes.
-10. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
-11. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
-12. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
+8. Update tk with concise implementation notes and a durable handoff note: tk add-note ${selectedTicket.id} "HANDOFF: <what changed>; <tests run>; <remaining risks or next touchpoint>"
+9. If your discovery affects sibling/future tickets, also add a short root note: tk add-note ${rootTicket.id} "HANDOFF from ${selectedTicket.id}: <cross-ticket context>"
+10. Before closing, review whether any discovered follow-up work should be captured as linked tk tickets or notes.
+11. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
+12. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
+13. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
 
 Hard requirements:
 - You must leave the worktree clean by committing successful changes.
@@ -941,7 +948,10 @@ TICKET: ${selectedTicket.id}
 COMMIT: <new commit hash, or none>
 VERIFY: <commands run and pass/fail result>
 TK_UPDATED: yes|no
-MESSAGE: <one-line handoff for the supervisor and next agent>`;
+MESSAGE: <one-line handoff for the supervisor and next agent>
+HANDOFF: <what changed, tests, remaining risk or next touchpoint>
+NEW_TICKETS: <ids created, or none>
+BLOCKERS: <ids/reasons, or none>`;
 }
 
 function getPiInvocation(args: string[]): { command: string; args: string[] } {
@@ -971,10 +981,65 @@ function maybeStopRepoDevEnvironment(repoRoot: string): void {
 	}
 }
 
-async function runChild(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, graphModeActive: boolean, hooks: RunChildHooks = {}): Promise<ChildResult> {
+function formatTicketMap(root: TicketMeta, tickets: TicketMeta[], selectedTicket: TicketMeta): string {
+	const byId = new Map(tickets.map((ticket) => [ticket.id, ticket]));
+	const scope = isLoopContainer(root, tickets) ? descendantTickets(root, tickets) : [root];
+	const lines = scope.slice(0, 40).map((ticket) => {
+		const deps = (ticket.deps ?? []).filter((dep) => byId.get(dep)?.status !== "closed");
+		const markers = [
+			ticket.id === selectedTicket.id ? "selected" : undefined,
+			isLoopContainer(ticket, tickets) ? "container" : undefined,
+			deps.length > 0 ? `blocked <- ${deps.join(", ")}` : undefined,
+		].filter(Boolean).join(", ");
+		return `- ${ticket.status ?? "unknown"} ${ticket.type ?? "ticket"} ${formatTicketRef(ticket)}${markers ? ` (${markers})` : ""}`;
+	});
+	if (scope.length > lines.length) lines.push(`- ...${scope.length - lines.length} more ticket(s) omitted`);
+	return lines.join("\n") || "- (no child tickets)";
+}
+
+function formatCompletedWork(root: TicketMeta, tickets: TicketMeta[], summaries: IterationSummary[]): string {
+	const completed = descendantTickets(root, tickets).filter((ticket) => ticket.status === "closed").slice(-12);
+	const completedLines = completed.map((ticket) => `- ${formatTicketRef(ticket)}`);
+	const summaryLines = summaries.slice(-5).map((item) => {
+		const handoff = item.handoff || item.message || item.verify;
+		return `- iteration ${item.iteration} ${item.ticket} ${item.commit.slice(0, 12)}: ${handoff}`;
+	});
+	return [...completedLines, ...summaryLines].join("\n") || "- (none yet)";
+}
+
+async function buildLoopFeatureBrief(repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, tickets: TicketMeta[], summaries: IterationSummary[]): Promise<string> {
+	let rootDetails = "";
+	try {
+		rootDetails = truncate(await tk(repoRoot, ["show", rootTicket.id]), 3500);
+	} catch {
+		rootDetails = `${formatTicketRef(rootTicket)}\n(root ticket details unavailable)`;
+	}
+
+	return `Loop Feature Brief
+
+Root Epic / Feature
+- ID: ${rootTicket.id}
+- Type: ${rootTicket.type ?? "unknown"}
+- Status: ${rootTicket.status ?? "unknown"}
+- Title: ${ticketSummary(rootTicket) ?? "(untitled)"}
+
+Root Ticket Details
+${rootDetails}
+
+Current Ticket Map
+${formatTicketMap(rootTicket, tickets, selectedTicket)}
+
+Completed Work And Recent Handoffs
+${formatCompletedWork(rootTicket, tickets, summaries)}
+
+Worker Scope Reminder
+You are working only on selected ticket ${selectedTicket.id}. Use this brief for context, but tk show ${rootTicket.id} and tk show ${selectedTicket.id} remain authoritative. If the brief, root ticket, and selected ticket conflict, update tk with the conflict and block instead of silently broadening scope.`;
+}
+
+async function runChild(options: LoopOptions, repoRoot: string, rootTicket: TicketMeta, selectedTicket: TicketMeta, featureBrief: string, graphModeActive: boolean, hooks: RunChildHooks = {}): Promise<ChildResult> {
 	const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-agent-loop-"));
 	const promptPath = path.join(tmpDir, "system-prompt.md");
-	fs.writeFileSync(promptPath, buildWorkerPrompt(options, repoRoot, rootTicket, selectedTicket, graphModeActive), { encoding: "utf-8", mode: 0o600 });
+	fs.writeFileSync(promptPath, buildWorkerPrompt(options, repoRoot, rootTicket, selectedTicket, graphModeActive, featureBrief), { encoding: "utf-8", mode: 0o600 });
 
 	const args = ["--mode", "json", "-p", "--no-session", "--append-system-prompt", promptPath];
 	if (options.model) args.push("--model", options.model);
@@ -1062,7 +1127,14 @@ async function runChild(options: LoopOptions, repoRoot: string, rootTicket: Tick
 function formatSummaries(summaries: IterationSummary[]): string {
 	if (summaries.length === 0) return "No iterations completed.";
 	return summaries
-		.map((item) => `${item.iteration}. ${item.ticket} ${item.commit.slice(0, 12)} ${item.result} - ${item.message || item.verify}`)
+		.map((item) => {
+			const extras = [
+				item.handoff ? `handoff: ${item.handoff}` : undefined,
+				item.newTickets && item.newTickets !== "none" ? `new tickets: ${item.newTickets}` : undefined,
+				item.blockers && item.blockers !== "none" ? `blockers: ${item.blockers}` : undefined,
+			].filter(Boolean).join("; ");
+			return `${item.iteration}. ${item.ticket} ${item.commit.slice(0, 12)} ${item.result} - ${item.message || item.verify}${extras ? ` (${extras})` : ""}`;
+		})
 		.join("\n");
 }
 
@@ -1138,9 +1210,10 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: Exten
 			setLoopStatus(ctx, progress, `aloop ${i}/${options.iterations} ${selected.id}`);
 			pushLoopProgress(ctx, progress, root.id === selected.id ? `> selected: ${selected.id}` : `> selected: ${selected.id} from ${root.id}`);
 
+			const featureBrief = await buildLoopFeatureBrief(repoRoot, root, selected, tickets, summaries);
 			const beforeHead = await git(repoRoot, ["rev-parse", "HEAD"]);
 			const beforeTickets = ticketsFingerprint(repoRoot);
-			const child = await runChild(options, repoRoot, root, selected, graphModeActive, {
+			const child = await runChild(options, repoRoot, root, selected, featureBrief, graphModeActive, {
 				onProgress: (activity) => applyChildProgress(ctx, progress, activity),
 			});
 			pushLoopProgress(ctx, progress, `> validate: checking ${selected.id}`);
@@ -1190,6 +1263,9 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: Exten
 				message: footer.message ?? "",
 				verify: footer.verify ?? "verification not reported",
 				result,
+				handoff: footer.handoff,
+				newTickets: footer.new_tickets,
+				blockers: footer.blockers,
 			});
 
 			if (result === "stop") break;
@@ -1217,19 +1293,21 @@ This project uses tk, a git-backed ticket system. Use tk as the durable source o
 
 Planning workflow:
 1. Inspect project guidance and docs first: AGENTS.md, README.md, docs, CONTEXT.md, ADRs, and existing .tickets when present.
-2. Cross-reference the code enough to ground terminology and feasibility.
-3. Challenge fuzzy language. Prefer concrete scenarios, edge cases, cardinality, state transitions, deletion behavior, migration concerns, and success criteria.
-4. Ask high-leverage clarification questions before creating tickets unless the user explicitly provided enough detail or invoked create mode.
-5. Capture shared language, decisions, non-goals, risks, verification strategy, and chunk boundaries.
-6. Create one tk epic for the whole unit of work and child tk tickets for implementation chunks. Use --parent for children, --design for decisions/approach, --acceptance for done criteria, and tk dep for ordering dependencies.
-7. For nested plans, use type: epic for any container users should pass to /aloop; use feature, task, bug, or chore for leaf implementation tickets. If a ticket gains children later, either convert it to epic or expect /aloop to treat it as a structural container.
-8. Commit the ticket plan after creating or materially updating tickets: stage only .tickets changes and commit them with a message like "plan <feature> tickets". Do not include unrelated dirty work in that commit.
-9. After committing the ticket plan, check git status --short. If there are any remaining dirty changes, stop and ask the user what to do with them before suggesting /aloop, because /aloop expects a clean worktree unless --allow-dirty is explicitly used.
-10. Treat the epic as a container: once the final descendant is closed, verify the epic acceptance criteria, add a closeout note, and close the epic.
-11. Make chunks large enough for meaningful commits but small enough for one fresh /aloop worker iteration.
-12. End by listing the epic id, child ticket ids, dependency notes, the ticket-plan commit hash, whether the worktree is clean, and the exact command the user can run next: /aloop <n> <epic-id>.
+2. Cross-reference the code enough to ground terminology and feasibility. Find existing names, boundaries, tests, and likely implementation seams.
+3. Grill the request like /grill-with-docs: walk the design tree branch by branch, challenge fuzzy language against existing docs/code, and prefer concrete scenarios, edge cases, cardinality, state transitions, deletion behavior, migration concerns, permission rules, and success criteria.
+4. Ask focused clarification questions in rounds. After each user answer, update your decision ledger and decide whether another round is needed. Keep asking until blocking ambiguity is resolved and your remaining assumptions are low-risk and explicit.
+5. When asking questions, offer options with tradeoffs and a recommendation when useful. Do not dump a long questionnaire if one or two high-leverage questions unblock the next branch.
+6. Maintain a visible planning ledger in your replies: resolved decisions, open questions, assumptions, terminology/shared language, non-goals, risks, and verification strategy.
+7. Before mutating tk, present a draft plan for explicit user confirmation. Include the proposed epic title/goal/design/acceptance, child tickets, dependencies, chunk order, verification strategy, assumptions, non-goals, and any docs/ADRs/CONTEXT updates you intend to make.
+8. Do not create, update, close, or commit tk tickets until the user explicitly approves the draft plan. If the user asks for changes, revise the draft and ask for confirmation again.
+9. After approval, create one tk epic for the whole unit of work and child tk tickets for implementation chunks. Use --parent for children, --design for decisions/approach, --acceptance for done criteria, and tk dep for ordering dependencies.
+10. For nested plans, use type: epic for any container users should pass to /aloop; use feature, task, bug, or chore for leaf implementation tickets. If a ticket gains children later, either convert it to epic or expect /aloop to treat it as a structural container.
+11. Commit the approved ticket plan after creating or materially updating tickets: stage only .tickets changes and commit them with a message like "plan <feature> tickets". Do not include unrelated dirty work in that commit.
+12. After committing the ticket plan, check git status --short. If there are any remaining dirty changes, stop and ask the user what to do with them before suggesting /aloop, because /aloop expects a clean worktree unless --allow-dirty is explicitly used.
+13. Treat the epic as a container: once the final descendant is closed, verify the epic acceptance criteria, add a closeout note, and close the epic.
+14. End by listing the epic id, child ticket ids, dependency notes, the ticket-plan commit hash, whether the worktree is clean, and the exact command the user can run next: /aloop <n> <epic-id>.
 
-${createNow ? "The user requested create mode. If enough information is present, create the tk epic and child tickets now; otherwise ask only the blocking questions." : "Do not create tickets yet if important product/domain decisions are unclear. Ask concise clarification questions first, then create tickets after the user answers."}`;
+${createNow ? "The user requested create mode, but still require an explicit approval moment before mutating tk unless they already supplied a concrete ticket plan and explicitly said to create it now." : "Clarify mode: do not mutate tk. Keep grilling until confident, then present the draft plan and ask for approval."}`;
 }
 
 async function startPlanning(rawArgs: string, pi: ExtensionAPI, ctx: ExtensionCommandContext): Promise<void> {
@@ -1255,7 +1333,11 @@ function toolText(stdout: string, stderr = ""): string {
 }
 
 function graphModeRequestedByEnvironment(): boolean {
-	return process.env[LOOP_GRAPH_ENV] === "1";
+	return shouldRegisterAgentLoopTools(process.env);
+}
+
+export function shouldRegisterAgentLoopTools(env: NodeJS.ProcessEnv = process.env): boolean {
+	return env[LOOP_GRAPH_ENV] === "1";
 }
 
 function registerLoopGraphMode(pi: ExtensionAPI): void {
@@ -1327,8 +1409,10 @@ function registerAgentLoopTools(pi: ExtensionAPI): void {
 }
 
 export default function registerAgentLoop(pi: ExtensionAPI): void {
-	registerAgentLoopTools(pi);
-	registerLoopGraphMode(pi);
+	if (shouldRegisterAgentLoopTools()) {
+		registerAgentLoopTools(pi);
+		registerLoopGraphMode(pi);
+	}
 	if (process.env[LOOP_CHILD_ENV] === "1") return;
 
 	pi.registerCommand("aloop", {
