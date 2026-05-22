@@ -1,6 +1,6 @@
 ---
 id: ph-6ze8
-status: open
+status: closed
 deps: [ph-0es9, ph-o6be, ph-ypfu, ph-wn6h, ph-omy2]
 links: []
 created: 2026-05-22T02:18:13Z
@@ -22,3 +22,9 @@ Update pi-harness docs with the model: project environment owns dependencies, la
 
 README or docs explain how agents should use LSP tools, how project-local language servers shadow fallbacks, and which dependency problems remain project-owned.
 
+
+## Notes
+
+**2026-05-22T02:58:34Z**
+
+HANDOFF: Added docs/lsp-agent-operating-model.md and linked README LSP notes documenting agent LSP workflow, PATH shadowing of harness fallbacks, project-owned dependency/config boundaries, and rg/tree-sitter fallback cases; tests run: nix run .#verify passed; remaining risk: no live interactive LSP session exercised.

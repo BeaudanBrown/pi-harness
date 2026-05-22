@@ -192,7 +192,17 @@ Use Pi's built-in session commands for conversation state:
 
 ## LSP Notes
 
-- `docs/lsp-current-behavior.md` records the current packaged Pi LSP behavior,
+- `docs/lsp-agent-operating-model.md` explains how agents should use Pi's LSP
+  tools: start Pi from the project environment, prefer semantic tools when the
+  server advertises the needed capability, inspect `/lsp status` for
+  root/command/capability/diagnostic context, and fall back to `rg`, file reads,
+  or tree-sitter when semantic setup is unavailable.
+- Project-local language servers shadow harness fallbacks because the NixOS
+  wrapper appends fallback LSP packages after the caller's existing `PATH`.
+  Dependencies, SDKs, generated files, and project configs remain owned by the
+  repository being edited; the harness reports those failures rather than
+  installing packages or inventing language-specific setup.
+- `docs/lsp-current-behavior.md` records the baseline packaged Pi LSP behavior,
   known failure modes, and the boundary between harness fixes and project-owned
   language-server configuration.
 

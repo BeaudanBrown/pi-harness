@@ -47,3 +47,7 @@ HANDOFF from ph-wn6h: Harness fallback LSP mappings now cover installed servers 
 **2026-05-22T02:55:24Z**
 
 HANDOFF from ph-ypfu: Workspace symbol search now queries all running LSP servers and reports per-server result/failure summaries before falling back to tree-sitter.
+
+**2026-05-22T02:58:34Z**
+
+HANDOFF from ph-6ze8: Agent-facing LSP operating model is now documented in docs/lsp-agent-operating-model.md and linked from README; this should unblock patch-size/fork-threshold evaluation with the intended user-facing model captured.
