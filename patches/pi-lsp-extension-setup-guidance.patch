@@ -1,0 +1,164 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -493,6 +493,8 @@
+           `  root: ${s.rootDir}`,
+           `  diagnostics: ${diagnostics}`,
+           `  capabilities: ${formatCapabilities(s.capabilities)}`,
++          ...(s.lastError ? [`  last error: ${s.lastError}`] : []),
++          ...(s.setupHint ? [`  setup hint: ${s.setupHint}`] : []),
+         ];
+       });
+ 
+--- a/src/lsp-manager.ts
++++ b/src/lsp-manager.ts
+@@ -64,6 +64,8 @@
+   diagnosticsCount: number;
+   diagnosticsFiles: number;
+   capabilities: ServerCapabilityStatus;
++  lastError?: string;
++  setupHint?: string;
+   /** True if using a shared daemon (vs direct spawn) */
+   shared: boolean;
+ }
+@@ -82,6 +84,7 @@
+   private _shuttingDown = false;
+   private _restartAttempts: Map<string, number> = new Map();
+   private _restartBackoff: Map<string, number> = new Map();
++  private _lastServerErrors: Map<string, string> = new Map();
+ 
+   private static readonly MAX_RESTART_ATTEMPTS = 3;
+   private static readonly INITIAL_BACKOFF_MS = 1000;
+@@ -252,6 +255,11 @@
+     if (existing && !existing.initialized && !existing.disposed) {
+       return `LSP server for ${languageId} is initializing. ${waitHint} Retry shortly.`;
+     }
++    const lastError = this._lastServerErrors.get(languageId);
++    if (lastError) {
++      const hint = getSetupHint(languageId, lastError);
++      return `LSP server for ${languageId} is unavailable after startup failure: ${lastError}${hint ? ` ${hint}` : ""}`;
++    }
+     return `No LSP server available for: ${filePath}. If you just opened this project, call any LSP tool on a file to trigger server startup.`;
+   }
+ 
+@@ -404,6 +412,7 @@
+         await client.start();
+         this.clients.set(languageId, client);
+         this.startingServers.delete(languageId);
++        this._lastServerErrors.delete(languageId);
+         this._callbacks.onServerReady?.(languageId);
+         this._restartAttempts.delete(languageId);
+         this._restartBackoff.delete(languageId);
+@@ -442,6 +451,7 @@
+             await client.start();
+             this.clients.set(languageId, client);
+             this.startingServers.delete(languageId);
++            this._lastServerErrors.delete(languageId);
+             this._callbacks.onServerReady?.(languageId);
+             this._restartAttempts.delete(languageId);
+             this._restartBackoff.delete(languageId);
+@@ -481,6 +491,7 @@
+       await client.start();
+       this.clients.set(languageId, client);
+       this.startingServers.delete(languageId);
++      this._lastServerErrors.delete(languageId);
+       this._callbacks.onServerReady?.(languageId);
+       this._restartAttempts.delete(languageId);
+       this._restartBackoff.delete(languageId);
+@@ -488,7 +499,10 @@
+       return client;
+     } catch (err: any) {
+       this.startingServers.delete(languageId);
+-      const message = `Failed to start LSP server for ${languageId} (${config.command}): ${err.message}`;
++      const rawMessage = err?.message ?? String(err);
++      this._lastServerErrors.set(languageId, rawMessage);
++      const hint = getSetupHint(languageId, rawMessage);
++      const message = `Failed to start LSP server for ${languageId} (${config.command}): ${rawMessage}${hint ? ` ${hint}` : ""}`;
+       this._callbacks.onServerError?.(languageId, message);
+       throw new Error(message);
+     }
+@@ -607,6 +621,8 @@
+         diagnosticsCount,
+         diagnosticsFiles: allDiagnostics.size,
+         capabilities: capabilityStatus(client?.serverCapabilities),
++        lastError: this._lastServerErrors.get(languageId),
++        setupHint: getSetupHint(languageId, this._lastServerErrors.get(languageId) ?? ""),
+         shared: daemonAlive,
+       });
+     }
+@@ -742,3 +758,22 @@
+     workspaceSymbols: hasProvider(capabilities.workspaceSymbolProvider),
+   };
+ }
++
++function getSetupHint(languageId: string, message: string): string | undefined {
++  const lower = message.toLowerCase();
++  const isTypeScript = ["typescript", "javascript", "typescriptreact", "javascriptreact"].includes(languageId);
++
++  if (lower.includes("enoent") || lower.includes("not found") || lower.includes("failed to spawn")) {
++    return "Ensure the language server command is available in PATH by launching Pi from the project dev shell/direnv, or configure a project-owned .pi-lsp.json server command.";
++  }
++
++  if (isTypeScript && (lower.includes("no project") || lower.includes("tsconfig") || lower.includes("jsconfig"))) {
++    return "TypeScript needs a project context; launch Pi from the project root/dev shell or add a project-owned tsconfig.json/jsconfig.json.";
++  }
++
++  if (isTypeScript && (lower.includes("cannot find module") || lower.includes("cannot find type definition") || lower.includes("module resolution"))) {
++    return "TypeScript dependency resolution is owned by this repo; enter the project dev shell/direnv and install or configure project deps/types rather than relying on the harness fallback server.";
++  }
++
++  return undefined;
++}
+--- a/src/tools/diagnostics.ts
++++ b/src/tools/diagnostics.ts
+@@ -37,6 +37,35 @@
+   return `${filePath}:${line}:${col} ${sev}: ${diag.message}${code}${source}`;
+ }
+ 
++function setupGuidanceForDiagnostic(diag: Diagnostic): string | null {
++  const message = diag.message.toLowerCase();
++  const source = String(diag.source ?? "").toLowerCase();
++  const code = diag.code !== undefined ? String(diag.code).toLowerCase() : "";
++  const looksLikeTypeScript = source.includes("ts") || source.includes("typescript") || /^ts\d+$/i.test(code);
++
++  if (message.includes("no project") || message.includes("project context")) {
++    return "TypeScript did not find a project for this file; launch Pi from the project dev shell/root or add a project-owned tsconfig.json/jsconfig.json.";
++  }
++
++  if (!looksLikeTypeScript) return null;
++
++  if (message.includes("cannot find type definition file for 'node'") || message.includes('cannot find type definition file for "node"') || message.includes("cannot find name 'process'") || message.includes('cannot find name "process"') || message.includes("cannot find name 'require'") || message.includes('cannot find name "require"')) {
++    return "Node types are missing from the project environment/config; add project-owned @types/node/tsconfig types or enter the project's dev shell.";
++  }
++
++  if (message.includes("cannot find module") || message.includes("could not find a declaration file for module") || message.includes("cannot find namespace")) {
++    return "TypeScript cannot resolve a project dependency or declaration; run Pi from the project dev shell/direnv and ensure package deps/types are installed by the project.";
++  }
++
++  return null;
++}
++
++function appendSetupGuidance(text: string, diagnostics: Diagnostic[]): string {
++  const guidance = [...new Set(diagnostics.map(setupGuidanceForDiagnostic).filter((v): v is string => Boolean(v)))];
++  if (guidance.length === 0) return text;
++  return `${text}\n\nSetup guidance:\n${guidance.map((line) => `- ${line}`).join("\n")}`;
++}
++
+ const DiagnosticsParams = Type.Object({
+   path: Type.String({ description: "File path to get diagnostics for. Pass \"*\" to get all workspace diagnostics from all running LSP servers." }),
+ });
+@@ -101,6 +130,7 @@
+         if (truncation.truncated) {
+           resultText += `\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} diagnostics]`;
+         }
++        resultText = appendSetupGuidance(resultText, sorted);
+ 
+         return {
+           content: [{ type: "text", text: resultText }],
+@@ -253,6 +283,7 @@
+   if (truncation.truncated) {
+     resultText += `\n\n[Output truncated: showing ${truncation.outputLines} of ${truncation.totalLines} diagnostics]`;
+   }
++  resultText = appendSetupGuidance(resultText, allDiagnostics.map((d) => d.diag));
+ 
+   return {
+     content: [{ type: "text" as const, text: resultText }],

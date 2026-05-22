@@ -35,3 +35,7 @@ HANDOFF from ph-0es9: File-scoped LSP tools now route getClientForFile through F
 **2026-05-22T02:34:02Z**
 
 HANDOFF from ph-o6be: /lsp status now reports server state/root/command/diagnostic counts and key advertised capabilities; daemon-backed clients fetch capabilities through a small local pi/serverCapabilities bridge for future agent-facing docs.
+
+**2026-05-22T02:42:33Z**
+
+HANDOFF from ph-omy2: LSP diagnostics and status now surface project-owned setup guidance for TypeScript No Project, missing Node types, unresolved modules, and missing server commands without installing deps or generating config.

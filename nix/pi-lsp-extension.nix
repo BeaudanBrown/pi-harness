@@ -77,6 +77,7 @@ buildNpmPackage {
     patches = [
       ../patches/pi-lsp-extension-document-sync.patch
       ../patches/pi-lsp-extension-status-reporting.patch
+      ../patches/pi-lsp-extension-setup-guidance.patch
     ];
   };
   npmDepsHash = "sha256-4SqvK2NDFxn61pcU7zQRfvUK/lpLcSNuc/4M8uxsLOA=";
