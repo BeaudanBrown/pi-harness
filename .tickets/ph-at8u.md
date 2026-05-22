@@ -1,6 +1,6 @@
 ---
 id: ph-at8u
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-05-22T02:18:13Z
@@ -59,3 +59,7 @@ HANDOFF from ph-n5fl: Patch-size review recommends keeping pi-lsp-extension as l
 **2026-05-22T03:00:36Z**
 
 CLOSEOUT CHECK: All child tickets are closed. Epic acceptance criteria are represented by completed handoffs for document sync, all-server workspace symbols, status/capabilities, fallback mappings, setup guidance, operating docs, and fork-threshold evaluation; nix run .#verify passed on 2026-05-22. Remaining validation risk across the epic: no live interactive LSP session was exercised in these iterations.
+
+**2026-05-22T03:00:57Z**
+
+All descendant tickets are closed; closing epic after ph-n5fl.
