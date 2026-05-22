@@ -8,11 +8,11 @@
         "pi-lsp-extension-src": "pi-lsp-extension-src"
       },
       "locked": {
-        "lastModified": 1779448460,
-        "narHash": "sha256-vuTM1noNRI/ssIC9XJ89qngkQawWOznTLfJ0xpc+nOg=",
+        "lastModified": 1779450319,
+        "narHash": "sha256-b+opgeViZlvKfEkhTjm/studsSawFOGaWg0Ml6PEFRk=",
         "ref": "refs/heads/master",
-        "rev": "bf9ffc9f283ae2f9410cef0869e231ddaf7423d0",
-        "revCount": 258,
+        "rev": "dd57dae85fa8b62256cc2cdc730a1dfe43c1a4a2",
+        "revCount": 259,
         "type": "git",
         "url": "ssh://git@github.com/BeaudanBrown/agentgraph.git"
       },
