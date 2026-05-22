@@ -3,6 +3,7 @@
   lib,
   piLspExtensionSrc,
   writeText,
+  applyPatches,
 }:
 
 let
@@ -70,7 +71,11 @@ in
 buildNpmPackage {
   pname = "pi-lsp-extension";
   version = "1.2.1";
-  src = piLspExtensionSrc;
+  src = applyPatches {
+    name = "pi-lsp-extension-patched-src";
+    src = piLspExtensionSrc;
+    patches = [ ../patches/pi-lsp-extension-document-sync.patch ];
+  };
   npmDepsHash = "sha256-4SqvK2NDFxn61pcU7zQRfvUK/lpLcSNuc/4M8uxsLOA=";
   dontNpmBuild = true;
 

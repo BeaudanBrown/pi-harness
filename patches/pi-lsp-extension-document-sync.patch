@@ -1,0 +1,92 @@
+--- a/src/file-sync.ts
++++ b/src/file-sync.ts
+@@ -24,6 +24,8 @@
+   uri: string;
+   languageId: string;
+   version: number;
++  /** Client instance that has received didOpen for this document. */
++  syncedClient?: unknown;
+ }
+ 
+ export class FileSync {
+@@ -99,7 +101,7 @@
+ 
+     try {
+       const content = await readFile(absPath, "utf-8");
+-      const doc: TrackedDocument = { uri, languageId, version: 1 };
++      const doc: TrackedDocument = { uri, languageId, version: 1, syncedClient: client };
+       this.tracked.set(uri, doc);
+       client.didOpen(uri, languageId, doc.version, content);
+       this.touchAndEvict(uri);
+@@ -154,10 +156,11 @@
+       if (existing) {
+         // Already open — send didChange with incremented version
+         existing.version++;
++        existing.syncedClient = client;
+         client.didChange(uri, existing.version, content);
+       } else {
+         // First time — send didOpen
+-        const doc: TrackedDocument = { uri, languageId, version: 1 };
++        const doc: TrackedDocument = { uri, languageId, version: 1, syncedClient: client };
+         this.tracked.set(uri, doc);
+         client.didOpen(uri, languageId, doc.version, content);
+       }
+@@ -167,6 +170,41 @@
+     }
+   }
+ 
++
++  /**
++   * Ensure a target file has been opened on the active LSP client before
++   * file-scoped textDocument requests. This covers files read before a server
++   * existed and documents whose previous client crashed or restarted.
++   */
++  async ensureFileOpen(filePath: string, client?: unknown): Promise<void> {
++    const absPath = this.manager.resolvePath(filePath);
++    const uri = this.manager.getFileUri(absPath);
++    const languageId = this.manager.getLanguageId(absPath);
++    if (!languageId) return;
++
++    const lspClient = (client ?? this.manager.getRunningClient(languageId)) as {
++      didOpen(uri: string, languageId: string, version: number, text: string): void;
++    } | null;
++    if (!lspClient) return;
++
++    const existing = this.tracked.get(uri);
++    if (existing?.syncedClient === lspClient) {
++      this.touchAndEvict(uri);
++      return;
++    }
++
++    try {
++      const content = await readFile(absPath, "utf-8");
++      const version = existing ? existing.version + 1 : 1;
++      const doc: TrackedDocument = { uri, languageId, version, syncedClient: lspClient };
++      this.tracked.set(uri, doc);
++      lspClient.didOpen(uri, languageId, version, content);
++      this.touchAndEvict(uri);
++    } catch {
++      // File might not exist or be unreadable — ignore.
++    }
++  }
++
+   /**
+    * Get the current tracked version for a URI, or null if not tracked.
+    * Used by tools that need to send temporary didChange notifications
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -313,6 +313,14 @@
+   // Tools call getManager() lazily so they work even if session_start hasn't fired
+   const managerProxy = new Proxy({} as LspManager, {
+     get(_target, prop) {
++      if (prop === "getClientForFile") {
++        return async (filePath: string) => {
++          const mgr = getManager();
++          const client = await mgr.getClientForFile(filePath);
++          if (client) await getFileSync().ensureFileOpen(filePath, client);
++          return client;
++        };
++      }
+       return (getManager() as any)[prop];
+     },
+   });

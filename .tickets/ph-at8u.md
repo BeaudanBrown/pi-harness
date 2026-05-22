@@ -27,3 +27,7 @@ Agents can use file-scoped LSP tools without document-not-found failures caused 
 **2026-05-22T02:23:50Z**
 
 HANDOFF from ph-3w1e: Current LSP behavior and failure-mode boundary documented in docs/lsp-current-behavior.md; sibling LSP implementation tickets should use it as the shared scope reference.
+
+**2026-05-22T02:28:58Z**
+
+HANDOFF from ph-0es9: File-scoped LSP tools now route getClientForFile through FileSync.ensureFileOpen, covering files read before server startup and restarted clients without language-specific dependency logic.
