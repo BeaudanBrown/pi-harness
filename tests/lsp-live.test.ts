@@ -175,6 +175,16 @@ export async function createFixtureFile(root: string, relativePath: string, cont
 	return path;
 }
 
+test("workspace symbols are capability-aware and timeout-bounded", async () => {
+	const extensionRoot = process.env.PI_LSP_EXTENSION ?? "";
+	assert.ok(extensionRoot, "PI_LSP_EXTENSION must point at the packaged pi-lsp-extension root");
+	const symbolsSource = await readFile(join(extensionRoot, "src/tools/symbols.ts"), "utf8");
+	assert.match(symbolsSource, /WORKSPACE_SYMBOL_TIMEOUT_MS/);
+	assert.match(symbolsSource, /Promise\.all\(queryableStatuses\.map/);
+	assert.match(symbolsSource, /workspaceSymbols !== false/);
+	assert.match(symbolsSource, /Skipped unsupported servers/);
+});
+
 test("FileSync opens once, refreshes changed content, and keys daemon clients by sync identity", async () => {
 	await withTempDir(async (dir) => {
 		const filePath = await createFixtureFile(dir, "src/example.ts", "export const value = 1;\n");

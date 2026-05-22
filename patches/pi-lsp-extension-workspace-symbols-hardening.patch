@@ -1,0 +1,83 @@
+--- a/src/tools/symbols.ts	2026-05-22 15:15:19.835999336 +1000
++++ b/src/tools/symbols.ts	2026-05-22 15:16:24.584246764 +1000
+@@ -16,6 +16,8 @@
+ import { fileURLToPath } from "node:url";
+ import { relative } from "node:path";
+ 
++const WORKSPACE_SYMBOL_TIMEOUT_MS = Number(process.env.PI_LSP_WORKSPACE_SYMBOL_TIMEOUT_MS ?? "3000");
++
+ const SYMBOL_KIND_NAMES: Record<number, string> = {
+   [SymbolKind.File]: "file", [SymbolKind.Module]: "module", [SymbolKind.Namespace]: "namespace",
+   [SymbolKind.Package]: "package", [SymbolKind.Class]: "class", [SymbolKind.Method]: "method",
+@@ -91,6 +93,23 @@
+ 
+   return `${sym.name}\u0000${sym.kind}\u0000${location}`;
+ }
++
++function supportsWorkspaceSymbols(status: { capabilities?: { workspaceSymbols: boolean | null } }): boolean {
++  return status.capabilities?.workspaceSymbols !== false;
++}
++
++async function withWorkspaceSymbolTimeout<T>(request: Promise<T>): Promise<T> {
++  let timer: ReturnType<typeof setTimeout> | undefined;
++  const timeout = new Promise<never>((_, reject) => {
++    timer = setTimeout(() => reject(new Error(`workspace/symbol timed out after ${WORKSPACE_SYMBOL_TIMEOUT_MS}ms`)), WORKSPACE_SYMBOL_TIMEOUT_MS);
++  });
++  try {
++    return await Promise.race([request, timeout]);
++  } finally {
++    if (timer) clearTimeout(timer);
++  }
++}
++
+ export function createSymbolsTool(
+   manager: LspManager,
+   treeSitter?: TreeSitterManager | null,
+@@ -178,6 +197,8 @@
+       // Workspace symbol search
+       const statuses = manager.getStatus();
+       const runningStatuses = statuses.filter((s) => s.running);
++      const queryableStatuses = runningStatuses.filter(supportsWorkspaceSymbols);
++      const skippedStatuses = runningStatuses.filter((s) => !supportsWorkspaceSymbols(s));
+       let workspaceStatusText = "";
+ 
+       if (runningStatuses.length > 0) {
+@@ -187,17 +208,17 @@
+         const serverSummaries: string[] = [];
+         const failures: string[] = [];
+ 
+-        for (const status of runningStatuses) {
++        await Promise.all(queryableStatuses.map(async (status) => {
+           const client = await manager.getClientForLanguage(status.languageId).catch(() => null);
+           if (!client) {
+             failures.push(`${status.languageId}: running status reported but no active client was available`);
+-            continue;
++            return;
+           }
+ 
+           try {
+-            const result = await client.sendRequest<(SymbolInformation | WorkspaceSymbol)[] | null>(
++            const result = await withWorkspaceSymbolTimeout(client.sendRequest<(SymbolInformation | WorkspaceSymbol)[] | null>(
+               "workspace/symbol", { query: query ?? "" }
+-            );
++            ));
+             const resultCount = result?.length ?? 0;
+             serverSummaries.push(`${status.languageId}: ${resultCount}`);
+ 
+@@ -211,11 +232,12 @@
+             const message = err?.message ?? String(err);
+             failures.push(`${status.languageId}: ${message}`);
+           }
+-        }
++        }));
+ 
+-        const summaryText = serverSummaries.length > 0 ? `Server results: ${serverSummaries.join(", ")}` : "";
+-        const failureText = failures.length > 0 ? `Server failures: ${failures.join("; ")}` : "";
+-        workspaceStatusText = [summaryText, failureText].filter(Boolean).join("\n");
++        const summaryText = serverSummaries.length > 0 ? `Server results: ${serverSummaries.sort().join(", ")}` : "";
++        const failureText = failures.length > 0 ? `Server failures: ${failures.sort().join("; ")}` : "";
++        const skippedText = skippedStatuses.length > 0 ? `Skipped unsupported servers: ${skippedStatuses.map((s) => s.languageId).sort().join(", ")}` : "";
++        workspaceStatusText = [summaryText, failureText, skippedText].filter(Boolean).join("\n");
+ 
+         if (symbols.length > 0) {
+           const lines = symbols.map((s) => formatSymbolInfo(s, rootDir));
