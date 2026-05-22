@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -49,6 +49,7 @@ async function compileExtensionModule(tempRoot: string, entryPoint: string): Pro
 		// still emits usable JavaScript for the modules under test.
 		if (!error?.stdout && !error?.stderr) throw error;
 	}
+	await symlink(join(extensionRoot, "node_modules"), join(outDir, "node_modules")).catch(() => undefined);
 	return join(outDir, entryPoint.replace(/\.ts$/, ".js"));
 }
 
@@ -194,6 +195,42 @@ test("workspace symbols are capability-aware and timeout-bounded", async () => {
 	assert.match(symbolsSource, /Promise\.all\(queryableStatuses\.map/);
 	assert.match(symbolsSource, /workspaceSymbols !== false/);
 	assert.match(symbolsSource, /Skipped unsupported servers/);
+});
+
+async function waitFor<T>(fn: () => T | undefined, timeoutMs = 5_000): Promise<T> {
+	const started = Date.now();
+	while (Date.now() - started < timeoutMs) {
+		const value = fn();
+		if (value !== undefined) return value;
+		await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
+	}
+	throw new Error("Timed out waiting for condition");
+}
+
+test("LspManager status reports startup errors and setup hints", async () => {
+	await withTempDir(async (dir) => {
+		const managerModule = await compileExtensionModule(dir, "lsp-manager.ts");
+		const { LspManager } = await import(`file://${managerModule}`) as { LspManager: new (...args: any[]) => any };
+		const workspace = {
+			workspaceRoot: dir,
+			stateDir: null,
+			ensureReady: async () => true,
+			getWorkspaceFolders: () => [],
+			getStatusText: () => "test workspace",
+		};
+		const manager = new LspManager(dir, {
+			typescript: { command: "definitely-missing-pi-lsp-server", args: [] },
+		}, undefined, "test-session", workspace);
+
+		assert.equal(await manager.getClientForLanguage("typescript"), null);
+		const failedStatus = await waitFor(() => {
+			const status = manager.getStatus().find((entry: any) => entry.languageId === "typescript");
+			return status?.lastError ? status : undefined;
+		});
+		assert.match(failedStatus.lastError, /definitely-missing-pi-lsp-server|ENOENT|not found/i);
+		assert.match(failedStatus.setupHint, /PATH|dev shell|\.pi-lsp\.json/);
+		assert.match(manager.getUnavailableReason("example.ts"), /startup failure/);
+	});
 });
 
 test("FileSync opens once, refreshes changed content, and keys daemon clients by sync identity", async () => {
