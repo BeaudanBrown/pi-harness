@@ -78,6 +78,7 @@ buildNpmPackage {
       ../patches/pi-lsp-extension-document-sync.patch
       ../patches/pi-lsp-extension-status-reporting.patch
       ../patches/pi-lsp-extension-setup-guidance.patch
+      ../patches/pi-lsp-extension-language-server-mappings.patch
     ];
   };
   npmDepsHash = "sha256-4SqvK2NDFxn61pcU7zQRfvUK/lpLcSNuc/4M8uxsLOA=";
@@ -86,9 +87,9 @@ buildNpmPackage {
   postPatch = ''
     cp ${packageLock} package-lock.json
     substituteInPlace src/shared/language-map.ts \
-      --replace-fail '  ".rs": "rust",' $'  ".rs": "rust",\n  ".hs": "haskell",\n  ".lhs": "haskell",\n  ".ml": "ocaml",\n  ".mli": "ocaml",'
+      --replace-fail '  ".rs": "rust",' $'  ".rs": "rust",\n  ".ml": "ocaml",\n  ".mli": "ocaml",'
     substituteInPlace src/lsp-manager.ts \
-      --replace-fail '  rust: { command: "rust-analyzer", args: [] },' $'  rust: { command: "rust-analyzer", args: [] },\n  haskell: { command: "haskell-language-server-wrapper", args: ["--lsp"] },\n  ocaml: { command: "ocamllsp", args: [] },'
+      --replace-fail '  rust: { command: "rust-analyzer", args: [] },' $'  rust: { command: "rust-analyzer", args: [] },\n  ocaml: { command: "ocamllsp", args: [] },'
     cat > package.json <<'JSON'
     {
       "name": "pi-lsp-extension",

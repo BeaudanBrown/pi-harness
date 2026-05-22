@@ -39,3 +39,7 @@ HANDOFF from ph-o6be: /lsp status now reports server state/root/command/diagnost
 **2026-05-22T02:42:33Z**
 
 HANDOFF from ph-omy2: LSP diagnostics and status now surface project-owned setup guidance for TypeScript No Project, missing Node types, unresolved modules, and missing server commands without installing deps or generating config.
+
+**2026-05-22T02:48:27Z**
+
+HANDOFF from ph-wn6h: Harness fallback LSP mappings now cover installed servers including nil, ocamllsp, clangd, lua-language-server, bash-language-server, vscode JSON/HTML/CSS, yaml-language-server, docker-langserver, taplo, marksman, and terraform-ls; project-local PATH shadowing remains documented.

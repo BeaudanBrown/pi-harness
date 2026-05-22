@@ -1,0 +1,63 @@
+--- a/src/shared/language-map.ts
++++ b/src/shared/language-map.ts
+@@ -16,6 +16,7 @@ export const EXT_TO_LANGUAGE: Record<string, string> = {
+   ".cts": "typescript",
+   ".cjs": "javascript",
+   ".rs": "rust",
++  ".nix": "nix",
+   ".py": "python",
+   ".go": "go",
+   ".java": "java",
+@@ -34,10 +35,29 @@ export const EXT_TO_LANGUAGE: Record<string, string> = {
+   ".html": "html",
+   ".htm": "html",
+   ".css": "css",
++  ".scss": "css",
++  ".less": "css",
++  ".yaml": "yaml",
++  ".yml": "yaml",
++  ".dockerfile": "dockerfile",
++  ".toml": "toml",
++  ".md": "markdown",
++  ".markdown": "markdown",
++  ".tf": "terraform",
++  ".tfvars": "terraform",
+ };
++
++/** Map extensionless filenames to LSP language IDs */
++export const NAME_TO_LANGUAGE: Record<string, string> = {
++  "dockerfile": "dockerfile",
++  "containerfile": "dockerfile",
++};
+ 
+ /** Get the language ID for a file path based on extension */
+ export function getLanguageIdFromPath(filePath: string): string | undefined {
++  const fileName = filePath.split(/[\\/]/).pop()?.toLowerCase();
++  if (fileName && NAME_TO_LANGUAGE[fileName]) return NAME_TO_LANGUAGE[fileName];
++
+   const ext = filePath.match(/\.[^.]+$/)?.[0]?.toLowerCase();
+   return ext ? EXT_TO_LANGUAGE[ext] : undefined;
+ }
+--- a/src/lsp-manager.ts
++++ b/src/lsp-manager.ts
+@@ -36,9 +36,22 @@ const DEFAULT_SERVERS: Record<string, ServerConfig> = {
+   typescriptreact: { command: "typescript-language-server", args: ["--stdio"] },
+   javascriptreact: { command: "typescript-language-server", args: ["--stdio"] },
+   rust: { command: "rust-analyzer", args: [] },
++  nix: { command: "nil", args: [] },
+   python: { command: "pyright-langserver", args: ["--stdio"] },
+   go: { command: "gopls", args: ["serve"] },
+   java: { command: "jdtls", args: [] },
++  c: { command: "clangd", args: [] },
++  cpp: { command: "clangd", args: [] },
++  lua: { command: "lua-language-server", args: [] },
++  bash: { command: "bash-language-server", args: ["start"] },
++  json: { command: "vscode-json-language-server", args: ["--stdio"] },
++  html: { command: "vscode-html-language-server", args: ["--stdio"] },
++  css: { command: "vscode-css-language-server", args: ["--stdio"] },
++  yaml: { command: "yaml-language-server", args: ["--stdio"] },
++  dockerfile: { command: "docker-langserver", args: ["--stdio"] },
++  toml: { command: "taplo", args: ["lsp", "stdio"] },
++  markdown: { command: "marksman", args: ["server"] },
++  terraform: { command: "terraform-ls", args: ["serve"] },
+ };

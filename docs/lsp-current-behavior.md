@@ -15,6 +15,14 @@ belong to each project environment.
 - The wrapper appends fallback packages after the caller's existing `PATH`.
   Project-local language servers from dev shells, `node_modules/.bin`, or other
   environment setup must keep shadowing harness fallbacks.
+- The harness adds low-risk server mappings only for language-server commands
+  already installed in the fallback LSP package set, such as `ocamllsp`, `nil`,
+  `clangd`, `lua-language-server`, `bash-language-server`, `vscode-*`
+  JSON/HTML/CSS servers, `yaml-language-server`, `docker-langserver`, `taplo`,
+  `marksman`, and `terraform-ls`.
+- These fallback mappings do not change command precedence: project-local
+  servers on the caller's `PATH` still shadow the harness packages because the
+  wrapper appends fallback packages after the existing `PATH`.
 - The harness may add low-risk server mappings for already-installed servers,
   but it should not implement language-specific project discovery or dependency
   installation.
