@@ -95,6 +95,16 @@
             esac
           '';
         };
+        typeSetup = ''
+          types_root=.pi-types/node_modules
+          mkdir -p "$types_root/@earendil-works" "$types_root/@types"
+          ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$types_root/@earendil-works/pi-coding-agent"
+          ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core "$types_root/@earendil-works/pi-agent-core"
+          ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$types_root/@earendil-works/pi-ai"
+          ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui "$types_root/@earendil-works/pi-tui"
+          ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
+          ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
+        '';
         verifyApp = pkgs.writeShellApplication {
           name = "verify";
           runtimeInputs = [
@@ -135,18 +145,28 @@
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
               ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
 
-            types_root=.pi-types/node_modules
-            mkdir -p "$types_root/@earendil-works" "$types_root/@types"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$types_root/@earendil-works/pi-coding-agent"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core "$types_root/@earendil-works/pi-agent-core"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$types_root/@earendil-works/pi-ai"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui "$types_root/@earendil-works/pi-tui"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
+            ${typeSetup}
             tsc --noEmit --project tsconfig.json
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
             node --test "$test_build_dir/tests/agent-loop-progress.test.js"
+          '';
+        };
+        verifyLspLiveApp = pkgs.writeShellApplication {
+          name = "verify-lsp-live";
+          runtimeInputs = [
+            pkgs.coreutils
+            pkgs.nodejs
+            pkgs.typescript
+          ] ++ lspPackages;
+          text = ''
+            set -euo pipefail
+            ${typeSetup}
+            test_build_dir=$(mktemp -d)
+            tsc --project tsconfig.test.json --outDir "$test_build_dir"
+            PI_LSP_EXTENSION=${piLspExtension}/share/pi-lsp-extension \
+              PI_LSP_EXTENSION_SOURCE=${piLspExtension}/share/pi-lsp-extension/src \
+              node --test "$test_build_dir/tests/lsp-live.test.js"
           '';
         };
       in
@@ -158,6 +178,7 @@
         packages.default = piHarnessPackage;
 
         apps.verify = flake-utils.lib.mkApp { drv = verifyApp; };
+        apps.verify-lsp-live = flake-utils.lib.mkApp { drv = verifyLspLiveApp; };
         apps.default = flake-utils.lib.mkApp {
           drv = piHarnessPackage;
           exePath = "/bin/pi";
@@ -178,14 +199,7 @@
           ] ++ lspPackages;
 
           shellHook = ''
-            types_root=.pi-types/node_modules
-            mkdir -p "$types_root/@earendil-works" "$types_root/@types"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$types_root/@earendil-works/pi-coding-agent"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-agent-core "$types_root/@earendil-works/pi-agent-core"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$types_root/@earendil-works/pi-ai"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui "$types_root/@earendil-works/pi-tui"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
-            ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
+            ${typeSetup}
           '';
         };
       }
