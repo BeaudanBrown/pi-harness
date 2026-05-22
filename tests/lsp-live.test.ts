@@ -233,6 +233,56 @@ test("LspManager status reports startup errors and setup hints", async () => {
 	});
 });
 
+async function createLiveManager(dir: string, configs: Record<string, { command: string; args: string[] }>): Promise<any> {
+	const managerModule = await compileExtensionModule(dir, "lsp-manager.ts");
+	const { LspManager } = await import(`file://${managerModule}`) as { LspManager: new (...args: any[]) => any };
+	const workspace = {
+		workspaceRoot: dir,
+		stateDir: null,
+		ensureReady: async () => true,
+		getWorkspaceFolders: () => [{ uri: new URL(`file://${dir}`).toString(), name: "fixture" }],
+		getStatusText: () => "test workspace",
+		shutdown: () => undefined,
+	};
+	return new LspManager(dir, configs, undefined, "test-session", workspace);
+}
+
+async function startLiveClient(manager: any, languageId: string): Promise<any> {
+	await manager.getClientForLanguage(languageId);
+	return waitFor(() => manager.getRunningClient(languageId) ?? undefined, 15_000);
+}
+
+test("real TypeScript fallback server starts and answers document symbols", async () => {
+	await withTempDir(async (dir) => {
+		await createFixtureFile(dir, "tsconfig.json", JSON.stringify({ compilerOptions: { target: "ES2022", module: "NodeNext", moduleResolution: "NodeNext", strict: true }, include: ["src/**/*.ts"] }));
+		const sourcePath = await createFixtureFile(dir, "src/index.ts", "export function greet(name: string): string { return `hello ${name}`; }\n");
+		const manager = await createLiveManager(dir, { typescript: { command: "typescript-language-server", args: ["--stdio"] } });
+		const client = await startLiveClient(manager, "typescript");
+		const uri = new URL(`file://${sourcePath}`).toString();
+		client.didOpen(uri, "typescript", 1, await readFile(sourcePath, "utf8"));
+		const result = await client.sendRequest("textDocument/documentSymbol", { textDocument: { uri } });
+		assert.ok(Array.isArray(result));
+		assert.equal(manager.getStatus().find((entry: any) => entry.languageId === "typescript")?.running, true);
+		await manager.shutdownAll();
+	});
+});
+
+test("real nil fallback server starts and reports status", async () => {
+	await withTempDir(async (dir) => {
+		const sourcePath = await createFixtureFile(dir, "sample.nix", "{ lib ? null }: { value = 1; }\n");
+		const manager = await createLiveManager(dir, { nix: { command: "nil", args: [] } });
+		const client = await startLiveClient(manager, "nix");
+		const uri = new URL(`file://${sourcePath}`).toString();
+		client.didOpen(uri, "nix", 1, await readFile(sourcePath, "utf8"));
+		const hover = await client.sendRequest("textDocument/hover", { textDocument: { uri }, position: { line: 0, character: 2 } }).catch((error: Error) => error);
+		assert.ok(hover);
+		const status = manager.getStatus().find((entry: any) => entry.languageId === "nix");
+		assert.equal(status?.running, true);
+		assert.equal(status?.command, "nil");
+		await manager.shutdownAll();
+	});
+});
+
 test("FileSync opens once, refreshes changed content, and keys daemon clients by sync identity", async () => {
 	await withTempDir(async (dir) => {
 		const filePath = await createFixtureFile(dir, "src/example.ts", "export const value = 1;\n");
