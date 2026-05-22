@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
@@ -49,7 +49,14 @@ async function compileExtensionModule(tempRoot: string, entryPoint: string): Pro
 		// still emits usable JavaScript for the modules under test.
 		if (!error?.stdout && !error?.stderr) throw error;
 	}
-	await symlink(join(extensionRoot, "node_modules"), join(outDir, "node_modules")).catch(() => undefined);
+	const nodeModules = join(outDir, "node_modules");
+	await mkdir(nodeModules, { recursive: true });
+	for (const entry of await readdir(join(extensionRoot, "node_modules"))) {
+		if (entry === ".package-lock.json") continue;
+		await symlink(join(extensionRoot, "node_modules", entry), join(nodeModules, entry)).catch(() => undefined);
+	}
+	await symlink(join(repoRoot, ".pi-types/node_modules/@earendil-works"), join(nodeModules, "@earendil-works")).catch(() => undefined);
+	await symlink(join(repoRoot, ".pi-types/node_modules/@types"), join(nodeModules, "@types")).catch(() => undefined);
 	return join(outDir, entryPoint.replace(/\.ts$/, ".js"));
 }
 
@@ -185,6 +192,14 @@ test("SCSS and LESS use dedicated language IDs backed by the CSS server", async 
 	assert.match(languageMap, /"\.less": "less"/);
 	assert.match(managerSource, /scss: \{ command: "vscode-css-language-server"/);
 	assert.match(managerSource, /less: \{ command: "vscode-css-language-server"/);
+});
+
+test("Typebox-backed tool modules load from the packaged dependency closure", async () => {
+	await withTempDir(async (dir) => {
+		const symbolsModule = await compileExtensionModule(dir, "tools/symbols.ts");
+		const imported = await import(`file://${symbolsModule}`) as { createSymbolsTool?: unknown };
+		assert.equal(typeof imported.createSymbolsTool, "function");
+	});
 });
 
 test("workspace symbols are capability-aware and timeout-bounded", async () => {

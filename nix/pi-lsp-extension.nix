@@ -20,6 +20,7 @@ let
           "license": "MIT",
           "dependencies": {
             "tree-sitter-wasms": "^0.1.13",
+            "typebox": "^1.1.38",
             "vscode-languageserver-protocol": "^3.17.5",
             "web-tree-sitter": "^0.24.7"
           }
@@ -32,6 +33,12 @@ let
           "dependencies": {
             "tree-sitter-wasms": "^0.1.11"
           }
+        },
+        "node_modules/typebox": {
+          "version": "1.1.38",
+          "resolved": "https://registry.npmjs.org/typebox/-/typebox-1.1.38.tgz",
+          "integrity": "sha512-pZ0aQPmMmXoUvSbeuWf/Hzsc+avNw/Zd6VeE8CFgkVGWyuHPJvqeJJDeJqLve+K70LvjYIoleGcoJHPT17cWoA==",
+          "license": "MIT"
         },
         "node_modules/vscode-jsonrpc": {
           "version": "8.2.0",
@@ -85,7 +92,7 @@ buildNpmPackage {
       ../patches/pi-lsp-extension-language-mapping-hardening.patch
     ];
   };
-  npmDepsHash = "sha256-4SqvK2NDFxn61pcU7zQRfvUK/lpLcSNuc/4M8uxsLOA=";
+  npmDepsHash = "sha256-j0BEIgsM9pUL56lE5JdJrlFW8jjZkkrox2KB8VRFLgE=";
   dontNpmBuild = true;
 
   postPatch = ''
@@ -94,6 +101,8 @@ buildNpmPackage {
       --replace-fail '  ".rs": "rust",' $'  ".rs": "rust",\n  ".ml": "ocaml",\n  ".mli": "ocaml",'
     substituteInPlace src/lsp-manager.ts \
       --replace-fail '  rust: { command: "rust-analyzer", args: [] },' $'  rust: { command: "rust-analyzer", args: [] },\n  ocaml: { command: "ocamllsp", args: [] },'
+    substituteInPlace src/tools/*.ts \
+      --replace-fail '@sinclair/typebox' 'typebox'
     cat > package.json <<'JSON'
     {
       "name": "pi-lsp-extension",
@@ -106,6 +115,7 @@ buildNpmPackage {
       },
       "dependencies": {
         "tree-sitter-wasms": "^0.1.13",
+        "typebox": "^1.1.38",
         "vscode-languageserver-protocol": "^3.17.5",
         "web-tree-sitter": "^0.24.7"
       }
