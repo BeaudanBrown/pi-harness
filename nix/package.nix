@@ -37,6 +37,7 @@ stdenvNoCC.mkDerivation {
   "extensions": [
     "./extensions/web-search/index.ts",
     "./extensions/agent-loop/index.ts",
+    "./extensions/nix-runtime/index.ts",
     "./extensions/agentgraph/index.ts"
   ],
   "skills": [

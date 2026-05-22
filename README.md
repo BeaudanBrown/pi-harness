@@ -15,6 +15,7 @@ layout is handled outside Pi with regular tmux.
 - a NixOS module named `nixosModules.pi-harness`
 - shared Pi config under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
+- a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
 - the `tk` git-backed ticket CLI for agent task tracking
 - supervised `/aplan` and `/aloop` commands under `config/agent/extensions/agent-loop`
 - the AgentGraph pi resources imported from the AgentGraph flake input
@@ -102,6 +103,15 @@ services.pi-harness.agentgraph.environmentFile =
 When set, `pi` inherits variables such as `LITELLM_BASE_URL`,
 `LITELLM_API_KEY`, and `AG_LITELLM_DEFAULT_MODEL`. No separate
 `pi-agentgraph` command is installed.
+
+## Nix Runtime Guidance
+
+The included `nix-runtime` extension appends lightweight system-prompt guidance
+that tells agents to use project Nix entrypoints first and ephemeral commands
+such as `nix develop -c`, `nix shell nixpkgs#pkg -c`, and `nix run` when a
+required command is missing. It does not add a new execution tool; normal Pi
+sessions still use the built-in `bash` tool, and AgentGraph mode keeps its
+restricted tool surface.
 
 ## Web Search
 

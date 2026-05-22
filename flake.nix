@@ -84,6 +84,7 @@
                 exec ${lib.getExe piPackage} \
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
                   --extension "$PWD/config/agent/extensions/agent-loop/index.ts" \
+                  --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
                   --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
                   --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
                   --skill "$PWD/config/agent/skills" \
@@ -121,6 +122,7 @@
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
             test -f config/agent/extensions/agent-loop/index.ts
+            test -f config/agent/extensions/nix-runtime/index.ts
             test -d config/agent/skills
             test -d config/agent/prompts
             test -d config/agent/themes
@@ -144,6 +146,8 @@
             jq -e '.extensions | index("./extensions/agentgraph/index.ts")' \
               ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
+              ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
               ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
 
             ${typeSetup}
