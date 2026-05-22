@@ -51,3 +51,11 @@ HANDOFF from ph-ypfu: Workspace symbol search now queries all running LSP server
 **2026-05-22T02:58:34Z**
 
 HANDOFF from ph-6ze8: Agent-facing LSP operating model is now documented in docs/lsp-agent-operating-model.md and linked from README; this should unblock patch-size/fork-threshold evaluation with the intended user-facing model captured.
+
+**2026-05-22T03:00:27Z**
+
+HANDOFF from ph-n5fl: Patch-size review recommends keeping pi-lsp-extension as local Nix-applied patches for now: current footprint is 5 patch files / 658 patch-file lines / 355 changed source lines (+321/-34), below the 500-800 changed-LOC fork threshold and still generic/localized.
+
+**2026-05-22T03:00:36Z**
+
+CLOSEOUT CHECK: All child tickets are closed. Epic acceptance criteria are represented by completed handoffs for document sync, all-server workspace symbols, status/capabilities, fallback mappings, setup guidance, operating docs, and fork-threshold evaluation; nix run .#verify passed on 2026-05-22. Remaining validation risk across the epic: no live interactive LSP session was exercised in these iterations.
