@@ -1,6 +1,6 @@
 ---
 id: ph-o6be
-status: open
+status: closed
 deps: [ph-3w1e]
 links: []
 created: 2026-05-22T02:18:13Z
@@ -22,3 +22,9 @@ Improve /lsp or equivalent status output to report server command, running/start
 
 Agents can decide whether diagnostics, definition, references, rename, and code actions are likely available before relying on them.
 
+
+## Notes
+
+**2026-05-22T02:34:02Z**
+
+HANDOFF: Added Nix-time pi-lsp-extension status patch reporting command args, state, root, diagnostic totals/files, and advertised definition/references/rename/code-action/completion/workspace-symbol capabilities; shared daemon now exposes cached server capabilities to clients; tests run: nix build .#pi-lsp-extension --no-link and nix run .#verify; remaining risk: no live interactive /lsp UI session exercised.

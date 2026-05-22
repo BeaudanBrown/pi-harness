@@ -1,0 +1,202 @@
+--- a/src/index.ts
++++ b/src/index.ts
+@@ -99,6 +99,23 @@
+   }
+ }
+ 
++function formatCapability(value: boolean | null): string {
++  if (value === true) return "yes";
++  if (value === false) return "no";
++  return "unknown";
++}
++
++function formatCapabilities(capabilities: { definition: boolean | null; references: boolean | null; rename: boolean | null; codeActions: boolean | null; completion: boolean | null; workspaceSymbols: boolean | null }): string {
++  return [
++    `definition=${formatCapability(capabilities.definition)}`,
++    `references=${formatCapability(capabilities.references)}`,
++    `rename=${formatCapability(capabilities.rename)}`,
++    `codeActions=${formatCapability(capabilities.codeActions)}`,
++    `completion=${formatCapability(capabilities.completion)}`,
++    `workspaceSymbols=${formatCapability(capabilities.workspaceSymbols)}`,
++  ].join(", ");
++}
++
+ export default function lspExtension(pi: ExtensionAPI) {
+   // Prevent EPIPE errors from LSP server exits from crashing the host process.
+   // When an LSP server exits unexpectedly, in-flight writes to its stdin pipe
+@@ -465,12 +482,18 @@
+         return;
+       }
+ 
+-      const lines = statuses.map((s) => {
+-        const icon = s.running ? "🟢" : "⚪";
+-        const diags =
+-          s.diagnosticsCount > 0 ? ` (${s.diagnosticsCount} diagnostics)` : "";
++      const lines = statuses.flatMap((s) => {
++        const icon = s.running ? "🟢" : s.state === "starting" ? "🟡" : "⚪";
++        const command = [s.command, ...s.args].join(" ");
+         const shared = s.shared ? " [shared]" : "";
+-        return `${icon} ${s.languageId}: ${s.command}${diags}${shared}`;
++        const diagnostics = `${s.diagnosticsCount} diagnostic${s.diagnosticsCount !== 1 ? "s" : ""} in ${s.diagnosticsFiles} file${s.diagnosticsFiles !== 1 ? "s" : ""}`;
++        return [
++          `${icon} ${s.languageId}: ${s.state}${shared}`,
++          `  command: ${command}`,
++          `  root: ${s.rootDir}`,
++          `  diagnostics: ${diagnostics}`,
++          `  capabilities: ${formatCapabilities(s.capabilities)}`,
++        ];
+       });
+ 
+       ctx.ui.notify(lines.join("\n"), "info");
+--- a/src/lsp-client.ts
++++ b/src/lsp-client.ts
+@@ -141,7 +141,14 @@
+ 
+         this.connection.listen();
+         this._initialized = true;
+-        settle(() => resolve());
++        this.connection.sendRequest("pi/serverCapabilities", null)
++          .then((capabilities) => {
++            this._serverCapabilities = capabilities as ServerCapabilities;
++          })
++          .catch(() => {
++            this._serverCapabilities = null;
++          })
++          .finally(() => settle(() => resolve()));
+       });
+ 
+       socket.on("error", (err) => {
+--- a/src/lsp-daemon.ts
++++ b/src/lsp-daemon.ts
+@@ -133,6 +133,7 @@
+ let lspProcess: ChildProcess;
+ let lspParser: MessageParser;
+ let lspInitialized = false;
++let serverCapabilities: unknown = null;
+ /** The request ID used for the initialize handshake (set by initializeLsp) */
+ let initRequestId: number | null = null;
+ /** Resolve/reject callbacks for the initialize promise */
+@@ -167,6 +168,18 @@
+ 
+ /** Forward a message from a client to the LSP server, rewriting request IDs */
+ function clientToServer(clientId: number, msg: JsonRpcMessage): void {
++  if (msg.id !== undefined && msg.method === "pi/serverCapabilities") {
++    const client = clients.get(clientId);
++    if (client && !client.socket.destroyed) {
++      client.socket.write(encodeMessage({
++        jsonrpc: "2.0",
++        id: msg.id,
++        result: serverCapabilities,
++      }));
++    }
++    return;
++  }
++
+   if (!lspProcess.stdin?.writable) return;
+ 
+   if (msg.id !== undefined && msg.method) {
+@@ -193,6 +206,7 @@
+     if (initRequestId !== null && msg.id === initRequestId && !msg.method) {
+       lspInitialized = true;
+       initRequestId = null;
++      serverCapabilities = (msg.result as { capabilities?: unknown } | undefined)?.capabilities ?? null;
+ 
+       // Send initialized notification
+       lspProcess.stdin!.write(encodeMessage({
+--- a/src/lsp-manager.ts
++++ b/src/lsp-manager.ts
+@@ -10,6 +10,7 @@
+ import { existsSync, readFileSync, readdirSync, unlinkSync } from "node:fs";
+ import { spawn as spawnChild } from "node:child_process";
+ import { LspClient } from "./lsp-client.js";
++import type { ServerCapabilities } from "vscode-languageserver-protocol";
+ import { type WorkspaceProvider, DefaultWorkspaceProvider } from "./workspace-provider.js";
+ import { getLanguageIdFromPath } from "./shared/language-map.js";
+ import { DAEMON_SOCKET_READY_DELAY_MS, DAEMON_RETRY_INTERVAL_MS, DAEMON_MAX_RETRIES } from "./shared/timing.js";
+@@ -44,11 +45,25 @@
+ 
+ // File extension → language ID mapping is in shared/language-map.ts
+ 
++export interface ServerCapabilityStatus {
++  definition: boolean | null;
++  references: boolean | null;
++  rename: boolean | null;
++  codeActions: boolean | null;
++  completion: boolean | null;
++  workspaceSymbols: boolean | null;
++}
++
+ export interface ServerStatus {
+   languageId: string;
+   command: string;
++  args: string[];
++  state: "stopped" | "starting" | "running";
+   running: boolean;
++  rootDir: string;
+   diagnosticsCount: number;
++  diagnosticsFiles: number;
++  capabilities: ServerCapabilityStatus;
+   /** True if using a shared daemon (vs direct spawn) */
+   shared: boolean;
+ }
+@@ -575,18 +590,23 @@
+     const statuses: ServerStatus[] = [];
+     for (const [languageId, config] of this.serverConfigs) {
+       const client = this.clients.get(languageId);
++      const allDiagnostics = client?.getAllDiagnostics() ?? new Map();
+       let diagnosticsCount = 0;
+-      if (client) {
+-        for (const diags of client.getAllDiagnostics().values()) {
+-          diagnosticsCount += diags.length;
+-        }
++      for (const diags of allDiagnostics.values()) {
++        diagnosticsCount += diags.length;
+       }
++      const running = client?.initialized === true && !client.disposed;
+       const daemonAlive = this.isDaemonAlive(languageId);
+       statuses.push({
+         languageId,
+         command: config.command,
+-        running: client?.initialized === true && !client.disposed,
++        args: config.args,
++        state: running ? "running" : this.startingServers.has(languageId) ? "starting" : "stopped",
++        running,
++        rootDir: client?.rootDir ?? this._workspace.workspaceRoot ?? this.rootDir,
+         diagnosticsCount,
++        diagnosticsFiles: allDiagnostics.size,
++        capabilities: capabilityStatus(client?.serverCapabilities),
+         shared: daemonAlive,
+       });
+     }
+@@ -694,3 +714,31 @@
+     }
+   }
+ }
++
++
++function hasProvider(value: unknown): boolean | null {
++  if (value === undefined || value === null) return null;
++  return value !== false;
++}
++
++function capabilityStatus(capabilities: ServerCapabilities | null | undefined): ServerCapabilityStatus {
++  if (!capabilities) {
++    return {
++      definition: null,
++      references: null,
++      rename: null,
++      codeActions: null,
++      completion: null,
++      workspaceSymbols: null,
++    };
++  }
++
++  return {
++    definition: hasProvider(capabilities.definitionProvider),
++    references: hasProvider(capabilities.referencesProvider),
++    rename: hasProvider(capabilities.renameProvider),
++    codeActions: hasProvider(capabilities.codeActionProvider),
++    completion: hasProvider(capabilities.completionProvider),
++    workspaceSymbols: hasProvider(capabilities.workspaceSymbolProvider),
++  };
++}

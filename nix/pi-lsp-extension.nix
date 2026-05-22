@@ -74,7 +74,10 @@ buildNpmPackage {
   src = applyPatches {
     name = "pi-lsp-extension-patched-src";
     src = piLspExtensionSrc;
-    patches = [ ../patches/pi-lsp-extension-document-sync.patch ];
+    patches = [
+      ../patches/pi-lsp-extension-document-sync.patch
+      ../patches/pi-lsp-extension-status-reporting.patch
+    ];
   };
   npmDepsHash = "sha256-4SqvK2NDFxn61pcU7zQRfvUK/lpLcSNuc/4M8uxsLOA=";
   dontNpmBuild = true;
