@@ -1,9 +1,9 @@
 # Current Pi LSP Behavior And Failure Modes
 
 This note records the behavior of the packaged `pi-lsp-extension` input used by
-`pi-harness` before reliability patches are added. It is meant to keep the LSP
-workstream focused on generic protocol plumbing and avoid hiding problems that
-belong to each project environment.
+`pi-harness` after the local reliability patches are applied. It is meant to
+keep the LSP workstream focused on generic protocol plumbing and avoid hiding
+problems that belong to each project environment.
 
 ## Harness Packaging Model
 
@@ -32,36 +32,33 @@ belong to each project environment.
 - LSP servers start lazily. Most file-scoped tools call `getClientForFile`; the
   first call starts the server in the background and returns an unavailable or
   starting message instead of waiting for readiness.
-- File synchronization is tied to Pi tool results. Reads send `didOpen` only if
-  a matching server is already running. Writes and edits ask for the file's
-  client, which may start the server, then send `didOpen` or `didChange` only
-  when a client is already ready.
+- File-scoped LSP requests ensure the target document is open on the active
+  server before sending the request. The sync layer tracks stable server
+  identities so reconnecting to the same daemon does not send duplicate
+  `didOpen`, and it sends `didChange` when file content changed since the last
+  sync.
 - Diagnostics are cached from LSP publish events. `lsp_diagnostics` for one file
   reports the cache for that file; `path="*"` reports cached diagnostics across
   currently running servers.
 - `lsp_symbols` has two modes: document symbols for a path and workspace symbol
-  search for a query. The query mode currently asks the first running server and
-  falls back to tree-sitter only if no usable LSP response is available.
-- `/lsp` currently reports configured language, command, running state, cached
-  diagnostic count, and whether a shared daemon appears alive. It does not show
-  roots, advertised capabilities, starting/error details, or per-file sync state.
+  search for a query. Query mode asks all running servers that do not explicitly
+  lack workspace-symbol capability, applies a per-server timeout, returns
+  partial results with warnings, and falls back to tree-sitter when useful.
+- `/lsp` reports configured language, command, args, running/starting/stopped
+  state, root, cached diagnostic count/files, advertised capabilities, shared
+  daemon state, last startup error, and setup hints.
 
-## Failure Modes To Fix In This Workstream
+## Fixed Failure Modes
 
-- Unopened document failures: file-scoped LSP requests can reach a ready server
-  for a file that was never synchronized with `textDocument/didOpen`. Some
-  servers respond with document-not-found or empty results even though the file
-  exists on disk. The generic fix is to ensure file-scoped LSP tools open or
-  refresh the target document before sending text-document requests.
-- First-running-server workspace symbols: workspace symbol search currently uses
-  the first running server. If that server has no useful project, lacks the
-  capability, or fails the request, the whole LSP workspace search can fail even
-  when another running server could answer. The generic fix is to query all
-  suitable running servers and combine or clearly report results.
-- Opaque status: agents cannot reliably tell which root a server owns, which
-  capabilities it advertised, whether a server is starting versus failed, or
-  which diagnostics are cached. The generic fix is richer status/capability and
-  diagnostic context without requiring language-specific interpretation.
+- Unopened document failures: file-scoped LSP requests now open or refresh the
+  target document before sending text-document requests.
+- Duplicate daemon `didOpen`: document sync now keys state by stable server
+  identity instead of transient client object identity.
+- First-running-server workspace symbols: workspace symbol search now queries all
+  suitable running servers and reports partial failures instead of failing
+  globally on the first bad server.
+- Opaque status: `/lsp` now exposes root, command args, state, capability,
+  diagnostics, shared-daemon, last-error, and setup-hint context.
 
 ## Failures To Report Honestly, Not Hide
 

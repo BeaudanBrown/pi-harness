@@ -202,12 +202,16 @@ Use Pi's built-in session commands for conversation state:
   Dependencies, SDKs, generated files, and project configs remain owned by the
   repository being edited; the harness reports those failures rather than
   installing packages or inventing language-specific setup.
-- `docs/lsp-current-behavior.md` records the baseline packaged Pi LSP behavior,
-  known failure modes, and the boundary between harness fixes and project-owned
-  language-server configuration.
+- `docs/lsp-current-behavior.md` records the packaged Pi LSP behavior, fixed
+  reliability boundaries, known remaining failure modes, and the boundary
+  between harness fixes and project-owned language-server configuration.
+- LSP patch changes should pass both the fast gate and live LSP gate. The live
+  gate starts fake and real fallback servers to cover document sync, startup
+  guidance, fallback mappings, TypeScript, and Nix smoke behavior.
 
 ## Verification
 
 ```bash
 nix run .#verify
+nix run .#verify-lsp-live
 ```

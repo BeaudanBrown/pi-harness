@@ -35,8 +35,9 @@ configured project environment.
    capability, such as diagnostics, definitions, references, or document
    symbols for a known path.
 5. Use workspace symbol search for cross-project navigation only after relevant
-   servers are running. The harness queries all running servers and summarizes
-   per-server successes or failures before falling back.
+   servers are running. The harness queries capable/unknown running servers with
+   per-server timeouts and summarizes successes, skips, failures, or timeouts
+   before falling back.
 6. Fall back to `rg`, normal file reads, or tree-sitter results when no LSP
    server is configured, the server lacks the needed capability, startup is
    failing, or the project intentionally has incomplete semantic setup.
@@ -55,10 +56,10 @@ shadowing guarantee:
   server overrides.
 
 The current fallback set includes common servers such as TypeScript,
-Python/Ruff, Rust, Go, Nix, OCaml, C/C++, Lua, Markdown, TOML, YAML, JSON,
-HTML/CSS, Bash, Dockerfile, Terraform, and Tailwind where those commands are
-packaged by the harness. These fallbacks improve availability; they do not make
-an unconfigured repository semantically complete.
+Python/Ruff, Rust, Go, Java, Nix, OCaml, C/C++, Lua, Markdown, TOML, YAML, JSON,
+HTML/CSS/SCSS/LESS, Bash, Dockerfile, Terraform, and Tailwind where those
+commands are packaged by the harness. These fallbacks improve availability;
+they do not make an unconfigured repository semantically complete.
 
 ## Project-Owned Problems To Report, Not Solve
 
@@ -93,3 +94,17 @@ Use `rg`, direct reads, and tree-sitter-style structural search when:
 LSP answers are strongest when the repo has already provided its own working
 language environment. The harness makes that state visible and dependable for
 agents, but it intentionally stays a thin generic bridge.
+
+## Verification For LSP Changes
+
+Use the normal fast gate for all changes and the live LSP gate for LSP patch
+changes:
+
+```bash
+nix run .#verify
+nix run .#verify-lsp-live
+```
+
+The live gate includes a fake protocol server plus real TypeScript and Nix smoke
+fixtures. It validates document sync, fallback command availability, setup
+hints, and basic real-server startup without requiring an LLM session.
