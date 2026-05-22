@@ -190,6 +190,12 @@ Use Pi's built-in session commands for conversation state:
 - `/fork` to fork from a point in the conversation
 - `/compact` to compact long context
 
+## LSP Notes
+
+- `docs/lsp-current-behavior.md` records the current packaged Pi LSP behavior,
+  known failure modes, and the boundary between harness fixes and project-owned
+  language-server configuration.
+
 ## Verification
 
 ```bash

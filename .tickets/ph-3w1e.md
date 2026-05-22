@@ -1,6 +1,6 @@
 ---
 id: ph-3w1e
-status: open
+status: closed
 deps: []
 links: []
 created: 2026-05-22T02:18:13Z
@@ -22,3 +22,9 @@ Ground the work with a short docs/test note before patching behavior. Distinguis
 
 A maintainer or agent can read the notes and understand what is intentionally fixed versus left to project environments.
 
+
+## Notes
+
+**2026-05-22T02:23:50Z**
+
+HANDOFF: Added docs/lsp-current-behavior.md and README link documenting current pi-lsp-extension behavior, failure modes, fix boundaries, and project-owned non-goals; verification run: nix run .#verify passed; remaining risk: future LSP patch tickets should keep behavior changes aligned with this documented boundary.

@@ -21,3 +21,9 @@ Use small local patches to the packaged pi-lsp-extension only for generic behavi
 
 Agents can use file-scoped LSP tools without document-not-found failures caused by unopened files. Workspace symbol search does not fail globally because the first running server has no project. LSP status output gives agents useful server/root/capability/diagnostic context. Harness-installed language servers have matching low-risk mappings. TypeScript missing-project/dependency failures are reported honestly without custom dependency magic. Project-local language servers continue to shadow harness fallback servers. nix run .#verify passes.
 
+
+## Notes
+
+**2026-05-22T02:23:50Z**
+
+HANDOFF from ph-3w1e: Current LSP behavior and failure-mode boundary documented in docs/lsp-current-behavior.md; sibling LSP implementation tickets should use it as the shared scope reference.
