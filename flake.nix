@@ -61,6 +61,7 @@
           rust-analyzer
           ocamlPackages.ocaml-lsp
           gopls
+          jdt-language-server
           clang-tools
           lua-language-server
           marksman
@@ -161,6 +162,13 @@
           ] ++ lspPackages;
           text = ''
             set -euo pipefail
+            for command_name in \
+              typescript-language-server rust-analyzer ocamllsp nil pyright-langserver \
+              gopls jdtls clangd lua-language-server bash-language-server \
+              vscode-json-language-server vscode-html-language-server vscode-css-language-server \
+              yaml-language-server docker-langserver taplo marksman terraform-ls; do
+              command -v "$command_name" >/dev/null
+            done
             ${typeSetup}
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"

@@ -175,6 +175,17 @@ export async function createFixtureFile(root: string, relativePath: string, cont
 	return path;
 }
 
+test("SCSS and LESS use dedicated language IDs backed by the CSS server", async () => {
+	const extensionRoot = process.env.PI_LSP_EXTENSION ?? "";
+	assert.ok(extensionRoot, "PI_LSP_EXTENSION must point at the packaged pi-lsp-extension root");
+	const languageMap = await readFile(join(extensionRoot, "src/shared/language-map.ts"), "utf8");
+	const managerSource = await readFile(join(extensionRoot, "src/lsp-manager.ts"), "utf8");
+	assert.match(languageMap, /"\.scss": "scss"/);
+	assert.match(languageMap, /"\.less": "less"/);
+	assert.match(managerSource, /scss: \{ command: "vscode-css-language-server"/);
+	assert.match(managerSource, /less: \{ command: "vscode-css-language-server"/);
+});
+
 test("workspace symbols are capability-aware and timeout-bounded", async () => {
 	const extensionRoot = process.env.PI_LSP_EXTENSION ?? "";
 	assert.ok(extensionRoot, "PI_LSP_EXTENSION must point at the packaged pi-lsp-extension root");

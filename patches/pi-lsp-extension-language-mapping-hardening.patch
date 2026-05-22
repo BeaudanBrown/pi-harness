@@ -1,0 +1,24 @@
+--- a/src/shared/language-map.ts	2026-05-22 15:19:25.647939413 +1000
++++ b/src/shared/language-map.ts	2026-05-22 15:19:25.719939689 +1000
+@@ -43,8 +43,8 @@
+   ".html": "html",
+   ".htm": "html",
+   ".css": "css",
+-  ".scss": "css",
+-  ".less": "css",
++  ".scss": "scss",
++  ".less": "less",
+   ".yaml": "yaml",
+   ".yml": "yaml",
+   ".dockerfile": "dockerfile",
+--- a/src/lsp-manager.ts	2026-05-22 15:19:25.647939413 +1000
++++ b/src/lsp-manager.ts	2026-05-22 15:19:25.720939693 +1000
+@@ -50,6 +50,8 @@
+   json: { command: "vscode-json-language-server", args: ["--stdio"] },
+   html: { command: "vscode-html-language-server", args: ["--stdio"] },
+   css: { command: "vscode-css-language-server", args: ["--stdio"] },
++  scss: { command: "vscode-css-language-server", args: ["--stdio"] },
++  less: { command: "vscode-css-language-server", args: ["--stdio"] },
+   yaml: { command: "yaml-language-server", args: ["--stdio"] },
+   dockerfile: { command: "docker-langserver", args: ["--stdio"] },
+   toml: { command: "taplo", args: ["lsp", "stdio"] },

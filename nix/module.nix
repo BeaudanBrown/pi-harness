@@ -18,6 +18,7 @@ let
     rust-analyzer
     ocamlPackages.ocaml-lsp
     gopls
+    jdt-language-server
     clang-tools
     lua-language-server
     marksman
