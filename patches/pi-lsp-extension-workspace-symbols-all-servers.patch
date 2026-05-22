@@ -1,0 +1,137 @@
+--- a/src/tools/symbols.ts
++++ b/src/tools/symbols.ts
+@@ -63,7 +63,7 @@
+   query: Type.Optional(Type.String({ description: "Search query for workspace symbols (searches across all files)" })),
+ });
+ 
+-interface SymbolsDetails { count: number }
++interface SymbolsDetails { count: number; warnings?: number }
+ 
+ function formatTreeSitterSymbol(sym: SymbolInfo, indent: number = 0): string[] {
+   const prefix = "  ".repeat(indent);
+@@ -75,6 +75,22 @@
+   return result;
+ }
+ 
++function workspaceSymbolKey(sym: SymbolInformation | WorkspaceSymbol, rootDir: string): string {
++  let location = "";
++  if ("location" in sym && sym.location) {
++    try {
++      const absPath = fileURLToPath(sym.location.uri);
++      const loc = sym.location as any;
++      const line = loc.range ? loc.range.start.line + 1 : "?";
++      const char = loc.range ? loc.range.start.character + 1 : "?";
++      location = `${relative(rootDir, absPath)}:${line}:${char}`;
++    } catch {
++      location = sym.location.uri;
++    }
++  }
++
++  return `${sym.name}\u0000${sym.kind}\u0000${location}`;
++}
+ export function createSymbolsTool(
+   manager: LspManager,
+   treeSitter?: TreeSitterManager | null,
+@@ -161,35 +177,65 @@
+ 
+       // Workspace symbol search
+       const statuses = manager.getStatus();
+-      const runningLang = statuses.find((s) => s.running)?.languageId;
++      const runningStatuses = statuses.filter((s) => s.running);
++      let workspaceStatusText = "";
++
++      if (runningStatuses.length > 0) {
++        const rootDir = manager.resolvePath(".");
++        const symbols: (SymbolInformation | WorkspaceSymbol)[] = [];
++        const seen = new Set<string>();
++        const serverSummaries: string[] = [];
++        const failures: string[] = [];
++
++        for (const status of runningStatuses) {
++          const client = await manager.getClientForLanguage(status.languageId).catch(() => null);
++          if (!client) {
++            failures.push(`${status.languageId}: running status reported but no active client was available`);
++            continue;
++          }
+ 
+-      if (runningLang) {
+-        const client = await manager.getClientForLanguage(runningLang).catch(() => null);
+-        if (client) {
+           try {
+             const result = await client.sendRequest<(SymbolInformation | WorkspaceSymbol)[] | null>(
+               "workspace/symbol", { query: query ?? "" }
+             );
++            const resultCount = result?.length ?? 0;
++            serverSummaries.push(`${status.languageId}: ${resultCount}`);
+ 
+-            if (!result || result.length === 0) {
+-              return { content: [{ type: "text", text: `No workspace symbols found for query: "${query}"` }], details: { count: 0 } };
++            for (const sym of result ?? []) {
++              const key = workspaceSymbolKey(sym, rootDir);
++              if (seen.has(key)) continue;
++              seen.add(key);
++              symbols.push(sym);
+             }
++          } catch (err: any) {
++            const message = err?.message ?? String(err);
++            failures.push(`${status.languageId}: ${message}`);
++          }
++        }
+ 
+-            const rootDir = manager.resolvePath(".");
+-            const lines = result.map((s) => formatSymbolInfo(s, rootDir));
+-            const output = lines.join("\n");
++        const summaryText = serverSummaries.length > 0 ? `Server results: ${serverSummaries.join(", ")}` : "";
++        const failureText = failures.length > 0 ? `Server failures: ${failures.join("; ")}` : "";
++        workspaceStatusText = [summaryText, failureText].filter(Boolean).join("\n");
+ 
+-            const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+-            let text = `${result.length} symbol(s) found:\n\n${truncation.content}`;
+-            if (truncation.truncated) text += `\n\n[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines]`;
++        if (symbols.length > 0) {
++          const lines = symbols.map((s) => formatSymbolInfo(s, rootDir));
++          const output = lines.join("\n");
++          const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
++          let text = `${symbols.length} symbol(s) found from ${runningStatuses.length} running server(s):\n\n${truncation.content}`;
++          if (truncation.truncated) text += `\n\n[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines]`;
++          if (workspaceStatusText) text += `\n\n${workspaceStatusText}`;
+ 
+-            return { content: [{ type: "text", text }], details: { count: result.length } };
+-          } catch (err: any) {
+-            return { content: [{ type: "text", text: `LSP workspace symbols request failed: ${err.message}` }], details: { count: 0 } };
+-          }
++          return { content: [{ type: "text", text }], details: { count: symbols.length, warnings: failures.length } };
++        }
++
++        if (failures.length > 0 && (!workspaceIndex || !query)) {
++          return { content: [{ type: "text", text: `No workspace symbols found for query: "${query}". ${workspaceStatusText}` }], details: { count: 0, warnings: failures.length } };
+         }
+-      }
+ 
++        if (!workspaceIndex || !query) {
++          return { content: [{ type: "text", text: `No workspace symbols found for query: "${query}". ${workspaceStatusText}` }], details: { count: 0 } };
++        }
++      }
+       // Tree-sitter fallback for workspace symbol search
+       if (workspaceIndex && query) {
+         try {
+@@ -207,6 +253,7 @@
+           const truncation = truncateHead(output, { maxLines: DEFAULT_MAX_LINES, maxBytes: DEFAULT_MAX_BYTES });
+           let text = `${results.length} symbol(s) found [tree-sitter]:\n\n${truncation.content}`;
+           if (truncation.truncated) text += `\n\n[Truncated: showing ${truncation.outputLines} of ${truncation.totalLines} lines]`;
++          if (workspaceStatusText) text += `\n\n${workspaceStatusText}`;
+           return { content: [{ type: "text", text }], details: { count: results.length } };
+         } catch { /* fall through */ }
+       }
+@@ -227,8 +274,9 @@
+     renderResult(result, { isPartial }, theme) {
+       if (isPartial) return new Text(theme.fg("warning", "Loading symbols..."), 0, 0);
+       const details = result.details;
+-      if (!details || details.count === 0) return new Text(theme.fg("dim", "No symbols"), 0, 0);
+-      return new Text(theme.fg("success", `${details.count} symbol(s)`), 0, 0);
++      if (!details || details.count === 0) return new Text(theme.fg("dim", details?.warnings ? `No symbols (${details.warnings} warning(s))` : "No symbols"), 0, 0);
++      const suffix = details.warnings ? `, ${details.warnings} warning(s)` : "";
++      return new Text(theme.fg("success", `${details.count} symbol(s)${suffix}`), 0, 0);
+     },
+   };
+ }

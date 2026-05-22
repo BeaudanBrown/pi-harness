@@ -1,6 +1,6 @@
 ---
 id: ph-ypfu
-status: open
+status: closed
 deps: [ph-3w1e]
 links: []
 created: 2026-05-22T02:18:13Z
@@ -22,3 +22,9 @@ Change workspace symbol search to query all initialized running LSP servers, mer
 
 If TypeScript returns No Project but OCaml is healthy, workspace symbol search still returns OCaml or tree-sitter results or a mixed-status summary.
 
+
+## Notes
+
+**2026-05-22T02:55:24Z**
+
+HANDOFF: Added pi-lsp-extension workspace-symbol patch to query every initialized running server, merge/dedupe symbol results, preserve tree-sitter fallback, and include per-server result/failure summaries; verification: nix build .#pi-lsp-extension --no-link and nix run .#verify passed; remaining risk: no live interactive multi-LSP session was exercised.

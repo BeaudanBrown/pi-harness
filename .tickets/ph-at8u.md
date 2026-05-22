@@ -43,3 +43,7 @@ HANDOFF from ph-omy2: LSP diagnostics and status now surface project-owned setup
 **2026-05-22T02:48:27Z**
 
 HANDOFF from ph-wn6h: Harness fallback LSP mappings now cover installed servers including nil, ocamllsp, clangd, lua-language-server, bash-language-server, vscode JSON/HTML/CSS, yaml-language-server, docker-langserver, taplo, marksman, and terraform-ls; project-local PATH shadowing remains documented.
+
+**2026-05-22T02:55:24Z**
+
+HANDOFF from ph-ypfu: Workspace symbol search now queries all running LSP servers and reports per-server result/failure summaries before falling back to tree-sitter.
