@@ -1,4 +1,6 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -23,6 +25,33 @@ export interface FakeLspEvent {
 
 const repoRoot = process.cwd();
 const fakeServerPath = join(repoRoot, "tests/fixtures/lsp/fake-server.mjs");
+const execFileAsync = promisify(execFile);
+
+async function compileExtensionModule(tempRoot: string, entryPoint: string): Promise<string> {
+	const extensionRoot = process.env.PI_LSP_EXTENSION ?? "";
+	assert.ok(extensionRoot, "PI_LSP_EXTENSION must point at the packaged pi-lsp-extension root");
+	const outDir = join(tempRoot, "compiled-extension");
+	try {
+		await execFileAsync("tsc", [
+			"--outDir", outDir,
+			"--rootDir", join(extensionRoot, "src"),
+			"--module", "NodeNext",
+			"--moduleResolution", "NodeNext",
+			"--target", "ES2022",
+			"--skipLibCheck",
+			"--types", "node",
+			"--typeRoots", join(repoRoot, ".pi-types/node_modules/@types"),
+			"--noEmitOnError", "false",
+			join(extensionRoot, "src", entryPoint),
+		], { cwd: repoRoot });
+	} catch (error: any) {
+		// The packaged extension intentionally has no local dev type closure, but tsc
+		// still emits usable JavaScript for the modules under test.
+		if (!error?.stdout && !error?.stderr) throw error;
+	}
+	return join(outDir, entryPoint.replace(/\.ts$/, ".js"));
+}
+
 
 class JsonRpcClient {
 	private nextId = 1;
@@ -145,3 +174,45 @@ export async function createFixtureFile(root: string, relativePath: string, cont
 	await writeFile(path, content);
 	return path;
 }
+
+test("FileSync opens once, refreshes changed content, and keys daemon clients by sync identity", async () => {
+	await withTempDir(async (dir) => {
+		const filePath = await createFixtureFile(dir, "src/example.ts", "export const value = 1;\n");
+		const fileSyncModule = await compileExtensionModule(dir, "file-sync.ts");
+		const { FileSync } = await import(`file://${fileSyncModule}`) as { FileSync: new (manager: any) => any };
+
+		const calls: Array<{ method: string; identity: string; version?: number; text?: string }> = [];
+		const makeClient = (identity: string) => ({
+			syncIdentity: identity,
+			languageId: "typescript",
+			rootDir: dir,
+			didOpen: (_uri: string, _languageId: string, version: number, text: string) => calls.push({ method: "didOpen", identity, version, text }),
+			didChange: (_uri: string, version: number, text: string) => calls.push({ method: "didChange", identity, version, text }),
+			didClose: () => calls.push({ method: "didClose", identity }),
+		});
+		let runningClient = makeClient("daemon:typescript:/tmp/fake.sock");
+		const manager = {
+			resolvePath: (path: string) => path.startsWith("/") ? path : join(dir, path),
+			getFileUri: (path: string) => new URL(`file://${path}`).toString(),
+			getLanguageId: () => "typescript",
+			getRunningClient: () => runningClient,
+		};
+		const sync = new FileSync(manager);
+
+		await sync.ensureFileOpen(filePath, runningClient);
+		await sync.ensureFileOpen(filePath, runningClient);
+		await writeFile(filePath, "export const value = 2;\n");
+		await sync.ensureFileOpen(filePath, runningClient);
+		runningClient = makeClient("daemon:typescript:/tmp/fake.sock");
+		await sync.ensureFileOpen(filePath, runningClient);
+		runningClient = makeClient("daemon:typescript:/tmp/other.sock");
+		await sync.ensureFileOpen(filePath, runningClient);
+
+		assert.deepEqual(calls.map((call) => [call.method, call.identity, call.version]), [
+			["didOpen", "daemon:typescript:/tmp/fake.sock", 1],
+			["didChange", "daemon:typescript:/tmp/fake.sock", 2],
+			["didOpen", "daemon:typescript:/tmp/other.sock", 3],
+		]);
+		assert.equal(calls[1]?.text, "export const value = 2;\n");
+	});
+});

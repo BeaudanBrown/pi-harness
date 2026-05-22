@@ -1,0 +1,180 @@
+--- a/src/lsp-client.ts	2026-05-22 15:11:03.356021059 +1000
++++ b/src/lsp-client.ts	2026-05-22 15:11:10.687048971 +1000
+@@ -49,6 +49,8 @@
+   onUnexpectedExit?: (code: number | null) => void;
+ }
+ 
++let directClientCounter = 0;
++
+ export class LspClient {
+   private process: ChildProcess | null = null;
+   private socket: Socket | null = null;
+@@ -63,11 +65,15 @@
+   readonly languageId: string;
+   readonly command: string;
+   readonly rootDir: string;
++  readonly syncIdentity: string;
+ 
+   constructor(private options: LspClientOptions) {
+     this.languageId = options.languageId;
+     this.command = options.command;
+     this.rootDir = options.rootDir;
++    this.syncIdentity = options.socketPath
++      ? `daemon:${options.languageId}:${options.socketPath}`
++      : `direct:${options.languageId}:${options.rootDir}:${++directClientCounter}`;
+   }
+ 
+   get initialized(): boolean {
+--- a/src/file-sync.ts	2026-05-22 15:11:03.356021059 +1000
++++ b/src/file-sync.ts	2026-05-22 15:12:22.259321647 +1000
+@@ -9,6 +9,7 @@
+  * prevent unbounded memory growth in the LSP server during long sessions.
+  */
+ 
++import { createHash } from "node:crypto";
+ import { readFile } from "node:fs/promises";
+ import { LspManager } from "./lsp-manager.js";
+ import type { TreeSitterManager } from "./tree-sitter/parser-manager.js";
+@@ -24,8 +25,26 @@
+   uri: string;
+   languageId: string;
+   version: number;
+-  /** Client instance that has received didOpen for this document. */
+-  syncedClient?: unknown;
++  /** Stable identity for the underlying LSP server that owns this open document. */
++  serverIdentity: string;
++  contentHash: string;
++}
++
++interface SyncClient {
++  didOpen(uri: string, languageId: string, version: number, text: string): void;
++  didChange(uri: string, version: number, text: string): void;
++  didClose?(uri: string): void;
++  syncIdentity?: string;
++  languageId?: string;
++  rootDir?: string;
++}
++
++function hashContent(content: string): string {
++  return createHash("sha256").update(content).digest("hex");
++}
++
++function getClientIdentity(client: SyncClient): string {
++  return client.syncIdentity ?? `client:${client.languageId ?? "unknown"}:${client.rootDir ?? "unknown"}`;
+ }
+ 
+ export class FileSync {
+@@ -71,9 +90,9 @@
+       this.tracked.delete(evictUri);
+ 
+       // Send didClose to the appropriate LSP server
+-      const client = this.manager.getRunningClient(evictDoc.languageId);
+-      if (client) {
+-        client.didClose(evictUri);
++      const client = this.manager.getRunningClient(evictDoc.languageId) as SyncClient | null;
++      if (client && getClientIdentity(client) === evictDoc.serverIdentity) {
++        client.didClose?.(evictUri);
+       }
+     }
+   }
+@@ -86,25 +105,16 @@
+     const absPath = this.manager.resolvePath(filePath);
+     const uri = this.manager.getFileUri(absPath);
+ 
+-    // Already tracked? Just touch it for LRU freshness.
+-    if (this.tracked.has(uri)) {
+-      this.touchAndEvict(uri);
+-      return;
+-    }
+-
+     const languageId = this.manager.getLanguageId(absPath);
+     if (!languageId) return;
+ 
+     // Only sync if we have a client already running for this language (don't start one just for a read)
+-    const client = this.manager.getRunningClient(languageId);
++    const client = this.manager.getRunningClient(languageId) as SyncClient | null;
+     if (!client) return;
+ 
+     try {
+       const content = await readFile(absPath, "utf-8");
+-      const doc: TrackedDocument = { uri, languageId, version: 1, syncedClient: client };
+-      this.tracked.set(uri, doc);
+-      client.didOpen(uri, languageId, doc.version, content);
+-      this.touchAndEvict(uri);
++      this.syncContent(uri, languageId, client, content, false);
+     } catch {
+       // File might not exist or be unreadable — ignore
+     }
+@@ -151,20 +161,7 @@
+ 
+     try {
+       const content = await readFile(absPath, "utf-8");
+-      const existing = this.tracked.get(uri);
+-
+-      if (existing) {
+-        // Already open — send didChange with incremented version
+-        existing.version++;
+-        existing.syncedClient = client;
+-        client.didChange(uri, existing.version, content);
+-      } else {
+-        // First time — send didOpen
+-        const doc: TrackedDocument = { uri, languageId, version: 1, syncedClient: client };
+-        this.tracked.set(uri, doc);
+-        client.didOpen(uri, languageId, doc.version, content);
+-      }
+-      this.touchAndEvict(uri);
++      this.syncContent(uri, languageId, client as SyncClient, content, true);
+     } catch {
+       // File might not exist or be unreadable — ignore
+     }
+@@ -182,27 +179,37 @@
+     const languageId = this.manager.getLanguageId(absPath);
+     if (!languageId) return;
+ 
+-    const lspClient = (client ?? this.manager.getRunningClient(languageId)) as {
+-      didOpen(uri: string, languageId: string, version: number, text: string): void;
+-    } | null;
++    const lspClient = (client ?? this.manager.getRunningClient(languageId)) as SyncClient | null;
+     if (!lspClient) return;
+ 
++    try {
++      const content = await readFile(absPath, "utf-8");
++      this.syncContent(uri, languageId, lspClient, content, true);
++    } catch {
++      // File might not exist or be unreadable — ignore.
++    }
++  }
++
++  private syncContent(uri: string, languageId: string, client: SyncClient, content: string, refreshExisting: boolean): void {
++    const serverIdentity = getClientIdentity(client);
++    const contentHash = hashContent(content);
+     const existing = this.tracked.get(uri);
+-    if (existing?.syncedClient === lspClient) {
++
++    if (!existing || existing.serverIdentity !== serverIdentity) {
++      const version = existing ? existing.version + 1 : 1;
++      this.tracked.set(uri, { uri, languageId, version, serverIdentity, contentHash });
++      client.didOpen(uri, languageId, version, content);
+       this.touchAndEvict(uri);
+       return;
+     }
+ 
+-    try {
+-      const content = await readFile(absPath, "utf-8");
+-      const version = existing ? existing.version + 1 : 1;
+-      const doc: TrackedDocument = { uri, languageId, version, syncedClient: lspClient };
+-      this.tracked.set(uri, doc);
+-      lspClient.didOpen(uri, languageId, version, content);
+-      this.touchAndEvict(uri);
+-    } catch {
+-      // File might not exist or be unreadable — ignore.
++    if (refreshExisting && existing.contentHash !== contentHash) {
++      existing.version++;
++      existing.contentHash = contentHash;
++      client.didChange(uri, existing.version, content);
+     }
++
++    this.touchAndEvict(uri);
+   }
+ 
+   /**

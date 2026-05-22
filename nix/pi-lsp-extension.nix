@@ -80,6 +80,7 @@ buildNpmPackage {
       ../patches/pi-lsp-extension-setup-guidance.patch
       ../patches/pi-lsp-extension-language-server-mappings.patch
       ../patches/pi-lsp-extension-workspace-symbols-all-servers.patch
+      ../patches/pi-lsp-extension-document-sync-hardening.patch
     ];
   };
   npmDepsHash = "sha256-4SqvK2NDFxn61pcU7zQRfvUK/lpLcSNuc/4M8uxsLOA=";
