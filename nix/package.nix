@@ -30,7 +30,6 @@ set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
-${lib.optionalString (agentgraphPiResources != null) ''export AGENTGRAPH_PI_RESOURCES="\''${AGENTGRAPH_PI_RESOURCES:-${agentgraphPiResources}/share/agentgraph-pi}"''}
 ${lib.optionalString (ticketPackage != null) ''export PATH="${ticketPackage}/bin:\$PATH"''}
 
 case "\''${1-}" in
@@ -47,10 +46,28 @@ resource_args=(
   --prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"
   --theme "${piHarnessResources}/share/pi-harness/agent/themes"
 )
-${lib.optionalString (agentgraphPiResources != null) ''resource_args+=(
-  --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts"
-  --skill "${agentgraphPiResources}/share/agentgraph-pi/skills"
-  --prompt-template "${agentgraphPiResources}/share/agentgraph-pi/prompts"
+${lib.optionalString (agentgraphPiResources != null) ''agentgraph_root="\''${PI_HARNESS_AGENTGRAPH_ROOT:-\''${AGENTGRAPH_PI_RESOURCES:-${agentgraphPiResources}/share/agentgraph-pi}}"
+agentgraph_extensions_dir="\''${PI_HARNESS_AGENTGRAPH_EXTENSIONS_DIR:-\$agentgraph_root/extensions}"
+agentgraph_skills_dir="\''${PI_HARNESS_AGENTGRAPH_SKILLS_DIR:-\$agentgraph_root/skills}"
+agentgraph_prompts_dir="\''${PI_HARNESS_AGENTGRAPH_PROMPTS_DIR:-\$agentgraph_root/prompts}"
+export AGENTGRAPH_PI_RESOURCES="\$agentgraph_root"
+
+if [[ ! -f "\$agentgraph_extensions_dir/agentgraph/index.ts" ]]; then
+  echo "pi-harness: missing AgentGraph extension at \$agentgraph_extensions_dir/agentgraph/index.ts" >&2
+  exit 1
+fi
+if [[ ! -d "\$agentgraph_skills_dir" ]]; then
+  echo "pi-harness: missing AgentGraph skills dir at \$agentgraph_skills_dir" >&2
+  exit 1
+fi
+if [[ ! -d "\$agentgraph_prompts_dir" ]]; then
+  echo "pi-harness: missing AgentGraph prompts dir at \$agentgraph_prompts_dir" >&2
+  exit 1
+fi
+resource_args+=(
+  --extension "\$agentgraph_extensions_dir/agentgraph/index.ts"
+  --skill "\$agentgraph_skills_dir"
+  --prompt-template "\$agentgraph_prompts_dir"
 )''}
 
 exec "${lib.getExe piPackage}" "\''${resource_args[@]}" "\$@"
