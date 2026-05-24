@@ -46,9 +46,20 @@
         piLspExtension = pkgs.callPackage ./nix/pi-lsp-extension.nix {
           piLspExtensionSrc = pi-lsp-extension-src;
         };
+        piHarnessResources = pkgs.callPackage ./nix/pi-harness-resources.nix {
+          inherit piPackage;
+        };
         ticketPackage = pkgs.callPackage ./nix/ticket.nix { };
         piHarnessPackage = pkgs.callPackage ./nix/package.nix {
-          inherit piPackage agentgraphPackage agentgraphPostgresPackage agentgraphPiResources piLspExtension ticketPackage;
+          inherit
+            piPackage
+            piHarnessResources
+            agentgraphPackage
+            agentgraphPostgresPackage
+            agentgraphPiResources
+            piLspExtension
+            ticketPackage
+            ;
         };
         lspPackages = with pkgs; [
           nodejs
@@ -126,9 +137,17 @@
             test -d config/agent/skills
             test -d config/agent/prompts
             test -d config/agent/themes
-            test -f ${piHarnessPackage}/share/pi-harness/agent/extensions/agentgraph/index.ts
-            test -f ${piHarnessPackage}/share/pi-harness/agent/skills/agentgraph-operator/SKILL.md
-            test -f ${piHarnessPackage}/share/pi-harness/agent/prompts/graph-change.md
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
+            test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
+            test -d ${piHarnessResources}/share/pi-harness/agent/skills
+            test -d ${piHarnessResources}/share/pi-harness/agent/prompts
+            test -d ${piHarnessResources}/share/pi-harness/agent/themes
+            test -L ${piHarnessPackage}/share/pi-harness/agent
+            test -f ${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts
+            test -f ${agentgraphPiResources}/share/agentgraph-pi/skills/agentgraph-operator/SKILL.md
+            test -f ${agentgraphPiResources}/share/agentgraph-pi/prompts/graph-change.md
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -e ${piHarnessPackage}/bin/tk
@@ -143,12 +162,10 @@
             grep -F 'dockerfile: { command: "docker-langserver", args: ["--stdio"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
             grep -F 'bash: { command: "bash-language-server", args: ["start"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
             grep -F 'const runningStatuses = statuses.filter((s) => s.running);' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/tools/symbols.ts >/dev/null
-            jq -e '.extensions | index("./extensions/agentgraph/index.ts")' \
-              ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
-              ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
-              ${piHarnessPackage}/share/pi-harness/agent/settings.json >/dev/null
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
 
             ${typeSetup}
             tsc --noEmit --project tsconfig.json
@@ -184,6 +201,7 @@
       in
       {
         packages.pi-harness = piHarnessPackage;
+        packages.pi-harness-resources = piHarnessResources;
         packages.pi-lsp-extension = piLspExtension;
         packages.tk = ticketPackage;
         packages.pi = piPackage;

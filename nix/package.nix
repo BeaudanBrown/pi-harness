@@ -2,6 +2,7 @@
   stdenvNoCC,
   lib,
   piPackage,
+  piHarnessResources,
   agentgraphPackage ? null,
   agentgraphPostgresPackage ? null,
   agentgraphPiResources ? null,
@@ -19,62 +20,8 @@ stdenvNoCC.mkDerivation {
   installPhase = ''
     runHook preInstall
 
-    mkdir -p "$out/share/pi-harness/agent"
-    cp -R config/agent/. "$out/share/pi-harness/agent/"
-
-    ${lib.optionalString (agentgraphPiResources != null) ''
-      mkdir -p "$out/share/pi-harness/agent/extensions"
-      mkdir -p "$out/share/pi-harness/agent/skills"
-      mkdir -p "$out/share/pi-harness/agent/prompts"
-      mkdir -p "$out/share/pi-harness/agent/sql"
-      cp -R ${agentgraphPiResources}/share/agentgraph-pi/extensions/. "$out/share/pi-harness/agent/extensions/"
-      cp -R ${agentgraphPiResources}/share/agentgraph-pi/skills/. "$out/share/pi-harness/agent/skills/"
-      cp -R ${agentgraphPiResources}/share/agentgraph-pi/prompts/. "$out/share/pi-harness/agent/prompts/"
-      cp -R ${agentgraphPiResources}/share/agentgraph-pi/sql/. "$out/share/pi-harness/agent/sql/"
-      cat > "$out/share/pi-harness/agent/settings.json" <<'JSON'
-{
-  "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/core/settings-schema.json",
-  "extensions": [
-    "./extensions/web-search/index.ts",
-    "./extensions/agent-loop/index.ts",
-    "./extensions/nix-runtime/index.ts",
-    "./extensions/agentgraph/index.ts"
-  ],
-  "skills": [
-    "./skills"
-  ],
-  "prompts": [
-    "./prompts"
-  ],
-  "themes": [
-    "./themes"
-  ],
-  "enableSkillCommands": true,
-  "compaction": {
-    "enabled": true,
-    "reserveTokens": 16384,
-    "keepRecentTokens": 20000
-  }
-}
-JSON
-    ''}
-
-    mkdir -p "$out/share/pi-harness/agent/extensions/node_modules"
-    typebox_dir=""
-    for candidate in \
-      "${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox" \
-      "${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules/typebox"
-    do
-      if [ -d "$candidate" ]; then
-        typebox_dir="$candidate"
-        break
-      fi
-    done
-    if [ -z "$typebox_dir" ]; then
-      echo "Could not find Pi-bundled typebox in ${piPackage}" >&2
-      exit 1
-    fi
-    cp -R "$typebox_dir" "$out/share/pi-harness/agent/extensions/node_modules/typebox"
+    mkdir -p "$out/share/pi-harness"
+    ln -s ${piHarnessResources}/share/pi-harness/agent "$out/share/pi-harness/agent"
 
     mkdir -p "$out/bin"
     cat > "$out/bin/pi" <<EOF
@@ -103,6 +50,8 @@ EOF
 
   passthru = {
     pi = piPackage;
+    piResources = piHarnessResources.piResources;
+    harnessResources = piHarnessResources;
     agentgraph = agentgraphPackage;
     agentgraphPostgres = agentgraphPostgresPackage;
     agentgraphPiResources = agentgraphPiResources;
