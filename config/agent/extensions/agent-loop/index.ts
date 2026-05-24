@@ -919,19 +919,21 @@ ${featureBrief ? `${featureBrief}\n\n` : ""}Your job in this single iteration:
 1. Read the loop root ticket with: tk show ${rootTicket.id}
 2. Read the selected ticket with: tk show ${selectedTicket.id}
 3. Start the selected ticket if it is open: tk start ${selectedTicket.id}
-4. Implement only the selected ticket. Do not broaden scope to sibling tickets.
-5. If you discover additional work, capture it in tk instead of silently expanding scope:
+4. Before changing files, think through the ticket, repository instructions, and acceptance criteria; make a short plan for the implementation.
+5. Explore the project enough to understand the surrounding code, tests, patterns, and ownership boundaries before choosing an approach. Prefer targeted reads/searches and existing diagnostics over guessing.
+6. Implement only the selected ticket. Do not broaden scope to sibling tickets.
+7. If you discover additional work, capture it in tk instead of silently expanding scope:
    - If it is required for this ticket to be correct, create/link a prerequisite ticket or dependency and block if needed.
    - If it is valuable follow-up but not required now, create a small linked ticket under the loop root when appropriate.
    - If it is speculative, add a concise note rather than growing the plan.
-6. Add or update tests when appropriate.
-7. ${verifyLine}
-8. Update tk with concise implementation notes and a durable handoff note: tk add-note ${selectedTicket.id} "HANDOFF: <what changed>; <tests run>; <remaining risks or next touchpoint>"
-9. If your discovery affects sibling/future tickets, also add a short root note: tk add-note ${rootTicket.id} "HANDOFF from ${selectedTicket.id}: <cross-ticket context>"
-10. Before closing, review whether any discovered follow-up work should be captured as linked tk tickets or notes.
-11. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
-12. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
-13. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
+8. Add or update tests when appropriate.
+9. ${verifyLine}
+10. Update tk with concise implementation notes and a durable handoff note: tk add-note ${selectedTicket.id} "HANDOFF: <what changed>; <tests run>; <remaining risks or next touchpoint>"
+11. If your discovery affects sibling/future tickets, also add a short root note: tk add-note ${rootTicket.id} "HANDOFF from ${selectedTicket.id}: <cross-ticket context>"
+12. Before closing, review whether any discovered follow-up work should be captured as linked tk tickets or notes.
+13. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
+14. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
+15. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
 
 Hard requirements:
 - You must leave the worktree clean by committing successful changes.
