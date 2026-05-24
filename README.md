@@ -12,8 +12,9 @@ layout is handled outside Pi with regular tmux.
 
 - the upstream `pi` CLI from `llm-agents.nix`
 - a Nix package named `pi-harness`
+- a Nix resource package named `pi-harness-resources`
 - a NixOS module named `nixosModules.pi-harness`
-- shared Pi config under `config/agent/`
+- shared Pi resources under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
 - the `tk` git-backed ticket CLI for agent task tracking
@@ -21,21 +22,21 @@ layout is handled outside Pi with regular tmux.
 - the AgentGraph pi resources imported from the AgentGraph flake input
 - empty skill, prompt, and theme directories for future additions
 
-The packaged configuration loads web search plus the AgentGraph mode extension.
-The working-tree development wrapper loads the AgentGraph resources directly
-from the flake input so the extension source stays in the AgentGraph repo.
+The packaged `pi-harness` binary wraps upstream `pi` and passes explicit local
+resource paths from the Nix store with `--extension`, `--skill`,
+`--prompt-template`, and `--theme`. It does not depend on mutable `pi install`
+state or on copying generated settings into `~/.pi/agent`.
 
-The packaged `pi-harness` binary is intentionally just the upstream `pi` CLI
-with harness defaults for AgentGraph helpers. Installed/system usage loads this
-repository's shared resources through Pi's normal configuration files, which the
-NixOS module links into `~/.pi/agent`. This keeps package execution and Pi's own
-auto-discovery from loading the same extension twice.
+Harness-owned resources are packaged separately as `pi-harness-resources` and
+expose `passthru.piResources` for future Nix-packaged Pi extensions. AgentGraph
+resources are consumed from the AgentGraph flake input by path, not copied into
+this repository's package output.
 
-The harness defaults do not overwrite pre-set `AG_DEV_ROOT`, `AGENTGRAPH_CLI`,
-or `AGENTGRAPH_POSTGRES`. Development launchers such as AgentGraph's `pi-ag`
-can therefore keep web search, agent-loop, tk, prompts/themes, models, and LSP
-from the global harness while shadowing only the packaged AgentGraph runtime and
-resources for that process.
+The harness defaults do not overwrite pre-set `AGENTGRAPH_CLI` or
+`AGENTGRAPH_POSTGRES`. Development launchers such as AgentGraph's `pi-ag` can
+keep web search, agent-loop, tk, prompts/themes, models, and LSP from the global
+harness while shadowing only the packaged AgentGraph runtime and resources for
+that process.
 
 ## NixOS Usage
 
@@ -61,21 +62,14 @@ In a consuming flake such as `nix-dotfiles`:
 }
 ```
 
-The module installs the packaged `pi` binary. In this setup, Home Manager can
-link the packaged shared resources into Pi's normal config directory:
-
-```text
-~/.pi/agent/settings.json
-~/.pi/agent/extensions
-~/.pi/agent/skills
-~/.pi/agent/prompts
-~/.pi/agent/themes
-```
+The module installs the packaged `pi` binary. The binary injects the shared
+resource paths directly, while Pi's normal user config directory remains mutable
+for auth, sessions, user settings, and user-installed extras.
 
 ## AgentGraph Mode
 
 The AgentGraph extension is sourced from the `agentgraph` flake input and wired
-into the packaged Pi config. It exposes `/ag on`, `/ag off`, `/ag status`,
+into the packaged Pi wrapper. It exposes `/ag on`, `/ag off`, `/ag status`,
 `/ag init`, and `/ag db`.
 
 `/ag on` switches the current Pi session into graph mode: direct `edit`,
@@ -88,7 +82,21 @@ PostgreSQL server with per-project databases via `agentgraph-postgres`.
 
 The reusable extension, prompts, PostgreSQL helper, and AgentGraph operator skill
 are maintained in the AgentGraph repo, not duplicated here; update the
-`agentgraph` flake input to pick up tool-surface changes.
+`agentgraph` flake input to pick up tool-surface changes. For live AgentGraph
+extension iteration, a launcher can set these environment variables before
+executing the normal `pi` wrapper:
+
+```bash
+export AG_DEV_ROOT="$PWD"
+export AGENTGRAPH_CLI="agentgraph-dev-ag"
+export AGENTGRAPH_POSTGRES="agentgraph-dev-postgres"
+export PI_HARNESS_AGENTGRAPH_ROOT="$PWD/pi/agentgraph"
+export PI_HARNESS_AGENTGRAPH_SKILLS_DIR="$PWD/skills"
+exec pi "$@"
+```
+
+The wrapper then loads the AgentGraph extension and prompts from the checkout
+while preserving the rest of the Nix-managed harness resources.
 
 AgentGraph LLM execution happens inside `ag agent run-cycle`, so provider
 secrets must be available as runtime environment variables to the `ag` process.
@@ -169,17 +177,17 @@ and `agent_loop_verify` for the supervisor-provided `--verify` command.
 
 ## Local Workflow
 
-For extension and prompt iteration in this repository, enter the development
-shell:
+For extension and prompt iteration in this repository, edit `config/agent` and
+run the fast verification gate:
 
 ```bash
-nix develop
-pi
+nix run .#verify
 ```
 
-Inside `nix develop`, `pi` is a wrapper around the upstream CLI that points at
-the working-tree `config/agent` resources. This lets edits to extensions,
-skills, prompts, and themes take effect without rebuilding the package.
+The installed `pi` wrapper points at immutable Nix store paths. Rebuild or update
+the flake input to pick up packaged resource changes. For fast iteration on an
+external resource package, use an environment-shadow launcher like AgentGraph's
+`pi-ag` so only that package's resource root is replaced by a checkout path.
 
 Use external tmux sessions directly:
 
