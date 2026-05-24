@@ -151,9 +151,14 @@
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -e ${piHarnessPackage}/bin/tk
-            grep -F "export AG_DEV_ROOT=\"\''${AG_DEV_ROOT:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--skill \"${piHarnessResources}/share/pi-harness/agent/skills\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--prompt-template \"${agentgraphPiResources}/share/agentgraph-pi/prompts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "install|remove|uninstall|update|list|config)" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_CLI=\"\''${AGENTGRAPH_CLI:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_POSTGRES=\"\''${AGENTGRAPH_POSTGRES:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export AGENTGRAPH_PI_RESOURCES=\"\''${AGENTGRAPH_PI_RESOURCES:-" ${piHarnessPackage}/bin/pi >/dev/null
             ${piHarnessPackage}/bin/tk help >/dev/null
             test -f ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/index.ts
             grep -F '".nix": "nix"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null

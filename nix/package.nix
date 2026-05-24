@@ -28,11 +28,32 @@ stdenvNoCC.mkDerivation {
 #!/usr/bin/env bash
 set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
-export AG_DEV_ROOT="\''${AG_DEV_ROOT:-$out/share/pi-harness/agent}"
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
+${lib.optionalString (agentgraphPiResources != null) ''export AGENTGRAPH_PI_RESOURCES="\''${AGENTGRAPH_PI_RESOURCES:-${agentgraphPiResources}/share/agentgraph-pi}"''}
 ${lib.optionalString (ticketPackage != null) ''export PATH="${ticketPackage}/bin:\$PATH"''}
-exec "${lib.getExe piPackage}" "\$@"
+
+case "\''${1-}" in
+  install|remove|uninstall|update|list|config)
+    exec "${lib.getExe piPackage}" "\$@"
+    ;;
+esac
+
+resource_args=(
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
+  --skill "${piHarnessResources}/share/pi-harness/agent/skills"
+  --prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"
+  --theme "${piHarnessResources}/share/pi-harness/agent/themes"
+)
+${lib.optionalString (agentgraphPiResources != null) ''resource_args+=(
+  --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts"
+  --skill "${agentgraphPiResources}/share/agentgraph-pi/skills"
+  --prompt-template "${agentgraphPiResources}/share/agentgraph-pi/prompts"
+)''}
+
+exec "${lib.getExe piPackage}" "\''${resource_args[@]}" "\$@"
 EOF
     chmod +x "$out/bin/pi"
     ${lib.optionalString (agentgraphPackage != null) ''
