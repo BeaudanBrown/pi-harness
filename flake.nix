@@ -96,6 +96,7 @@
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
                   --extension "$PWD/config/agent/extensions/agent-loop/index.ts" \
                   --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
+                  --extension "$PWD/config/agent/extensions/codex-fast/index.ts" \
                   --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
                   --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
                   --skill "$PWD/config/agent/skills" \
@@ -134,12 +135,14 @@
             test -f config/agent/extensions/web-search/index.ts
             test -f config/agent/extensions/agent-loop/index.ts
             test -f config/agent/extensions/nix-runtime/index.ts
+            test -f config/agent/extensions/codex-fast/index.ts
             test -d config/agent/skills
             test -d config/agent/prompts
             test -d config/agent/themes
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
             test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
             test -d ${piHarnessResources}/share/pi-harness/agent/skills
             test -d ${piHarnessResources}/share/pi-harness/agent/prompts
@@ -152,6 +155,7 @@
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -e ${piHarnessPackage}/bin/tk
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--skill \"${piHarnessResources}/share/pi-harness/agent/skills\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"\$agentgraph_extensions_dir/agentgraph/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--prompt-template \"\$agentgraph_prompts_dir\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -172,6 +176,8 @@
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/codex-fast/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
 
             ${typeSetup}

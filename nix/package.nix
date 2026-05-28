@@ -42,6 +42,7 @@ resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts"
   --skill "${piHarnessResources}/share/pi-harness/agent/skills"
   --prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"
   --theme "${piHarnessResources}/share/pi-harness/agent/themes"

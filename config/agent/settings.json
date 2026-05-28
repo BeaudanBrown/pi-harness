@@ -3,7 +3,8 @@
   "extensions": [
     "./extensions/web-search/index.ts",
     "./extensions/agent-loop/index.ts",
-    "./extensions/nix-runtime/index.ts"
+    "./extensions/nix-runtime/index.ts",
+    "./extensions/codex-fast/index.ts"
   ],
   "skills": [
     "./skills"

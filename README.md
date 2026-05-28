@@ -17,6 +17,7 @@ layout is handled outside Pi with regular tmux.
 - shared Pi resources under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
+- a Codex fast-mode extension under `config/agent/extensions/codex-fast`
 - the `tk` git-backed ticket CLI for agent task tracking
 - supervised `/aplan` and `/aloop` commands under `config/agent/extensions/agent-loop`
 - the AgentGraph pi resources imported from the AgentGraph flake input
@@ -120,6 +121,16 @@ such as `nix develop -c`, `nix shell nixpkgs#pkg -c`, and `nix run` when a
 required command is missing. It does not add a new execution tool; normal Pi
 sessions still use the built-in `bash` tool, and AgentGraph mode keeps its
 restricted tool surface.
+
+## Codex Fast Mode
+
+The included `codex-fast` extension is based on `calesennett/pi-codex-fast`.
+When enabled, it adds `service_tier=priority` to OpenAI and OpenAI Codex
+provider requests. It is inactive for other providers.
+
+Use `/codex-fast` inside Pi to toggle it, or start Pi with `pi --fast` to enable
+it for that session. The persisted setting is stored under `pi-codex-fast` in
+Pi's normal settings files.
 
 ## Web Search
 
