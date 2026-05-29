@@ -44,6 +44,7 @@ let
         "${drv}/share/pi-harness/agent/extensions/agent-loop/index.ts"
         "${drv}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
         "${drv}/share/pi-harness/agent/extensions/codex-fast/index.ts"
+        "${drv}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
       ];
       skills = [ "${drv}/share/pi-harness/agent/skills" ];
       prompts = [ "${drv}/share/pi-harness/agent/prompts" ];

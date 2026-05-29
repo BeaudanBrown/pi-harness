@@ -18,6 +18,7 @@ layout is handled outside Pi with regular tmux.
 - a small web search extension under `config/agent/extensions/web-search`
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
 - a Codex fast-mode extension under `config/agent/extensions/codex-fast`
+- a tmux cursor focus extension under `config/agent/extensions/tmux-cursor-focus`
 - the `tk` git-backed ticket CLI for agent task tracking
 - supervised `/aplan` and `/aloop` commands under `config/agent/extensions/agent-loop`
 - the AgentGraph pi resources imported from the AgentGraph flake input
@@ -121,6 +122,26 @@ such as `nix develop -c`, `nix shell nixpkgs#pkg -c`, and `nix run` when a
 required command is missing. It does not add a new execution tool; normal Pi
 sessions still use the built-in `bash` tool, and AgentGraph mode keeps its
 restricted tool surface.
+
+## Tmux Cursor Focus
+
+The included `tmux-cursor-focus` extension hides Pi's software-rendered editor
+cursor when the current tmux pane loses focus, then restores it when focus
+returns. It is based on the approach used by the community
+`pi-tmux-cursor-focus` extension but is vendored as a small harness-owned
+extension so the packaged Pi wrapper does not depend on mutable `pi install`
+state or an unpinned npm package.
+
+It only activates when `TMUX_PANE` is set. It uses tmux `pane-focus-in` and
+`pane-focus-out` hooks for the current pane, so tmux focus events must be
+enabled:
+
+```tmux
+set -g focus-events on
+```
+
+The `nix-dotfiles` tmux module already sets Home Manager's `focusEvents = true`,
+which generates the required tmux setting.
 
 ## Codex Fast Mode
 
