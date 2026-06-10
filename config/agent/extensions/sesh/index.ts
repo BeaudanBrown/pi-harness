@@ -176,9 +176,17 @@ async function runSesh(_args: string | undefined, ctx: ExtensionCommandContext):
 		const script = `#!/usr/bin/env bash
 set -euo pipefail
 cd ${shellQuote(tempDir)}
+
+# Keep /sesh deterministic. User defaults such as --height=40% make fzf
+# render as a small nested window inside the tmux popup instead of filling it.
+unset FZF_DEFAULT_OPTS
+unset FZF_DEFAULT_OPTS_FILE
+
 status=0
 ${shellQuote(fzfPath)} \\
   --ansi \\
+  --height='100%' \\
+  --border='none' \\
   --delimiter=$'\t' \\
   --with-nth='2,3,4' \\
   --nth='2,4,5' \\

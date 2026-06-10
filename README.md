@@ -154,7 +154,8 @@ switch to the selected session; press Esc to cancel.
 
 `/sesh` intentionally fails with a warning outside tmux because `fzf` owns a
 terminal UI and is run through `tmux display-popup` rather than embedded in Pi's
-TUI renderer.
+TUI renderer. It clears user `FZF_DEFAULT_OPTS` for the popup so personal fzf
+settings such as `--height` do not shrink the picker inside the tmux popup.
 
 ## Codex Fast Mode
 
