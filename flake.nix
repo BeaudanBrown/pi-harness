@@ -60,6 +60,8 @@
             piLspExtension
             ticketPackage
             ;
+          fzf = pkgs.fzf;
+          tmux = pkgs.tmux;
         };
         lspPackages = with pkgs; [
           nodejs
@@ -98,6 +100,7 @@
                   --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
                   --extension "$PWD/config/agent/extensions/codex-fast/index.ts" \
                   --extension "$PWD/config/agent/extensions/tmux-cursor-focus/index.ts" \
+                  --extension "$PWD/config/agent/extensions/sesh/index.ts" \
                   --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
                   --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
                   --skill "$PWD/config/agent/skills" \
@@ -138,6 +141,7 @@
             test -f config/agent/extensions/nix-runtime/index.ts
             test -f config/agent/extensions/codex-fast/index.ts
             test -f config/agent/extensions/tmux-cursor-focus/index.ts
+            test -f config/agent/extensions/sesh/index.ts
             test -d config/agent/skills
             test -d config/agent/prompts
             test -d config/agent/themes
@@ -146,6 +150,7 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts
             test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
             test -d ${piHarnessResources}/share/pi-harness/agent/skills
             test -d ${piHarnessResources}/share/pi-harness/agent/prompts
@@ -160,12 +165,15 @@
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--skill \"${piHarnessResources}/share/pi-harness/agent/skills\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"\$agentgraph_extensions_dir/agentgraph/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--prompt-template \"\$agentgraph_prompts_dir\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "install|remove|uninstall|update|list|config)" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_CLI=\"\''${AGENTGRAPH_CLI:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_POSTGRES=\"\''${AGENTGRAPH_POSTGRES:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export PI_HARNESS_FZF=\"\''${PI_HARNESS_FZF:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export PI_HARNESS_TMUX=\"\''${PI_HARNESS_TMUX:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "PI_HARNESS_AGENTGRAPH_ROOT" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "PI_HARNESS_AGENTGRAPH_SKILLS_DIR" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_PI_RESOURCES=\"\$agentgraph_root\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -184,6 +192,8 @@
             jq -e '.extensions | index("./extensions/codex-fast/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/tmux-cursor-focus/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/sesh/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
 
             ${typeSetup}

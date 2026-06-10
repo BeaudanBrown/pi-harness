@@ -19,6 +19,7 @@ layout is handled outside Pi with regular tmux.
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
 - a Codex fast-mode extension under `config/agent/extensions/codex-fast`
 - a tmux cursor focus extension under `config/agent/extensions/tmux-cursor-focus`
+- a tmux/fzf session picker command under `config/agent/extensions/sesh`
 - the `tk` git-backed ticket CLI for agent task tracking
 - supervised `/aplan` and `/aloop` commands under `config/agent/extensions/agent-loop`
 - the AgentGraph pi resources imported from the AgentGraph flake input
@@ -142,6 +143,18 @@ set -g focus-events on
 
 The `nix-dotfiles` tmux module already sets Home Manager's `focusEvents = true`,
 which generates the required tmux setting.
+
+## Sesh Session Picker
+
+The included `sesh` extension registers `/sesh`, a current-project Pi session
+picker that runs real `fzf` in a tmux popup. It searches session name/id and the
+first message, displays a concise session list, and shows a right-hand preview
+of recent user/assistant context for the highlighted session. Press Enter to
+switch to the selected session; press Esc to cancel.
+
+`/sesh` intentionally fails with a warning outside tmux because `fzf` owns a
+terminal UI and is run through `tmux display-popup` rather than embedded in Pi's
+TUI renderer.
 
 ## Codex Fast Mode
 

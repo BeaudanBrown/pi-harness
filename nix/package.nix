@@ -8,6 +8,8 @@
   agentgraphPiResources ? null,
   piLspExtension ? null,
   ticketPackage ? null,
+  fzf ? null,
+  tmux ? null,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -31,6 +33,8 @@ export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
 ${lib.optionalString (ticketPackage != null) ''export PATH="${ticketPackage}/bin:\$PATH"''}
+${lib.optionalString (fzf != null) ''export PI_HARNESS_FZF="\''${PI_HARNESS_FZF:-${fzf}/bin/fzf}"''}
+${lib.optionalString (tmux != null) ''export PI_HARNESS_TMUX="\''${PI_HARNESS_TMUX:-${tmux}/bin/tmux}"''}
 
 case "\''${1-}" in
   install|remove|uninstall|update|list|config)
@@ -44,6 +48,7 @@ resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts"
   --skill "${piHarnessResources}/share/pi-harness/agent/skills"
   --prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"
   --theme "${piHarnessResources}/share/pi-harness/agent/themes"
@@ -97,6 +102,8 @@ EOF
     agentgraphPiResources = agentgraphPiResources;
     piLspExtension = piLspExtension;
     ticket = ticketPackage;
+    fzf = fzf;
+    tmux = tmux;
   };
 
   meta = {
