@@ -202,18 +202,26 @@ The included `agent-loop` extension registers `/aplan` and `/aloop`:
 high-value questions, and then creates a `tk` epic plus child tickets when the
 plan is ready. `/aloop` supervises fresh child Pi processes one at a time. Each
 iteration selects a ready `tk` ticket from the requested subtree, implements only
-that ticket, updates `tk`, verifies, commits code plus `.tickets/` changes,
-closes a root epic once all descendants are complete, and leaves the worktree
-clean before continuing. Epics are preferred for planned multi-ticket work, but
-`/aloop` treats any ticket with children as a subtree container and warns when a
-non-epic ticket is used that way.
+that ticket, updates `tk`, verifies, commits exactly one worker commit containing
+code plus `.tickets/` changes, closes a root epic once all descendants are
+complete, and leaves the worktree clean before continuing. Epics are preferred
+for planned multi-ticket work, but `/aloop` treats any ticket with children as a
+subtree container and warns when a non-epic ticket is used that way.
+
+If an iteration needs reboot or other out-of-process validation, the worker can
+finish with `ALOOP_RESULT: needs_reboot`. The supervisor treats that as a
+successful handoff, allows the selected ticket to remain open/in progress,
+verifies that one worker commit and tk updates exist, verifies the worktree is
+clean, and then stops the live loop for the external resume path.
 
 Useful `/aloop` options are `--timeout 45m`, `--model provider/model`,
 `--verify <cmd>`, and `--allow-dirty`. Iterations default to a 30 minute timeout;
 on timeout the supervisor terminates the child process group and runs a best-effort
 `bash ./bin/in-env dev-stop` when the repo provides that wrapper. The extension
 refuses a dirty worktree by default and never pushes; the child prompt also
-instructs workers never to push.
+instructs workers never to push. Workers are instructed to squash or amend any
+intermediate commits before returning so one iteration maps to one coherent
+commit.
 
 When `/ag on` is active in the supervising session, `/aloop` starts child Pi
 processes in AgentGraph-compatible loop mode. Those children cannot use direct

@@ -14,6 +14,7 @@ import {
 	latestAgentGraphModeEnabled,
 	parseChildProgressLine,
 	parseDiffNumstat,
+	parseFooter,
 	pickReadyTicket,
 	pushLoopProgress,
 	shortTicketSummary,
@@ -123,6 +124,14 @@ test("child JSON tool events are summarized into brief actions", () => {
 	}), { kind: "file", action: "edit", path: "src/Auth.hs" });
 
 	assert.equal(formatChildActivity({ kind: "file", action: "edit", path: "src/Auth.hs" }), "> edit: src/Auth.hs");
+});
+
+test("aloop footer accepts reboot handoff result", () => {
+	assert.deepEqual(parseFooter("ALOOP_RESULT: needs_reboot\nTK_UPDATED: yes\nMESSAGE: seeded reboot"), {
+		aloop_result: "needs_reboot",
+		tk_updated: "yes",
+		message: "seeded reboot",
+	});
 });
 
 test("diff numstat is summarized as additions, deletions, and binary files", () => {
@@ -252,6 +261,9 @@ test("normal worker prompt keeps loop tools out of the context", () => {
 	);
 	assert.match(prompt, /AgentGraph mode is not active/);
 	assert.match(prompt, /Use normal bash commands for tk, git, verification/);
+	assert.match(prompt, /Create exactly one commit for a successful iteration/);
+	assert.match(prompt, /ALOOP_RESULT: continue\|stop\|blocked\|needs_reboot/);
+	assert.match(prompt, /finish with ALOOP_RESULT: needs_reboot/);
 	assert.doesNotMatch(prompt, /agent_loop_/);
 	assert.doesNotMatch(prompt, /agentgraph_/);
 });

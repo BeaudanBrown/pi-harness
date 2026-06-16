@@ -566,7 +566,7 @@ function extractTextContent(message: any): string {
 		.join("\n");
 }
 
-function parseFooter(text: string): Record<string, string> {
+export function parseFooter(text: string): Record<string, string> {
 	const fields: Record<string, string> = {};
 	for (const line of text.split("\n")) {
 		const match = line.match(/^([A-Z_]+):\s*(.*)$/);
@@ -744,6 +744,13 @@ async function committedDiffStat(cwd: string, before: string, after: string): Pr
 	return parseDiffNumstat(await git(cwd, ["diff", "--numstat", before, after]));
 }
 
+async function commitCountBetween(cwd: string, before: string, after: string): Promise<number> {
+	const raw = await git(cwd, ["rev-list", "--count", `${before}..${after}`]);
+	const count = Number(raw.trim());
+	if (!Number.isInteger(count)) throw new Error(`Unable to count commits between ${before} and ${after}: ${raw}`);
+	return count;
+}
+
 function clearLoopProgress(ctx: ProgressUiContext, progress: LoopProgress): void {
 	ctx.ui.setStatus(progress.statusId, undefined);
 	ctx.ui.setWidget(progress.widgetId, undefined);
@@ -893,6 +900,7 @@ export function buildWorkerPrompt(options: LoopOptions, repoRoot: string, rootTi
 		: options.verify
 			? `Run this verification command via bash unless a narrower failing-focused check is necessary first: ${options.verify}`
 			: "Run the most relevant focused tests or verification for the selected ticket via bash. If repository instructions define a canonical gate, prefer that gate when practical.";
+	const rebootLine = "If validation requires a reboot, commit one coherent change, seed the project boot-resume task according to repository docs, leave the worktree clean, keep the selected ticket open/in progress with a HANDOFF note, and finish with ALOOP_RESULT: needs_reboot.";
 	const graphModeSection = graphModeActive
 		? `
 
@@ -928,14 +936,17 @@ ${featureBrief ? `${featureBrief}\n\n` : ""}Your job in this single iteration:
    - If it is speculative, add a concise note rather than growing the plan.
 8. Add or update tests when appropriate.
 9. ${verifyLine}
-10. Update tk with concise implementation notes and a durable handoff note: tk add-note ${selectedTicket.id} "HANDOFF: <what changed>; <tests run>; <remaining risks or next touchpoint>"
-11. If your discovery affects sibling/future tickets, also add a short root note: tk add-note ${rootTicket.id} "HANDOFF from ${selectedTicket.id}: <cross-ticket context>"
-12. Before closing, review whether any discovered follow-up work should be captured as linked tk tickets or notes.
-13. Close the selected ticket only if its acceptance criteria are satisfied: tk close ${selectedTicket.id}
-14. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
-15. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
+10. ${rebootLine}
+11. Update tk with concise implementation notes and a durable handoff note: tk add-note ${selectedTicket.id} "HANDOFF: <what changed>; <tests run>; <remaining risks or next touchpoint>"
+12. If your discovery affects sibling/future tickets, also add a short root note: tk add-note ${rootTicket.id} "HANDOFF from ${selectedTicket.id}: <cross-ticket context>"
+13. Before closing, review whether any discovered follow-up work should be captured as linked tk tickets or notes.
+14. Close the selected ticket only if its acceptance criteria are satisfied and no reboot validation is still required: tk close ${selectedTicket.id}
+15. If the loop root is an epic and this closes the final open descendant under ${rootTicket.id}, verify the epic acceptance criteria and add a concise closeout note. The supervisor may close the root epic after validation.
+16. Commit exactly this iteration's completed work, including code changes and .tickets updates. Use git locally only; never push.
 
 Hard requirements:
+- Create exactly one commit for a successful iteration. If you make intermediate commits, squash or amend them before your final response.
+- Diagnostic or trial tools must not create commits; review their output and include relevant artifacts in your one iteration commit.
 - You must leave the worktree clean by committing successful changes.
 - You must update tk on every successful or blocked iteration.
 - New tickets must be small, actionable, linked to the current/root ticket, and clearly marked as prerequisite or follow-up.
@@ -944,7 +955,7 @@ Hard requirements:
 - If no useful work can proceed, update tk with the blocker and report ALOOP_RESULT: blocked.
 
 Finish your final response with these exact footer lines:
-ALOOP_RESULT: continue|stop|blocked
+ALOOP_RESULT: continue|stop|blocked|needs_reboot
 LOOP_ROOT: ${rootTicket.id}
 TICKET: ${selectedTicket.id}
 COMMIT: <new commit hash, or none>
@@ -1241,14 +1252,18 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: Exten
 			if (afterHead === beforeHead) {
 				throw new Error(`Iteration ${i} did not create a commit. Final response:\n${truncate(child.finalText)}`);
 			}
+			const workerCommitCount = await commitCountBetween(repoRoot, beforeHead, afterHead);
+			if (workerCommitCount !== 1) {
+				throw new Error(`Iteration ${i} created ${workerCommitCount} commits; expected exactly one. Squash or amend iteration work before finishing.`);
+			}
 			if (afterTickets === beforeTickets || tkUpdated === "no") {
 				throw new Error(`Iteration ${i} did not update tk tickets.`);
 			}
-			if (updatedTicket.status !== "closed") {
+			if (result !== "needs_reboot" && updatedTicket.status !== "closed") {
 				throw new Error(`Iteration ${i} did not close selected ticket ${selected.id}.`);
 			}
 			if (!options.allowDirty) await requireCleanWorktree(repoRoot);
-			const epicCloseCommit = await finalizeRootEpicIfComplete(repoRoot, root, selected);
+			const epicCloseCommit = result === "needs_reboot" ? undefined : await finalizeRootEpicIfComplete(repoRoot, root, selected);
 			if (epicCloseCommit) {
 				afterHead = epicCloseCommit;
 				pushLoopProgress(ctx, progress, `> closed epic: ${root.id} ${afterHead.slice(0, 12)}`);
@@ -1270,7 +1285,7 @@ async function runLoop(rawArgs: string, ctx: ExtensionCommandContext, pi?: Exten
 				blockers: footer.blockers,
 			});
 
-			if (result === "stop") break;
+			if (result === "stop" || result === "needs_reboot") break;
 		}
 	} finally {
 		clearLoopProgress(ctx, progress);
