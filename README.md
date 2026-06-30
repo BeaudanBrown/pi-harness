@@ -177,14 +177,17 @@ architecture documentation:
 - `diagram_inventory` lists diagram-as-code files in the current repository.
 - `diagram_render` validates or renders Mermaid, D2, Graphviz DOT, PlantUML,
   and Structurizr diagram sources using local CLI tools.
+- `diagram_show` opens rendered SVG/PNG/JPEG/GIF/WebP/PDF artifacts in a
+  detached local viewer when visual review is useful or explicitly requested.
 - `architecture_commands` lists project-defined deterministic architecture
   commands from `.pi/architecture.json`.
 - `architecture_command` runs a named project-defined architecture command.
 
-The packaged wrapper exposes D2 and Graphviz through `PI_HARNESS_D2` and
-`PI_HARNESS_DOT`. Other renderers can be provided by the project environment or
-through `PI_HARNESS_MERMAID_CLI`, `PI_HARNESS_PLANTUML`, and
-`PI_HARNESS_STRUCTURIZR`. The NixOS module also provides
+The packaged wrapper exposes D2, Graphviz, and a default diagram viewer through
+`PI_HARNESS_D2`, `PI_HARNESS_DOT`, and `PI_HARNESS_IMAGE_VIEWER`. Other
+renderers can be provided by the project environment or through
+`PI_HARNESS_MERMAID_CLI`, `PI_HARNESS_PLANTUML`, and `PI_HARNESS_STRUCTURIZR`.
+The NixOS module also provides
 `services.pi-harness.diagrams.enable` to append diagram CLIs such as Graphviz
 and D2 to Pi's fallback runtime path.
 

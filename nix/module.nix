@@ -34,6 +34,7 @@ let
   defaultDiagramPackages = with pkgs; [
     graphviz
     d2
+    xdg-utils
   ];
 
   fallbackRuntimePackages =
@@ -93,7 +94,7 @@ in
     diagrams.packages = lib.mkOption {
       type = lib.types.listOf lib.types.package;
       default = defaultDiagramPackages;
-      defaultText = lib.literalExpression "[ pkgs.graphviz pkgs.d2 ]";
+      defaultText = lib.literalExpression "[ pkgs.graphviz pkgs.d2 pkgs.xdg-utils ]";
       description = ''
         Diagram CLI packages exposed on PATH for Pi architecture diagram tools.
         Project-local tools from dev shells take precedence because these are

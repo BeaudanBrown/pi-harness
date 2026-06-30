@@ -23,6 +23,7 @@ When available, use these pi tools:
 
 - `diagram_inventory`: list diagram-as-code files in the repo.
 - `diagram_render`: validate/render Mermaid, D2, Graphviz DOT, PlantUML, or Structurizr diagram files with local CLIs.
+- `diagram_show`: open rendered SVG/PNG/JPEG/GIF/WebP/PDF artifacts in a detached local viewer.
 - `architecture_commands`: list project-defined deterministic architecture commands from `.pi/architecture.json`.
 - `architecture_command`: run a named deterministic architecture command from `.pi/architecture.json`.
 
@@ -49,6 +50,16 @@ Use live diagrams for:
 - answering “how does this fit together?”
 
 Keep them small and label uncertain edges as tentative.
+
+## Showing Diagrams
+
+Use `diagram_show` only when it is likely to help the user, for example:
+
+- the user explicitly asks to see/open/show a diagram
+- you just rendered a non-trivial diagram artifact and visual inspection is part of the task
+- you need the user to review layout/readability before committing or proceeding
+
+Do not open viewer windows for every small exploratory diagram. For quick inline Mermaid explanations, normally just include the diagram in the response. If you open a diagram, mention the path you opened.
 
 ## Durable Documentation Workflow
 

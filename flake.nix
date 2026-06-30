@@ -64,6 +64,7 @@
           tmux = pkgs.tmux;
           d2 = pkgs.d2;
           graphviz = pkgs.graphviz;
+          xdgUtils = pkgs.xdg-utils;
         };
         lspPackages = with pkgs; [
           nodejs
@@ -182,6 +183,7 @@
             grep -F "export PI_HARNESS_TMUX=\"\''${PI_HARNESS_TMUX:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export PI_HARNESS_D2=\"\''${PI_HARNESS_D2:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export PI_HARNESS_DOT=\"\''${PI_HARNESS_DOT:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export PI_HARNESS_IMAGE_VIEWER=\"\''${PI_HARNESS_IMAGE_VIEWER:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "PI_HARNESS_AGENTGRAPH_ROOT" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "PI_HARNESS_AGENTGRAPH_SKILLS_DIR" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_PI_RESOURCES=\"\$agentgraph_root\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -267,6 +269,7 @@
             pkgs.tmux
             pkgs.d2
             pkgs.graphviz
+            pkgs.xdg-utils
           ] ++ lspPackages;
 
           shellHook = ''

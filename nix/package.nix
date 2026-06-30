@@ -12,6 +12,7 @@
   tmux ? null,
   d2 ? null,
   graphviz ? null,
+  xdgUtils ? null,
   plantuml ? null,
   mermaidCli ? null,
   structurizrCli ? null,
@@ -42,6 +43,7 @@ ${lib.optionalString (fzf != null) ''export PI_HARNESS_FZF="\''${PI_HARNESS_FZF:
 ${lib.optionalString (tmux != null) ''export PI_HARNESS_TMUX="\''${PI_HARNESS_TMUX:-${tmux}/bin/tmux}"''}
 ${lib.optionalString (d2 != null) ''export PI_HARNESS_D2="\''${PI_HARNESS_D2:-${d2}/bin/d2}"''}
 ${lib.optionalString (graphviz != null) ''export PI_HARNESS_DOT="\''${PI_HARNESS_DOT:-${graphviz}/bin/dot}"''}
+${lib.optionalString (xdgUtils != null) ''export PI_HARNESS_IMAGE_VIEWER="\''${PI_HARNESS_IMAGE_VIEWER:-${xdgUtils}/bin/xdg-open}"''}
 ${lib.optionalString (plantuml != null) ''export PI_HARNESS_PLANTUML="\''${PI_HARNESS_PLANTUML:-${plantuml}/bin/plantuml}"''}
 ${lib.optionalString (mermaidCli != null) ''export PI_HARNESS_MERMAID_CLI="\''${PI_HARNESS_MERMAID_CLI:-${mermaidCli}/bin/mmdc}"''}
 ${lib.optionalString (structurizrCli != null) ''export PI_HARNESS_STRUCTURIZR="\''${PI_HARNESS_STRUCTURIZR:-${structurizrCli}/bin/structurizr}"''}
@@ -117,6 +119,7 @@ EOF
     tmux = tmux;
     d2 = d2;
     graphviz = graphviz;
+    xdgUtils = xdgUtils;
     plantuml = plantuml;
     mermaidCli = mermaidCli;
     structurizrCli = structurizrCli;

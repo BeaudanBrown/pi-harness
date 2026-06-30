@@ -10,6 +10,7 @@ const MAX_OUTPUT = 24_000;
 const ARCH_CONFIG = ".pi/architecture.json";
 
 const diagramLanguages = ["mermaid", "d2", "dot", "plantuml", "structurizr"] as const;
+const showableExtensions = [".svg", ".png", ".jpg", ".jpeg", ".gif", ".webp", ".pdf"];
 type DiagramLanguage = (typeof diagramLanguages)[number];
 
 type CommandSpec = {
@@ -47,14 +48,28 @@ function resolveInsideRepo(input: string): string {
 	return resolved;
 }
 
-function assertSafeWritePath(input: string): string {
+function assertSafeArtifactPath(input: string, action: "read" | "write"): string {
 	const root = repoRoot();
 	const resolved = resolveInsideRepo(input);
 	const relative = path.relative(root, resolved);
 	const allowedRoots = ["docs", "diagrams", "output", "build", ".pi/tmp"];
 	if (!allowedRoots.some((allowed) => relative === allowed || relative.startsWith(`${allowed}${path.sep}`))) {
-		throw new Error(`Refusing to write outside docs/, diagrams/, output/, build/, or .pi/tmp/: ${input}`);
+		throw new Error(`Refusing to ${action} outside docs/, diagrams/, output/, build/, or .pi/tmp/: ${input}`);
 	}
+	return resolved;
+}
+
+function assertSafeWritePath(input: string): string {
+	return assertSafeArtifactPath(input, "write");
+}
+
+function assertSafeShowPath(input: string): string {
+	const resolved = assertSafeArtifactPath(input, "read");
+	const ext = path.extname(resolved).toLowerCase();
+	if (!showableExtensions.includes(ext)) {
+		throw new Error(`Refusing to show unsupported file type ${ext || "<none>"}. Supported: ${showableExtensions.join(", ")}`);
+	}
+	if (!fs.existsSync(resolved)) throw new Error(`File does not exist: ${input}`);
 	return resolved;
 }
 
@@ -148,6 +163,28 @@ function extensionFor(language: DiagramLanguage): string {
 	return ".mmd";
 }
 
+function imageViewer(override?: string): string {
+	if (override?.trim()) return override.trim();
+	if (process.env.PI_HARNESS_IMAGE_VIEWER) return process.env.PI_HARNESS_IMAGE_VIEWER;
+	return process.platform === "darwin" ? "open" : "xdg-open";
+}
+
+function showFile(filePath: string, viewer: string): Promise<{ pid?: number }> {
+	return new Promise((resolve, reject) => {
+		const child = spawn(viewer, [filePath], {
+			cwd: repoRoot(),
+			detached: true,
+			env: process.env,
+			stdio: "ignore",
+		});
+		child.on("error", reject);
+		child.on("spawn", () => {
+			child.unref();
+			resolve({ pid: child.pid });
+		});
+	});
+}
+
 function findDiagramFiles(): Array<{ path: string; language: string }> {
 	const root = repoRoot();
 	const ignored = new Set([".git", "node_modules", ".direnv", "dist", "result"]);
@@ -237,6 +274,27 @@ export default function (pi: ExtensionAPI) {
 				...(result.stderr.trim() ? ["", "stderr:", result.stderr.trim()] : []),
 			].join("\n");
 			return text(summary, { command, args, exitCode: result.code, outputPath: outputRel });
+		},
+	});
+
+	pi.registerTool({
+		name: "diagram_show",
+		label: "Show Diagram",
+		description: "Open a rendered diagram/image/PDF artifact in a detached local viewer. Use only when the user asks to view a diagram or when visual inspection is helpful after rendering.",
+		parameters: Type.Object({
+			path: Type.String({ description: "Repository-relative artifact path under docs/, diagrams/, output/, build/, or .pi/tmp/." }),
+			viewer: Type.Optional(Type.String({ description: "Optional viewer executable override. Defaults to PI_HARNESS_IMAGE_VIEWER, xdg-open, or macOS open." })),
+		}),
+		async execute(_toolCallId, params) {
+			const fullPath = assertSafeShowPath(params.path);
+			const viewer = imageViewer(params.viewer);
+			const result = await showFile(fullPath, viewer);
+			const relative = path.relative(repoRoot(), fullPath);
+			return text(`Opened ${relative} with ${viewer}${result.pid ? ` (pid ${result.pid})` : ""}.`, {
+				path: relative,
+				viewer,
+				pid: result.pid,
+			});
 		},
 	});
 
