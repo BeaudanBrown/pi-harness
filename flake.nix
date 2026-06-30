@@ -62,6 +62,8 @@
             ;
           fzf = pkgs.fzf;
           tmux = pkgs.tmux;
+          d2 = pkgs.d2;
+          graphviz = pkgs.graphviz;
         };
         lspPackages = with pkgs; [
           nodejs
@@ -97,6 +99,7 @@
                 exec ${lib.getExe piPackage} \
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
                   --extension "$PWD/config/agent/extensions/agent-loop/index.ts" \
+                  --extension "$PWD/config/agent/extensions/diagram-tools/index.ts" \
                   --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
                   --extension "$PWD/config/agent/extensions/codex-fast/index.ts" \
                   --extension "$PWD/config/agent/extensions/tmux-cursor-focus/index.ts" \
@@ -138,6 +141,7 @@
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
             test -f config/agent/extensions/agent-loop/index.ts
+            test -f config/agent/extensions/diagram-tools/index.ts
             test -f config/agent/extensions/nix-runtime/index.ts
             test -f config/agent/extensions/codex-fast/index.ts
             test -f config/agent/extensions/tmux-cursor-focus/index.ts
@@ -147,6 +151,7 @@
             test -d config/agent/themes
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts
@@ -163,6 +168,7 @@
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -e ${piHarnessPackage}/bin/tk
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -174,6 +180,8 @@
             grep -F "export AGENTGRAPH_POSTGRES=\"\''${AGENTGRAPH_POSTGRES:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export PI_HARNESS_FZF=\"\''${PI_HARNESS_FZF:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export PI_HARNESS_TMUX=\"\''${PI_HARNESS_TMUX:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export PI_HARNESS_D2=\"\''${PI_HARNESS_D2:-" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F "export PI_HARNESS_DOT=\"\''${PI_HARNESS_DOT:-" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "PI_HARNESS_AGENTGRAPH_ROOT" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "PI_HARNESS_AGENTGRAPH_SKILLS_DIR" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_PI_RESOURCES=\"\$agentgraph_root\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -186,6 +194,8 @@
             grep -F 'bash: { command: "bash-language-server", args: ["start"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
             grep -F 'const runningStatuses = statuses.filter((s) => s.running);' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/tools/symbols.ts >/dev/null
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/diagram-tools/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
@@ -255,6 +265,8 @@
             ticketPackage
             pkgs.jq
             pkgs.tmux
+            pkgs.d2
+            pkgs.graphviz
           ] ++ lspPackages;
 
           shellHook = ''

@@ -10,6 +10,11 @@
   ticketPackage ? null,
   fzf ? null,
   tmux ? null,
+  d2 ? null,
+  graphviz ? null,
+  plantuml ? null,
+  mermaidCli ? null,
+  structurizrCli ? null,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -35,6 +40,11 @@ ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POS
 ${lib.optionalString (ticketPackage != null) ''export PATH="${ticketPackage}/bin:\$PATH"''}
 ${lib.optionalString (fzf != null) ''export PI_HARNESS_FZF="\''${PI_HARNESS_FZF:-${fzf}/bin/fzf}"''}
 ${lib.optionalString (tmux != null) ''export PI_HARNESS_TMUX="\''${PI_HARNESS_TMUX:-${tmux}/bin/tmux}"''}
+${lib.optionalString (d2 != null) ''export PI_HARNESS_D2="\''${PI_HARNESS_D2:-${d2}/bin/d2}"''}
+${lib.optionalString (graphviz != null) ''export PI_HARNESS_DOT="\''${PI_HARNESS_DOT:-${graphviz}/bin/dot}"''}
+${lib.optionalString (plantuml != null) ''export PI_HARNESS_PLANTUML="\''${PI_HARNESS_PLANTUML:-${plantuml}/bin/plantuml}"''}
+${lib.optionalString (mermaidCli != null) ''export PI_HARNESS_MERMAID_CLI="\''${PI_HARNESS_MERMAID_CLI:-${mermaidCli}/bin/mmdc}"''}
+${lib.optionalString (structurizrCli != null) ''export PI_HARNESS_STRUCTURIZR="\''${PI_HARNESS_STRUCTURIZR:-${structurizrCli}/bin/structurizr}"''}
 
 case "\''${1-}" in
   install|remove|uninstall|update|list|config)
@@ -45,6 +55,7 @@ esac
 resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
@@ -104,6 +115,11 @@ EOF
     ticket = ticketPackage;
     fzf = fzf;
     tmux = tmux;
+    d2 = d2;
+    graphviz = graphviz;
+    plantuml = plantuml;
+    mermaidCli = mermaidCli;
+    structurizrCli = structurizrCli;
   };
 
   meta = {

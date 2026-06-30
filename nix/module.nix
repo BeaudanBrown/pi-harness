@@ -31,7 +31,15 @@ let
     tailwindcss-language-server
   ];
 
-  fallbackRuntimePackages = [ cfg.package ] ++ lib.optionals cfg.lsp.enable cfg.lsp.packages;
+  defaultDiagramPackages = with pkgs; [
+    graphviz
+    d2
+  ];
+
+  fallbackRuntimePackages =
+    [ cfg.package ]
+    ++ lib.optionals cfg.lsp.enable cfg.lsp.packages
+    ++ lib.optionals cfg.diagrams.enable cfg.diagrams.packages;
   lspExtensionArray =
     if cfg.lsp.enable then
       ''extension_args=(--extension "${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts")''
@@ -77,6 +85,19 @@ in
         Optional runtime environment file sourced by the installed pi command.
         Use this for SOPS-managed LLM provider variables such as
         LITELLM_BASE_URL, LITELLM_API_KEY, and AG_LITELLM_DEFAULT_MODEL.
+      '';
+    };
+
+    diagrams.enable = lib.mkEnableOption "diagram rendering tools for Pi";
+
+    diagrams.packages = lib.mkOption {
+      type = lib.types.listOf lib.types.package;
+      default = defaultDiagramPackages;
+      defaultText = lib.literalExpression "[ pkgs.graphviz pkgs.d2 ]";
+      description = ''
+        Diagram CLI packages exposed on PATH for Pi architecture diagram tools.
+        Project-local tools from dev shells take precedence because these are
+        appended after the caller's PATH.
       '';
     };
 

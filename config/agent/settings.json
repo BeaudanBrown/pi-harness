@@ -3,6 +3,7 @@
   "extensions": [
     "./extensions/web-search/index.ts",
     "./extensions/agent-loop/index.ts",
+    "./extensions/diagram-tools/index.ts",
     "./extensions/nix-runtime/index.ts",
     "./extensions/codex-fast/index.ts",
     "./extensions/tmux-cursor-focus/index.ts",

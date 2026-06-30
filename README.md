@@ -20,6 +20,8 @@ layout is handled outside Pi with regular tmux.
 - a Codex fast-mode extension under `config/agent/extensions/codex-fast`
 - a tmux cursor focus extension under `config/agent/extensions/tmux-cursor-focus`
 - a tmux/fzf session picker command under `config/agent/extensions/sesh`
+- reusable architecture diagram tools under `config/agent/extensions/diagram-tools`
+- an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
 - the `tk` git-backed ticket CLI for agent task tracking
 - supervised `/aplan` and `/aloop` commands under `config/agent/extensions/agent-loop`
 - the AgentGraph pi resources imported from the AgentGraph flake input
@@ -166,6 +168,42 @@ provider requests. It is inactive for other providers.
 Use `/codex-fast` inside Pi to toggle it, or start Pi with `pi --fast` to enable
 it for that session. The persisted setting is stored under `pi-codex-fast` in
 Pi's normal settings files.
+
+## Architecture Diagram Tools
+
+The included `diagram-tools` extension registers reusable tools for agentic
+architecture documentation:
+
+- `diagram_inventory` lists diagram-as-code files in the current repository.
+- `diagram_render` validates or renders Mermaid, D2, Graphviz DOT, PlantUML,
+  and Structurizr diagram sources using local CLI tools.
+- `architecture_commands` lists project-defined deterministic architecture
+  commands from `.pi/architecture.json`.
+- `architecture_command` runs a named project-defined architecture command.
+
+The packaged wrapper exposes D2 and Graphviz through `PI_HARNESS_D2` and
+`PI_HARNESS_DOT`. Other renderers can be provided by the project environment or
+through `PI_HARNESS_MERMAID_CLI`, `PI_HARNESS_PLANTUML`, and
+`PI_HARNESS_STRUCTURIZR`. The NixOS module also provides
+`services.pi-harness.diagrams.enable` to append diagram CLIs such as Graphviz
+and D2 to Pi's fallback runtime path.
+
+Projects can opt into deterministic architecture generation with
+`.pi/architecture.json`:
+
+```json
+{
+  "commands": {
+    "facts": {
+      "description": "Generate deterministic architecture facts.",
+      "command": ["bash", "./scripts/architecture/generate-facts.sh"]
+    }
+  }
+}
+```
+
+Use the bundled `architecture-diagrams` skill when creating durable architecture
+docs or adding live diagrams to an answer.
 
 ## Web Search
 
