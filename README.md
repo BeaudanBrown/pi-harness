@@ -200,6 +200,11 @@ Projects can opt into deterministic architecture generation with
 
 ```json
 {
+  "metadata": {
+    "description": "Project-owned architecture evidence generated from source.",
+    "capabilities": ["facts", "diagrams", "focused-queries"],
+    "factModel": "versioned entities/relationships with provenance"
+  },
   "commands": {
     "facts": {
       "description": "Generate deterministic architecture facts.",
@@ -209,6 +214,8 @@ Projects can opt into deterministic architecture generation with
   "queries": {
     "component": {
       "description": "Generate a focused component diagram.",
+      "intent": "Explain one component from observed project facts, not from hard-coded architecture assumptions.",
+      "capabilities": ["diagram", "provenance"],
       "command": ["bash", "./scripts/architecture/query.sh"],
       "parameters": {
         "kind": { "type": "string", "enum": ["service", "module", "table"] },
@@ -230,16 +237,33 @@ JSON object to stdout:
 ```json
 {
   "summary": "Generated focused diagram.",
+  "warnings": ["No high-confidence runtime edges were found."],
+  "metrics": { "nodes": 12, "edges": 18 },
+  "tables": [
+    {
+      "title": "referenced files",
+      "rows": [{ "path": "src/component.ts", "relationship": "source" }]
+    }
+  ],
+  "sections": [
+    { "title": "Notes", "content": "Diagrams are views over generated facts, not source of truth." }
+  ],
   "artifacts": [
     { "path": ".pi/tmp/architecture-query/component.svg", "kind": "diagram", "language": "svg" }
   ],
-  "provenance": { "sources": ["src/component.ts"] }
+  "provenance": { "sources": ["src/component.ts"], "confidence": "high" }
 }
 ```
 
 Use the bundled `architecture-diagrams` skill when creating durable architecture
 docs, adding live diagrams to an answer, or teaching a project to expose its own
 deterministic architecture commands and focused queries.
+
+Keep pi-harness generic: it owns command/query discovery, argument validation,
+structured result display, artifact safety, and common diagram rendering. Project
+repositories own source scanners, semantic classifiers, fact model evolution, and
+query implementations. Prefer intent-based query names and capability metadata so
+projects can change implementation details without changing the harness contract.
 
 ## Web Search
 

@@ -77,10 +77,15 @@ Before editing durable architecture docs:
 
 ## Project Architecture Commands And Queries
 
-A project can define `.pi/architecture.json`:
+A project can define `.pi/architecture.json`. The harness stays generic: it discovers commands/queries, validates args, displays structured results, and checks artifact paths. Project repos own scanners, classifiers, and architecture semantics.
 
 ```json
 {
+  "metadata": {
+    "description": "Project-owned architecture evidence generated from source.",
+    "capabilities": ["facts", "diagrams", "focused-queries"],
+    "factModel": "versioned entities/relationships with provenance"
+  },
   "commands": {
     "facts": {
       "description": "Generate deterministic architecture facts.",
@@ -94,6 +99,8 @@ A project can define `.pi/architecture.json`:
   "queries": {
     "component": {
       "description": "Generate a focused component diagram.",
+      "intent": "Explain one component from observed project facts.",
+      "capabilities": ["diagram", "provenance"],
       "command": ["bash", "./scripts/architecture/query.sh"],
       "parameters": {
         "kind": { "type": "string", "enum": ["service", "module", "table"] },
@@ -130,18 +137,27 @@ Input payload:
 }
 ```
 
-The project command should write a structured JSON object to stdout:
+The project command should write a structured JSON object to stdout. Diagrams are optional; some architecture questions are better answered with metrics, tables, sections, warnings, and provenance:
 
 ```json
 {
   "summary": "Generated focused diagram for Billing.",
+  "warnings": ["No high-confidence runtime edges were found."],
+  "metrics": { "nodes": 12, "edges": 18 },
+  "tables": [
+    { "title": "referenced files", "rows": [{ "path": "src/Billing.ts", "relationship": "source" }] }
+  ],
+  "sections": [
+    { "title": "Notes", "content": "This is a view over generated facts, not a source of truth." }
+  ],
   "artifacts": [
     { "path": ".pi/tmp/architecture-query/component-billing.svg", "kind": "diagram", "language": "svg" },
     { "path": ".pi/tmp/architecture-query/component-billing.dot", "kind": "source", "language": "dot" }
   ],
   "provenance": {
     "sources": ["src/Billing.ts"],
-    "generatedFrom": "output/architecture/facts.json"
+    "generatedFrom": "output/architecture/facts.json",
+    "confidence": "high"
   }
 }
 ```
@@ -156,13 +172,14 @@ When asked to add architecture tooling to a new project:
 2. Identify the project runtime wrapper and package manager. Examples: `bash ./bin/in-env`, `nix develop -c`, `npm run`, `make`, or `just`.
 3. Choose deterministic source inputs: schema, routes, modules, imports, package manifests, IaC files, API specs, traces, or generated types.
 4. Add `.pi/architecture.json` with stable `commands` for whole-project facts/diagrams and parameterized `queries` for focused questions.
-5. Implement project scanners in the repo, not in pi-harness. Keep pi-harness generic.
+5. Implement project scanners and semantic classifiers in the repo, not in pi-harness. Keep pi-harness generic.
 6. Ensure commands run through the project environment wrapper so project-specific CLIs are present.
 7. Prefer common diagram formats supported by the harness (`dot`/Graphviz and D2). Use Mermaid/PlantUML/Structurizr only when the project provides those CLIs.
 8. Write global generated outputs to an agreed directory, commonly `output/architecture/` if ignored or `docs/architecture/generated/` if committed.
 9. Write focused temporary query outputs under `.pi/tmp/architecture-query/` or a project-specific `.pi/tmp/architecture-*` subdirectory.
 10. Document how to regenerate, how to run freshness checks, and whether generated outputs are committed.
-11. Validate by running `architecture_commands`, `architecture_queries`, at least one `architecture_command`, and at least one `architecture_query`.
+11. Use versioned facts, provenance, and confidence where possible. Prefer intent-based query names (`request-flow`, `realtime-usage`, `generated-contracts`) over names tied to temporary implementation mechanisms.
+12. Validate by running `architecture_commands`, `architecture_queries`, at least one `architecture_command`, and at least one `architecture_query`.
 
 ## CLI Availability Guidance
 

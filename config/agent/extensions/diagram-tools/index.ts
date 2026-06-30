@@ -18,6 +18,13 @@ type CommandSpec = {
 	command: string[];
 };
 
+type ArchitectureMetadata = {
+	description?: string;
+	capabilities?: string[];
+	factModel?: string;
+	generatedArtifacts?: string[];
+};
+
 type QueryParameterSpec = {
 	type: "string" | "number" | "boolean" | "array" | "object";
 	description?: string;
@@ -28,18 +35,29 @@ type QueryParameterSpec = {
 
 type QuerySpec = {
 	description?: string;
+	intent?: string;
+	capabilities?: string[];
 	command: string[];
 	parameters?: Record<string, QueryParameterSpec>;
 };
 
 type ArchitectureConfig = {
+	metadata?: ArchitectureMetadata;
 	commands?: Record<string, CommandSpec>;
 	queries?: Record<string, QuerySpec>;
 };
 
+type QueryArtifact = { path: string; kind?: string; language?: string; description?: string };
+type QueryTable = { title?: string; columns?: string[]; rows?: unknown[][] | Record<string, unknown>[] };
+type QuerySection = { title: string; content?: string; metrics?: Record<string, unknown>; tables?: QueryTable[]; artifacts?: QueryArtifact[] };
+
 type QueryResult = {
 	summary?: string;
-	artifacts?: Array<{ path: string; kind?: string; language?: string; description?: string }>;
+	warnings?: string[];
+	metrics?: Record<string, unknown>;
+	tables?: QueryTable[];
+	sections?: QuerySection[];
+	artifacts?: QueryArtifact[];
 	provenance?: Record<string, unknown>;
 };
 
@@ -201,6 +219,42 @@ function describeQueryParameter(name: string, parameter: QueryParameterSpec): st
 	if (parameter.enum) parts.push(`enum=${parameter.enum.map(String).join("|")}`);
 	if (Object.prototype.hasOwnProperty.call(parameter, "default")) parts.push(`default=${JSON.stringify(parameter.default)}`);
 	return `    - ${parts.join("; ")}${parameter.description ? ` — ${parameter.description}` : ""}`;
+}
+
+function describeCapabilities(capabilities?: string[]): string[] {
+	return capabilities && capabilities.length > 0 ? [`    capabilities: ${capabilities.join(", ")}`] : [];
+}
+
+function formatScalar(value: unknown): string {
+	if (typeof value === "string") return value;
+	if (typeof value === "number" || typeof value === "boolean" || value === null) return String(value);
+	return JSON.stringify(value);
+}
+
+function formatMetrics(metrics: Record<string, unknown> | undefined, indent = ""): string[] {
+	if (!metrics || Object.keys(metrics).length === 0) return [];
+	return Object.entries(metrics).map(([key, value]) => `${indent}- ${key}: ${formatScalar(value)}`);
+}
+
+function formatTables(tables: QueryTable[] | undefined): string[] {
+	if (!tables || tables.length === 0) return [];
+	return tables.flatMap((table, index) => {
+		const title = table.title ?? `table ${index + 1}`;
+		const rows = table.rows ?? [];
+		const preview = rows.slice(0, 8).map((row) => `  - ${formatScalar(row)}`);
+		return [title, ...preview, ...(rows.length > preview.length ? [`  ... ${rows.length - preview.length} more rows`] : [])];
+	});
+}
+
+function validateQueryResult(result: QueryResult | undefined): void {
+	if (!result) return;
+	if (result.warnings !== undefined && (!Array.isArray(result.warnings) || result.warnings.some((item) => typeof item !== "string"))) {
+		throw new Error("query result warnings must be an array of strings");
+	}
+	for (const artifact of result.artifacts ?? []) validateQueryResultArtifactPath(artifact.path);
+	for (const section of result.sections ?? []) {
+		for (const artifact of section.artifacts ?? []) validateQueryResultArtifactPath(artifact.path);
+	}
 }
 
 function validateQueryResultArtifactPath(artifactPath: string): void {
@@ -405,16 +459,23 @@ export default function (pi: ExtensionAPI) {
 			const config = readArchitectureConfig();
 			const queries = config.queries ?? {};
 			const entries = Object.entries(queries);
+			const header = [
+				...(config.metadata?.description ? [config.metadata.description] : []),
+				...(config.metadata?.capabilities?.length ? [`Project capabilities: ${config.metadata.capabilities.join(", ")}`] : []),
+				...(config.metadata?.factModel ? [`Fact model: ${config.metadata.factModel}`] : []),
+			];
 			const lines = entries.length > 0
 				? entries.flatMap(([name, spec]) => {
 					const parameters = Object.entries(spec.parameters ?? {});
 					return [
 						`- ${name}: ${spec.description ?? spec.command.join(" ")}`,
+						...(spec.intent ? [`    intent: ${spec.intent}`] : []),
+						...describeCapabilities(spec.capabilities),
 						...(parameters.length > 0 ? parameters.map(([parameterName, parameter]) => describeQueryParameter(parameterName, parameter)) : []),
 					];
 				})
 				: [`No ${ARCH_CONFIG} queries found.`];
-			return text(lines.join("\n"), { queries });
+			return text([...header, ...(header.length ? [""] : []), ...lines].join("\n"), { metadata: config.metadata, queries });
 		},
 	});
 
@@ -450,12 +511,26 @@ export default function (pi: ExtensionAPI) {
 				},
 			});
 			const parsed = parseQueryResult(result.stdout);
-			for (const artifact of parsed?.artifacts ?? []) validateQueryResultArtifactPath(artifact.path);
-			const artifactLines = (parsed?.artifacts ?? []).map((artifact) => `- ${artifact.path}${artifact.kind ? ` (${artifact.kind}${artifact.language ? `/${artifact.language}` : ""})` : ""}`);
+			validateQueryResult(parsed);
+			const artifactLines = (parsed?.artifacts ?? []).map((artifact) => `- ${artifact.path}${artifact.kind ? ` (${artifact.kind}${artifact.language ? `/${artifact.language}` : ""})` : ""}${artifact.description ? ` — ${artifact.description}` : ""}`);
+			const sectionLines = (parsed?.sections ?? []).flatMap((section) => {
+				const sectionArtifacts = (section.artifacts ?? []).map((artifact) => `  - ${artifact.path}${artifact.kind ? ` (${artifact.kind}${artifact.language ? `/${artifact.language}` : ""})` : ""}${artifact.description ? ` — ${artifact.description}` : ""}`);
+				return [
+					`## ${section.title}`,
+					...(section.content ? [section.content] : []),
+					...(formatMetrics(section.metrics, "  ").length > 0 ? ["metrics:", ...formatMetrics(section.metrics, "  ")] : []),
+					...(formatTables(section.tables).length > 0 ? ["tables:", ...formatTables(section.tables)] : []),
+					...(sectionArtifacts.length > 0 ? ["artifacts:", ...sectionArtifacts] : []),
+				];
+			});
 			const body = [
 				`Command: ${spec.command.join(" ")}`,
 				`Exit code: ${result.code}`,
 				...(parsed?.summary ? ["", parsed.summary] : []),
+				...(parsed?.warnings?.length ? ["", "warnings:", ...parsed.warnings.map((warning) => `- ${warning}`)] : []),
+				...(formatMetrics(parsed?.metrics).length > 0 ? ["", "metrics:", ...formatMetrics(parsed?.metrics)] : []),
+				...(formatTables(parsed?.tables).length > 0 ? ["", "tables:", ...formatTables(parsed?.tables)] : []),
+				...(sectionLines.length > 0 ? ["", "sections:", ...sectionLines] : []),
 				...(artifactLines.length > 0 ? ["", "artifacts:", ...artifactLines] : []),
 				...(result.stderr.trim() ? ["", "stderr:", result.stderr.trim()] : []),
 				...(parsed ? [] : result.stdout.trim() ? ["", "stdout:", result.stdout.trim()] : []),
