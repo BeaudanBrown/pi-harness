@@ -182,6 +182,10 @@ architecture documentation:
 - `architecture_commands` lists project-defined deterministic architecture
   commands from `.pi/architecture.json`.
 - `architecture_command` runs a named project-defined architecture command.
+- `architecture_queries` lists project-defined parameterized architecture
+  queries from `.pi/architecture.json`.
+- `architecture_query` runs a named architecture query with structured JSON
+  arguments, returning summary, artifact paths, and provenance.
 
 The packaged wrapper exposes D2, Graphviz, and a default diagram viewer through
 `PI_HARNESS_D2`, `PI_HARNESS_DOT`, and `PI_HARNESS_IMAGE_VIEWER`. Other
@@ -201,12 +205,41 @@ Projects can opt into deterministic architecture generation with
       "description": "Generate deterministic architecture facts.",
       "command": ["bash", "./scripts/architecture/generate-facts.sh"]
     }
+  },
+  "queries": {
+    "component": {
+      "description": "Generate a focused component diagram.",
+      "command": ["bash", "./scripts/architecture/query.sh"],
+      "parameters": {
+        "kind": { "type": "string", "enum": ["service", "module", "table"] },
+        "target": { "type": "string", "required": true },
+        "depth": { "type": "number", "default": 1 },
+        "direction": { "type": "string", "enum": ["upstream", "downstream", "both"], "default": "both" }
+      }
+    }
   }
 }
 ```
 
+`architecture_query` validates declared parameters, applies defaults, passes a
+JSON payload on stdin, sets `PI_ARCHITECTURE_QUERY_NAME`,
+`PI_ARCHITECTURE_QUERY_ARGS_JSON`, and
+`PI_ARCHITECTURE_QUERY_PAYLOAD_JSON`, and expects the project command to write a
+JSON object to stdout:
+
+```json
+{
+  "summary": "Generated focused diagram.",
+  "artifacts": [
+    { "path": ".pi/tmp/architecture-query/component.svg", "kind": "diagram", "language": "svg" }
+  ],
+  "provenance": { "sources": ["src/component.ts"] }
+}
+```
+
 Use the bundled `architecture-diagrams` skill when creating durable architecture
-docs or adding live diagrams to an answer.
+docs, adding live diagrams to an answer, or teaching a project to expose its own
+deterministic architecture commands and focused queries.
 
 ## Web Search
 

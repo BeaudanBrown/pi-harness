@@ -18,8 +18,29 @@ type CommandSpec = {
 	command: string[];
 };
 
+type QueryParameterSpec = {
+	type: "string" | "number" | "boolean" | "array" | "object";
+	description?: string;
+	required?: boolean;
+	default?: unknown;
+	enum?: unknown[];
+};
+
+type QuerySpec = {
+	description?: string;
+	command: string[];
+	parameters?: Record<string, QueryParameterSpec>;
+};
+
 type ArchitectureConfig = {
 	commands?: Record<string, CommandSpec>;
+	queries?: Record<string, QuerySpec>;
+};
+
+type QueryResult = {
+	summary?: string;
+	artifacts?: Array<{ path: string; kind?: string; language?: string; description?: string }>;
+	provenance?: Record<string, unknown>;
 };
 
 function stringEnum(values: readonly string[]) {
@@ -90,13 +111,13 @@ function outputFormat(outputPath?: string, requested?: string): string {
 function runCommand(
 	command: string,
 	args: string[],
-	options: { signal?: AbortSignal; timeoutMs?: number } = {},
+	options: { signal?: AbortSignal; timeoutMs?: number; input?: string; env?: NodeJS.ProcessEnv } = {},
 ): Promise<{ code: number | null; stdout: string; stderr: string }> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(command, args, {
 			cwd: repoRoot(),
-			env: process.env,
-			stdio: ["ignore", "pipe", "pipe"],
+			env: options.env ?? process.env,
+			stdio: [options.input === undefined ? "ignore" : "pipe", "pipe", "pipe"],
 			signal: options.signal,
 		});
 		let stdout = "";
@@ -112,8 +133,11 @@ function runCommand(
 			if (settled) return;
 			child.kill("SIGTERM");
 		}, options.timeoutMs ?? DEFAULT_TIMEOUT_MS);
-		child.stdout.on("data", appendStdout);
-		child.stderr.on("data", appendStderr);
+		child.stdout!.on("data", appendStdout);
+		child.stderr!.on("data", appendStderr);
+		if (options.input !== undefined) {
+			child.stdin!.end(options.input);
+		}
 		child.on("error", (error) => {
 			if (settled) return;
 			settled = true;
@@ -135,6 +159,64 @@ function readArchitectureConfig(): ArchitectureConfig {
 	const parsed = JSON.parse(fs.readFileSync(configPath, "utf8")) as ArchitectureConfig;
 	if (!parsed || typeof parsed !== "object") throw new Error(`${ARCH_CONFIG} must contain a JSON object.`);
 	return parsed;
+}
+
+function normalizeQueryArgs(spec: QuerySpec, rawArgs: unknown): Record<string, unknown> {
+	if (rawArgs !== undefined && (rawArgs === null || typeof rawArgs !== "object" || Array.isArray(rawArgs))) {
+		throw new Error("architecture_query args must be a JSON object.");
+	}
+	const input = (rawArgs ?? {}) as Record<string, unknown>;
+	const parameters = spec.parameters ?? {};
+	const normalized: Record<string, unknown> = {};
+	for (const [name, parameter] of Object.entries(parameters)) {
+		let value = input[name];
+		if (value === undefined && Object.prototype.hasOwnProperty.call(parameter, "default")) {
+			value = parameter.default;
+		}
+		if (value === undefined) {
+			if (parameter.required) throw new Error(`Missing required query parameter: ${name}`);
+			continue;
+		}
+		if (parameter.type === "array") {
+			if (!Array.isArray(value)) throw new Error(`Query parameter ${name} must be an array.`);
+		} else if (parameter.type === "object") {
+			if (value === null || typeof value !== "object" || Array.isArray(value)) throw new Error(`Query parameter ${name} must be an object.`);
+		} else if (typeof value !== parameter.type) {
+			throw new Error(`Query parameter ${name} must be a ${parameter.type}.`);
+		}
+		if (parameter.enum && !parameter.enum.includes(value)) {
+			throw new Error(`Query parameter ${name} must be one of: ${parameter.enum.map(String).join(", ")}`);
+		}
+		normalized[name] = value;
+	}
+	for (const [name, value] of Object.entries(input)) {
+		if (!Object.prototype.hasOwnProperty.call(parameters, name)) normalized[name] = value;
+	}
+	return normalized;
+}
+
+function describeQueryParameter(name: string, parameter: QueryParameterSpec): string {
+	const parts = [name, parameter.type];
+	if (parameter.required) parts.push("required");
+	if (parameter.enum) parts.push(`enum=${parameter.enum.map(String).join("|")}`);
+	if (Object.prototype.hasOwnProperty.call(parameter, "default")) parts.push(`default=${JSON.stringify(parameter.default)}`);
+	return `    - ${parts.join("; ")}${parameter.description ? ` — ${parameter.description}` : ""}`;
+}
+
+function validateQueryResultArtifactPath(artifactPath: string): void {
+	assertSafeArtifactPath(artifactPath, "read");
+}
+
+function parseQueryResult(stdout: string): QueryResult | undefined {
+	const trimmed = stdout.trim();
+	if (!trimmed) return undefined;
+	try {
+		const parsed = JSON.parse(trimmed) as QueryResult;
+		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("query output must be a JSON object");
+		return parsed;
+	} catch (error) {
+		throw new Error(`architecture_query command must write a structured JSON object to stdout. ${error instanceof Error ? error.message : String(error)}`);
+	}
 }
 
 function commandArgs(language: DiagramLanguage, inputPath: string, outputPath: string | undefined, format: string, mode: string): string[] {
@@ -311,6 +393,80 @@ export default function (pi: ExtensionAPI) {
 				? entries.map(([name, spec]) => `- ${name}: ${spec.description ?? spec.command.join(" ")}`)
 				: [`No ${ARCH_CONFIG} commands found.`];
 			return text(lines.join("\n"), { commands });
+		},
+	});
+
+	pi.registerTool({
+		name: "architecture_queries",
+		label: "Architecture Queries",
+		description: `List project-defined parameterized architecture queries from ${ARCH_CONFIG} if present.`,
+		parameters: Type.Object({}),
+		async execute() {
+			const config = readArchitectureConfig();
+			const queries = config.queries ?? {};
+			const entries = Object.entries(queries);
+			const lines = entries.length > 0
+				? entries.flatMap(([name, spec]) => {
+					const parameters = Object.entries(spec.parameters ?? {});
+					return [
+						`- ${name}: ${spec.description ?? spec.command.join(" ")}`,
+						...(parameters.length > 0 ? parameters.map(([parameterName, parameter]) => describeQueryParameter(parameterName, parameter)) : []),
+					];
+				})
+				: [`No ${ARCH_CONFIG} queries found.`];
+			return text(lines.join("\n"), { queries });
+		},
+	});
+
+	pi.registerTool({
+		name: "architecture_query",
+		label: "Run Architecture Query",
+		description: `Run a project-defined parameterized architecture query from ${ARCH_CONFIG}.`,
+		parameters: Type.Object({
+			name: Type.String({ description: "Query name from .pi/architecture.json." }),
+			args: Type.Optional(Type.Any({ description: "JSON object containing query arguments." })),
+			timeoutMs: Type.Optional(Type.Number({ description: "Timeout in milliseconds. Defaults to 120000." })),
+		}),
+		async execute(_toolCallId, params, signal) {
+			const config = readArchitectureConfig();
+			const spec = config.queries?.[params.name];
+			if (!spec) throw new Error(`Unknown architecture query: ${params.name}`);
+			if (!Array.isArray(spec.command) || spec.command.length === 0) {
+				throw new Error(`Architecture query ${params.name} must be a non-empty argv array.`);
+			}
+			const normalizedArgs = normalizeQueryArgs(spec, params.args);
+			const payload = { name: params.name, args: normalizedArgs };
+			const payloadJson = JSON.stringify(payload);
+			const [command, ...args] = spec.command;
+			const result = await runCommand(command, args, {
+				signal,
+				timeoutMs: params.timeoutMs ?? 120_000,
+				input: `${JSON.stringify(payload, null, 2)}\n`,
+				env: {
+					...process.env,
+					PI_ARCHITECTURE_QUERY_NAME: params.name,
+					PI_ARCHITECTURE_QUERY_ARGS_JSON: JSON.stringify(normalizedArgs),
+					PI_ARCHITECTURE_QUERY_PAYLOAD_JSON: payloadJson,
+				},
+			});
+			const parsed = parseQueryResult(result.stdout);
+			for (const artifact of parsed?.artifacts ?? []) validateQueryResultArtifactPath(artifact.path);
+			const artifactLines = (parsed?.artifacts ?? []).map((artifact) => `- ${artifact.path}${artifact.kind ? ` (${artifact.kind}${artifact.language ? `/${artifact.language}` : ""})` : ""}`);
+			const body = [
+				`Command: ${spec.command.join(" ")}`,
+				`Exit code: ${result.code}`,
+				...(parsed?.summary ? ["", parsed.summary] : []),
+				...(artifactLines.length > 0 ? ["", "artifacts:", ...artifactLines] : []),
+				...(result.stderr.trim() ? ["", "stderr:", result.stderr.trim()] : []),
+				...(parsed ? [] : result.stdout.trim() ? ["", "stdout:", result.stdout.trim()] : []),
+			].join("\n");
+			return text(body, {
+				name: params.name,
+				args: normalizedArgs,
+				command: spec.command,
+				exitCode: result.code,
+				result: parsed,
+			});
 		},
 	});
 
