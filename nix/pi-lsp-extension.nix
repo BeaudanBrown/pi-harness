@@ -98,9 +98,9 @@ buildNpmPackage {
   postPatch = ''
     cp ${packageLock} package-lock.json
     substituteInPlace src/shared/language-map.ts \
-      --replace-fail '  ".rs": "rust",' $'  ".rs": "rust",\n  ".ml": "ocaml",\n  ".mli": "ocaml",'
+      --replace-fail '  ".rs": "rust",' $'  ".rs": "rust",\n  ".hs": "haskell",\n  ".lhs": "haskell",\n  ".ml": "ocaml",\n  ".mli": "ocaml",'
     substituteInPlace src/lsp-manager.ts \
-      --replace-fail '  rust: { command: "rust-analyzer", args: [] },' $'  rust: { command: "rust-analyzer", args: [] },\n  ocaml: { command: "ocamllsp", args: [] },'
+      --replace-fail '  rust: { command: "rust-analyzer", args: [] },' $'  rust: { command: "rust-analyzer", args: [] },\n  haskell: { command: "haskell-language-server-wrapper", args: ["--lsp"] },\n  ocaml: { command: "ocamllsp", args: [] },'
     substituteInPlace src/tools/*.ts \
       --replace-fail '@sinclair/typebox' 'typebox'
     cat > package.json <<'JSON'

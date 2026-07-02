@@ -194,6 +194,16 @@ test("SCSS and LESS use dedicated language IDs backed by the CSS server", async 
 	assert.match(managerSource, /less: \{ command: "vscode-css-language-server"/);
 });
 
+test("Haskell files use the project-local HLS wrapper by default", async () => {
+	const extensionRoot = process.env.PI_LSP_EXTENSION ?? "";
+	assert.ok(extensionRoot, "PI_LSP_EXTENSION must point at the packaged pi-lsp-extension root");
+	const languageMap = await readFile(join(extensionRoot, "src/shared/language-map.ts"), "utf8");
+	const managerSource = await readFile(join(extensionRoot, "src/lsp-manager.ts"), "utf8");
+	assert.match(languageMap, /"\.hs": "haskell"/);
+	assert.match(languageMap, /"\.lhs": "haskell"/);
+	assert.match(managerSource, /haskell: \{ command: "haskell-language-server-wrapper", args: \["--lsp"\] \}/);
+});
+
 test("Typebox-backed tool modules load from the packaged dependency closure", async () => {
 	await withTempDir(async (dir) => {
 		const symbolsModule = await compileExtensionModule(dir, "tools/symbols.ts");

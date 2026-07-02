@@ -58,8 +58,11 @@ shadowing guarantee:
 The current fallback set includes common servers such as TypeScript,
 Python/Ruff, Rust, Go, Java, Nix, OCaml, C/C++, Lua, Markdown, TOML, YAML, JSON,
 HTML/CSS/SCSS/LESS, Bash, Dockerfile, Terraform, and Tailwind where those
-commands are packaged by the harness. These fallbacks improve availability;
-they do not make an unconfigured repository semantically complete.
+commands are packaged by the harness. Haskell is mapped to
+`haskell-language-server-wrapper --lsp`, relying on the project/dev shell to put
+its matching GHC/HLS wrapper on `PATH` unless a project `.pi-lsp.json` overrides
+it. These fallbacks improve availability; they do not make an unconfigured
+repository semantically complete.
 
 ## Project-Owned Problems To Report, Not Solve
 
