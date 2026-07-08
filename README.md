@@ -20,6 +20,7 @@ layout is handled outside Pi with regular tmux.
 - a Codex fast-mode extension under `config/agent/extensions/codex-fast`
 - a tmux cursor focus extension under `config/agent/extensions/tmux-cursor-focus`
 - a tmux/fzf session picker command under `config/agent/extensions/sesh`
+- a delegated noisy-command runner under `config/agent/extensions/worker-runner`
 - reusable architecture diagram tools under `config/agent/extensions/diagram-tools`
 - an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
 - the `tk` git-backed ticket CLI for agent task tracking
@@ -168,6 +169,14 @@ provider requests. It is inactive for other providers.
 Use `/codex-fast` inside Pi to toggle it, or start Pi with `pi --fast` to enable
 it for that session. The persisted setting is stored under `pi-codex-fast` in
 Pi's normal settings files.
+
+## Delegated Worker Runner
+
+The included `worker-runner` extension registers `run_worker`, a tool for noisy checks and commands. It runs a command in the current repository, writes the full log under `.pi/tmp/workers/`, and asks a bounded read-only Pi SDK worker to return a concise summary for the parent agent.
+
+Use it for tests, typechecks, builds, and integration checks where dumping raw output into the main context would be wasteful. The parent agent supplies the command and a plain-language task describing what the worker should extract or diagnose. The worker model defaults to `openai/gpt-5.4-mini` when available and can be overridden with `PI_HARNESS_WORKER_MODEL=provider/model`; otherwise it falls back to the current session model.
+
+`run_worker` is disabled in AgentGraph restricted mode because arbitrary command execution would bypass the graph-mode tool boundary.
 
 ## Architecture Diagram Tools
 

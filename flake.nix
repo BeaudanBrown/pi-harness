@@ -101,6 +101,7 @@
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
                   --extension "$PWD/config/agent/extensions/agent-loop/index.ts" \
                   --extension "$PWD/config/agent/extensions/diagram-tools/index.ts" \
+                  --extension "$PWD/config/agent/extensions/worker-runner/index.ts" \
                   --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
                   --extension "$PWD/config/agent/extensions/codex-fast/index.ts" \
                   --extension "$PWD/config/agent/extensions/tmux-cursor-focus/index.ts" \
@@ -143,6 +144,7 @@
             test -f config/agent/extensions/web-search/index.ts
             test -f config/agent/extensions/agent-loop/index.ts
             test -f config/agent/extensions/diagram-tools/index.ts
+            test -f config/agent/extensions/worker-runner/index.ts
             test -f config/agent/extensions/nix-runtime/index.ts
             test -f config/agent/extensions/codex-fast/index.ts
             test -f config/agent/extensions/tmux-cursor-focus/index.ts
@@ -153,6 +155,7 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts
@@ -170,6 +173,7 @@
             test -e ${piHarnessPackage}/bin/tk
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -200,6 +204,8 @@
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/diagram-tools/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/worker-runner/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
