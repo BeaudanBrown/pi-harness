@@ -16,7 +16,7 @@ import { Type } from "typebox";
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_LOG_BYTES_FOR_WORKER = 80_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8_000;
-const DEFAULT_WORKER_MODEL = "openai/gpt-5.4-mini";
+const DEFAULT_WORKER_MODEL = "litellm/sub-gpt-5.3-codex-spark";
 const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
 const WORKER_ROOT = ".pi/tmp/workers";
 
@@ -145,10 +145,17 @@ function parseModelRef(value: string): { provider: string; id: string } | undefi
 }
 
 function selectWorkerModel(ctx: ExtensionContext) {
-	const configured = process.env.PI_HARNESS_WORKER_MODEL || DEFAULT_WORKER_MODEL;
-	const parsed = parseModelRef(configured);
-	const configuredModel = parsed ? ctx.modelRegistry.find(parsed.provider, parsed.id) : undefined;
-	return configuredModel ?? ctx.model;
+	const candidates = [process.env.PI_HARNESS_WORKER_MODEL, DEFAULT_WORKER_MODEL, ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined].filter(
+		(value): value is string => Boolean(value),
+	);
+
+	for (const candidate of candidates) {
+		const parsed = parseModelRef(candidate);
+		const model = parsed ? ctx.modelRegistry.find(parsed.provider, parsed.id) : undefined;
+		if (model && ctx.modelRegistry.hasConfiguredAuth(model)) return model;
+	}
+
+	return ctx.model;
 }
 
 function createWorkerResourceLoader(): ResourceLoader {
