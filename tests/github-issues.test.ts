@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { bodyWithMarker, issueMarker, validateIssuePlan } from "../config/agent/extensions/github-issues/index.js";
+import { bodyWithMarker, frontierIssueNumbers, issueMarker, validateIssuePlan } from "../config/agent/extensions/github-issues/index.js";
 
 test("issue plans receive stable provenance markers", () => {
 	assert.equal(issueMarker("migration-2026", "closed-epic"), "<!-- pi-harness-plan:migration-2026/closed-epic -->");
@@ -32,6 +32,15 @@ test("issue plans validate dependency keys and cycles before publication", () =>
 			{ key: "second", title: "Second", body: "", blockedBy: ["first"] },
 		],
 	}), /dependency cycle/);
+});
+
+test("frontier selection requires an open, ready, unassigned issue without blockers", () => {
+	assert.deepEqual(frontierIssueNumbers([
+		{ number: 2, state: "open", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 0 } },
+		{ number: 3, state: "open", labels: [{ name: "ready-for-agent" }], assignee: { login: "other" }, issue_dependencies_summary: { blocked_by: 0 } },
+		{ number: 4, state: "open", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 1 } },
+		{ number: 5, state: "closed", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 0 } },
+	]), [2]);
 });
 
 test("issue plans reject duplicate keys before mutation", () => {

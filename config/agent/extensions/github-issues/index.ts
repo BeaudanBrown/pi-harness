@@ -92,6 +92,20 @@ const InspectParamsSchema = Type.Object({
 	marker: Type.Optional(Type.String({ description: "Generated provenance marker to find, for idempotency inspection." })),
 });
 
+const RelationshipParamsSchema = Type.Object({
+	...BaseParams,
+	op: Type.Union([Type.Literal("add_subissue"), Type.Literal("add_blocker")]),
+	parent: Type.Optional(Type.Number({ minimum: 1 })),
+	child: Type.Number({ minimum: 1, description: "Child issue number for add_subissue or blocked issue number for add_blocker." }),
+	blocker: Type.Optional(Type.Number({ minimum: 1, description: "Blocker issue number for add_blocker." })),
+});
+
+const GraphParamsSchema = Type.Object({
+	repo: Type.Optional(Type.String({ description: "GitHub owner/repository. Defaults to the current checkout remote; any different repository is rejected." })),
+	parent: Type.Number({ minimum: 1, description: "Parent issue whose direct sub-issues are inspected." }),
+	ready_label: Type.Optional(Type.String({ description: "Label required for a frontier issue. Defaults to ready-for-agent." })),
+});
+
 function compactJson(value: unknown): string {
 	return JSON.stringify(value, null, 2);
 }
@@ -273,6 +287,51 @@ async function publishPlan(cwd: string, repo: string, plan: GitHubIssuePlan, app
 	return { repo, planKey: plan.key, issues: results, deferredBlockedBy: plan.issues.filter((item) => (item.blockedBy?.length ?? 0) > 0).map((item) => ({ key: item.key, blockedBy: item.blockedBy })) };
 }
 
+async function issueDatabaseId(cwd: string, repo: string, number: number): Promise<number> {
+	const issue = await ghJson(cwd, ["api", `repos/${repo}/issues/${issueNumber(number)}`]);
+	if (!Number.isInteger(issue.id)) throw new Error(`GitHub issue #${number} did not provide a REST database ID.`);
+	return issue.id;
+}
+
+async function publishRelationship(cwd: string, repo: string, params: { op: "add_subissue" | "add_blocker"; parent?: number; child: number; blocker?: number }, apply: boolean): Promise<unknown> {
+	if (params.op === "add_subissue") {
+		const parent = issueNumber(params.parent);
+		const child = issueNumber(params.child);
+		const childId = await issueDatabaseId(cwd, repo, child);
+		if (!apply) return { dryRun: true, repo, op: params.op, parent, child, childDatabaseId: childId };
+		const existing = await ghJson(cwd, ["api", `repos/${repo}/issues/${parent}/sub_issues`]);
+		if ((existing ?? []).some((issue: any) => issue.id === childId)) return { repo, op: params.op, parent, child, status: "existing" };
+		return await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues/${parent}/sub_issues`], { sub_issue_id: childId });
+	}
+	const child = issueNumber(params.child);
+	const blocker = issueNumber(params.blocker);
+	const blockerId = await issueDatabaseId(cwd, repo, blocker);
+	if (!apply) return { dryRun: true, repo, op: params.op, child, blocker, blockerDatabaseId: blockerId };
+	const existing = await ghJson(cwd, ["api", `repos/${repo}/issues/${child}/dependencies/blocked_by`]);
+	if ((existing ?? []).some((issue: any) => issue.id === blockerId)) return { repo, op: params.op, child, blocker, status: "existing" };
+	return await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues/${child}/dependencies/blocked_by`], { issue_id: blockerId });
+}
+
+export function frontierIssueNumbers(issues: Array<{ number: number; state: string; labels?: Array<{ name?: string }>; assignee?: unknown; issue_dependencies_summary?: { blocked_by?: number } }>, readyLabel = "ready-for-agent"): number[] {
+	return issues
+		.filter((issue) => issue.state === "open")
+		.filter((issue) => (issue.labels ?? []).some((label) => label.name === readyLabel))
+		.filter((issue) => !issue.assignee)
+		.filter((issue) => (issue.issue_dependencies_summary?.blocked_by ?? 0) === 0)
+		.map((issue) => issue.number);
+}
+
+async function inspectGraph(cwd: string, repo: string, parent: number, readyLabel: string): Promise<unknown> {
+	const children = await ghJson(cwd, ["api", `repos/${repo}/issues/${issueNumber(parent)}/sub_issues`]);
+	const issues = await Promise.all((children as any[]).map(async (child) => await ghJson(cwd, ["api", `repos/${repo}/issues/${child.number}`])));
+	return {
+		repo,
+		parent,
+		issues: issues.map((issue) => ({ number: issue.number, title: issue.title, state: issue.state, labels: issue.labels, assignee: issue.assignee?.login ?? null, openBlockers: issue.issue_dependencies_summary?.blocked_by ?? 0 })),
+		frontier: frontierIssueNumbers(issues, readyLabel),
+	};
+}
+
 function asMutation(value: any): GitHubIssueMutation {
 	return value as GitHubIssueMutation;
 }
@@ -306,6 +365,34 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 			const repo = await currentRepo(ctx.cwd, params.repo);
 			const result = await mutate(ctx.cwd, repo, asMutation(params.mutation), params.apply === true);
 			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, apply: params.apply === true } };
+		},
+	});
+
+	pi.registerTool({
+		name: "github_issue_relationship",
+		label: "GitHub Issue Relationship",
+		description: "Dry-run-first native GitHub sub-issue and blocker mutations scoped to the current checkout repository.",
+		promptSnippet: "Create native GitHub sub-issue or blocker links using issue numbers; database IDs are resolved internally.",
+		promptGuidelines: ["Call with apply false first, then apply true only after reviewing the relationship.", "Use native relationships rather than body-text conventions when the repository supports them."],
+		parameters: RelationshipParamsSchema,
+		async execute(_id, params: { repo?: string; apply?: boolean; op: "add_subissue" | "add_blocker"; parent?: number; child: number; blocker?: number }, _signal, _update, ctx: ExtensionContext) {
+			const repo = await currentRepo(ctx.cwd, params.repo);
+			const result = await publishRelationship(ctx.cwd, repo, params, params.apply === true);
+			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, apply: params.apply === true, op: params.op } };
+		},
+	});
+
+	pi.registerTool({
+		name: "github_issue_graph",
+		label: "GitHub Issue Graph",
+		description: "Inspect a parent issue's direct sub-issues and return the ready, unassigned, unblocked frontier.",
+		promptSnippet: "Inspect a GitHub issue subtree and select ready-for-agent, unassigned issues with no open blockers.",
+		promptGuidelines: ["Use github_issue_graph to choose manual implementation work from the GitHub frontier."],
+		parameters: GraphParamsSchema,
+		async execute(_id, params: { repo?: string; parent: number; ready_label?: string }, _signal, _update, ctx: ExtensionContext) {
+			const repo = await currentRepo(ctx.cwd, params.repo);
+			const result = await inspectGraph(ctx.cwd, repo, params.parent, params.ready_label ?? "ready-for-agent");
+			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, parent: params.parent } };
 		},
 	});
 
