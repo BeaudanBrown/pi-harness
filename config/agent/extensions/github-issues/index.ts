@@ -227,7 +227,7 @@ export function validateIssuePlan(plan: GitHubIssuePlan): void {
 
 async function findByMarker(cwd: string, repo: string, marker: string): Promise<any | undefined> {
 	const query = `repo:${repo} is:issue in:body "${marker}"`;
-	const search = await ghJson(cwd, ["api", "search/issues", "-f", `q=${query}`, "-f", "per_page=100"]);
+	const search = await ghJson(cwd, ["api", "--method", "GET", "search/issues", "-f", `q=${query}`, "-f", "per_page=100"]);
 	const matches = (search.items ?? []).filter((item: any) => typeof item.body === "string" && item.body.includes(marker));
 	if (matches.length > 1) throw new Error(`Idempotency marker ${marker} matches multiple GitHub issues.`);
 	return matches[0];
