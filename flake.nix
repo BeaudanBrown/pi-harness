@@ -139,6 +139,22 @@
           ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
           ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
         '';
+        migrateTkApp = pkgs.writeShellApplication {
+          name = "pi-migrate-tk";
+          runtimeInputs = [ ticketPackage pkgs.gh ];
+          text = ''
+            set -euo pipefail
+            if [ ! -d .tickets ]; then
+              echo "pi-migrate-tk: no .tickets directory in the current project; run this from a tk-backed repository." >&2
+              exit 1
+            fi
+            if ! gh auth status >/dev/null 2>&1; then
+              echo "pi-migrate-tk: GitHub CLI authentication is required; run gh auth login first." >&2
+              exit 1
+            fi
+            exec ${piHarnessPackage}/bin/pi "$@"
+          '';
+        };
         verifyApp = pkgs.writeShellApplication {
           name = "verify";
           runtimeInputs = [
@@ -205,6 +221,9 @@
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -e ${piHarnessPackage}/bin/tk
+            test -x ${migrateTkApp}/bin/pi-migrate-tk
+            grep -F 'no .tickets directory' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
+            grep -F 'gh auth status' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -293,10 +312,12 @@
         packages.pi-harness-resources = piHarnessResources;
         packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
+        packages.migrate-tk = migrateTkApp;
         packages.tk = ticketPackage;
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
 
+        apps.migrate-tk = flake-utils.lib.mkApp { drv = migrateTkApp; };
         apps.verify = flake-utils.lib.mkApp { drv = verifyApp; };
         apps.verify-lsp-live = flake-utils.lib.mkApp { drv = verifyLspLiveApp; };
         apps.default = flake-utils.lib.mkApp {
