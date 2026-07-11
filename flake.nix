@@ -172,6 +172,10 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts
             test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
             test -d ${piHarnessResources}/share/pi-harness/agent/skills
+            test -f ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/SKILL.md
+            test -f ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/references/inventory-schema.md
+            grep -F 'disable-model-invocation: true' \
+              ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/SKILL.md >/dev/null
             mattpocock_skills_root=${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills
             for skill_name in \
               ask-matt codebase-design code-review diagnosing-bugs domain-modeling \
