@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -103,6 +103,7 @@ const InspectParamsSchema = Type.Object({
 	repo: Type.Optional(Type.String({ description: "GitHub owner/repository. Defaults to the current checkout remote; any different repository is rejected." })),
 	number: Type.Optional(Type.Number({ minimum: 1, description: "Issue number to inspect." })),
 	marker: Type.Optional(Type.String({ description: "Generated provenance marker to find, for idempotency inspection." })),
+	include_body: Type.Optional(Type.Boolean({ description: "Include a body excerpt in the response. Defaults to false." })),
 });
 
 const RelationshipParamsSchema = Type.Object({
@@ -506,6 +507,48 @@ async function inspectGraph(cwd: string, repo: string, parent: number, readyLabe
 	};
 }
 
+function truncate(value: string, limit = 500): string {
+	return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1))}…`;
+}
+
+async function compactResponse(cwd: string, tool: string, summary: string, raw: unknown): Promise<{ content: Array<{ type: "text"; text: string }>; details: { artifactPath: string } }> {
+	const dir = path.join(cwd, ".pi/tmp/github-issues");
+	await mkdir(dir, { recursive: true });
+	const artifactPath = path.join(dir, `${tool}-${Date.now()}-${Math.random().toString(16).slice(2)}.json`);
+	await writeFile(artifactPath, `${compactJson(raw)}\n`, "utf8");
+	const relative = path.relative(cwd, artifactPath);
+	return { content: [{ type: "text", text: `${truncate(summary, 3_000)}\nArtifact: ${relative}` }], details: { artifactPath: relative } };
+}
+
+function issueSummary(issue: any, includeBody = false): string {
+	if (!issue) return "No matching GitHub issue found.";
+	const lines = [`#${issue.number ?? "?"} ${truncate(String(issue.title ?? "(untitled)"), 180)}`, `State: ${issue.state ?? "unknown"}`, issue.html_url ? `URL: ${issue.html_url}` : undefined].filter(Boolean);
+	if (includeBody && typeof issue.body === "string") lines.push(`Body: ${truncate(issue.body, 2_000)}`);
+	return lines.join("\n");
+}
+
+function mutationSummary(mutation: GitHubIssueMutation, apply: boolean, result: any): string {
+	const mode = apply ? "Applied" : "Dry run";
+	if (mutation.op === "ensure_label") return `${mode}: ${result?.status === "existing" ? "label already existed" : "ensure label"} ${mutation.name}.`;
+	if (mutation.op === "comment") return `${mode}: comment on #${mutation.number}.`;
+	if (mutation.op === "close_issue") return `${mode}: close #${mutation.number}.`;
+	const issue = result?.number ? ` #${result.number}${result.html_url ? ` (${result.html_url})` : ""}` : mutation.op === "create_issue" ? ` ${mutation.title}` : ` #${mutation.number}`;
+	return `${mode}: ${mutation.op.replaceAll("_", " ")}${issue}.`;
+}
+
+function graphSummary(result: any): string {
+	const issues = Array.isArray(result?.issues) ? result.issues : [];
+	const shown = issues.slice(0, 10).map((issue: any) => `- #${issue.number} ${truncate(String(issue.title ?? "(untitled)"), 100)} — ${issue.state}, blockers ${issue.openBlockers}`).join("\n");
+	return [`Parent: #${result?.parent ?? "?"}`, `Children: ${issues.length}`, `Frontier: ${(result?.frontier ?? []).map((number: number) => `#${number}`).join(", ") || "none"}`, shown, issues.length > 10 ? `… ${issues.length - 10} more child issues in artifact.` : undefined].filter(Boolean).join("\n");
+}
+
+function batchSummary(result: any): string {
+	if (result?.paused) return `Paused for GitHub rate limit during ${result.phase}; completed ${result.completed}. Retry after: ${result.retryAfter ?? "unknown"}.`;
+	if (result?.phase) return `${result.phase}: processed ${Array.isArray(result.processed) ? result.processed.length : 0}; remaining ${result.remaining ?? 0}; next: ${result.nextOperation ?? "none"}.`;
+	if (result?.dryRun) return `Dry run: ${result.issues ?? result.pending ?? 0} issues, ${result.relationships ?? 0} relationships.`;
+	return "GitHub operation completed.";
+}
+
 function asMutation(value: any): GitHubIssueMutation {
 	return value as GitHubIssueMutation;
 }
@@ -518,13 +561,13 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		promptSnippet: "Inspect GitHub issue details or a generated issue marker without mutating the tracker.",
 		promptGuidelines: ["Use github_issue_inspect before mutating a generated issue plan or when verifying a source marker."],
 		parameters: InspectParamsSchema,
-		async execute(_id, params: { repo?: string; number?: number; marker?: string }, _signal, _update, ctx: ExtensionContext) {
+		async execute(_id, params: { repo?: string; number?: number; marker?: string; include_body?: boolean }, _signal, _update, ctx: ExtensionContext) {
 			if ((params.number === undefined) === (params.marker === undefined)) throw new Error("Provide exactly one of number or marker.");
 			const repo = await currentRepo(ctx.cwd, params.repo);
 			const result = params.number !== undefined
 				? await ghJson(ctx.cwd, ["api", `repos/${repo}/issues/${issueNumber(params.number)}`])
 				: await findByMarker(ctx.cwd, repo, nonEmpty(params.marker, "marker"));
-			return { content: [{ type: "text", text: compactJson(result ?? { found: false }) }], details: { repo } };
+			return await compactResponse(ctx.cwd, "inspect", issueSummary(result, params.include_body === true), result ?? { found: false, repo });
 		},
 	});
 
@@ -537,8 +580,9 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		parameters: MutateParamsSchema,
 		async execute(_id, params: { repo?: string; apply?: boolean; mutation: any }, _signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo);
-			const result = await mutate(ctx.cwd, repo, asMutation(params.mutation), params.apply === true);
-			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, apply: params.apply === true } };
+			const mutation = asMutation(params.mutation);
+			const result = await mutate(ctx.cwd, repo, mutation, params.apply === true);
+			return await compactResponse(ctx.cwd, "mutate", mutationSummary(mutation, params.apply === true, result), { repo, apply: params.apply === true, mutation, result });
 		},
 	});
 
@@ -552,7 +596,9 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		async execute(_id, params: { repo?: string; apply?: boolean; op: "add_subissue" | "add_blocker"; parent?: number; child: number; blocker?: number }, _signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo);
 			const result = await publishRelationship(ctx.cwd, repo, params, params.apply === true);
-			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, apply: params.apply === true, op: params.op } };
+			const relation = params.op === "add_subissue" ? `#${params.child} as sub-issue of #${params.parent}` : `#${params.blocker} blocks #${params.child}`;
+			const status = (result as any)?.status === "existing" ? "already exists" : params.apply === true ? "applied" : "dry run";
+			return await compactResponse(ctx.cwd, "relationship", `${status}: ${relation}.`, { repo, apply: params.apply === true, params, result });
 		},
 	});
 
@@ -566,7 +612,7 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		async execute(_id, params: { repo?: string; parent: number; ready_label?: string }, _signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo);
 			const result = await inspectGraph(ctx.cwd, repo, params.parent, params.ready_label ?? "ready-for-agent");
-			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, parent: params.parent } };
+			return await compactResponse(ctx.cwd, "graph", graphSummary(result), result);
 		},
 	});
 
@@ -580,7 +626,7 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		async execute(_id, params: { repo?: string; apply?: boolean; operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile" | "resume"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number; write_delay_ms?: number }, _signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo);
 			const result = await executeMigration(ctx.cwd, repo, params);
-			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, operation: params.operation, apply: params.apply === true } };
+			return await compactResponse(ctx.cwd, "migration", batchSummary(result), { repo, operation: params.operation, apply: params.apply === true, result });
 		},
 	});
 
@@ -594,7 +640,8 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		async execute(_id, params: { repo?: string; apply?: boolean; plan: GitHubIssuePlan }, _signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo);
 			const result = await publishPlan(ctx.cwd, repo, params.plan, params.apply === true);
-			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, apply: params.apply === true, planKey: params.plan.key } };
+			const issues = Array.isArray((result as any)?.issues) ? (result as any).issues : params.plan.issues;
+			return await compactResponse(ctx.cwd, "plan", `${params.apply === true ? "Published" : "Dry run"} plan ${params.plan.key}: ${issues.length} issues.`, { repo, apply: params.apply === true, planKey: params.plan.key, result });
 		},
 	});
 }
