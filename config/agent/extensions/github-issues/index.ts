@@ -115,11 +115,12 @@ const RelationshipParamsSchema = Type.Object({
 
 const MigrationParamsSchema = Type.Object({
 	...BaseParams,
-	operation: Type.Union([Type.Literal("dry_run"), Type.Literal("apply_issues"), Type.Literal("apply_relationships"), Type.Literal("reconcile")]),
+	operation: Type.Union([Type.Literal("dry_run"), Type.Literal("apply_issues"), Type.Literal("apply_relationships"), Type.Literal("reconcile"), Type.Literal("resume")]),
 	manifest_path: Type.String({ description: "Repository-relative migration manifest under .pi/tmp/tk-to-github/." }),
 	issue_plan_path: Type.String({ description: "Repository-relative issue plan under .pi/tmp/tk-to-github/." }),
 	cursor: Type.Optional(Type.Number({ minimum: 0, description: "Zero-based batch offset. Defaults to zero." })),
-	batch_size: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: "Maximum issues or relationships to process. Defaults to 25." })),
+	batch_size: Type.Optional(Type.Number({ minimum: 1, maximum: 50, description: "Maximum issues or relationships to process. Defaults to 10." })),
+	write_delay_ms: Type.Optional(Type.Number({ minimum: 0, maximum: 10_000, description: "Delay between GitHub writes. Defaults to 750ms." })),
 });
 
 const GraphParamsSchema = Type.Object({
@@ -330,7 +331,21 @@ async function publishPlan(cwd: string, repo: string, plan: GitHubIssuePlan, app
 	return { repo, planKey: plan.key, issues: results, deferredBlockedBy: plan.issues.filter((item) => (item.blockedBy?.length ?? 0) > 0).map((item) => ({ key: item.key, blockedBy: item.blockedBy })) };
 }
 
-type MigrationOutcome = { repo: string; planKey: string; issues: Record<string, { number: number; url: string }> };
+type MigrationOutcome = {
+	repo: string;
+	planKey: string;
+	issues: Record<string, { number: number; url: string }>;
+	relationships: Record<string, true>;
+	labelsInitialized?: boolean;
+};
+
+function isRateLimited(error: unknown): boolean {
+	return /secondary rate limit|rate limit exceeded|api rate limit/i.test(String(error));
+}
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 function migrationArtifactPath(cwd: string, input: string): string {
 	if (path.isAbsolute(input)) throw new Error("Migration artifact paths must be repository-relative.");
@@ -352,9 +367,9 @@ async function readOutcome(outcomePath: string, repo: string, planKey: string): 
 	try {
 		const parsed = JSON.parse(await readFile(outcomePath, "utf8")) as MigrationOutcome;
 		if (parsed.repo !== repo || parsed.planKey !== planKey || !parsed.issues) throw new Error("Migration outcome belongs to a different repository or plan.");
-		return parsed;
+		return { ...parsed, relationships: parsed.relationships ?? {} };
 	} catch (error: any) {
-		if (error?.code === "ENOENT") return { repo, planKey, issues: {} };
+		if (error?.code === "ENOENT") return { repo, planKey, issues: {}, relationships: {} };
 		throw error;
 	}
 }
@@ -370,44 +385,79 @@ function migrationEdges(plan: GitHubIssuePlan): Array<{ kind: "subissue" | "bloc
 	]);
 }
 
-async function executeMigration(cwd: string, repo: string, params: { operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number; apply?: boolean }): Promise<unknown> {
+async function rateLimitPause(cwd: string, repo: string, phase: string, completed: number, outcomePath: string, error: unknown): Promise<unknown> {
+	let retryAfter: string | undefined;
+	try {
+		const rate = await ghJson(cwd, ["api", "rate_limit"]);
+		const reset = rate.resources?.core?.reset;
+		if (typeof reset === "number") retryAfter = new Date(reset * 1000).toISOString();
+	} catch { /* secondary limits may also block this read */ }
+	return { paused: true, reason: "github-rate-limit", repo, phase, completed, retryAfter, outcomePath: path.relative(cwd, outcomePath), error: String(error) };
+}
+
+async function executeMigration(cwd: string, repo: string, params: { operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile" | "resume"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number; write_delay_ms?: number; apply?: boolean }): Promise<unknown> {
 	const { plan, outcomePath } = await readMigrationPlan(cwd, params.manifest_path, params.issue_plan_path);
-	const cursor = Math.max(0, Math.trunc(params.cursor ?? 0));
-	const batchSize = Math.max(1, Math.min(50, Math.trunc(params.batch_size ?? 25)));
+	const batchSize = Math.max(1, Math.min(50, Math.trunc(params.batch_size ?? 10)));
+	const delay = Math.max(0, Math.min(10_000, Math.trunc(params.write_delay_ms ?? 750)));
 	const edges = migrationEdges(plan);
 	if (params.operation === "dry_run") return { dryRun: true, repo, planKey: plan.key, issues: plan.issues.length, relationships: edges.length, labels: [...new Set(plan.issues.flatMap((item) => item.labels ?? []))], outcomePath: path.relative(cwd, outcomePath) };
 	const outcome = await readOutcome(outcomePath, repo, plan.key);
-	if (params.operation === "apply_issues") {
-		const batch = plan.issues.slice(cursor, cursor + batchSize);
-		if (!params.apply) return { dryRun: true, phase: "issues", cursor, batch: batch.map((item) => item.key), nextCursor: cursor + batch.length < plan.issues.length ? cursor + batch.length : null };
-		if (cursor === 0) for (const label of new Set(plan.issues.flatMap((item) => item.labels ?? []))) await mutate(cwd, repo, { op: "ensure_label", name: label }, true);
-		for (const item of batch) {
-			const existing = await findByMarker(cwd, repo, issueMarker(plan.key, item.key));
-			const issue = existing ?? await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues`], { title: item.title, body: bodyWithMarker(plan.key, item), labels: item.labels ?? [] });
-			if (item.state === "closed" && issue.state !== "closed") await ghJsonWithInput(cwd, ["api", "--method", "PATCH", `repos/${repo}/issues/${issue.number}`], { state: "closed" });
-			outcome.issues[item.key] = { number: issue.number, url: issue.html_url };
-			await writeOutcome(outcomePath, outcome);
+	const pendingIssues = plan.issues.filter((item) => !outcome.issues[item.key]);
+	const pendingEdges = edges.filter((edge) => !outcome.relationships[`${edge.kind}:${edge.child}:${edge.other}`]);
+	const operation = params.operation === "resume" ? (pendingIssues.length > 0 ? "apply_issues" : pendingEdges.length > 0 ? "apply_relationships" : "reconcile") : params.operation;
+	if (operation === "apply_issues") {
+		const batch = pendingIssues.slice(0, batchSize);
+		if (!params.apply) return { dryRun: true, phase: "issues", pending: pendingIssues.length, batch: batch.map((item) => item.key), outcomePath: path.relative(cwd, outcomePath) };
+		try {
+			if (!outcome.labelsInitialized) {
+				for (const label of new Set(plan.issues.flatMap((item) => item.labels ?? []))) {
+					await mutate(cwd, repo, { op: "ensure_label", name: label }, true);
+					if (delay) await sleep(delay);
+				}
+				outcome.labelsInitialized = true;
+				await writeOutcome(outcomePath, outcome);
+			}
+			for (const item of batch) {
+				const existing = await findByMarker(cwd, repo, issueMarker(plan.key, item.key));
+				const issue = existing ?? await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues`], { title: item.title, body: bodyWithMarker(plan.key, item), labels: item.labels ?? [] });
+				if (item.state === "closed" && issue.state !== "closed") await ghJsonWithInput(cwd, ["api", "--method", "PATCH", `repos/${repo}/issues/${issue.number}`], { state: "closed" });
+				outcome.issues[item.key] = { number: issue.number, url: issue.html_url };
+				await writeOutcome(outcomePath, outcome);
+				if (delay) await sleep(delay);
+			}
+		} catch (error) {
+			if (isRateLimited(error)) return await rateLimitPause(cwd, repo, "issues", Object.keys(outcome.issues).length, outcomePath, error);
+			throw error;
 		}
-		return { phase: "issues", cursor, processed: batch.map((item) => item.key), nextCursor: cursor + batch.length < plan.issues.length ? cursor + batch.length : null, outcomePath: path.relative(cwd, outcomePath) };
+		return { phase: "issues", processed: batch.map((item) => item.key), remaining: plan.issues.length - Object.keys(outcome.issues).length, nextOperation: Object.keys(outcome.issues).length < plan.issues.length ? "apply_issues" : "apply_relationships", outcomePath: path.relative(cwd, outcomePath) };
 	}
-	if (params.operation === "apply_relationships") {
-		const batch = edges.slice(cursor, cursor + batchSize);
-		for (const edge of batch) if (!outcome.issues[edge.child] || !outcome.issues[edge.other]) throw new Error(`Relationship ${edge.child} -> ${edge.other} requires completed issue publication.`);
-		if (!params.apply) return { dryRun: true, phase: "relationships", cursor, batch, nextCursor: cursor + batch.length < edges.length ? cursor + batch.length : null };
-		for (const edge of batch) {
-			const child = outcome.issues[edge.child]!.number;
-			const other = outcome.issues[edge.other]!.number;
-			await publishRelationship(cwd, repo, edge.kind === "subissue" ? { op: "add_subissue", parent: other, child } : { op: "add_blocker", child, blocker: other }, true);
+	if (operation === "apply_relationships") {
+		if (pendingIssues.length > 0) throw new Error("Publish every issue before publishing relationships.");
+		const batch = pendingEdges.slice(0, batchSize);
+		if (!params.apply) return { dryRun: true, phase: "relationships", pending: pendingEdges.length, batch, outcomePath: path.relative(cwd, outcomePath) };
+		try {
+			for (const edge of batch) {
+				const child = outcome.issues[edge.child]!.number;
+				const other = outcome.issues[edge.other]!.number;
+				await publishRelationship(cwd, repo, edge.kind === "subissue" ? { op: "add_subissue", parent: other, child } : { op: "add_blocker", child, blocker: other }, true);
+				outcome.relationships[`${edge.kind}:${edge.child}:${edge.other}`] = true;
+				await writeOutcome(outcomePath, outcome);
+				if (delay) await sleep(delay);
+			}
+		} catch (error) {
+			if (isRateLimited(error)) return await rateLimitPause(cwd, repo, "relationships", Object.keys(outcome.relationships).length, outcomePath, error);
+			throw error;
 		}
-		return { phase: "relationships", cursor, processed: batch, nextCursor: cursor + batch.length < edges.length ? cursor + batch.length : null };
+		return { phase: "relationships", processed: batch, remaining: edges.length - Object.keys(outcome.relationships).length, nextOperation: Object.keys(outcome.relationships).length < edges.length ? "apply_relationships" : "reconcile", outcomePath: path.relative(cwd, outcomePath) };
 	}
 	const mismatches: string[] = [];
 	for (const item of plan.issues) {
 		const expected = outcome.issues[item.key];
-		const found = await findByMarker(cwd, repo, issueMarker(plan.key, item.key));
+		const found = expected ? await findByMarker(cwd, repo, issueMarker(plan.key, item.key)) : undefined;
 		if (!expected || !found || expected.number !== found.number) mismatches.push(`${item.key}: missing or mismatched provenance marker`);
 		else if (found.state !== (item.state ?? "open")) mismatches.push(`${item.key}: expected ${item.state ?? "open"}, found ${found.state}`);
 	}
+	if (pendingEdges.length > 0) mismatches.push(`${pendingEdges.length} relationship(s) remain unpublished`);
 	return { phase: "reconcile", repo, planKey: plan.key, passed: mismatches.length === 0, mismatches, outcomePath: path.relative(cwd, outcomePath) };
 }
 
@@ -525,9 +575,9 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		label: "GitHub Issue Migration",
 		description: "Execute a validated local tk-to-GitHub manifest in resumable bounded issue and relationship batches; dry-run by default.",
 		promptSnippet: "Run a local migration manifest through dry-run, bounded issue batches, relationship batches, and reconciliation.",
-		promptGuidelines: ["Keep migration artifacts under .pi/tmp/tk-to-github/.", "Run dry_run first, then apply issue batches until complete, then relationship batches, then reconcile.", "Never remove .tickets/ with this tool; cleanup requires a separate explicit user approval."],
+		promptGuidelines: ["Keep migration artifacts under .pi/tmp/tk-to-github/.", "Run dry_run first, then use resume with apply true until it reports reconciliation.", "When paused for a rate limit, wait until retryAfter and run resume again; do not change cursors or recreate the plan.", "Never remove .tickets/ with this tool; cleanup requires a separate explicit user approval."],
 		parameters: MigrationParamsSchema,
-		async execute(_id, params: { repo?: string; apply?: boolean; operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number }, _signal, _update, ctx: ExtensionContext) {
+		async execute(_id, params: { repo?: string; apply?: boolean; operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile" | "resume"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number; write_delay_ms?: number }, _signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo);
 			const result = await executeMigration(ctx.cwd, repo, params);
 			return { content: [{ type: "text", text: compactJson(result) }], details: { repo, operation: params.operation, apply: params.apply === true } };

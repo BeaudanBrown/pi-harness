@@ -97,11 +97,11 @@ Use `github_issue_migration`; never paste a large plan or hundreds of relationsh
 
 1. Write the approved issue graph to `.pi/tmp/tk-to-github/github-issue-plan.json`. It must contain `{ key, issues }`; each issue has `key`, `title`, `body`, optional `labels`, `state`, `parent`, and `blockedBy` keys. Use the source tk ID as the stable issue key.
 2. Run `github_issue_migration` with `operation: dry_run`, the inventory manifest path, and the issue-plan path. Confirm counts, labels, and relationship totals with the user.
-3. Run `operation: apply_issues` with `apply: true` in bounded batches. Continue with the returned `nextCursor` until it is null. The executor writes `github-migration-outcomes.json` beside the manifest after each issue, so an interruption resumes without duplicates.
-4. Run `operation: apply_relationships` with `apply: true` in bounded batches until its `nextCursor` is null.
-5. Run `operation: reconcile`. It verifies source markers and state against the manifest before cleanup can be proposed.
+3. Run `operation: resume` with `apply: true`. It processes the next bounded issue batch, then bounded relationship batches, and finally reconciliation without requiring inline payloads or manual cursors.
+4. If it returns `paused: true` with `reason: github-rate-limit`, wait until `retryAfter` when present, then run the same `resume` request again. Do not recreate the plan or alter a cursor.
+5. A `resume` result that reaches `phase: reconcile` must have `passed: true` before cleanup can be proposed.
 
-The executor creates missing labels, reuses issues by stable marker, and retains every outcome under `.pi/tmp/tk-to-github/`. If a batch fails, leave `.tickets/` untouched and resume from the reported cursor.
+The executor defaults to ten items and a 750ms delay between writes, creates missing labels once, reuses persisted outcomes before GitHub marker lookups, and retains every issue and relationship outcome under `.pi/tmp/tk-to-github/`. If a batch fails, leave `.tickets/` untouched and run the same `resume` request later.
 
 **Completion:** every approved source record has either one mapped GitHub issue or an approved omission, all relationship batches are complete, and reconciliation passes.
 
