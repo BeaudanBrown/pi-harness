@@ -106,6 +106,27 @@ If label, issue, or relationship publication partially fails, leave `.tickets/` 
 
 **Completion:** every approved source record has either one mapped GitHub issue or an approved omission, and the temporary manifest records every resulting URL, state, label, and relationship result.
 
+## 7. Reconcile and cut over
+
+Compare the approved temporary manifest with GitHub before any cleanup:
+
+- every approved migrated source ID resolves to exactly one GitHub issue by its provenance marker;
+- every approved omission has an approved rationale and no unintended GitHub issue;
+- title, labels, open/closed state, parent links, blocker links, and preserved related context match the map;
+- duplicate markers, missing mappings, API capability fallbacks, or relationship failures are listed as reconciliation failures.
+
+Use `github_issue_inspect` and `github_issue_graph` to gather the evidence. Write a reconciliation table into `.pi/tmp/tk-to-github/report.md`. A failure leaves `.tickets/` and repository guidance untouched; repair the map and rerun publication instead.
+
+Only after a clean reconciliation, present the table and ask the user explicitly whether to complete cutover. On approval:
+
+1. remove `.tickets/` from the working tree;
+2. remove remaining project-local tk instructions or source references;
+3. confirm `docs/agents/issue-tracker.md` identifies GitHub Issues as the sole source of truth;
+4. commit the repository cleanup separately from any implementation work;
+5. retain the source history in Git but do not keep a second active ticket copy.
+
+**Completion:** the user approved cleanup, GitHub reconciles with the map, `.tickets/` is absent, repository guidance names GitHub as authoritative, and the cleanup commit is recorded.
+
 ## Handoff
 
-Report the source-ticket count, disposition totals, approved stale/omitted tickets, unresolved decisions, and paths to temporary artifacts. Point to the later publication and reconciliation workflow; do not claim migration is complete while `.tickets/` remains authoritative.
+Report the source-ticket count, disposition totals, approved stale/omitted tickets, reconciliation result, cleanup decision, and paths to temporary artifacts. Do not claim migration is complete while `.tickets/` remains present.
