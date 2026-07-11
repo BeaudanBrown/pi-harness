@@ -172,9 +172,23 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts
             test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
             test -d ${piHarnessResources}/share/pi-harness/agent/skills
-            test -f ${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills/setup-matt-pocock-skills/SKILL.md
-            test -f ${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills/to-tickets/SKILL.md
-            test -f ${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills/tdd/tests.md
+            mattpocock_skills_root=${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills
+            for skill_name in \
+              ask-matt codebase-design code-review diagnosing-bugs domain-modeling \
+              grill-with-docs implement prototype research resolving-merge-conflicts \
+              setup-matt-pocock-skills tdd to-spec to-tickets triage wayfinder grilling handoff; do
+              test -f "$mattpocock_skills_root/$skill_name/SKILL.md"
+              grep -F "name: $skill_name" "$mattpocock_skills_root/$skill_name/SKILL.md" >/dev/null
+            done
+            for user_invoked_skill in \
+              ask-matt grill-with-docs implement setup-matt-pocock-skills \
+              to-spec to-tickets triage wayfinder handoff; do
+              grep -F "disable-model-invocation: true" \
+                "$mattpocock_skills_root/$user_invoked_skill/SKILL.md" >/dev/null
+            done
+            test -f "$mattpocock_skills_root/tdd/tests.md"
+            test -f "$mattpocock_skills_root/setup-matt-pocock-skills/issue-tracker-github.md"
+            jq -e '.enableSkillCommands == true' ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             test -d ${piHarnessResources}/share/pi-harness/agent/prompts
             test -d ${piHarnessResources}/share/pi-harness/agent/themes
             test -L ${piHarnessPackage}/share/pi-harness/agent
