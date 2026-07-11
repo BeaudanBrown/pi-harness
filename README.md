@@ -22,9 +22,11 @@ layout is handled outside Pi with regular tmux.
 - a tmux/fzf session picker command under `config/agent/extensions/sesh`
 - a delegated noisy-command runner under `config/agent/extensions/worker-runner`
 - reusable architecture diagram tools under `config/agent/extensions/diagram-tools`
+- typed dry-run-first GitHub Issue tools under `config/agent/extensions/github-issues`
 - an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
-- the `tk` git-backed ticket CLI for agent task tracking
-- supervised `/aplan` and `/aloop` commands under `config/agent/extensions/agent-loop`
+- a curated, pinned distribution of Matt Pocock's engineering skills
+- a user-invoked `migrate-tk-to-github` migration inventory skill and dedicated migration launcher
+- legacy `tk` and `/aloop` support during the migration period only
 - the AgentGraph pi resources imported from the AgentGraph flake input
 - empty skill, prompt, and theme directories for future additions
 
@@ -289,7 +291,60 @@ PI_WEB_SEARCH_API_KEY_COMMAND
 
 If no Pi-specific key is set, the extension falls back to `OPENAI_API_KEY`.
 
-## Agent Planning And Loops
+## Engineering Workflow
+
+GitHub Issues is the durable source of truth for planned work. Use the GitHub UI
+for the queue, parent/sub-issue hierarchy, native blockers, labels, comments,
+and handoffs. Claim an issue before changing code; record verification and a
+concise handoff before closing it.
+
+The primary workflow is the curated Matt Pocock skill chain:
+
+```text
+setup-matt-pocock-skills → grill-with-docs → to-spec → to-tickets → implement → code-review
+```
+
+Pi exposes skills as `/skill:<name>`, for example:
+
+```text
+/skill:setup-matt-pocock-skills
+/skill:grill-with-docs
+/skill:to-spec
+/skill:to-tickets
+/skill:implement
+/skill:code-review
+```
+
+Run setup once per repository to write `docs/agents/issue-tracker.md`, domain
+layout guidance, and triage-label mapping. Configure GitHub there and do not
+create new `tk` tickets. `to-spec` creates a parent specification issue and
+`to-tickets` creates dependency-aware, vertical-slice child issues. Work one
+ready, unassigned, unblocked issue in a fresh context when practical.
+
+Use `/skill:tdd` for bounded test-first work, `/skill:diagnosing-bugs` for hard
+bugs, `/skill:triage` for incoming requests, `/skill:wayfinder` for uncertain
+large efforts, and `/skill:handoff` before session transitions.
+
+The `github_issue_inspect`, `github_issue_mutate`, `github_issue_plan`,
+`github_issue_relationship`, and `github_issue_graph` tools provide a typed,
+dry-run-first boundary for current-repository issue work. They resolve GitHub
+REST database IDs internally; callers use ordinary issue numbers.
+
+### tk migration
+
+`tk` remains available only while older projects migrate. From a tk-backed
+project, run:
+
+```bash
+nix run github:BeaudanBrown/pi-harness#migrate-tk
+```
+
+Then invoke `/skill:migrate-tk-to-github`. Its inventory phase reviews every
+source ticket with code, Git, and GitHub evidence and asks about stale or
+ambiguous work. It never creates issues or removes `.tickets/` before later
+approved publication and reconciliation phases.
+
+## Legacy Agent Planning And Loops
 
 The packaged harness includes `tk`, the git-backed ticket CLI from
 `wedow/ticket`. Tickets live as Markdown files under `.tickets/`, which keeps
