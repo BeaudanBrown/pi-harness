@@ -3,6 +3,7 @@
   lib,
   piPackage,
   piHarnessResources,
+  mattPocockSkillsResources,
   agentgraphPackage ? null,
   agentgraphPostgresPackage ? null,
   agentgraphPiResources ? null,
@@ -64,6 +65,7 @@ resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts"
   --skill "${piHarnessResources}/share/pi-harness/agent/skills"
+  --skill "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"
   --prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"
   --theme "${piHarnessResources}/share/pi-harness/agent/themes"
 )
@@ -111,6 +113,7 @@ EOF
     pi = piPackage;
     piResources = piHarnessResources.piResources;
     harnessResources = piHarnessResources;
+    mattpocockSkills = mattPocockSkillsResources;
     agentgraph = agentgraphPackage;
     agentgraphPostgres = agentgraphPostgresPackage;
     agentgraphPiResources = agentgraphPiResources;

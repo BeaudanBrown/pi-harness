@@ -23,6 +23,10 @@
       url = "github:samfoy/pi-lsp-extension/73251632ad116c973844cc28fb1210417295c6fe";
       flake = false;
     };
+    mattpocock-skills-src = {
+      url = "github:mattpocock/skills/391a2701dd948f94f56a39f7533f8eea9a859c87";
+      flake = false;
+    };
   };
 
   outputs =
@@ -32,6 +36,7 @@
       nix-ai-tools,
       agentgraph,
       pi-lsp-extension-src,
+      mattpocock-skills-src,
       ...
     }:
     flake-utils.lib.eachDefaultSystem (
@@ -49,11 +54,15 @@
         piHarnessResources = pkgs.callPackage ./nix/pi-harness-resources.nix {
           inherit piPackage;
         };
+        mattPocockSkillsResources = pkgs.callPackage ./nix/mattpocock-skills-resources.nix {
+          mattPocockSkillsSrc = mattpocock-skills-src;
+        };
         ticketPackage = pkgs.callPackage ./nix/ticket.nix { };
         piHarnessPackage = pkgs.callPackage ./nix/package.nix {
           inherit
             piPackage
             piHarnessResources
+            mattPocockSkillsResources
             agentgraphPackage
             agentgraphPostgresPackage
             agentgraphPiResources
@@ -109,6 +118,7 @@
                   --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
                   --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
                   --skill "$PWD/config/agent/skills" \
+                  --skill "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills" \
                   --skill "${agentgraphPiResources}/share/agentgraph-pi/skills" \
                   --prompt-template "$PWD/config/agent/prompts" \
                   --prompt-template "${agentgraphPiResources}/share/agentgraph-pi/prompts" \
@@ -162,6 +172,9 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts
             test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
             test -d ${piHarnessResources}/share/pi-harness/agent/skills
+            test -f ${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills/setup-matt-pocock-skills/SKILL.md
+            test -f ${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills/to-tickets/SKILL.md
+            test -f ${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills/tdd/tests.md
             test -d ${piHarnessResources}/share/pi-harness/agent/prompts
             test -d ${piHarnessResources}/share/pi-harness/agent/themes
             test -L ${piHarnessPackage}/share/pi-harness/agent
@@ -178,6 +191,7 @@
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--skill \"${piHarnessResources}/share/pi-harness/agent/skills\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--skill \"${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"\$agentgraph_extensions_dir/agentgraph/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--prompt-template \"\$agentgraph_prompts_dir\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "install|remove|uninstall|update|list|config)" ${piHarnessPackage}/bin/pi >/dev/null
@@ -251,6 +265,7 @@
       {
         packages.pi-harness = piHarnessPackage;
         packages.pi-harness-resources = piHarnessResources;
+        packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
         packages.tk = ticketPackage;
         packages.pi = piPackage;
