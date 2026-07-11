@@ -1,0 +1,34 @@
+[
+  {
+    "sourceId": "tk-epic",
+    "disposition": "migrate-open",
+    "title": "Example migration epic",
+    "body": "Open parent work.",
+    "labels": ["ready-for-agent"],
+    "blockedBy": []
+  },
+  {
+    "sourceId": "tk-first",
+    "disposition": "migrate-open",
+    "title": "First vertical slice",
+    "body": "Runnable end-to-end slice.",
+    "labels": ["ready-for-agent"],
+    "blockedBy": []
+  },
+  {
+    "sourceId": "tk-later",
+    "disposition": "migrate-closed",
+    "title": "Historical completed slice",
+    "body": "Closed historical work.",
+    "labels": ["migration"],
+    "blockedBy": ["tk-first"]
+  },
+  {
+    "sourceId": "tk-stale",
+    "disposition": "omit",
+    "title": "Superseded work",
+    "body": "User-approved omission.",
+    "labels": [],
+    "blockedBy": ["tk-first"]
+  }
+]

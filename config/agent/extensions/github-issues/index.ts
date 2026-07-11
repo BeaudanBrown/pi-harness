@@ -18,6 +18,15 @@ export type GitHubIssuePlan = {
 	issues: GitHubIssuePlanItem[];
 };
 
+export type MigrationRecord = {
+	sourceId: string;
+	disposition: "migrate-open" | "migrate-closed" | "omit";
+	title: string;
+	body: string;
+	labels?: string[];
+	blockedBy?: string[];
+};
+
 type GitHubIssueMutation =
 	| { op: "ensure_label"; name: string; color?: string; description?: string }
 	| { op: "create_issue"; title: string; body: string; labels?: string[] }
@@ -168,6 +177,25 @@ export function issueMarker(planKey: string, issueKey: string): string {
 
 export function bodyWithMarker(planKey: string, item: GitHubIssuePlanItem): string {
 	return `${item.body.trim()}\n\n${issueMarker(planKey, item.key)}`;
+}
+
+export function migrationIssuePlan(planKey: string, records: MigrationRecord[]): GitHubIssuePlan {
+	const migrated = new Set(records.filter((record) => record.disposition !== "omit").map((record) => record.sourceId));
+	const plan = {
+		key: planKey,
+		issues: records
+			.filter((record) => record.disposition !== "omit")
+			.map((record) => ({
+				key: record.sourceId,
+				title: record.title,
+				body: `${record.body.trim()}\n\n## Migration provenance\n\nMigrated from tk ticket \`${record.sourceId}\`.`,
+				labels: record.labels ?? [],
+				blockedBy: (record.blockedBy ?? []).filter((id) => migrated.has(id)),
+				state: record.disposition === "migrate-closed" ? "closed" as const : "open" as const,
+			})),
+	};
+	validateIssuePlan(plan);
+	return plan;
 }
 
 export function validateIssuePlan(plan: GitHubIssuePlan): void {
