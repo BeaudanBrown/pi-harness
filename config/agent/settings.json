@@ -2,6 +2,7 @@
   "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/core/settings-schema.json",
   "extensions": [
     "./extensions/web-search/index.ts",
+    "./extensions/github-issues/index.ts",
     "./extensions/agent-loop/index.ts",
     "./extensions/diagram-tools/index.ts",
     "./extensions/worker-runner/index.ts",

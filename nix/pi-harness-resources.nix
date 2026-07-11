@@ -41,6 +41,7 @@ let
     passthru.piResources = {
       extensions = [
         "${drv}/share/pi-harness/agent/extensions/web-search/index.ts"
+        "${drv}/share/pi-harness/agent/extensions/github-issues/index.ts"
         "${drv}/share/pi-harness/agent/extensions/agent-loop/index.ts"
         "${drv}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
         "${drv}/share/pi-harness/agent/extensions/worker-runner/index.ts"

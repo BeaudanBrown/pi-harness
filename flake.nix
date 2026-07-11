@@ -108,6 +108,7 @@
               *)
                 exec ${lib.getExe piPackage} \
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
+                  --extension "$PWD/config/agent/extensions/github-issues/index.ts" \
                   --extension "$PWD/config/agent/extensions/agent-loop/index.ts" \
                   --extension "$PWD/config/agent/extensions/diagram-tools/index.ts" \
                   --extension "$PWD/config/agent/extensions/worker-runner/index.ts" \
@@ -152,6 +153,7 @@
             jq empty config/agent/settings.json
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
+            test -f config/agent/extensions/github-issues/index.ts
             test -f config/agent/extensions/agent-loop/index.ts
             test -f config/agent/extensions/diagram-tools/index.ts
             test -f config/agent/extensions/worker-runner/index.ts
@@ -163,6 +165,7 @@
             test -d config/agent/prompts
             test -d config/agent/themes
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts
@@ -203,6 +206,7 @@
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -e ${piHarnessPackage}/bin/tk
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -233,6 +237,8 @@
             grep -F 'dockerfile: { command: "docker-langserver", args: ["--stdio"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
             grep -F 'bash: { command: "bash-language-server", args: ["start"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
             grep -F 'const runningStatuses = statuses.filter((s) => s.running);' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/tools/symbols.ts >/dev/null
+            jq -e '.extensions | index("./extensions/github-issues/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/diagram-tools/index.ts")' \
@@ -252,7 +258,9 @@
             tsc --noEmit --project tsconfig.json
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
-            node --test "$test_build_dir/tests/agent-loop-progress.test.js"
+            node --test \
+              "$test_build_dir/tests/agent-loop-progress.test.js" \
+              "$test_build_dir/tests/github-issues.test.js"
           '';
         };
         verifyLspLiveApp = pkgs.writeShellApplication {

@@ -57,6 +57,7 @@ esac
 
 resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts"
