@@ -23,6 +23,20 @@ agent.
 - Use Nix to distribute shared config across machines.
 - Do not push unless the user explicitly asks in the current session.
 
+## Agent skills
+
+### Issue tracker
+
+GitHub Issues are the sole task source of truth. See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Use the configured GitHub lifecycle labels. See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Read project guidance and relevant documentation before work. See `docs/agents/domain.md`.
+
 ## Verification
 
 - Canonical gate: `nix run .#verify`
