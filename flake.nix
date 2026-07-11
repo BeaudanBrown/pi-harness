@@ -67,7 +67,6 @@
             agentgraphPostgresPackage
             agentgraphPiResources
             piLspExtension
-            ticketPackage
             ;
           fzf = pkgs.fzf;
           tmux = pkgs.tmux;
@@ -109,7 +108,6 @@
                 exec ${lib.getExe piPackage} \
                   --extension "$PWD/config/agent/extensions/web-search/index.ts" \
                   --extension "$PWD/config/agent/extensions/github-issues/index.ts" \
-                  --extension "$PWD/config/agent/extensions/agent-loop/index.ts" \
                   --extension "$PWD/config/agent/extensions/diagram-tools/index.ts" \
                   --extension "$PWD/config/agent/extensions/worker-runner/index.ts" \
                   --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
@@ -170,7 +168,6 @@
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
             test -f config/agent/extensions/github-issues/index.ts
-            test -f config/agent/extensions/agent-loop/index.ts
             test -f config/agent/extensions/diagram-tools/index.ts
             test -f config/agent/extensions/worker-runner/index.ts
             test -f config/agent/extensions/nix-runtime/index.ts
@@ -182,7 +179,6 @@
             test -d config/agent/themes
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
@@ -220,7 +216,7 @@
             test -f ${agentgraphPiResources}/share/agentgraph-pi/prompts/graph-change.md
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
-            test -e ${piHarnessPackage}/bin/tk
+            test ! -e ${piHarnessPackage}/bin/tk
             test -x ${migrateTkApp}/bin/pi-migrate-tk
             grep -F 'no .tickets directory' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
             grep -F 'gh auth status' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
@@ -246,7 +242,7 @@
             grep -F "PI_HARNESS_AGENTGRAPH_ROOT" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "PI_HARNESS_AGENTGRAPH_SKILLS_DIR" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F "export AGENTGRAPH_PI_RESOURCES=\"\$agentgraph_root\"" ${piHarnessPackage}/bin/pi >/dev/null
-            ${piHarnessPackage}/bin/tk help >/dev/null
+            grep -F '${ticketPackage}/bin' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
             test -f ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/index.ts
             grep -F '".nix": "nix"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null
             grep -F '"dockerfile": "dockerfile"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null
@@ -257,8 +253,6 @@
             grep -F 'bash: { command: "bash-language-server", args: ["start"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
             grep -F 'const runningStatuses = statuses.filter((s) => s.running);' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/tools/symbols.ts >/dev/null
             jq -e '.extensions | index("./extensions/github-issues/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/agent-loop/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/diagram-tools/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
@@ -277,9 +271,7 @@
             tsc --noEmit --project tsconfig.json
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
-            node --test \
-              "$test_build_dir/tests/agent-loop-progress.test.js" \
-              "$test_build_dir/tests/github-issues.test.js"
+            node --test "$test_build_dir/tests/github-issues.test.js"
           '';
         };
         verifyLspLiveApp = pkgs.writeShellApplication {
@@ -313,7 +305,6 @@
         packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
         packages.migrate-tk = migrateTkApp;
-        packages.tk = ticketPackage;
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
 
@@ -334,7 +325,6 @@
             # piDevWrapper
             agentgraphPackage
             agentgraphPostgresPackage
-            ticketPackage
             pkgs.jq
             pkgs.tmux
             pkgs.d2

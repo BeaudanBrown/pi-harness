@@ -6,7 +6,7 @@ disable-model-invocation: true
 
 # Migrate tk To GitHub
 
-Run the **inventory** phase of a one-way `tk` to GitHub Issues migration. This phase establishes the approved disposition of every source ticket; it does not create, edit, close, or label GitHub issues, and it does not remove `.tickets/`.
+Run a one-way `tk` to GitHub Issues migration. Inventory and user approval always come before publication; `.tickets/` is never removed until a later reconciliation phase succeeds.
 
 Use this skill only in a project that has elected GitHub Issues as its sole future task source of truth. Run it as `/skill:migrate-tk-to-github`.
 
@@ -87,9 +87,24 @@ Create `.pi/tmp/tk-to-github/report.md` and a machine-readable `.pi/tmp/tk-to-gi
 - an explicit list of omitted tickets and the approved reason;
 - unresolved capability or data-quality warnings.
 
-Show the map to the user. Obtain explicit approval before continuing to a later publication phase. Do not create GitHub issues from this skill phase.
+Show the map to the user. Obtain explicit approval before publishing it.
 
 **Completion:** the user has an approved, reviewable migration map or has asked to revise it.
+
+## 6. Publish the approved map
+
+Use the typed GitHub tools; never reconstruct raw `gh api` commands in a migration run.
+
+1. Dry-run `github_issue_mutate` for every missing migration and triage label, then apply only the approved label set.
+2. Convert approved `migrate-open` and `migrate-closed` records into one `github_issue_plan`. Use a stable plan key derived from the repository and migration run; use the source `tk` ID as each plan issue key. The tool adds a stable hidden provenance marker and returns the source-key-to-GitHub mapping.
+3. Dry-run the complete plan. Confirm that its titles, labels, states, and omitted tickets match the approved report. Then apply it.
+4. Re-run the same plan after any interruption. Existing provenance markers must resolve to existing issues rather than create duplicates.
+5. Use `github_issue_relationship` to create approved parent/sub-issue and blocker edges from the returned mapping. Dry-run each relation before applying it. Preserve valuable non-blocking `tk link` context as reciprocal issue comments.
+6. For a closed historical issue, add a concise migration comment explaining that it was imported from the listed tk ticket; do not copy transient command logs.
+
+If label, issue, or relationship publication partially fails, leave `.tickets/` untouched, record the failed source IDs in the temporary manifest, and resume from the same stable keys.
+
+**Completion:** every approved source record has either one mapped GitHub issue or an approved omission, and the temporary manifest records every resulting URL, state, label, and relationship result.
 
 ## Handoff
 

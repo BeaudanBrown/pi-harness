@@ -8,7 +8,6 @@
   agentgraphPostgresPackage ? null,
   agentgraphPiResources ? null,
   piLspExtension ? null,
-  ticketPackage ? null,
   fzf ? null,
   tmux ? null,
   d2 ? null,
@@ -39,7 +38,6 @@ set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
-${lib.optionalString (ticketPackage != null) ''export PATH="${ticketPackage}/bin:\$PATH"''}
 ${lib.optionalString (fzf != null) ''export PI_HARNESS_FZF="\''${PI_HARNESS_FZF:-${fzf}/bin/fzf}"''}
 ${lib.optionalString (tmux != null) ''export PI_HARNESS_TMUX="\''${PI_HARNESS_TMUX:-${tmux}/bin/tmux}"''}
 ${lib.optionalString (d2 != null) ''export PI_HARNESS_D2="\''${PI_HARNESS_D2:-${d2}/bin/d2}"''}
@@ -58,7 +56,6 @@ esac
 resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/agent-loop/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
@@ -103,9 +100,6 @@ EOF
     ${lib.optionalString (agentgraphPostgresPackage != null) ''
       ln -s "${agentgraphPostgresPackage}/bin/agentgraph-postgres" "$out/bin/agentgraph-postgres"
     ''}
-    ${lib.optionalString (ticketPackage != null) ''
-      ln -s "${ticketPackage}/bin/tk" "$out/bin/tk"
-    ''}
 
     runHook postInstall
   '';
@@ -119,7 +113,6 @@ EOF
     agentgraphPostgres = agentgraphPostgresPackage;
     agentgraphPiResources = agentgraphPiResources;
     piLspExtension = piLspExtension;
-    ticket = ticketPackage;
     fzf = fzf;
     tmux = tmux;
     d2 = d2;
