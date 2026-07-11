@@ -93,18 +93,17 @@ Show the map to the user. Obtain explicit approval before publishing it.
 
 ## 6. Publish the approved map
 
-Use the typed GitHub tools; never reconstruct raw `gh api` commands in a migration run.
+Use `github_issue_migration`; never paste a large plan or hundreds of relationships into inline tool calls.
 
-1. Dry-run `github_issue_mutate` for every missing migration and triage label, then apply only the approved label set.
-2. Convert approved `migrate-open` and `migrate-closed` records into one `github_issue_plan`. Use a stable plan key derived from the repository and migration run; use the source `tk` ID as each plan issue key. The tool adds a stable hidden provenance marker and returns the source-key-to-GitHub mapping.
-3. Dry-run the complete plan. Confirm that its titles, labels, states, and omitted tickets match the approved report. Then apply it.
-4. Re-run the same plan after any interruption. Existing provenance markers must resolve to existing issues rather than create duplicates.
-5. Use `github_issue_relationship` to create approved parent/sub-issue and blocker edges from the returned mapping. Dry-run each relation before applying it. Preserve valuable non-blocking `tk link` context as reciprocal issue comments.
-6. For a closed historical issue, add a concise migration comment explaining that it was imported from the listed tk ticket; do not copy transient command logs.
+1. Write the approved issue graph to `.pi/tmp/tk-to-github/github-issue-plan.json`. It must contain `{ key, issues }`; each issue has `key`, `title`, `body`, optional `labels`, `state`, `parent`, and `blockedBy` keys. Use the source tk ID as the stable issue key.
+2. Run `github_issue_migration` with `operation: dry_run`, the inventory manifest path, and the issue-plan path. Confirm counts, labels, and relationship totals with the user.
+3. Run `operation: apply_issues` with `apply: true` in bounded batches. Continue with the returned `nextCursor` until it is null. The executor writes `github-migration-outcomes.json` beside the manifest after each issue, so an interruption resumes without duplicates.
+4. Run `operation: apply_relationships` with `apply: true` in bounded batches until its `nextCursor` is null.
+5. Run `operation: reconcile`. It verifies source markers and state against the manifest before cleanup can be proposed.
 
-If label, issue, or relationship publication partially fails, leave `.tickets/` untouched, record the failed source IDs in the temporary manifest, and resume from the same stable keys.
+The executor creates missing labels, reuses issues by stable marker, and retains every outcome under `.pi/tmp/tk-to-github/`. If a batch fails, leave `.tickets/` untouched and resume from the reported cursor.
 
-**Completion:** every approved source record has either one mapped GitHub issue or an approved omission, and the temporary manifest records every resulting URL, state, label, and relationship result.
+**Completion:** every approved source record has either one mapped GitHub issue or an approved omission, all relationship batches are complete, and reconciliation passes.
 
 ## 7. Reconcile and cut over
 
