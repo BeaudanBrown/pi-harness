@@ -16,7 +16,7 @@ import { Type } from "typebox";
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_LOG_BYTES_FOR_WORKER = 80_000;
 const DEFAULT_MAX_OUTPUT_BYTES = 8_000;
-const DEFAULT_WORKER_MODEL = "litellm/sub-gpt-5.3-codex-spark";
+const DEFAULT_WORKER_MODEL = "openai-codex/gpt-5.3-codex-spark";
 const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
 const WORKER_ROOT = ".pi/tmp/workers";
 
