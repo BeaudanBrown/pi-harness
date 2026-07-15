@@ -21,6 +21,7 @@ layout is handled outside Pi with regular tmux.
 - a tmux cursor focus extension under `config/agent/extensions/tmux-cursor-focus`
 - a tmux/fzf session picker command under `config/agent/extensions/sesh`
 - a delegated noisy-command runner under `config/agent/extensions/worker-runner`
+- dedicated parallel code-review agents under `config/agent/extensions/review-agents`
 - reusable architecture diagram tools under `config/agent/extensions/diagram-tools`
 - typed dry-run-first GitHub Issue tools under `config/agent/extensions/github-issues`
 - an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
@@ -177,7 +178,17 @@ The included `worker-runner` extension registers `run_worker`, a tool for noisy 
 
 Use it for tests, typechecks, builds, and integration checks where dumping raw output into the main context would be wasteful. The parent agent supplies the command and a plain-language task describing what the worker should extract or diagnose. The worker model defaults to `openai-codex/gpt-5.3-codex-spark` when available and can be overridden with `PI_HARNESS_WORKER_MODEL=provider/model`; otherwise it falls back to the current session model.
 
+Do not use `run_worker` for subjective code review. The dedicated `review_agents` tool uses a review-specific model, prompt, and shared pinned diff.
+
 `run_worker` is disabled in AgentGraph restricted mode because arbitrary command execution would bypass the graph-mode tool boundary.
+
+## Code Review Agents
+
+The `review-agents` extension registers `review_agents` for the curated two-axis `code-review` skill. It captures one merge-base diff and commit list, stores them under `.pi/tmp/reviews/`, and runs the Standards and Spec tasks concurrently in isolated read-only Pi SDK sessions.
+
+Review sessions use `openai-codex/gpt-5.6-terra` with low thinking. Set `PI_HARNESS_REVIEW_MODEL=provider/model` to override the model explicitly; unlike the diagnostic worker, review agents fail clearly when their configured model is unavailable or lacks authentication rather than silently falling back to a lower-quality model.
+
+The review sessions expose only `read`, `grep`, `find`, and `ls`. `review_agents` is disabled in AgentGraph restricted mode because its model calls would sit outside graph provenance.
 
 ## Architecture Diagram Tools
 

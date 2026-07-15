@@ -251,6 +251,7 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 		promptGuidelines: [
 			"Prefer run_worker over bash for tests, typechecks, builds, integration checks, or commands expected to produce large/noisy output.",
 			"Give run_worker a clear task describing what to extract or diagnose from the command result.",
+			"Do not use run_worker for subjective code review; use review_agents so review tasks use the dedicated review model and shared pinned diff.",
 			"Use bash directly for small commands where raw output is useful; use the saved run_worker log for drill-down when needed.",
 		],
 		parameters: RunWorkerParams,

@@ -110,6 +110,7 @@
                   --extension "$PWD/config/agent/extensions/github-issues/index.ts" \
                   --extension "$PWD/config/agent/extensions/diagram-tools/index.ts" \
                   --extension "$PWD/config/agent/extensions/worker-runner/index.ts" \
+                  --extension "$PWD/config/agent/extensions/review-agents/index.ts" \
                   --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
                   --extension "$PWD/config/agent/extensions/codex-fast/index.ts" \
                   --extension "$PWD/config/agent/extensions/tmux-cursor-focus/index.ts" \
@@ -170,6 +171,7 @@
             test -f config/agent/extensions/github-issues/index.ts
             test -f config/agent/extensions/diagram-tools/index.ts
             test -f config/agent/extensions/worker-runner/index.ts
+            test -f config/agent/extensions/review-agents/index.ts
             test -f config/agent/extensions/nix-runtime/index.ts
             test -f config/agent/extensions/codex-fast/index.ts
             test -f config/agent/extensions/tmux-cursor-focus/index.ts
@@ -181,6 +183,7 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts
@@ -199,6 +202,11 @@
               test -f "$mattpocock_skills_root/$skill_name/SKILL.md"
               grep -F "name: $skill_name" "$mattpocock_skills_root/$skill_name/SKILL.md" >/dev/null
             done
+            grep -F 'review_agents' "$mattpocock_skills_root/code-review/SKILL.md" >/dev/null
+            if grep -F "two \`Agent\` tool calls" "$mattpocock_skills_root/code-review/SKILL.md" >/dev/null; then
+              echo "code-review skill still references the unavailable Agent tool" >&2
+              exit 1
+            fi
             for user_invoked_skill in \
               ask-matt grill-with-docs implement setup-matt-pocock-skills \
               to-spec to-tickets triage wayfinder handoff; do
@@ -224,6 +232,7 @@
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -258,6 +267,8 @@
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/worker-runner/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/review-agents/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/codex-fast/index.ts")' \
@@ -271,7 +282,9 @@
             tsc --noEmit --project tsconfig.json
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
-            node --test "$test_build_dir/tests/github-issues.test.js"
+            node --test \
+              "$test_build_dir/tests/github-issues.test.js" \
+              "$test_build_dir/tests/review-agents.test.js"
           '';
         };
         verifyLspLiveApp = pkgs.writeShellApplication {
