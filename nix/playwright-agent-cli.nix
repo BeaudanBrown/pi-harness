@@ -31,7 +31,7 @@ buildNpmPackage rec {
           --set PLAYWRIGHT_MCP_EXECUTABLE_PATH ${lib.getExe chromium} \
           --set PLAYWRIGHT_MCP_HEADLESS true \
           --set PLAYWRIGHT_MCP_ISOLATED true \
-          --set PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS false
+          --unset PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS
 
         cat > "$out/bin/playwright-cli-fallback" <<EOF
     #!/usr/bin/env bash
