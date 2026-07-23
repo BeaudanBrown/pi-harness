@@ -37,6 +37,10 @@ Use the configured GitHub lifecycle labels. See `docs/agents/triage-labels.md`.
 
 Read project guidance and relevant documentation before work. See `docs/agents/domain.md`.
 
+### Browser automation
+
+Use the `playwright-browser` skill and `pi-playwright` interface for stateful browser exploration. Prefer project adapters for application work and the harness fallback only for disposable exploration when no project Playwright setup exists.
+
 ## Verification
 
 - Canonical gate: `nix run .#verify`

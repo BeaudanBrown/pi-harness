@@ -1,0 +1,110 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+jq_bin="${PI_HARNESS_JQ:-@PI_HARNESS_JQ@}"
+fallback_command="${PI_HARNESS_PLAYWRIGHT_FALLBACK:-playwright-cli-fallback}"
+workspace="${PI_PLAYWRIGHT_ROOT:-}"
+
+if [[ -z "$workspace" ]]; then
+  workspace="$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$PWD")"
+fi
+workspace="$(cd "$workspace" && pwd -P)"
+manifest="$workspace/.pi/playwright-cli.json"
+backend="auto"
+
+if [[ "${1-}" == --backend=* ]]; then
+  backend="${1#--backend=}"
+  shift
+elif [[ "${1-}" == "--backend" ]]; then
+  if [[ $# -lt 2 ]]; then
+    echo "pi-playwright: --backend requires project or fallback" >&2
+    exit 2
+  fi
+  backend="$2"
+  shift 2
+fi
+
+if [[ "$backend" != "auto" && "$backend" != "project" && "$backend" != "fallback" ]]; then
+  echo "pi-playwright: --backend must be project or fallback" >&2
+  exit 2
+fi
+
+adapter=""
+declare -a command=()
+
+load_project_manifest() {
+  if ! "$jq_bin" -e '
+    .version == 1
+    and (.command | type == "array")
+    and (.command | length > 0)
+    and all(.command[]; type == "string" and length > 0 and (contains("\n") | not))
+  ' "$manifest" >/dev/null 2>&1; then
+    echo "pi-playwright: invalid project adapter manifest: $manifest" >&2
+    exit 2
+  fi
+  mapfile -t command < <("$jq_bin" -r '.command[]' "$manifest")
+  adapter="project-manifest"
+}
+
+if [[ "$backend" != "fallback" && -f "$manifest" ]]; then
+  load_project_manifest
+elif [[ "$backend" != "fallback" && -x "$workspace/node_modules/.bin/playwright-cli" ]]; then
+  command=("$workspace/node_modules/.bin/playwright-cli")
+  adapter="project-node-modules"
+elif [[ "$backend" == "project" ]]; then
+  echo "pi-playwright: no project adapter found; expected $manifest or node_modules/.bin/playwright-cli" >&2
+  exit 1
+fi
+
+if [[ -z "$adapter" ]]; then
+  if [[ "$fallback_command" == */* ]]; then
+    if [[ ! -x "$fallback_command" ]]; then
+      echo "pi-playwright: harness fallback is unavailable: $fallback_command" >&2
+      exit 1
+    fi
+    command=("$fallback_command")
+  elif fallback_path="$(command -v "$fallback_command" 2>/dev/null)"; then
+    command=("$fallback_path")
+  else
+    echo "pi-playwright: no project adapter and no harness fallback are available" >&2
+    echo "Add .pi/playwright-cli.json or enable services.pi-harness.playwright." >&2
+    exit 1
+  fi
+  adapter="harness-fallback"
+
+  cache_home="${XDG_CACHE_HOME:-$HOME/.cache}"
+  if command -v sha256sum >/dev/null 2>&1; then
+    workspace_key="$(printf '%s' "$workspace" | sha256sum | cut -c1-16)"
+  else
+    workspace_key="$(printf '%s' "$workspace" | cksum | awk '{print $1}')"
+  fi
+  export PLAYWRIGHT_MCP_OUTPUT_DIR="${PLAYWRIGHT_MCP_OUTPUT_DIR:-$cache_home/pi-harness/playwright/$workspace_key}"
+  mkdir -p "$PLAYWRIGHT_MCP_OUTPUT_DIR"
+fi
+
+if [[ "${1-}" == "doctor" ]]; then
+  version_output="$("${command[@]}" --version 2>&1)" || {
+    echo "pi-playwright: selected adapter failed its version check" >&2
+    exit 1
+  }
+  version="$(printf '%s\n' "$version_output" | awk 'NF { line = $0 } END { print line }')"
+  printf 'workspace: %s\n' "$workspace"
+  printf 'adapter: %s\n' "$adapter"
+  if [[ "$adapter" == "project-manifest" ]]; then
+    printf 'manifest: %s\n' "$manifest"
+  fi
+  printf 'command:'
+  printf ' %q' "${command[@]}"
+  printf '\nversion: %s\n' "$version"
+  if [[ "$adapter" == "harness-fallback" ]]; then
+    printf 'output_dir: %s\n' "$PLAYWRIGHT_MCP_OUTPUT_DIR"
+  fi
+  exit 0
+fi
+
+if [[ "$adapter" == "harness-fallback" ]]; then
+  echo "pi-playwright: using harness fallback for $workspace" >&2
+fi
+
+cd "$workspace"
+exec "${command[@]}" "$@"

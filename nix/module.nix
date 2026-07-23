@@ -37,15 +37,20 @@ let
     xdg-utils
   ];
 
-  fallbackRuntimePackages =
-    [ cfg.package ]
-    ++ lib.optionals cfg.lsp.enable cfg.lsp.packages
-    ++ lib.optionals cfg.diagrams.enable cfg.diagrams.packages;
+  fallbackRuntimePackages = [
+    cfg.package
+  ]
+  ++ lib.optionals cfg.lsp.enable cfg.lsp.packages
+  ++ lib.optionals cfg.diagrams.enable cfg.diagrams.packages
+  ++ lib.optionals (cfg.playwright.enable && cfg.playwright.package != null) [
+    cfg.playwright.package
+  ];
+  runtimeFeaturesEnabled = cfg.lsp.enable || cfg.diagrams.enable || cfg.playwright.enable;
   lspExtensionArray =
     if cfg.lsp.enable then
       ''extension_args=(--extension "${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts")''
     else
-      ''extension_args=()'';
+      "extension_args=()";
 
   piWithAgentGraphEnv = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
@@ -91,6 +96,18 @@ in
 
     diagrams.enable = lib.mkEnableOption "diagram rendering tools for Pi";
 
+    playwright.enable = lib.mkEnableOption "the harness Playwright Agent CLI browser fallback";
+
+    playwright.package = lib.mkOption {
+      type = lib.types.nullOr lib.types.package;
+      default = cfg.package.playwrightAgentCli or null;
+      defaultText = lib.literalExpression "services.pi-harness.package.playwrightAgentCli";
+      description = ''
+        Nix-pinned Playwright Agent CLI and Chromium fallback exposed to Pi.
+        Project adapters selected by pi-playwright take precedence over this package.
+      '';
+    };
+
     diagrams.packages = lib.mkOption {
       type = lib.types.listOf lib.types.package;
       default = defaultDiagramPackages;
@@ -129,10 +146,14 @@ in
         assertion = !cfg.lsp.enable || cfg.lsp.extension != null;
         message = "services.pi-harness.lsp.enable requires a pi-lsp-extension package.";
       }
+      {
+        assertion = !cfg.playwright.enable || cfg.playwright.package != null;
+        message = "services.pi-harness.playwright.enable requires a Playwright Agent CLI package.";
+      }
     ];
 
     environment.systemPackages =
-      if cfg.agentgraph.environmentFile == null && cfg.lsp.enable then
+      if cfg.agentgraph.environmentFile == null && runtimeFeaturesEnabled then
         [ piWithRuntimePath ]
       else if cfg.agentgraph.environmentFile == null then
         [ cfg.package ]

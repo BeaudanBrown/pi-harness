@@ -16,6 +16,8 @@
   plantuml ? null,
   mermaidCli ? null,
   structurizrCli ? null,
+  jq,
+  playwrightAgentCli ? null,
 }:
 
 stdenvNoCC.mkDerivation {
@@ -95,6 +97,11 @@ resource_args+=(
 exec "${lib.getExe piPackage}" "\''${resource_args[@]}" "\$@"
 EOF
     chmod +x "$out/bin/pi"
+
+    cp bin/pi-playwright "$out/bin/pi-playwright"
+    substituteInPlace "$out/bin/pi-playwright" \
+      --replace-fail '@PI_HARNESS_JQ@' '${lib.getExe jq}'
+    chmod +x "$out/bin/pi-playwright"
     ${lib.optionalString (agentgraphPackage != null) ''
       ln -s "${agentgraphPackage}/bin/ag" "$out/bin/ag"
     ''}
@@ -122,6 +129,7 @@ EOF
     plantuml = plantuml;
     mermaidCli = mermaidCli;
     structurizrCli = structurizrCli;
+    playwrightAgentCli = playwrightAgentCli;
   };
 
   meta = {

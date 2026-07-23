@@ -23,6 +23,7 @@ layout is handled outside Pi with regular tmux.
 - a delegated noisy-command runner under `config/agent/extensions/worker-runner`
 - dedicated parallel code-review agents under `config/agent/extensions/review-agents`
 - reusable architecture diagram tools under `config/agent/extensions/diagram-tools`
+- a `playwright-browser` skill and `pi-playwright` resolver for project-first browser automation with an optional Nix-pinned fallback
 - typed dry-run-first GitHub Issue tools under `config/agent/extensions/github-issues`
 - an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
 - a curated, pinned distribution of Matt Pocock's engineering skills
@@ -119,6 +120,35 @@ services.pi-harness.agentgraph.environmentFile =
 When set, `pi` inherits variables such as `LITELLM_BASE_URL`,
 `LITELLM_API_KEY`, and `AG_LITELLM_DEFAULT_MODEL`. No separate
 `pi-agentgraph` command is installed.
+
+## Playwright Browser Fallback
+
+The `playwright-browser` skill teaches agents to use the stateful Playwright Agent CLI for browser exploration, accessibility snapshots, console/network inspection, screenshots, and test-generation skeletons. The stable interface is:
+
+```bash
+pi-playwright doctor
+pi-playwright -s=my-task open https://example.com
+pi-playwright -s=my-task snapshot
+```
+
+`pi-playwright` prefers a project adapter declared in `.pi/playwright-cli.json`:
+
+```json
+{
+  "version": 1,
+  "command": ["bash", "./bin/in-env", "pwcli"]
+}
+```
+
+It next checks `node_modules/.bin/playwright-cli`, then uses the harness fallback when enabled. Projects own Playwright/Test versions, application fixtures, authentication, and committed E2E tests. The fallback is an isolated, Nix-pinned `@playwright/cli` plus Chromium intended for disposable exploration in projects without browser tooling.
+
+Enable the fallback on selected hosts:
+
+```nix
+services.pi-harness.playwright.enable = true;
+```
+
+The fallback starts no process until invoked, disables unrestricted file access and browser downloads, and writes default artifacts under the user's XDG cache. It does not add MCP support or replace project E2E tests.
 
 ## Nix Runtime Guidance
 

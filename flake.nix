@@ -58,6 +58,7 @@
           mattPocockSkillsSrc = mattpocock-skills-src;
         };
         ticketPackage = pkgs.callPackage ./nix/ticket.nix { };
+        playwrightAgentCli = pkgs.callPackage ./nix/playwright-agent-cli.nix { };
         piHarnessPackage = pkgs.callPackage ./nix/package.nix {
           inherit
             piPackage
@@ -67,12 +68,14 @@
             agentgraphPostgresPackage
             agentgraphPiResources
             piLspExtension
+            playwrightAgentCli
             ;
           fzf = pkgs.fzf;
           tmux = pkgs.tmux;
           d2 = pkgs.d2;
           graphviz = pkgs.graphviz;
           xdgUtils = pkgs.xdg-utils;
+          jq = pkgs.jq;
         };
         lspPackages = with pkgs; [
           nodejs
@@ -140,7 +143,10 @@
         '';
         migrateTkApp = pkgs.writeShellApplication {
           name = "pi-migrate-tk";
-          runtimeInputs = [ ticketPackage pkgs.gh ];
+          runtimeInputs = [
+            ticketPackage
+            pkgs.gh
+          ];
           text = ''
             set -euo pipefail
             if [ ! -d .tickets ]; then
@@ -177,6 +183,7 @@
             test -f config/agent/extensions/tmux-cursor-focus/index.ts
             test -f config/agent/extensions/sesh/index.ts
             test -d config/agent/skills
+            test -f config/agent/skills/playwright-browser/SKILL.md
             test -d config/agent/prompts
             test -d config/agent/themes
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
@@ -191,6 +198,7 @@
             test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
             test -d ${piHarnessResources}/share/pi-harness/agent/skills
             test -f ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/SKILL.md
+            test -f ${piHarnessResources}/share/pi-harness/agent/skills/playwright-browser/SKILL.md
             test -f ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/references/inventory-schema.md
             grep -F 'disable-model-invocation: true' \
               ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/SKILL.md >/dev/null
@@ -224,6 +232,9 @@
             test -f ${agentgraphPiResources}/share/agentgraph-pi/prompts/graph-change.md
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
+            test -x ${piHarnessPackage}/bin/pi-playwright
+            test -x ${playwrightAgentCli}/bin/playwright-cli-fallback
+            ${playwrightAgentCli}/bin/playwright-cli-fallback --version | grep -Fx '0.1.17' >/dev/null
             test ! -e ${piHarnessPackage}/bin/tk
             test -x ${migrateTkApp}/bin/pi-migrate-tk
             grep -F 'no .tickets directory' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
@@ -282,8 +293,9 @@
             tsc --noEmit --project tsconfig.json
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
-            node --test \
+            PI_HARNESS_JQ=${lib.getExe pkgs.jq} node --test \
               "$test_build_dir/tests/github-issues.test.js" \
+              "$test_build_dir/tests/playwright-resolver.test.js" \
               "$test_build_dir/tests/review-agents.test.js"
           '';
         };
@@ -293,7 +305,8 @@
             pkgs.coreutils
             pkgs.nodejs
             pkgs.typescript
-          ] ++ lspPackages;
+          ]
+          ++ lspPackages;
           text = ''
             set -euo pipefail
             for command_name in \
@@ -317,6 +330,7 @@
         packages.pi-harness-resources = piHarnessResources;
         packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
+        packages.playwright-agent-cli = playwrightAgentCli;
         packages.migrate-tk = migrateTkApp;
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
@@ -338,12 +352,14 @@
             # piDevWrapper
             agentgraphPackage
             agentgraphPostgresPackage
+            playwrightAgentCli
             pkgs.jq
             pkgs.tmux
             pkgs.d2
             pkgs.graphviz
             pkgs.xdg-utils
-          ] ++ lspPackages;
+          ]
+          ++ lspPackages;
 
           shellHook = ''
             ${typeSetup}
