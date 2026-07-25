@@ -4,7 +4,6 @@ import { Type } from "typebox";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_MODEL = "gpt-5.4-mini";
-const MAX_OUTPUT_TOKENS = 1200;
 const SEARCH_TIMEOUT_MS = 60_000;
 
 const WebSearchParams = Type.Object({
@@ -184,7 +183,6 @@ export default function (pi: ExtensionAPI) {
 						input: [{ role: "user", content: input.query }],
 						tools: [{ type: "web_search" }],
 						tool_choice: { type: "web_search" },
-						max_output_tokens: MAX_OUTPUT_TOKENS,
 						store: false,
 						stream: true,
 					}),
