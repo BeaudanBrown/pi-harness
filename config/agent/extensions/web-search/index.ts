@@ -183,6 +183,7 @@ export default function (pi: ExtensionAPI) {
 						input: [{ role: "user", content: input.query }],
 						tools: [{ type: "web_search" }],
 						tool_choice: { type: "web_search" },
+						text: { verbosity: "low" },
 						store: false,
 						stream: true,
 					}),
