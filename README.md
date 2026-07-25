@@ -319,17 +319,14 @@ projects can change implementation details without changing the harness contract
 ## Web Search
 
 The included `web_search` extension registers a Pi tool for current web
-research. It calls the OpenAI Responses API with `gpt-5-mini` by default and
-can be pointed at a compatible proxy with environment variables:
+research. It uses Pi's ChatGPT Plus/Pro (Codex) OAuth login and Codex's native
+web-search backend, rather than an OpenAI API key. Log in through `/login` and
+select ChatGPT Plus/Pro (Codex). The delegated search model defaults to
+`gpt-5.4-mini`; set `PI_CODEX_WEB_SEARCH_MODEL` to override it.
 
-```text
-PI_WEB_SEARCH_BASE_URL
-PI_WEB_SEARCH_MODEL
-PI_WEB_SEARCH_API_KEY
-PI_WEB_SEARCH_API_KEY_COMMAND
-```
-
-If no Pi-specific key is set, the extension falls back to `OPENAI_API_KEY`.
+The Codex backend is not a public OpenAI API. Pi keeps the OAuth credential
+refreshed, but an upstream backend or model-entitlement change can require a
+new `/login` or model override.
 
 ## Engineering Workflow
 
