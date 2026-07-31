@@ -206,7 +206,9 @@ Pi's normal settings files.
 
 The included `worker-runner` extension registers `run_worker`, a tool for noisy checks and commands. It runs a command in the current repository, writes the full log under `.pi/tmp/workers/`, and asks a bounded read-only Pi SDK worker to return a concise summary for the parent agent.
 
-Use it for tests, typechecks, builds, and integration checks where dumping raw output into the main context would be wasteful. The parent agent supplies the command and a plain-language task describing what the worker should extract or diagnose. The worker model defaults to `openai-codex/gpt-5.3-codex-spark` when available and can be overridden with `PI_HARNESS_WORKER_MODEL=provider/model`; otherwise it falls back to the current session model.
+Use it for tests, typechecks, builds, and integration checks where dumping raw output into the main context would be wasteful. The parent agent supplies the command and a plain-language task describing what the worker should extract or diagnose. The worker defaults to `openai-codex/gpt-5.3-codex-spark` and falls back to the current session model only when Spark is unavailable.
+
+Use `/worker-model` to toggle between Spark and `openai-codex/gpt-5.6-luna`, or use `/worker-model spark`, `/worker-model luna`, and `/worker-model status`. The selection persists in Pi's global settings under `pi-worker-runner`, so it applies to future Pi sessions. Luna is never silently replaced with Spark or the parent model: selecting Luna requires registered, authenticated Luna access. `PI_HARNESS_WORKER_MODEL=provider/model` remains an explicit environment override; it takes precedence over the saved preference and is shown as active by `/worker-model status`.
 
 Do not use `run_worker` for subjective code review. The dedicated `review_agents` tool uses a review-specific model, prompt, and shared pinned diff.
 

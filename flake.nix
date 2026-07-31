@@ -296,7 +296,8 @@
             PI_HARNESS_JQ=${lib.getExe pkgs.jq} node --test \
               "$test_build_dir/tests/github-issues.test.js" \
               "$test_build_dir/tests/playwright-resolver.test.js" \
-              "$test_build_dir/tests/review-agents.test.js"
+              "$test_build_dir/tests/review-agents.test.js" \
+              "$test_build_dir/tests/worker-runner.test.js"
           '';
         };
         verifyLspLiveApp = pkgs.writeShellApplication {
