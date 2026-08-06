@@ -97,6 +97,7 @@
               services.pi-harness = {
                 enable = true;
                 package = piHarnessPackage;
+                sessionDirectory = "/home/operator/.local/state/syncthing/pi/sessions";
                 remoteSession = {
                   environmentFile = "/run/secrets/pi/matrix-test-env";
                   homeserver = "https://matrix.example.com";
@@ -277,6 +278,9 @@
             test -x ${remoteSessionPiWrapper}/bin/pi
             test -x ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami
             jq -e '.packageCount == 2 and (.assertions | all)' ${remoteSessionModuleReport} >/dev/null
+            grep -F 'PI_CODING_AGENT_SESSION_DIR' ${remoteSessionPiWrapper}/bin/pi >/dev/null
+            grep -F '/home/operator/.local/state/syncthing/pi/sessions' \
+              ${remoteSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'PI_MATRIX_HOMESERVER' ${remoteSessionPiWrapper}/bin/pi >/dev/null
             grep -F '/run/secrets/pi/matrix-test-env' ${remoteSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'exec ${piHarnessPackage}/bin/pi-matrix-whoami' \

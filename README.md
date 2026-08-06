@@ -75,6 +75,11 @@ The module installs the packaged `pi` binary. The binary injects the shared
 resource paths directly, while Pi's normal user config directory remains mutable
 for auth, sessions, user settings, and user-installed extras.
 
+Set `services.pi-harness.sessionDirectory` when a host should use a specific Pi
+session store. The installed `pi` wrapper exports
+`PI_CODING_AGENT_SESSION_DIR` immediately before starting Pi, so a NixOS switch
+takes effect without requiring the desktop user to log out and back in.
+
 ## Matrix Host Bot Runtime
 
 The optional `services.pi-harness.remoteSession` settings provide a

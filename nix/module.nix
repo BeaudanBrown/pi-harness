@@ -46,6 +46,7 @@ let
     cfg.playwright.package
   ];
   runtimeFeaturesEnabled = cfg.lsp.enable || cfg.diagrams.enable || cfg.playwright.enable;
+  sessionDirectoryEnabled = cfg.sessionDirectory != null;
   remoteSessionEnabled = cfg.remoteSession.environmentFile != null;
   nonNullString = value: if value == null then "" else value;
   runtimeEnvironmentFiles = lib.filter (path: path != null) [
@@ -59,6 +60,9 @@ let
       . ${lib.escapeShellArg path}
     '') runtimeEnvironmentFiles}
     set +a
+  '';
+  sessionDirectoryEnvironment = lib.optionalString sessionDirectoryEnabled ''
+    export PI_CODING_AGENT_SESSION_DIR=${lib.escapeShellArg (nonNullString cfg.sessionDirectory)}
   '';
   remoteSessionEnvironment = lib.optionalString remoteSessionEnabled ''
     export PI_MATRIX_HOMESERVER=${lib.escapeShellArg (nonNullString cfg.remoteSession.homeserver)}
@@ -75,6 +79,7 @@ let
   piWithRuntime = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
     ${runtimeEnvironmentSetup}
+    ${sessionDirectoryEnvironment}
     ${remoteSessionEnvironment}
     export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspExtensionArray}
@@ -99,6 +104,17 @@ in
       };
       defaultText = lib.literalExpression "inputs.pi-harness.packages.${pkgs.system}.default";
       description = "The pi-harness package containing the Pi binary and shared agent config.";
+    };
+
+    sessionDirectory = lib.mkOption {
+      type = lib.types.nullOr lib.types.nonEmptyStr;
+      default = null;
+      example = "/home/operator/.local/state/syncthing/pi/sessions";
+      description = ''
+        Optional Pi session storage directory exported by the installed pi
+        wrapper as PI_CODING_AGENT_SESSION_DIR. This applies immediately after
+        activation without requiring a new login session.
+      '';
     };
 
     agentgraph.environmentFile = lib.mkOption {
@@ -226,7 +242,10 @@ in
     ];
 
     environment.systemPackages =
-      (if runtimeEnvironmentFiles != [ ] || runtimeFeaturesEnabled then [ piWithRuntime ] else [ cfg.package ])
+      (if runtimeEnvironmentFiles != [ ] || runtimeFeaturesEnabled || sessionDirectoryEnabled then
+        [ piWithRuntime ]
+      else
+        [ cfg.package ])
       ++ lib.optional remoteSessionEnabled matrixWhoami;
   };
 }
