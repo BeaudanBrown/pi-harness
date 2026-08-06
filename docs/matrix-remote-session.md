@@ -80,19 +80,48 @@ expanded by Pi and persisted with the same semantics as interactive input.
 Text-only v1 ignores edits, reactions, attachments, thread events, voice, and
 other media. It does not turn fallback reply quotations into prompt content.
 
+## Explicit checkpoints
+
+Matrix output is intentionally narrower than Matrix input. Routine assistant
+answers, settled events, thinking, and tool activity remain in the Pi terminal
+and session; they are not mirrored to Matrix. On upgrade, any legacy pending
+routine-answer outbounds are marked complete without sending; typed extension
+command acknowledgements remain retryable. Agents have one
+`remote_checkpoint` tool for intentional approval boundaries:
+
+- `question` states the decision required, with optional concise context and
+  options;
+- `blocked` states observed blocker evidence and the exact intervention needed;
+- `issue_complete` states the issue or objective, implementation summary,
+  verification evidence, caveats, Git/commit state, and exact closure or
+  continuation approval request.
+
+Checkpoint schemas reject missing, extra, oversized, control-character, and
+code-like content in normal prose fields. Rendered Matrix messages are bounded
+to 6,000 characters. Code or diffs are accepted only in the dedicated requested
+content field when the agent explicitly confirms that the operator asked for it.
+
+The extension records prepared and waiting checkpoint entries in the Pi session,
+sends the structured message to the bound room with one transaction ID, and
+calls Pi's abort boundary. If the process stops after preparation or an uncertain
+send, reconnect retries that same transaction and resolves the originating
+inbound turn without resuming it. The current run cannot continue past the tool
+call. The next authorized Matrix reply is accepted through the normal inbound path,
+persisted as an ordinary Pi user message, and has the same approval authority as
+terminal input.
+
 ## Interruption semantics
 
 An accepted Matrix event ID and prompt are recorded before injection. Session
 markers also retain the exact post-command/skill/template expansion so recovery
 cannot mistake an unrelated later local turn for the remote input. These markers
-distinguish accepted, persisted-user, and answered interruption windows.
-Reconnect injects an event that stopped before persistence, continues a persisted
-unfinished turn without duplicating its user entry, or sends an answer already
-present in session history. Replayed sync events are ignored. Each
-inbound event also receives a deterministic Matrix transaction ID. If sending
-the final answer fails or the process stops after an uncertain send, reconnect
-retries the same body with the same transaction ID; Matrix treats that retry
-idempotently.
+distinguish accepted, persisted-user, and completed interruption windows.
+Reconnect injects an event that stopped before persistence or continues a
+persisted unfinished turn without duplicating its user entry. A prepared or
+waiting checkpoint resolves its originating inbound instead of resuming it;
+completed routine answers are never sent. Replayed sync events are ignored.
+Typed command acknowledgements and checkpoints have stable Matrix transaction
+IDs, so reconnect can retry an uncertain allowed send idempotently.
 
 The bot-specific sync cursor advances after every successful sync, including an
 empty timeline, and is written only when the token changes. Events that arrived

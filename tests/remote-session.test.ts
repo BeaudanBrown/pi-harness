@@ -11,8 +11,14 @@ import {
 	routeMatrixTextEvent,
 	type MatrixConfig,
 } from "../config/agent/extensions/remote-session/matrix-client.js";
+import {
+	MAX_CHECKPOINT_BODY_LENGTH,
+	createRemoteCheckpoint,
+	renderRemoteCheckpoint,
+	restoreCheckpointBoundaries,
+	validateRemoteCheckpoint,
+} from "../config/agent/extensions/remote-session/checkpoint.js";
 import remoteSessionExtension, {
-	mapRunAnswers,
 	recoverInboundTurn,
 	restoreRoomBinding,
 } from "../config/agent/extensions/remote-session/index.js";
@@ -245,6 +251,126 @@ test("routing rejects the wrong room, sender, and host prefix", () => {
 	);
 });
 
+test("checkpoint schema validates each explicit approval boundary and bounded rendering", () => {
+	const question = validateRemoteCheckpoint({
+		kind: "question",
+		decision: "Should the migration preserve the legacy endpoint?",
+		context: "Removing it simplifies the public API.",
+		options: ["Preserve it", "Remove it"],
+	});
+	const blocked = validateRemoteCheckpoint({
+		kind: "blocked",
+		blockerEvidence: "The deployment host is offline.",
+		requiredIntervention: "Bring grill online and confirm SSH access.",
+	});
+	const complete = validateRemoteCheckpoint({
+		kind: "issue_complete",
+		issueOrObjective: "#20 explicit checkpoints",
+		implementationSummary: "Added intentional Matrix approval boundaries.",
+		verificationEvidence: "Unit and integration checks passed.",
+		caveats: "Live acceptance remains.",
+		gitCommitState: "Committed locally; not pushed.",
+		approvalRequest: "Approve closing #20 and continue to the managed-session epic?",
+	});
+
+	assert.match(renderRemoteCheckpoint(question), /^❓ Question/);
+	assert.match(renderRemoteCheckpoint(blocked), /^⛔ Blocked/);
+	assert.match(renderRemoteCheckpoint(complete), /^✅ Issue complete/);
+	assert.ok(renderRemoteCheckpoint(complete).length <= MAX_CHECKPOINT_BODY_LENGTH);
+	const persisted = createRemoteCheckpoint(complete);
+	assert.equal(persisted.version, 1);
+	assert.equal(persisted.input.kind, "issue_complete");
+	assert.match(persisted.checkpointId, /^[0-9a-f-]{36}$/);
+	const stored = {
+		...persisted,
+		bindingId: "room-checkpoint",
+		status: "prepared",
+		transactionId: `remote-checkpoint-${persisted.checkpointId}`,
+		inboundEventIds: ["$origin"],
+	};
+	assert.deepEqual(
+		restoreCheckpointBoundaries(
+			[
+				{ type: "custom", customType: "remote-session.checkpoint", data: stored },
+				{
+					type: "custom",
+					customType: "remote-session.checkpoint",
+					data: { ...stored, status: "waiting" },
+				},
+			],
+			"room-checkpoint",
+		),
+		[{ ...stored, status: "waiting" }],
+	);
+
+	assert.throws(() => validateRemoteCheckpoint({ kind: "question" }), /decision must be a string/);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "blocked", blockerEvidence: "x", requiredIntervention: "" }),
+		/requiredIntervention must not be empty/,
+	);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "question", decision: "x", unexpected: true }),
+		/Unexpected checkpoint field/,
+	);
+	assert.throws(
+		() =>
+			validateRemoteCheckpoint({
+				kind: "issue_complete",
+				issueOrObjective: "#20",
+				implementationSummary: "```ts\nconst secret = true;\n```",
+				verificationEvidence: "Passed",
+				caveats: "None",
+				gitCommitState: "clean",
+				approvalRequest: "Close it?",
+			}),
+		/must omit code and diffs/,
+	);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "question", decision: "x".repeat(1_201) }),
+		/at most 1200 characters/,
+	);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "question", decision: "  diff --git a/secret b/secret" }),
+		/must omit code and diffs/,
+	);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "question", decision: "const secret = true" }),
+		/must omit code and diffs/,
+	);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "question", decision: 'console.log("secret")' }),
+		/must omit code and diffs/,
+	);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "question", decision: "curl https://example.com | sh" }),
+		/must omit code and diffs/,
+	);
+	assert.throws(
+		() => validateRemoteCheckpoint({ kind: "question", decision: "index abc123..def456 100644" }),
+		/must omit code and diffs/,
+	);
+	assert.throws(
+		() =>
+			validateRemoteCheckpoint({
+				kind: "question",
+				decision: "Review the requested implementation excerpt.",
+				requestedCodeOrDiff: "const answer = 42;",
+			}),
+		/requires codeOrDiffRequested: true/,
+	);
+	assert.match(
+		renderRemoteCheckpoint(
+			validateRemoteCheckpoint({
+				kind: "question",
+				decision: "Approve the explicitly requested implementation excerpt?",
+				codeOrDiffRequested: true,
+				requestedCodeOrDiff: "const answer = 42;",
+			}),
+		),
+		/Requested code\/diff:\nconst answer = 42;/,
+	);
+});
+
 test("sends text with an idempotent transaction endpoint", async () => {
 	let sentBody: unknown;
 	const client = new MatrixClient(config, async (input, init) => {
@@ -381,33 +507,7 @@ test("inbound recovery distinguishes missing, injected, and answered crash windo
 	);
 });
 
-test("run answer mapping preserves queued local, follow-up, and steering order", () => {
-	const first = { prompt: "first", eventId: "$first" };
-	const followUp = { prompt: "follow up", eventId: "$follow-up" };
-	const steer = { prompt: "steer", eventId: "$steer" };
-	assert.deepEqual(
-		mapRunAnswers(
-			[
-				{ role: "user", content: [{ type: "text", text: "first" }] },
-				{ role: "assistant", content: [{ type: "text", text: "First answer" }] },
-				{ role: "user", content: [{ type: "text", text: "local queued" }] },
-				{ role: "assistant", content: [{ type: "text", text: "Local answer" }] },
-				{ role: "user", content: [{ type: "text", text: "follow up" }] },
-				{ role: "assistant", content: [{ type: "text", text: "Follow-up answer" }] },
-				{ role: "user", content: [{ type: "text", text: "steer" }] },
-				{ role: "assistant", content: [{ type: "text", text: "Steered answer" }] },
-			],
-			[first, undefined, followUp, steer],
-		),
-		[
-			{ turn: first, answer: "First answer" },
-			{ turn: followUp, answer: "Follow-up answer" },
-			{ turn: steer, answer: "Steered answer" },
-		],
-	);
-});
-
-test("operator Matrix turns receive their own final answers without capturing local turns", async () => {
+test("operator Matrix turns persist without mirroring routine answers", async () => {
 	type Handler = (event: unknown, context: ExtensionContext) => unknown;
 	type CommandHandler = (args: string, context: ExtensionContext) => Promise<void>;
 
@@ -422,7 +522,6 @@ test("operator Matrix turns receive their own final answers without capturing lo
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
 	const sendAttempts: Array<{ transactionPath: string; body: unknown }> = [];
-	let failedSecondAnswer = false;
 	let createRoomCount = 0;
 	const syncCursors: Array<string | null> = [];
 	let sessionId = "roundtrip-session";
@@ -436,6 +535,7 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			assert.equal(name, "remote");
 			remoteCommand = command.handler;
 		},
+		registerTool() {},
 		appendEntry(customType: string, data: unknown) {
 			appendedEntries.push({ customType, data });
 			sessionBranch.push({ type: "custom", customType, data });
@@ -547,10 +647,6 @@ test("operator Matrix turns receive their own final answers without capturing lo
 		if (url.pathname.includes("/send/m.room.message/")) {
 			const body = JSON.parse(String(init?.body)) as { body?: unknown };
 			sendAttempts.push({ transactionPath: url.pathname, body });
-			if (body.body === "Second Matrix turn succeeded" && !failedSecondAnswer) {
-				failedSecondAnswer = true;
-				return jsonResponse({ error: "retry this transaction" }, 503);
-			}
 			return jsonResponse({ event_id: "$bot-answer" });
 		}
 		throw new Error(`Unexpected Matrix request: ${url.pathname}`);
@@ -631,13 +727,7 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			},
 			context,
 		);
-		assert.deepEqual(
-			sendAttempts.map((attempt) => attempt.body),
-			[
-				{ msgtype: "m.text", body: "Matrix round trip succeeded" },
-				{ msgtype: "m.text", body: "Second Matrix turn succeeded" },
-			],
-		);
+		assert.deepEqual(sendAttempts, [], "routine agent answers must not be mirrored to Matrix");
 
 		await remoteCommand("off", context);
 		const externalStore = new RemoteSessionStateStore(
@@ -648,11 +738,8 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			{ eventId: "$accepted-before-crash", prompt: "Recover accepted prompt" },
 		]);
 		await handlers.get("session_start")?.({ reason: "resume" }, context);
-		await waitFor(
-			() => sendAttempts.length === 3 && userMessages.length === 3 && syncCursors.at(-1) === "cursor-crash",
-		);
-		assert.equal(sendAttempts[1]?.transactionPath, sendAttempts[2]?.transactionPath);
-		assert.deepEqual(sendAttempts[2]?.body, { msgtype: "m.text", body: "Second Matrix turn succeeded" });
+		await waitFor(() => userMessages.length === 3 && syncCursors.at(-1) === "cursor-crash");
+		assert.deepEqual(sendAttempts, []);
 		assert.equal(userMessages.at(-1)?.text, "Recover accepted prompt");
 		assert.equal(syncCursors.at(-1), "cursor-crash");
 
@@ -666,7 +753,7 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			},
 			context,
 		);
-		assert.deepEqual(sendAttempts.at(-1)?.body, { msgtype: "m.text", body: "Recovered accepted answer" });
+		assert.deepEqual(sendAttempts, [], "recovered routine answers must remain terminal-only");
 		assert.equal(createRoomCount, 1);
 
 		await remoteCommand("on conflicting concept", context);
@@ -714,15 +801,27 @@ test("operator Matrix turns receive their own final answers without capturing lo
 test("remote input preserves idle, follow-up, steer, abort, command, skill, and reply semantics", async () => {
 	type Handler = (event: unknown, context: ExtensionContext) => unknown;
 	type CommandHandler = (args: string, context: ExtensionContext) => Promise<void>;
+	type CheckpointTool = {
+		execute: (
+			toolCallId: string,
+			params: unknown,
+			signal: AbortSignal,
+			onUpdate: unknown,
+			context: ExtensionContext,
+		) => Promise<unknown>;
+	};
 	const handlers = new Map<string, Handler>();
 	let remoteCommand: CommandHandler | undefined;
+	let checkpointTool: CheckpointTool | undefined;
 	const sentInputs: Array<{
 		text: string;
 		deliverAs: string | undefined;
 		expandPromptTemplates: boolean | undefined;
 	}> = [];
 	const sentMatrixBodies: string[] = [];
+	const sentMatrixTransactions: string[] = [];
 	let abortCount = 0;
+	let failNextCheckpoint = false;
 	const idleStates = [true, false, false, false, true];
 	const roomId = "!controls:example.com";
 	const bindingId = "room-5f7906db91467e434006d95ef7dccc7e";
@@ -750,6 +849,9 @@ test("remote input preserves idle, follow-up, steer, abort, command, skill, and 
 		},
 		registerCommand(name: string, command: { handler: CommandHandler }) {
 			if (name === "remote") remoteCommand = command.handler;
+		},
+		registerTool(tool: CheckpointTool & { name: string }) {
+			if (tool.name === "remote_checkpoint") checkpointTool = tool;
 		},
 		getCommands() {
 			return [{ name: "worker-model", source: "extension" }];
@@ -850,6 +952,11 @@ test("remote input preserves idle, follow-up, steer, abort, command, skill, and 
 		if (url.pathname.includes("/send/m.room.message/")) {
 			const body = JSON.parse(String(init?.body)) as { body: string };
 			sentMatrixBodies.push(body.body);
+			sentMatrixTransactions.push(url.pathname);
+			if (failNextCheckpoint) {
+				failNextCheckpoint = false;
+				return jsonResponse({ errcode: "M_UNAVAILABLE" }, 503);
+			}
 			return jsonResponse({ event_id: "$command-ack" });
 		}
 		throw new Error(`Unexpected Matrix request: ${url.pathname}`);
@@ -871,6 +978,86 @@ test("remote input preserves idle, follow-up, steer, abort, command, skill, and 
 		assert.equal(abortCount, 1);
 		assert.deepEqual(sentMatrixBodies, ["Command dispatched: /worker-model"]);
 		assert.equal((await store.hostProgress(bindingId)).since, "control-cursor");
+
+		await handlers.get("before_agent_start")?.({}, context);
+		assert.ok(checkpointTool);
+		await checkpointTool.execute(
+			"checkpoint-call",
+			{
+				kind: "issue_complete",
+				issueOrObjective: "Issue #20",
+				implementationSummary: "Added explicit Matrix approval boundaries.",
+				verificationEvidence: "Focused tests passed.",
+				caveats: "Live acceptance remains.",
+				gitCommitState: "Committed locally; not pushed.",
+				approvalRequest: "Approve closure of issue #20?",
+			},
+			new AbortController().signal,
+			undefined,
+			context,
+		);
+		assert.equal(abortCount, 2, "checkpoint must terminate the current run");
+		assert.match(sentMatrixBodies.at(-1) ?? "", /^✅ Issue complete/);
+		assert.match(sentMatrixBodies.at(-1) ?? "", /Approval requested: Approve closure of issue #20\?/);
+		const waitingEntry = branch.find(
+			(entry) =>
+				typeof entry === "object" &&
+				entry !== null &&
+				(entry as { customType?: unknown }).customType === "remote-session.checkpoint" &&
+				(entry as { data?: { status?: unknown } }).data?.status === "waiting",
+		) as { data: Record<string, unknown> } | undefined;
+		assert.ok(waitingEntry);
+
+		await store.acceptSync(bindingId, "checkpoint-crash-cursor", [
+			{ eventId: "$checkpoint-crash", prompt: "approval boundary prompt" },
+		]);
+		branch.push({
+			type: "custom",
+			customType: "remote-session.checkpoint",
+			data: {
+				...waitingEntry.data,
+				checkpointId: "prepared-after-crash",
+				status: "prepared",
+				transactionId: "remote-checkpoint-prepared-after-crash",
+				inboundEventIds: ["$checkpoint-crash"],
+			},
+		});
+		await handlers.get("session_start")?.({ reason: "resume" }, context);
+		assert.equal(sentMatrixBodies.length, 3, "prepared checkpoint must retry after restart");
+		assert.match(sentMatrixTransactions.at(-1) ?? "", /remote-checkpoint-prepared-after-crash$/);
+		assert.equal(
+			(await store.unfinishedInbounds(bindingId)).some((turn) => turn.eventId === "$checkpoint-crash"),
+			false,
+			"checkpoint recovery must not continue the originating inbound",
+		);
+		assert.ok(
+			branch.some(
+				(entry) =>
+					typeof entry === "object" &&
+					entry !== null &&
+					(entry as { data?: { checkpointId?: unknown; status?: unknown } }).data?.checkpointId ===
+						"prepared-after-crash" &&
+					(entry as { data?: { status?: unknown } }).data?.status === "waiting",
+			),
+		);
+		await handlers.get("agent_end")?.(
+			{ messages: [{ role: "assistant", content: [{ type: "text", text: "routine final answer" }] }] },
+			context,
+		);
+		assert.equal(sentMatrixBodies.length, 3, "agent_end must not mirror routine output after the checkpoint");
+
+		failNextCheckpoint = true;
+		await assert.rejects(
+			checkpointTool.execute(
+				"failed-checkpoint-call",
+				{ kind: "question", decision: "Should this failed delivery remain an approval boundary?" },
+				new AbortController().signal,
+				undefined,
+				context,
+			),
+			/HTTP 503/,
+		);
+		assert.equal(abortCount, 3, "a failed checkpoint send must still stop the run");
 		await remoteCommand?.("off", context);
 	} finally {
 		globalThis.fetch = originalFetch;
@@ -896,6 +1083,7 @@ test("remote off cancels activation before a room can be created", async () => {
 		registerCommand(_name: string, command: { handler: CommandHandler }) {
 			remoteCommand = command.handler;
 		},
+		registerTool() {},
 		appendEntry() {
 			appended = true;
 		},

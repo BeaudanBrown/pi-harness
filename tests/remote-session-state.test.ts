@@ -59,7 +59,7 @@ test("each bot has an independent cursor while sharing room identity", async () 
 	assert.deepEqual(await t480.bindingForSession("session-1"), binding);
 });
 
-test("accepted event IDs are durable and produce stable outbound transactions", async () => {
+test("accepted event IDs are durable and command acknowledgements use stable outbound transactions", async () => {
 	const first = await temporaryStore();
 	await first.bindSession("session-1", binding);
 	const accepted = await first.acceptSync(binding.bindingId, "cursor-1", [
@@ -76,17 +76,30 @@ test("accepted event IDs are durable and produce stable outbound transactions", 
 	await resumed.markInboundInjected(binding.bindingId, "$prompt");
 	assert.deepEqual(await resumed.unfinishedInbounds(binding.bindingId), accepted);
 
-	await resumed.recordAnswer(binding.bindingId, "$prompt", "Final answer");
+	await resumed.recordAnswer(binding.bindingId, "$prompt", "Command dispatched", "command_ack");
 	assert.deepEqual(await resumed.unfinishedInbounds(binding.bindingId), []);
 	assert.deepEqual(await resumed.pendingOutbounds(binding.bindingId), [
 		{
 			eventId: "$prompt",
 			transactionId: accepted[0]?.transactionId,
-			body: "Final answer",
+			body: "Command dispatched",
 		},
 	]);
 	await resumed.markOutboundSent(binding.bindingId, "$prompt");
 	assert.deepEqual(await resumed.pendingOutbounds(binding.bindingId), []);
+});
+
+test("legacy pending routine answers are discarded instead of mirrored after upgrade", async () => {
+	const store = await temporaryStore();
+	await store.bindSession("session-1", binding);
+	await store.acceptSync(binding.bindingId, "legacy-cursor", [
+		{ eventId: "$legacy-routine", prompt: "Old remote prompt" },
+	]);
+	await store.recordAnswer(binding.bindingId, "$legacy-routine", "Old routine assistant answer");
+	assert.equal((await store.pendingOutbounds(binding.bindingId)).length, 1);
+	await store.discardLegacyRoutineOutbounds(binding.bindingId);
+	assert.deepEqual(await store.pendingOutbounds(binding.bindingId), []);
+	assert.deepEqual(await store.unfinishedInbounds(binding.bindingId), []);
 });
 
 test("control kind is durable and handled controls leave no unfinished turn", async () => {

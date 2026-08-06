@@ -1,5 +1,11 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
+	CHECKPOINT_ENTRY_TYPE,
+	RemoteCheckpointSchema,
+	createRemoteCheckpoint,
+	restoreCheckpointBoundaries,
+} from "./checkpoint.js";
+import {
 	MatrixClient,
 	matrixConfigFromEnvironment,
 	routeMatrixTextEvent,
@@ -146,39 +152,6 @@ function contentText(content: string | readonly unknown[]): string | undefined {
 	return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
-function messageText(messages: readonly unknown[], role: "assistant"): string | undefined {
-	for (let index = messages.length - 1; index >= 0; index -= 1) {
-		const message = messages[index];
-		if (typeof message !== "object" || message === null) continue;
-		const candidate = message as { role?: unknown; content?: unknown };
-		if (candidate.role !== role || (typeof candidate.content !== "string" && !Array.isArray(candidate.content))) continue;
-		const text = contentText(candidate.content);
-		if (text) return text;
-	}
-	return undefined;
-}
-
-export function mapRunAnswers<T extends { prompt: string }>(
-	messages: readonly unknown[],
-	inputs: ReadonlyArray<T | undefined>,
-): Array<{ turn: T; answer?: string }> {
-	const userIndexes: number[] = [];
-	for (let index = 0; index < messages.length; index += 1) {
-		const message = messages[index];
-		if (typeof message === "object" && message !== null && (message as { role?: unknown }).role === "user") {
-			userIndexes.push(index);
-		}
-	}
-	const relevantUserIndexes = userIndexes.slice(-inputs.length);
-	return inputs.flatMap((turn, inputIndex) => {
-		if (!turn) return [];
-		const start = relevantUserIndexes[inputIndex];
-		if (start === undefined) return [{ turn }];
-		const end = relevantUserIndexes[inputIndex + 1] ?? messages.length;
-		return [{ turn, answer: messageText(messages.slice(start + 1, end), "assistant") }];
-	});
-}
-
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 }
@@ -301,11 +274,26 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 
 		if (extensionCommand) {
 			const acknowledgement = `Command dispatched: /${commandName}`;
-			await store.recordAnswer(room.bindingId, turn.eventId, acknowledgement);
+			await store.recordAnswer(room.bindingId, turn.eventId, acknowledgement, "command_ack");
 			const client = activeClient;
 			if (!client) return;
 			await client.sendText(room.roomId, acknowledgement, turn.transactionId);
 			await store.markOutboundSent(room.bindingId, turn.eventId);
+		}
+	}
+
+	async function recoverPendingCheckpoints(
+		client: MatrixClient,
+		room: DurableRoomBinding,
+		ctx: ExtensionContext,
+	): Promise<void> {
+		if (!stateStore) return;
+		for (const checkpoint of restoreCheckpointBoundaries(ctx.sessionManager.getBranch(), room.bindingId)) {
+			if (checkpoint.status === "prepared") {
+				await client.sendText(room.roomId, checkpoint.body, checkpoint.transactionId);
+				pi.appendEntry(CHECKPOINT_ENTRY_TYPE, { ...checkpoint, status: "waiting" });
+			}
+			await stateStore.markCheckpointInboundsHandled(room.bindingId, checkpoint.inboundEventIds);
 		}
 	}
 
@@ -314,7 +302,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 		for (const turn of await stateStore.unfinishedInbounds(room.bindingId)) {
 			const recovery = recoverInboundTurn(ctx.sessionManager.getBranch(), turn.eventId, turn.prompt);
 			if (recovery.state === "answered" && recovery.answer) {
-				await stateStore.recordAnswer(room.bindingId, turn.eventId, recovery.answer);
+				await stateStore.markInboundHandled(room.bindingId, turn.eventId);
 				continue;
 			}
 			if (recovery.state === "injected") {
@@ -336,6 +324,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 
 	async function flushPendingOutbounds(client: MatrixClient, room: DurableRoomBinding, ctx: ExtensionContext): Promise<void> {
 		if (!stateStore) return;
+		await stateStore.discardLegacyRoutineOutbounds(room.bindingId);
 		for (const pending of await stateStore.pendingOutbounds(room.bindingId)) {
 			try {
 				await client.sendText(room.roomId, pending.body, pending.transactionId);
@@ -409,6 +398,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 			if (authenticatedUserId !== config.botUserId) {
 				throw new Error(`Expected Matrix bot ${config.botUserId}, authenticated as ${authenticatedUserId}`);
 			}
+			await recoverPendingCheckpoints(client, binding, ctx);
 			await recoverUnfinishedInbounds(binding, ctx);
 			await flushPendingOutbounds(client, binding, ctx);
 			if (controller.signal.aborted || activationController !== controller) return;
@@ -477,25 +467,64 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 		activeRunInputs = [inputRunQueue.shift()];
 	});
 
-	pi.on("agent_end", async (event, ctx) => {
+	pi.on("agent_end", async (_event, ctx) => {
 		const runInputs = activeRunInputs;
 		activeRunInputs = undefined;
-		if (!runInputs || !activeClient || !binding || !stateStore) return;
-		const mappedAnswers = mapRunAnswers(event.messages, runInputs);
-		const lastRemoteIndex = mappedAnswers.length - 1;
+		if (!runInputs || !binding || !stateStore) return;
 		try {
-			for (const [index, { turn, answer }] of mappedAnswers.entries()) {
-				if (!answer) {
-					if (index < lastRemoteIndex) await stateStore.markInboundHandled(binding.bindingId, turn.eventId);
-					continue;
-				}
-				await stateStore.recordAnswer(binding.bindingId, turn.eventId, answer);
-				await activeClient.sendText(binding.roomId, answer, turn.transactionId);
-				await stateStore.markOutboundSent(binding.bindingId, turn.eventId);
+			for (const turn of runInputs) {
+				if (turn) await stateStore.markInboundHandled(binding.bindingId, turn.eventId);
 			}
 		} catch (error) {
-			notify(ctx, error instanceof Error ? error.message : "Matrix send failed", "error");
+			notify(ctx, error instanceof Error ? error.message : "Matrix input completion failed", "error");
 		}
+	});
+
+	pi.registerTool({
+		name: "remote_checkpoint",
+		label: "Remote Checkpoint",
+		description:
+			"Send one explicit question, blocker, or issue-completion approval boundary to the bound Matrix room, persist it, and stop the current run awaiting an ordinary reply.",
+		promptSnippet:
+			"Use remote_checkpoint only for an intentional question, blocked state, or issue-completion approval boundary.",
+		promptGuidelines: [
+			"Do not mirror routine progress, thinking, tool activity, or ordinary terminal answers to Matrix.",
+			"Use issue_complete only with objective, implementation, verification, caveat, Git state, and exact approval-request evidence.",
+			"Omit code and diffs unless the operator explicitly requested them; only then set codeOrDiffRequested and requestedCodeOrDiff.",
+		],
+		parameters: RemoteCheckpointSchema,
+		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
+			const client = activeClient;
+			const room = binding;
+			const store = stateStore;
+			if (!client || !room || !store || !pollController) {
+				throw new Error("remote_checkpoint requires an active Matrix remote session");
+			}
+			const checkpoint = createRemoteCheckpoint(params);
+			const transactionId = `remote-checkpoint-${checkpoint.checkpointId}`;
+			const inboundEventIds = (activeRunInputs ?? []).flatMap((turn) => (turn ? [turn.eventId] : []));
+			const storedCheckpoint = {
+				...checkpoint,
+				bindingId: room.bindingId,
+				status: "prepared" as const,
+				transactionId,
+				inboundEventIds,
+			};
+			pi.appendEntry(CHECKPOINT_ENTRY_TYPE, storedCheckpoint);
+			try {
+				await client.sendText(room.roomId, checkpoint.body, transactionId);
+				pi.appendEntry(CHECKPOINT_ENTRY_TYPE, { ...storedCheckpoint, status: "waiting" });
+				for (const eventId of inboundEventIds) {
+					await store.markInboundHandled(room.bindingId, eventId);
+				}
+				return {
+					content: [{ type: "text", text: "Remote checkpoint sent. The run is stopped pending Matrix input." }],
+					details: { checkpointId: checkpoint.checkpointId, kind: checkpoint.input.kind, waiting: true },
+				};
+			} finally {
+				ctx.abort();
+			}
+		},
 	});
 
 	pi.registerCommand("remote", {
