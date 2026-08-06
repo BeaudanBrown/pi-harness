@@ -75,10 +75,12 @@ The module installs the packaged `pi` binary. The binary injects the shared
 resource paths directly, while Pi's normal user config directory remains mutable
 for auth, sessions, user settings, and user-installed extras.
 
-Set `services.pi-harness.sessionDirectory` when a host should use a specific Pi
-session store. The installed `pi` wrapper exports
+Set `services.pi-harness.sessionDirectory` only when a host should use one
+exact flat Pi session directory. The installed `pi` wrapper exports
 `PI_CODING_AGENT_SESSION_DIR` immediately before starting Pi, so a NixOS switch
-takes effect without requiring the desktop user to log out and back in.
+takes effect without requiring the desktop user to log out and back in. This
+option does not configure the parent of Pi's native per-project session tree;
+use a filesystem mount when that complete tree must live elsewhere.
 
 ## Matrix Host Bot Runtime
 
@@ -90,9 +92,12 @@ both `pi` and `pi-matrix-whoami` receive those values at runtime without copying
 the token into the package or Nix store.
 
 `pi-matrix-whoami` calls Matrix's authenticated identity endpoint and succeeds
-only when it returns the configured bot MXID. See
-[`docs/matrix-bot-provisioning.md`](docs/matrix-bot-provisioning.md) for the
-non-admin account, stable device, SOPS, activation, and verification runbook.
+only when it returns the configured bot MXID. The packaged `remote-session`
+extension is inert until `/remote on <concept-name>` verifies that identity,
+creates a private room, and starts polling. `/remote status` reports non-secret
+binding state; `/remote off` disconnects without deleting the room or session
+binding. See [`docs/matrix-bot-provisioning.md`](docs/matrix-bot-provisioning.md)
+for provisioning and the live round-trip smoke test.
 
 ## AgentGraph Mode
 

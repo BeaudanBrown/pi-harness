@@ -106,6 +106,40 @@ A different identity, rejected token, missing secret, or unreachable homeserver
 returns non-zero. The command never includes the token in process arguments or
 prints Matrix response bodies.
 
+## 5. Live grill round-trip smoke test
+
+Start a disposable ordinary Pi session on grill and activate one concept room:
+
+```text
+/remote on matrix-roundtrip-smoke
+```
+
+The command must verify `@pi-grill:matrix.bepis.lol` before it creates or polls
+the private, unencrypted room `pi · matrix-roundtrip-smoke`. In Element X,
+accept the invitation as `@beau:matrix.bepis.lol` and send:
+
+```text
+@grill Reply exactly: Matrix round trip succeeded
+```
+
+Acceptance requires one ordinary persisted Pi user turn containing only
+`Reply exactly: Matrix round trip succeeded`, followed by one Matrix text event
+from the bot containing the final assistant answer. Input from another sender,
+room, or host prefix must be ignored.
+
+Then run:
+
+```text
+/remote status
+/remote off
+/remote status
+```
+
+The first status must identify the connected concept and room without revealing
+the token. After `off`, polling must stop while the room and persisted session
+binding remain available. Record only room-independent pass/fail evidence in the
+GitHub issue; do not record credentials or decrypted environment content.
+
 ## Rotation or revocation
 
 Until the full remote-session runbook lands, rotate by logging in a replacement

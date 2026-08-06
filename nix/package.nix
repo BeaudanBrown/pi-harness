@@ -62,6 +62,7 @@ resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
