@@ -12,6 +12,7 @@ import {
 	type MatrixConfig,
 } from "../config/agent/extensions/remote-session/matrix-client.js";
 import remoteSessionExtension, {
+	mapRunAnswers,
 	recoverInboundTurn,
 	restoreRoomBinding,
 } from "../config/agent/extensions/remote-session/index.js";
@@ -122,6 +123,28 @@ test("sync is restricted to the bound room and extracts text events", async () =
 								},
 								{
 									type: "m.room.message",
+									event_id: "$reply",
+									sender: config.operatorUserId,
+									content: {
+										msgtype: "m.text",
+										body: "yes",
+										"m.relates_to": { "m.in_reply_to": { event_id: "$bot-answer" } },
+									},
+								},
+								{
+									type: "m.room.message",
+									event_id: "$thread",
+									sender: config.operatorUserId,
+									content: { msgtype: "m.text", body: "ignored", "m.relates_to": { rel_type: "m.thread" } },
+								},
+								{
+									type: "m.room.message",
+									event_id: "$edit",
+									sender: config.operatorUserId,
+									content: { msgtype: "m.text", body: "ignored", "m.relates_to": { rel_type: "m.replace" } },
+								},
+								{
+									type: "m.room.message",
 									event_id: "$image",
 									sender: config.operatorUserId,
 									content: { msgtype: "m.image", body: "ignored" },
@@ -136,8 +159,22 @@ test("sync is restricted to the bound room and extracts text events", async () =
 
 	assert.deepEqual(await client.syncRoom(roomId, "cursor-1"), {
 		nextBatch: "cursor-2",
-		events: [{ roomId, eventId: "$event", sender: config.operatorUserId, body: "@grill hello" }],
+		events: [
+			{ roomId, eventId: "$event", sender: config.operatorUserId, body: "@grill hello", replyToEventId: undefined },
+			{ roomId, eventId: "$reply", sender: config.operatorUserId, body: "yes", replyToEventId: "$bot-answer" },
+		],
 	});
+});
+
+test("reply target verification reads the event sender from the bound room", async () => {
+	const client = new MatrixClient(config, async (input) => {
+		assert.equal(
+			new URL(input.toString()).pathname,
+			"/_matrix/client/v3/rooms/!room%3Aexample.com/event/%24bot-answer",
+		);
+		return jsonResponse({ event_id: "$bot-answer", sender: config.botUserId });
+	});
+	assert.equal(await client.eventSender("!room:example.com", "$bot-answer"), config.botUserId);
 });
 
 test("routing rejects the wrong room, sender, and host prefix", () => {
@@ -149,11 +186,63 @@ test("routing rejects the wrong room, sender, and host prefix", () => {
 		body: "@grill investigate this",
 	};
 
-	assert.equal(routeMatrixTextEvent(baseEvent, binding, config), "investigate this");
+	assert.deepEqual(routeMatrixTextEvent(baseEvent, binding, config), { kind: "prompt", text: "investigate this" });
 	assert.equal(routeMatrixTextEvent({ ...baseEvent, roomId: "!other:example.com" }, binding, config), undefined);
 	assert.equal(routeMatrixTextEvent({ ...baseEvent, sender: "@mallory:example.com" }, binding, config), undefined);
+	assert.equal(
+		routeMatrixTextEvent({ ...baseEvent, sender: "@mallory:example.com", body: "@grill !abort" }, binding, config),
+		undefined,
+	);
+	assert.equal(
+		routeMatrixTextEvent({ ...baseEvent, roomId: "!other:example.com", body: "@grill !steer attack" }, binding, config),
+		undefined,
+	);
 	assert.equal(routeMatrixTextEvent({ ...baseEvent, body: "@t480 investigate this" }, binding, config), undefined);
 	assert.equal(routeMatrixTextEvent({ ...baseEvent, body: "unaddressed" }, binding, config), undefined);
+	assert.deepEqual(routeMatrixTextEvent({ ...baseEvent, body: "@grill !steer redirect" }, binding, config), {
+		kind: "steer",
+		text: "redirect",
+	});
+	assert.deepEqual(routeMatrixTextEvent({ ...baseEvent, body: "@grill !abort" }, binding, config), {
+		kind: "abort",
+		text: "",
+	});
+	assert.deepEqual(
+		routeMatrixTextEvent(
+			{ ...baseEvent, body: "> <@pi-grill:example.com> old answer\n\nyes", replyToEventId: "$bot-answer" },
+			binding,
+			config,
+			config.botUserId,
+		),
+		{ kind: "prompt", text: "yes" },
+	);
+	assert.equal(
+		routeMatrixTextEvent(
+			{ ...baseEvent, body: ">not-a-quote\n\nyes", replyToEventId: "$bot-answer" },
+			binding,
+			config,
+			config.botUserId,
+		),
+		undefined,
+	);
+	assert.equal(
+		routeMatrixTextEvent(
+			{ ...baseEvent, body: "> malformed fallback", replyToEventId: "$bot-answer" },
+			binding,
+			config,
+			config.botUserId,
+		),
+		undefined,
+	);
+	assert.equal(
+		routeMatrixTextEvent(
+			{ ...baseEvent, body: "yes", replyToEventId: "$other-answer" },
+			binding,
+			config,
+			"@someone-else:example.com",
+		),
+		undefined,
+	);
 });
 
 test("sends text with an idempotent transaction endpoint", async () => {
@@ -201,11 +290,32 @@ test("inbound recovery distinguishes missing, injected, and answered crash windo
 		customType: "remote-session.inbound",
 		data: { version: 1, eventId: "$recover", status: "injecting", prompt: "Remote prompt" },
 	};
+	const expandedMarker = {
+		type: "custom",
+		customType: "remote-session.inbound",
+		data: { version: 1, eventId: "$recover", status: "expanded", prompt: "Remote prompt" },
+	};
 	assert.deepEqual(recoverInboundTurn([], "$recover", "Remote prompt"), { state: "missing" });
 	assert.deepEqual(recoverInboundTurn([marker], "$recover", "Remote prompt"), { state: "missing" });
 	assert.deepEqual(
 		recoverInboundTurn(
-			[marker, { type: "message", message: { role: "user", content: [{ type: "text", text: "Remote prompt" }] } }],
+			[
+				marker,
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "later local prompt" }] } },
+				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "local answer" }] } },
+			],
+			"$recover",
+			"Remote prompt",
+		),
+		{ state: "missing" },
+	);
+	assert.deepEqual(
+		recoverInboundTurn(
+			[
+				marker,
+				expandedMarker,
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "Remote prompt" }] } },
+			],
 			"$recover",
 			"Remote prompt",
 		),
@@ -214,7 +324,34 @@ test("inbound recovery distinguishes missing, injected, and answered crash windo
 	assert.deepEqual(
 		recoverInboundTurn(
 			[
+				{ ...marker, data: { ...marker.data, prompt: "/skill:research Matrix" } },
+				{
+					type: "custom",
+					customType: "remote-session.inbound",
+					data: {
+						version: 1,
+						eventId: "$recover",
+						status: "expanded",
+						prompt: "<skill>expanded skill content</skill>",
+					},
+				},
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "unrelated local turn" }] } },
+				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "local answer" }] } },
+				{
+					type: "message",
+					message: { role: "user", content: [{ type: "text", text: "<skill>expanded skill content</skill>" }] },
+				},
+			],
+			"$recover",
+			"/skill:research Matrix",
+		),
+		{ state: "injected" },
+	);
+	assert.deepEqual(
+		recoverInboundTurn(
+			[
 				marker,
+				expandedMarker,
 				{ type: "message", message: { role: "user", content: [{ type: "text", text: "Remote prompt" }] } },
 				{
 					type: "message",
@@ -233,6 +370,7 @@ test("inbound recovery distinguishes missing, injected, and answered crash windo
 		recoverInboundTurn(
 			[
 				marker,
+				expandedMarker,
 				{ type: "message", message: { role: "user", content: [{ type: "text", text: "Remote prompt" }] } },
 				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Recovered answer" }] } },
 			],
@@ -243,6 +381,32 @@ test("inbound recovery distinguishes missing, injected, and answered crash windo
 	);
 });
 
+test("run answer mapping preserves queued local, follow-up, and steering order", () => {
+	const first = { prompt: "first", eventId: "$first" };
+	const followUp = { prompt: "follow up", eventId: "$follow-up" };
+	const steer = { prompt: "steer", eventId: "$steer" };
+	assert.deepEqual(
+		mapRunAnswers(
+			[
+				{ role: "user", content: [{ type: "text", text: "first" }] },
+				{ role: "assistant", content: [{ type: "text", text: "First answer" }] },
+				{ role: "user", content: [{ type: "text", text: "local queued" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Local answer" }] },
+				{ role: "user", content: [{ type: "text", text: "follow up" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Follow-up answer" }] },
+				{ role: "user", content: [{ type: "text", text: "steer" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Steered answer" }] },
+			],
+			[first, undefined, followUp, steer],
+		),
+		[
+			{ turn: first, answer: "First answer" },
+			{ turn: followUp, answer: "Follow-up answer" },
+			{ turn: steer, answer: "Steered answer" },
+		],
+	);
+});
+
 test("operator Matrix turns receive their own final answers without capturing local turns", async () => {
 	type Handler = (event: unknown, context: ExtensionContext) => unknown;
 	type CommandHandler = (args: string, context: ExtensionContext) => Promise<void>;
@@ -250,7 +414,11 @@ test("operator Matrix turns receive their own final answers without capturing lo
 	const handlers = new Map<string, Handler>();
 	let remoteCommand: CommandHandler | undefined;
 	const appendedEntries: Array<{ customType: string; data: unknown }> = [];
-	const userMessages: Array<{ text: string; deliverAs: string | undefined }> = [];
+	const userMessages: Array<{
+		text: string;
+		deliverAs: string | undefined;
+		expandPromptTemplates: boolean | undefined;
+	}> = [];
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
 	const sendAttempts: Array<{ transactionPath: string; body: unknown }> = [];
@@ -272,8 +440,23 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			appendedEntries.push({ customType, data });
 			sessionBranch.push({ type: "custom", customType, data });
 		},
-		sendUserMessage(text: string, options?: { deliverAs?: string }) {
-			userMessages.push({ text, deliverAs: options?.deliverAs });
+		getCommands() {
+			return [];
+		},
+		sendUserMessage(
+			text: string,
+			options?: {
+				deliverAs?: string;
+				expandPromptTemplates?: boolean;
+				onPromptExpanded?: (text: string) => void;
+			},
+		) {
+			options?.onPromptExpanded?.(text);
+			userMessages.push({
+				text,
+				deliverAs: options?.deliverAs,
+				expandPromptTemplates: options?.expandPromptTemplates,
+			});
 			void handlers.get("input")?.(
 				{ text, source: "extension", streamingBehavior: options?.deliverAs },
 				context,
@@ -284,6 +467,8 @@ test("operator Matrix turns receive their own final answers without capturing lo
 	const sessionRoot = await mkdtemp(join(tmpdir(), "pi-remote-extension-"));
 	const context = {
 		hasUI: true,
+		isIdle: () => false,
+		abort() {},
 		ui: {
 			notify(message: string) {
 				notifications.push(message);
@@ -421,8 +606,16 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			],
 		);
 		assert.deepEqual(userMessages, [
-			{ text: "Reply exactly: Matrix round trip succeeded", deliverAs: "followUp" },
-			{ text: "Reply exactly: Second Matrix turn succeeded", deliverAs: "followUp" },
+			{
+				text: "Reply exactly: Matrix round trip succeeded",
+				deliverAs: "followUp",
+				expandPromptTemplates: true,
+			},
+			{
+				text: "Reply exactly: Second Matrix turn succeeded",
+				deliverAs: "followUp",
+				expandPromptTemplates: true,
+			},
 		]);
 
 		await handlers.get("agent_end")?.(
@@ -430,26 +623,8 @@ test("operator Matrix turns receive their own final answers without capturing lo
 				messages: [
 					{ role: "user", content: [{ type: "text", text: "Reply exactly: Matrix round trip succeeded" }] },
 					{ role: "assistant", content: [{ type: "text", text: "Local answer with colliding prompt text" }] },
-				],
-			},
-			context,
-		);
-		assert.equal(sendAttempts.length, 0);
-
-		await handlers.get("before_agent_start")?.({}, context);
-		await handlers.get("agent_end")?.(
-			{
-				messages: [
 					{ role: "user", content: [{ type: "text", text: "Reply exactly: Matrix round trip succeeded" }] },
 					{ role: "assistant", content: [{ type: "text", text: "Matrix round trip succeeded" }] },
-				],
-			},
-			context,
-		);
-		await handlers.get("before_agent_start")?.({}, context);
-		await handlers.get("agent_end")?.(
-			{
-				messages: [
 					{ role: "user", content: [{ type: "text", text: "Reply exactly: Second Matrix turn succeeded" }] },
 					{ role: "assistant", content: [{ type: "text", text: "Second Matrix turn succeeded" }] },
 				],
@@ -527,6 +702,176 @@ test("operator Matrix turns receive their own final answers without capturing lo
 		);
 		await remoteCommand("off", context);
 		assert.equal(statuses.at(-1), undefined);
+	} finally {
+		globalThis.fetch = originalFetch;
+		for (const [name, value] of Object.entries(previousEnvironment)) {
+			if (value === undefined) delete process.env[name];
+			else process.env[name] = value;
+		}
+	}
+});
+
+test("remote input preserves idle, follow-up, steer, abort, command, skill, and reply semantics", async () => {
+	type Handler = (event: unknown, context: ExtensionContext) => unknown;
+	type CommandHandler = (args: string, context: ExtensionContext) => Promise<void>;
+	const handlers = new Map<string, Handler>();
+	let remoteCommand: CommandHandler | undefined;
+	const sentInputs: Array<{
+		text: string;
+		deliverAs: string | undefined;
+		expandPromptTemplates: boolean | undefined;
+	}> = [];
+	const sentMatrixBodies: string[] = [];
+	let abortCount = 0;
+	const idleStates = [true, false, false, false, true];
+	const roomId = "!controls:example.com";
+	const bindingId = "room-5f7906db91467e434006d95ef7dccc7e";
+	const binding = { version: 2 as const, bindingId, roomId, conceptName: "controls" };
+	const sessionId = "control-session";
+	const sessionRoot = await mkdtemp(join(tmpdir(), "pi-remote-controls-"));
+	const sessionDir = join(sessionRoot, "--project--");
+	const branch: unknown[] = [{ type: "custom", customType: "remote-session.binding", data: binding }];
+
+	const context = {
+		hasUI: false,
+		isIdle: () => idleStates.shift() ?? true,
+		abort() {
+			abortCount += 1;
+		},
+		sessionManager: {
+			getBranch: () => branch,
+			getSessionId: () => sessionId,
+			getSessionDir: () => sessionDir,
+		},
+	} as unknown as ExtensionContext;
+	const pi = {
+		on(event: string, handler: Handler) {
+			handlers.set(event, handler);
+		},
+		registerCommand(name: string, command: { handler: CommandHandler }) {
+			if (name === "remote") remoteCommand = command.handler;
+		},
+		getCommands() {
+			return [{ name: "worker-model", source: "extension" }];
+		},
+		appendEntry(customType: string, data: unknown) {
+			branch.push({ type: "custom", customType, data });
+		},
+		sendUserMessage(
+			text: string,
+			options?: {
+				deliverAs?: string;
+				expandPromptTemplates?: boolean;
+				onPromptExpanded?: (text: string) => void;
+			},
+		) {
+			if (!text.startsWith("/worker-model")) {
+				const expandedText = text.startsWith("/skill:") ? `<skill>expanded</skill>\n\n${text.split(" ").slice(1).join(" ")}` : text;
+				options?.onPromptExpanded?.(expandedText);
+			}
+			sentInputs.push({
+				text,
+				deliverAs: options?.deliverAs,
+				expandPromptTemplates: options?.expandPromptTemplates,
+			});
+			if (!text.startsWith("/worker-model")) {
+				void handlers.get("input")?.({ text, source: "extension" }, context);
+			}
+		},
+	} as unknown as ExtensionAPI;
+
+	const environment = {
+		PI_MATRIX_HOMESERVER: config.homeserver,
+		PI_MATRIX_ACCESS_TOKEN: config.accessToken,
+		PI_MATRIX_BOT_USER_ID: config.botUserId,
+		PI_MATRIX_OPERATOR_USER_ID: config.operatorUserId,
+		PI_MATRIX_HOSTNAME: config.hostName,
+	};
+	const previousEnvironment = Object.fromEntries(
+		Object.keys(environment).map((name) => [name, process.env[name]]),
+	) as Record<string, string | undefined>;
+	Object.assign(process.env, environment);
+	const store = new RemoteSessionStateStore(stateRootForSessionDirectory(sessionDir), config.botUserId);
+	await store.bindSession(sessionId, binding);
+
+	const originalFetch = globalThis.fetch;
+	let syncCount = 0;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(input.toString());
+		if (url.pathname.endsWith("/account/whoami")) return jsonResponse({ user_id: config.botUserId });
+		if (url.pathname.endsWith("/event/%24bot-answer")) {
+			return jsonResponse({ event_id: "$bot-answer", sender: config.botUserId });
+		}
+		if (url.pathname.endsWith("/event/%24missing")) return jsonResponse({ errcode: "M_NOT_FOUND" }, 404);
+		if (url.pathname.endsWith("/sync")) {
+			syncCount += 1;
+			if (syncCount === 1) {
+				const event = (eventId: string, body: string, content: Record<string, unknown> = {}) => ({
+					type: "m.room.message",
+					event_id: eventId,
+					sender: config.operatorUserId,
+					content: { msgtype: "m.text", body, ...content },
+				});
+				return jsonResponse({
+					next_batch: "control-cursor",
+					rooms: {
+						join: {
+							[roomId]: {
+								timeline: {
+									events: [
+										event("$skill", "@grill /skill:research Matrix APIs"),
+										event("$ordinary", "@grill queue this"),
+										event("$steer", "@grill !steer redirect now"),
+										event("$command", "@grill /worker-model status"),
+										event("$abort", "@grill !abort"),
+										event("$missing-reply", "must be ignored", {
+											"m.relates_to": { "m.in_reply_to": { event_id: "$missing" } },
+										}),
+										event("$reply", "yes", {
+											"m.relates_to": { "m.in_reply_to": { event_id: "$bot-answer" } },
+										}),
+									],
+								},
+							},
+						},
+					},
+				});
+			}
+			return new Promise<Response>((_resolve, reject) => {
+				const abort = () => {
+					const error = new Error("aborted");
+					error.name = "AbortError";
+					reject(error);
+				};
+				if (init?.signal?.aborted) abort();
+				else init?.signal?.addEventListener("abort", abort, { once: true });
+			});
+		}
+		if (url.pathname.includes("/send/m.room.message/")) {
+			const body = JSON.parse(String(init?.body)) as { body: string };
+			sentMatrixBodies.push(body.body);
+			return jsonResponse({ event_id: "$command-ack" });
+		}
+		throw new Error(`Unexpected Matrix request: ${url.pathname}`);
+	};
+
+	try {
+		remoteSessionExtension(pi);
+		await handlers.get("session_start")?.({ reason: "resume" }, context);
+		for (let attempt = 0; attempt < 100 && sentInputs.length < 5; attempt += 1) {
+			await new Promise((resolve) => setTimeout(resolve, 5));
+		}
+		assert.deepEqual(sentInputs, [
+			{ text: "/skill:research Matrix APIs", deliverAs: undefined, expandPromptTemplates: true },
+			{ text: "queue this", deliverAs: "followUp", expandPromptTemplates: true },
+			{ text: "redirect now", deliverAs: "steer", expandPromptTemplates: true },
+			{ text: "/worker-model status", deliverAs: "followUp", expandPromptTemplates: true },
+			{ text: "yes", deliverAs: undefined, expandPromptTemplates: true },
+		]);
+		assert.equal(abortCount, 1);
+		assert.deepEqual(sentMatrixBodies, ["Command dispatched: /worker-model"]);
+		assert.equal((await store.hostProgress(bindingId)).since, "control-cursor");
+		await remoteCommand?.("off", context);
 	} finally {
 		globalThis.fetch = originalFetch;
 		for (const [name, value] of Object.entries(previousEnvironment)) {

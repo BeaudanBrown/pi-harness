@@ -4,6 +4,7 @@ import {
 	matrixConfigFromEnvironment,
 	routeMatrixTextEvent,
 	type MatrixConfig,
+	type MatrixInputKind,
 } from "./matrix-client.js";
 import {
 	RemoteSessionStateStore,
@@ -26,6 +27,8 @@ type StoredRoomBinding = LegacyRoomBinding | DurableRoomBinding;
 
 interface PendingRemoteTurn {
 	prompt: string;
+	kind?: MatrixInputKind;
+	delivery?: "immediate" | "steer" | "followUp";
 	eventId: string;
 	transactionId: string;
 }
@@ -70,7 +73,7 @@ function durableBinding(binding: StoredRoomBinding): DurableRoomBinding {
 export function recoverInboundTurn(
 	entries: readonly unknown[],
 	eventId: string,
-	prompt: string,
+	_prompt: string,
 ): { state: "missing" | "injected" | "answered"; answer?: string } {
 	let markerIndex = -1;
 	for (let index = 0; index < entries.length; index += 1) {
@@ -84,6 +87,20 @@ export function recoverInboundTurn(
 	}
 	if (markerIndex === -1) return { state: "missing" };
 
+	let expectedPrompt: string | undefined;
+	for (const entry of entries.slice(markerIndex + 1)) {
+		if (typeof entry !== "object" || entry === null) continue;
+		const candidate = entry as { type?: unknown; customType?: unknown; data?: unknown };
+		if (candidate.type !== "custom" || candidate.customType !== INBOUND_ENTRY_TYPE) continue;
+		if (typeof candidate.data !== "object" || candidate.data === null) continue;
+		const data = candidate.data as { eventId?: unknown; status?: unknown; prompt?: unknown };
+		if (data.eventId === eventId && data.status === "expanded" && typeof data.prompt === "string") {
+			expectedPrompt = data.prompt;
+			break;
+		}
+	}
+	if (expectedPrompt === undefined) return { state: "missing" };
+
 	let sawPrompt = false;
 	let answer: string | undefined;
 	for (const entry of entries.slice(markerIndex + 1)) {
@@ -94,7 +111,7 @@ export function recoverInboundTurn(
 		if (message.role === "user") {
 			if (sawPrompt) break;
 			if (typeof message.content !== "string" && !Array.isArray(message.content)) continue;
-			sawPrompt = contentText(message.content) === prompt;
+			sawPrompt = contentText(message.content) === expectedPrompt;
 			continue;
 		}
 		if (sawPrompt && message.role === "assistant" && (typeof message.content === "string" || Array.isArray(message.content))) {
@@ -141,6 +158,27 @@ function messageText(messages: readonly unknown[], role: "assistant"): string | 
 	return undefined;
 }
 
+export function mapRunAnswers<T extends { prompt: string }>(
+	messages: readonly unknown[],
+	inputs: ReadonlyArray<T | undefined>,
+): Array<{ turn: T; answer?: string }> {
+	const userIndexes: number[] = [];
+	for (let index = 0; index < messages.length; index += 1) {
+		const message = messages[index];
+		if (typeof message === "object" && message !== null && (message as { role?: unknown }).role === "user") {
+			userIndexes.push(index);
+		}
+	}
+	const relevantUserIndexes = userIndexes.slice(-inputs.length);
+	return inputs.flatMap((turn, inputIndex) => {
+		if (!turn) return [];
+		const start = relevantUserIndexes[inputIndex];
+		if (start === undefined) return [{ turn }];
+		const end = relevantUserIndexes[inputIndex + 1] ?? messages.length;
+		return [{ turn, answer: messageText(messages.slice(start + 1, end), "assistant") }];
+	});
+}
+
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 }
@@ -172,7 +210,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 	let pollController: AbortController | undefined;
 	let pollPromise: Promise<void> | undefined;
 	let activationController: AbortController | undefined;
-	let activeRemoteTurn: PendingRemoteTurn | undefined;
+	let activeRunInputs: Array<PendingRemoteTurn | undefined> | undefined;
 	const awaitingRemoteInputs: PendingRemoteTurn[] = [];
 	const inputRunQueue: Array<PendingRemoteTurn | undefined> = [];
 
@@ -202,24 +240,73 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 		pollController = undefined;
 		pollPromise = undefined;
 		activeClient = undefined;
-		activeRemoteTurn = undefined;
+		activeRunInputs = undefined;
 		awaitingRemoteInputs.length = 0;
 		inputRunQueue.length = 0;
 		if (ctx) updateStatus(ctx);
 	}
 
-	async function deliverInbound(turn: PendingRemoteTurn): Promise<void> {
+	async function deliverInbound(turn: PendingRemoteTurn, ctx: ExtensionContext): Promise<void> {
 		if (!stateStore || !binding) throw new Error("Remote-session durable binding is unavailable");
+		const store = stateStore;
+		const room = binding;
+		const kind = turn.kind ?? "prompt";
 		pi.appendEntry(INBOUND_ENTRY_TYPE, {
 			version: 1,
 			eventId: turn.eventId,
 			status: "injecting",
+			kind,
 			prompt: turn.prompt,
 		});
-		awaitingRemoteInputs.push(turn);
-		pi.sendUserMessage(turn.prompt, { deliverAs: "followUp" });
-		await stateStore.markInboundInjected(binding.bindingId, turn.eventId);
-		pi.appendEntry(INBOUND_ENTRY_TYPE, { version: 1, eventId: turn.eventId, status: "injected" });
+
+		if (kind === "abort") {
+			for (const interrupted of activeRunInputs ?? []) {
+				if (interrupted) await store.markInboundHandled(room.bindingId, interrupted.eventId);
+			}
+			activeRunInputs = [];
+			ctx.abort();
+			await store.markInboundHandled(room.bindingId, turn.eventId);
+			pi.appendEntry(INBOUND_ENTRY_TYPE, { version: 1, eventId: turn.eventId, status: "handled", kind });
+			return;
+		}
+
+		const commandName = turn.prompt.match(/^\/([^\s]+)/)?.[1];
+		const extensionCommand =
+			kind === "prompt" &&
+			commandName !== undefined &&
+			pi.getCommands().some((command) => command.source === "extension" && command.name === commandName);
+		const idle = ctx.isIdle();
+		turn.delivery = idle ? "immediate" : kind === "steer" ? "steer" : "followUp";
+		if (!extensionCommand) awaitingRemoteInputs.push(turn);
+		const deliveryOptions: {
+			deliverAs: "steer" | "followUp" | undefined;
+			expandPromptTemplates: boolean;
+			onPromptExpanded: (text: string) => void;
+		} = {
+			deliverAs: idle ? undefined : kind === "steer" ? "steer" : "followUp",
+			expandPromptTemplates: true,
+			onPromptExpanded: (text) => {
+				pi.appendEntry(INBOUND_ENTRY_TYPE, {
+					version: 1,
+					eventId: turn.eventId,
+					status: "expanded",
+					kind,
+					prompt: text,
+				});
+			},
+		};
+		pi.sendUserMessage(turn.prompt, deliveryOptions);
+		await store.markInboundInjected(room.bindingId, turn.eventId);
+		pi.appendEntry(INBOUND_ENTRY_TYPE, { version: 1, eventId: turn.eventId, status: "injected", kind });
+
+		if (extensionCommand) {
+			const acknowledgement = `Command dispatched: /${commandName}`;
+			await store.recordAnswer(room.bindingId, turn.eventId, acknowledgement);
+			const client = activeClient;
+			if (!client) return;
+			await client.sendText(room.roomId, acknowledgement, turn.transactionId);
+			await store.markOutboundSent(room.bindingId, turn.eventId);
+		}
 	}
 
 	async function recoverUnfinishedInbounds(room: DurableRoomBinding, ctx: ExtensionContext): Promise<void> {
@@ -243,7 +330,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 				);
 				continue;
 			}
-			await deliverInbound(turn);
+			await deliverInbound(turn, ctx);
 		}
 	}
 
@@ -280,14 +367,28 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 						continue;
 					}
 
-					const routed = result.events.flatMap((event) => {
-						const prompt = routeMatrixTextEvent(event, room, config);
-						return prompt ? [{ eventId: event.eventId, prompt }] : [];
-					});
+					const routed: Array<{ eventId: string; prompt: string; kind: MatrixInputKind }> = [];
+					for (const event of result.events) {
+						let replyTargetSender: string | undefined;
+						if (
+							event.sender === config.operatorUserId &&
+							event.replyToEventId &&
+							!event.body.startsWith(`@${config.hostName} `)
+						) {
+							try {
+								replyTargetSender = await client.eventSender(room.roomId, event.replyToEventId, controller.signal);
+							} catch (error) {
+								if (controller.signal.aborted || isAbortError(error)) throw error;
+								// Missing, redacted, or inaccessible reply targets do not block later timeline events.
+							}
+						}
+						const input = routeMatrixTextEvent(event, room, config, replyTargetSender);
+						if (input) routed.push({ eventId: event.eventId, prompt: input.text, kind: input.kind });
+					}
 					const accepted = await store.acceptSync(room.bindingId, result.nextBatch, routed);
 					since = result.nextBatch;
 					if (controller.signal.aborted || pollController !== controller) return;
-					for (const event of accepted) await deliverInbound(event);
+					for (const event of accepted) await deliverInbound(event, ctx);
 				} catch (error) {
 					if (controller.signal.aborted || isAbortError(error)) return;
 					notify(ctx, error instanceof Error ? error.message : "Matrix synchronization failed", "error");
@@ -368,23 +469,30 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 			const pendingIndex = awaitingRemoteInputs.findIndex((turn) => turn.prompt === event.text);
 			if (pendingIndex !== -1) [remoteTurn] = awaitingRemoteInputs.splice(pendingIndex, 1);
 		}
-		inputRunQueue.push(remoteTurn);
+		if (activeRunInputs) activeRunInputs.push(remoteTurn);
+		else inputRunQueue.push(remoteTurn);
 	});
 
 	pi.on("before_agent_start", () => {
-		activeRemoteTurn = inputRunQueue.shift();
+		activeRunInputs = [inputRunQueue.shift()];
 	});
 
 	pi.on("agent_end", async (event, ctx) => {
-		if (!activeRemoteTurn || !activeClient || !binding || !stateStore) return;
-		const remoteTurn = activeRemoteTurn;
-		const response = messageText(event.messages, "assistant");
-		if (!response) return;
-		activeRemoteTurn = undefined;
+		const runInputs = activeRunInputs;
+		activeRunInputs = undefined;
+		if (!runInputs || !activeClient || !binding || !stateStore) return;
+		const mappedAnswers = mapRunAnswers(event.messages, runInputs);
+		const lastRemoteIndex = mappedAnswers.length - 1;
 		try {
-			await stateStore.recordAnswer(binding.bindingId, remoteTurn.eventId, response);
-			await activeClient.sendText(binding.roomId, response, remoteTurn.transactionId);
-			await stateStore.markOutboundSent(binding.bindingId, remoteTurn.eventId);
+			for (const [index, { turn, answer }] of mappedAnswers.entries()) {
+				if (!answer) {
+					if (index < lastRemoteIndex) await stateStore.markInboundHandled(binding.bindingId, turn.eventId);
+					continue;
+				}
+				await stateStore.recordAnswer(binding.bindingId, turn.eventId, answer);
+				await activeClient.sendText(binding.roomId, answer, turn.transactionId);
+				await stateStore.markOutboundSent(binding.bindingId, turn.eventId);
+			}
 		} catch (error) {
 			notify(ctx, error instanceof Error ? error.message : "Matrix send failed", "error");
 		}

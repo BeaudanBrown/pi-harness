@@ -11,6 +11,14 @@ export interface MatrixTextEvent {
 	eventId: string;
 	sender: string;
 	body: string;
+	replyToEventId?: string;
+}
+
+export type MatrixInputKind = "prompt" | "steer" | "abort";
+
+export interface RoutedMatrixInput {
+	kind: MatrixInputKind;
+	text: string;
 }
 
 export interface MatrixSyncResult {
@@ -61,19 +69,46 @@ export function matrixConfigFromEnvironment(environment: NodeJS.ProcessEnv = pro
 	};
 }
 
+function stripReplyFallback(body: string): string | undefined {
+	if (!body.startsWith(">")) return body;
+	const boundary = body.indexOf("\n\n");
+	if (boundary === -1) return undefined;
+	const quotedLines = body.slice(0, boundary).split("\n");
+	if (!/^> <@[^>\n]+> /.test(quotedLines[0] ?? "") || quotedLines.some((line) => !line.startsWith("> "))) {
+		return undefined;
+	}
+	return body.slice(boundary + 2);
+}
+
 export function routeMatrixTextEvent(
 	event: MatrixTextEvent,
 	binding: { roomId: string },
-	config: Pick<MatrixConfig, "operatorUserId" | "hostName">,
-): string | undefined {
+	config: Pick<MatrixConfig, "botUserId" | "operatorUserId" | "hostName">,
+	replyTargetSender?: string,
+): RoutedMatrixInput | undefined {
 	if (event.roomId !== binding.roomId || event.sender !== config.operatorUserId) return undefined;
 
 	const prefix = `@${config.hostName}`;
-	if (event.body === prefix) return undefined;
-	if (!event.body.startsWith(`${prefix} `)) return undefined;
-
-	const text = event.body.slice(prefix.length + 1).trim();
-	return text || undefined;
+	const strippedBody = event.replyToEventId ? stripReplyFallback(event.body) : event.body;
+	if (strippedBody === undefined) return undefined;
+	const body = strippedBody.trim();
+	let text: string;
+	if (body === prefix) return undefined;
+	if (body.startsWith(`${prefix} `)) {
+		text = body.slice(prefix.length + 1).trim();
+	} else {
+		const explicitHost = body.match(/^@[^\s]+(?:\s|$)/)?.[0].trim();
+		if (explicitHost || !event.replyToEventId || replyTargetSender !== config.botUserId) return undefined;
+		text = body.trim();
+	}
+	if (!text) return undefined;
+	if (text === "!abort") return { kind: "abort", text: "" };
+	if (text === "!steer") return undefined;
+	if (text.startsWith("!steer ")) {
+		const steeringText = text.slice("!steer ".length).trim();
+		return steeringText ? { kind: "steer", text: steeringText } : undefined;
+	}
+	return { kind: "prompt", text };
 }
 
 export class MatrixClient {
@@ -121,6 +156,11 @@ export class MatrixClient {
 		return roomId;
 	}
 
+	async eventSender(roomId: string, eventId: string, signal?: AbortSignal): Promise<string | undefined> {
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`;
+		return stringField(await this.request("GET", path, undefined, signal), "sender");
+	}
+
 	async syncRoom(roomId: string, since: string | undefined, signal?: AbortSignal): Promise<MatrixSyncResult> {
 		const filter = {
 			presence: { types: [] },
@@ -150,10 +190,14 @@ export class MatrixClient {
 		for (const event of timelineEvents) {
 			if (!isRecord(event) || event.type !== "m.room.message") continue;
 			if (!isRecord(event.content) || event.content.msgtype !== "m.text") continue;
+			const relation = isRecord(event.content["m.relates_to"]) ? event.content["m.relates_to"] : undefined;
+			if (relation && (relation.rel_type === "m.replace" || relation.rel_type === "m.thread")) continue;
+			const inReplyTo = relation && isRecord(relation["m.in_reply_to"]) ? relation["m.in_reply_to"] : undefined;
 			const eventId = stringField(event, "event_id");
 			const sender = stringField(event, "sender");
 			const body = stringField(event.content, "body");
-			if (eventId && sender && body !== undefined) events.push({ roomId, eventId, sender, body });
+			const replyToEventId = stringField(inReplyTo, "event_id");
+			if (eventId && sender && body !== undefined) events.push({ roomId, eventId, sender, body, replyToEventId });
 		}
 
 		return { nextBatch, events };

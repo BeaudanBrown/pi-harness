@@ -47,13 +47,48 @@ small duplication of conversation content closes interruption windows; it has
 the same synchronized trust boundary as Pi's session JSONL. Sidecar files and
 directories use private user permissions and atomic replacement.
 
+## Matrix input and control
+
+New instructions in a shared room require the configured host prefix:
+
+```text
+@grill investigate the failing test
+@grill /skill:diagnosing-bugs inspect the current failure
+@grill /worker-model status
+@grill !steer stop refactoring and preserve the public API
+@grill !abort
+```
+
+A direct Matrix reply to an event authored by the grill bot infers `@grill`, so
+a short reply such as `yes` needs no prefix. The extension verifies the replied
+event's sender through the bound room before accepting it. An explicit different
+host prefix still wins and is ignored by grill.
+
+Idle prompts start immediately. Ordinary input received while Pi is busy queues
+as a `followUp`; `!steer` strips its control prefix and queues the remaining text
+with Pi's `steer` semantics. Exact `!abort` requests `ctx.abort()` and does not
+create a user turn. All controls pass the same room and operator checks as normal
+prompts.
+
+The harness carries a narrow compatibility patch for the pinned Pi package so
+extension-injected input may opt into Pi's normal command, skill, and prompt
+expansion path. The default `sendUserMessage` behavior remains unchanged for
+other extensions. Remote extension commands execute as commands rather than LLM
+prompts and receive a small Matrix dispatch acknowledgement. Skill input is
+expanded by Pi and persisted with the same semantics as interactive input.
+
+Text-only v1 ignores edits, reactions, attachments, thread events, voice, and
+other media. It does not turn fallback reply quotations into prompt content.
+
 ## Interruption semantics
 
-An accepted Matrix event ID and prompt are recorded before injection. Paired
-session markers distinguish accepted, persisted-user, and answered interruption
-windows. Reconnect injects an event that stopped before persistence, continues a
-persisted unfinished turn without duplicating its user entry, or sends an answer
-already present in session history. Replayed sync events are ignored. Each
+An accepted Matrix event ID and prompt are recorded before injection. Session
+markers also retain the exact post-command/skill/template expansion so recovery
+cannot mistake an unrelated later local turn for the remote input. These markers
+distinguish accepted, persisted-user, and answered interruption windows.
+Reconnect injects an event that stopped before persistence, continues a persisted
+unfinished turn without duplicating its user entry, or sends an answer already
+present in session history. Replayed sync events are ignored. Each
 inbound event also receives a deterministic Matrix transaction ID. If sending
 the final answer fails or the process stops after an uncertain send, reconnect
 retries the same body with the same transaction ID; Matrix treats that retry

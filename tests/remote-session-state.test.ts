@@ -89,6 +89,19 @@ test("accepted event IDs are durable and produce stable outbound transactions", 
 	assert.deepEqual(await resumed.pendingOutbounds(binding.bindingId), []);
 });
 
+test("control kind is durable and handled controls leave no unfinished turn", async () => {
+	const store = await temporaryStore();
+	await store.bindSession("session-1", binding);
+	const [accepted] = await store.acceptSync(binding.bindingId, "control-cursor", [
+		{ eventId: "$abort", prompt: "", kind: "abort" },
+	]);
+	assert.equal(accepted?.kind, "abort");
+	assert.deepEqual(await store.unfinishedInbounds(binding.bindingId), [accepted]);
+	await store.markInboundHandled(binding.bindingId, "$abort");
+	assert.deepEqual(await store.unfinishedInbounds(binding.bindingId), []);
+	assert.deepEqual(await store.pendingOutbounds(binding.bindingId), []);
+});
+
 test("concurrent host updates retain every accepted event", async () => {
 	const store = await temporaryStore();
 	await store.bindSession("session-1", binding);

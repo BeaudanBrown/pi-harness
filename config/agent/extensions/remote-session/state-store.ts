@@ -10,9 +10,12 @@ export interface DurableRoomBinding {
 	conceptName: string;
 }
 
+export type InboundKind = "prompt" | "steer" | "abort";
+
 export interface AcceptedInbound {
 	eventId: string;
 	prompt: string;
+	kind?: InboundKind;
 	transactionId: string;
 }
 
@@ -35,6 +38,7 @@ interface SessionLink {
 
 interface EventProgress {
 	prompt?: string;
+	kind?: InboundKind;
 	transactionId: string;
 	status: "accepted" | "injected" | "pending" | "sent";
 	body?: string;
@@ -156,6 +160,7 @@ function parseHostState(value: unknown): HostState {
 			typeof progress.transactionId !== "string" ||
 			!["accepted", "injected", "pending", "sent"].includes(progress.status ?? "") ||
 			(progress.prompt !== undefined && typeof progress.prompt !== "string") ||
+			(progress.kind !== undefined && !["prompt", "steer", "abort"].includes(progress.kind)) ||
 			(progress.body !== undefined && typeof progress.body !== "string") ||
 			((progress.status === "accepted" || progress.status === "injected") && typeof progress.prompt !== "string") ||
 			(progress.status === "pending" && typeof progress.body !== "string")
@@ -240,7 +245,7 @@ export class RemoteSessionStateStore {
 	async acceptSync(
 		bindingId: string,
 		nextBatch: string,
-		events: ReadonlyArray<{ eventId: string; prompt: string }>,
+		events: ReadonlyArray<{ eventId: string; prompt: string; kind?: InboundKind }>,
 	): Promise<AcceptedInbound[]> {
 		return this.withHostState(bindingId, async () => {
 			const state = await this.readHostState(bindingId);
@@ -256,6 +261,7 @@ export class RemoteSessionStateStore {
 				const stableTransactionId = transactionId(bindingId, event.eventId);
 				state.events[event.eventId] = {
 					prompt: event.prompt,
+					kind: event.kind,
 					transactionId: stableTransactionId,
 					status: "accepted",
 				};
@@ -300,7 +306,14 @@ export class RemoteSessionStateStore {
 			return state.eventOrder.flatMap((eventId) => {
 				const event = state.events[eventId];
 				return (event?.status === "accepted" || event?.status === "injected") && event.prompt !== undefined
-					? [{ eventId, prompt: event.prompt, transactionId: event.transactionId }]
+					? [
+							{
+								eventId,
+								prompt: event.prompt,
+								...(event.kind ? { kind: event.kind } : {}),
+								transactionId: event.transactionId,
+							},
+						]
 					: [];
 			});
 		});
@@ -312,6 +325,18 @@ export class RemoteSessionStateStore {
 			const event = state.events[eventId];
 			if (!event) throw new Error(`Unknown Matrix event ${eventId}`);
 			if (event.status === "accepted") event.status = "injected";
+			await this.writeHostState(bindingId, state);
+		});
+	}
+
+	async markInboundHandled(bindingId: string, eventId: string): Promise<void> {
+		await this.withHostState(bindingId, async () => {
+			const state = await this.readHostState(bindingId);
+			const event = state.events[eventId];
+			if (!event) throw new Error(`Unknown Matrix event ${eventId}`);
+			event.status = "sent";
+			delete event.prompt;
+			delete event.body;
 			await this.writeHostState(bindingId, state);
 		});
 	}

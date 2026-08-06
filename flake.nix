@@ -44,7 +44,10 @@
       let
         pkgs = nixpkgs.legacyPackages.${system};
         inherit (pkgs) lib;
-        piPackage = nix-ai-tools.packages.${system}.pi;
+        upstreamPiPackage = nix-ai-tools.packages.${system}.pi;
+        piPackage = upstreamPiPackage.overrideAttrs (old: {
+          patches = (old.patches or [ ]) ++ [ ./nix/patches/pi-extension-expanded-input.patch ];
+        });
         agentgraphPackage = agentgraph.packages.${system}.ag-unchecked;
         agentgraphPostgresPackage = agentgraph.packages.${system}.agentgraph-postgres;
         agentgraphPiResources = agentgraph.packages.${system}.agentgraph-pi-resources;
@@ -282,6 +285,32 @@
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -x ${piHarnessPackage}/bin/pi-playwright
             test -x ${piHarnessPackage}/bin/pi-matrix-whoami
+            grep -F 'expandPromptTemplates: options?.expandPromptTemplates ?? false' \
+              ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js >/dev/null
+            grep -F 'expandPromptTemplates?: boolean' \
+              ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts >/dev/null
+            grep -F 'options?.onPromptExpanded?.(expandedText)' \
+              ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js >/dev/null
+            command_probe_dir=$(mktemp -d)
+            cat > "$command_probe_dir/extension.ts" <<'EOF'
+            import { writeFileSync } from "node:fs";
+            import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+            export default function (pi: ExtensionAPI): void {
+              pi.registerCommand("matrix-command-probe", {
+                handler: async (args) => writeFileSync(process.env.PROBE_RESULT!, args),
+              });
+              pi.on("session_start", () => {
+                pi.sendUserMessage("/matrix-command-probe expanded", { expandPromptTemplates: true });
+              });
+            }
+            EOF
+            PROBE_RESULT="$command_probe_dir/result" \
+              printf '%s\n' '{"type":"get_state"}' | \
+              PROBE_RESULT="$command_probe_dir/result" \
+              timeout 10 ${piPackage}/bin/pi --mode rpc --no-session \
+                --extension "$command_probe_dir/extension.ts" >/dev/null
+            test "$(cat "$command_probe_dir/result")" = expanded
+            rm -rf "$command_probe_dir"
             test -x ${remoteSessionPiWrapper}/bin/pi
             test -x ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami
             jq -e '.packageCount == 2 and (.assertions | all)' ${remoteSessionModuleReport} >/dev/null
