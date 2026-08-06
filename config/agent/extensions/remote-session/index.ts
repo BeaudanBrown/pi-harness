@@ -152,6 +152,46 @@ function contentText(content: string | readonly unknown[]): string | undefined {
 	return parts.length > 0 ? parts.join("\n\n") : undefined;
 }
 
+function messageText(messages: readonly unknown[], role: "assistant"): string | undefined {
+	for (let index = messages.length - 1; index >= 0; index -= 1) {
+		const message = messages[index];
+		if (typeof message !== "object" || message === null) continue;
+		const candidate = message as { role?: unknown; content?: unknown };
+		if (candidate.role !== role || (typeof candidate.content !== "string" && !Array.isArray(candidate.content))) continue;
+		if (
+			Array.isArray(candidate.content) &&
+			candidate.content.some(
+				(block) => typeof block === "object" && block !== null && (block as { type?: unknown }).type === "toolCall",
+			)
+		) {
+			return undefined;
+		}
+		return contentText(candidate.content);
+	}
+	return undefined;
+}
+
+export function mapRunAnswers<T extends { prompt: string }>(
+	messages: readonly unknown[],
+	inputs: ReadonlyArray<T | undefined>,
+): Array<{ turn: T; answer?: string }> {
+	const userIndexes: number[] = [];
+	for (let index = 0; index < messages.length; index += 1) {
+		const message = messages[index];
+		if (typeof message === "object" && message !== null && (message as { role?: unknown }).role === "user") {
+			userIndexes.push(index);
+		}
+	}
+	const relevantUserIndexes = userIndexes.slice(-inputs.length);
+	return inputs.flatMap((turn, inputIndex) => {
+		if (!turn) return [];
+		const start = relevantUserIndexes[inputIndex];
+		if (start === undefined) return [{ turn }];
+		const end = relevantUserIndexes[inputIndex + 1] ?? messages.length;
+		return [{ turn, answer: messageText(messages.slice(start + 1, end), "assistant") }];
+	});
+}
+
 function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
 	if (ctx.hasUI) ctx.ui.notify(message, level);
 }
@@ -186,6 +226,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 	let activeRunInputs: Array<PendingRemoteTurn | undefined> | undefined;
 	const awaitingRemoteInputs: PendingRemoteTurn[] = [];
 	const inputRunQueue: Array<PendingRemoteTurn | undefined> = [];
+	const checkpointBoundedInbounds = new Set<string>();
 
 	function updateStatus(ctx: ExtensionContext): void {
 		if (!ctx.hasUI) return;
@@ -216,6 +257,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 		activeRunInputs = undefined;
 		awaitingRemoteInputs.length = 0;
 		inputRunQueue.length = 0;
+		checkpointBoundedInbounds.clear();
 		if (ctx) updateStatus(ctx);
 	}
 
@@ -274,7 +316,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 
 		if (extensionCommand) {
 			const acknowledgement = `Command dispatched: /${commandName}`;
-			await store.recordAnswer(room.bindingId, turn.eventId, acknowledgement, "command_ack");
+			await store.recordAnswer(room.bindingId, turn.eventId, acknowledgement);
 			const client = activeClient;
 			if (!client) return;
 			await client.sendText(room.roomId, acknowledgement, turn.transactionId);
@@ -302,7 +344,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 		for (const turn of await stateStore.unfinishedInbounds(room.bindingId)) {
 			const recovery = recoverInboundTurn(ctx.sessionManager.getBranch(), turn.eventId, turn.prompt);
 			if (recovery.state === "answered" && recovery.answer) {
-				await stateStore.markInboundHandled(room.bindingId, turn.eventId);
+				await stateStore.recordAnswer(room.bindingId, turn.eventId, recovery.answer);
 				continue;
 			}
 			if (recovery.state === "injected") {
@@ -324,7 +366,6 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 
 	async function flushPendingOutbounds(client: MatrixClient, room: DurableRoomBinding, ctx: ExtensionContext): Promise<void> {
 		if (!stateStore) return;
-		await stateStore.discardLegacyRoutineOutbounds(room.bindingId);
 		for (const pending of await stateStore.pendingOutbounds(room.bindingId)) {
 			try {
 				await client.sendText(room.roomId, pending.body, pending.transactionId);
@@ -467,16 +508,28 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 		activeRunInputs = [inputRunQueue.shift()];
 	});
 
-	pi.on("agent_end", async (_event, ctx) => {
+	pi.on("agent_end", async (event, ctx) => {
 		const runInputs = activeRunInputs;
 		activeRunInputs = undefined;
-		if (!runInputs || !binding || !stateStore) return;
+		if (!runInputs || !activeClient || !binding || !stateStore) return;
+		const mappedAnswers = mapRunAnswers(event.messages, runInputs);
+		const lastRemoteIndex = mappedAnswers.length - 1;
 		try {
-			for (const turn of runInputs) {
-				if (turn) await stateStore.markInboundHandled(binding.bindingId, turn.eventId);
+			for (const [index, { turn, answer }] of mappedAnswers.entries()) {
+				if (checkpointBoundedInbounds.delete(turn.eventId)) {
+					await stateStore.markInboundHandled(binding.bindingId, turn.eventId);
+					continue;
+				}
+				if (!answer) {
+					if (index < lastRemoteIndex) await stateStore.markInboundHandled(binding.bindingId, turn.eventId);
+					continue;
+				}
+				await stateStore.recordAnswer(binding.bindingId, turn.eventId, answer);
+				await activeClient.sendText(binding.roomId, answer, turn.transactionId);
+				await stateStore.markOutboundSent(binding.bindingId, turn.eventId);
 			}
 		} catch (error) {
-			notify(ctx, error instanceof Error ? error.message : "Matrix input completion failed", "error");
+			notify(ctx, error instanceof Error ? error.message : "Matrix send failed", "error");
 		}
 	});
 
@@ -503,6 +556,7 @@ export default function remoteSessionExtension(pi: ExtensionAPI): void {
 			const checkpoint = createRemoteCheckpoint(params);
 			const transactionId = `remote-checkpoint-${checkpoint.checkpointId}`;
 			const inboundEventIds = (activeRunInputs ?? []).flatMap((turn) => (turn ? [turn.eventId] : []));
+			for (const eventId of inboundEventIds) checkpointBoundedInbounds.add(eventId);
 			const storedCheckpoint = {
 				...checkpoint,
 				bindingId: room.bindingId,

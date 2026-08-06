@@ -42,7 +42,6 @@ interface EventProgress {
 	transactionId: string;
 	status: "accepted" | "injected" | "pending" | "sent";
 	body?: string;
-	outboundKind?: "command_ack";
 }
 
 interface HostState {
@@ -163,7 +162,6 @@ function parseHostState(value: unknown): HostState {
 			(progress.prompt !== undefined && typeof progress.prompt !== "string") ||
 			(progress.kind !== undefined && !["prompt", "steer", "abort"].includes(progress.kind)) ||
 			(progress.body !== undefined && typeof progress.body !== "string") ||
-			(progress.outboundKind !== undefined && progress.outboundKind !== "command_ack") ||
 			((progress.status === "accepted" || progress.status === "injected") && typeof progress.prompt !== "string") ||
 			(progress.status === "pending" && typeof progress.body !== "string")
 		) {
@@ -339,7 +337,6 @@ export class RemoteSessionStateStore {
 			event.status = "sent";
 			delete event.prompt;
 			delete event.body;
-			delete event.outboundKind;
 			await this.writeHostState(bindingId, state);
 		});
 	}
@@ -355,43 +352,20 @@ export class RemoteSessionStateStore {
 				event.status = "sent";
 				delete event.prompt;
 				delete event.body;
-				delete event.outboundKind;
 				changed = true;
 			}
 			if (changed) await this.writeHostState(bindingId, state);
 		});
 	}
 
-	async recordAnswer(
-		bindingId: string,
-		eventId: string,
-		body: string,
-		outboundKind?: "command_ack",
-	): Promise<void> {
+	async recordAnswer(bindingId: string, eventId: string, body: string): Promise<void> {
 		await this.withHostState(bindingId, async () => {
 			const state = await this.readHostState(bindingId);
 			const event = state.events[eventId];
 			if (!event) throw new Error(`Unknown Matrix event ${eventId}`);
 			event.body = body;
-			event.outboundKind = outboundKind;
 			event.status = "pending";
 			await this.writeHostState(bindingId, state);
-		});
-	}
-
-	async discardLegacyRoutineOutbounds(bindingId: string): Promise<void> {
-		await this.withHostState(bindingId, async () => {
-			const state = await this.readHostState(bindingId);
-			let changed = false;
-			for (const event of Object.values(state.events)) {
-				if (event.status !== "pending" || event.outboundKind === "command_ack") continue;
-				event.status = "sent";
-				delete event.prompt;
-				delete event.body;
-				delete event.outboundKind;
-				changed = true;
-			}
-			if (changed) await this.writeHostState(bindingId, state);
 		});
 	}
 
@@ -415,7 +389,6 @@ export class RemoteSessionStateStore {
 			event.status = "sent";
 			delete event.prompt;
 			delete event.body;
-			delete event.outboundKind;
 			await this.writeHostState(bindingId, state);
 		});
 	}

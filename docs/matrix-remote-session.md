@@ -82,12 +82,10 @@ other media. It does not turn fallback reply quotations into prompt content.
 
 ## Explicit checkpoints
 
-Matrix output is intentionally narrower than Matrix input. Routine assistant
-answers, settled events, thinking, and tool activity remain in the Pi terminal
-and session; they are not mirrored to Matrix. On upgrade, any legacy pending
-routine-answer outbounds are marked complete without sending; typed extension
-command acknowledgements remain retryable. Agents have one
-`remote_checkpoint` tool for intentional approval boundaries:
+Normal Matrix prompts receive the corresponding final assistant answer, while
+thinking, tool activity, and unrelated local turns remain in the Pi terminal and
+session. Agents also have one `remote_checkpoint` tool for intentional approval
+boundaries:
 
 - `question` states the decision required, with optional concise context and
   options;
@@ -118,10 +116,11 @@ cannot mistake an unrelated later local turn for the remote input. These markers
 distinguish accepted, persisted-user, and completed interruption windows.
 Reconnect injects an event that stopped before persistence or continues a
 persisted unfinished turn without duplicating its user entry. A prepared or
-waiting checkpoint resolves its originating inbound instead of resuming it;
-completed routine answers are never sent. Replayed sync events are ignored.
-Typed command acknowledgements and checkpoints have stable Matrix transaction
-IDs, so reconnect can retry an uncertain allowed send idempotently.
+waiting checkpoint resolves its originating inbound instead of resuming it, and
+suppresses any ordinary final answer from that checkpoint-bound run. Replayed
+sync events are ignored. Routine answers, typed command acknowledgements, and
+checkpoints have stable Matrix transaction IDs, so reconnect can retry an
+uncertain send idempotently.
 
 The bot-specific sync cursor advances after every successful sync, including an
 empty timeline, and is written only when the token changes. Events that arrived

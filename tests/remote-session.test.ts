@@ -19,6 +19,7 @@ import {
 	validateRemoteCheckpoint,
 } from "../config/agent/extensions/remote-session/checkpoint.js";
 import remoteSessionExtension, {
+	mapRunAnswers,
 	recoverInboundTurn,
 	restoreRoomBinding,
 } from "../config/agent/extensions/remote-session/index.js";
@@ -507,7 +508,47 @@ test("inbound recovery distinguishes missing, injected, and answered crash windo
 	);
 });
 
-test("operator Matrix turns persist without mirroring routine answers", async () => {
+test("run answer mapping preserves queued local, follow-up, and steering order", () => {
+	const first = { prompt: "first", eventId: "$first" };
+	const followUp = { prompt: "follow up", eventId: "$follow-up" };
+	const steer = { prompt: "steer", eventId: "$steer" };
+	assert.deepEqual(
+		mapRunAnswers(
+			[
+				{ role: "user", content: [{ type: "text", text: "first" }] },
+				{ role: "assistant", content: [{ type: "text", text: "First answer" }] },
+				{ role: "user", content: [{ type: "text", text: "local queued" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Local answer" }] },
+				{ role: "user", content: [{ type: "text", text: "follow up" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Follow-up answer" }] },
+				{ role: "user", content: [{ type: "text", text: "steer" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Steered answer" }] },
+			],
+			[first, undefined, followUp, steer],
+		),
+		[
+			{ turn: first, answer: "First answer" },
+			{ turn: followUp, answer: "Follow-up answer" },
+			{ turn: steer, answer: "Steered answer" },
+		],
+	);
+	assert.deepEqual(
+		mapRunAnswers(
+			[
+				{ role: "user", content: [{ type: "text", text: "run tool" }] },
+				{ role: "assistant", content: [{ type: "text", text: "Earlier planning text" }] },
+				{
+					role: "assistant",
+					content: [{ type: "text", text: "Working" }, { type: "toolCall", name: "bash" }],
+				},
+			],
+			[{ prompt: "run tool", eventId: "$tool" }],
+		),
+		[{ turn: { prompt: "run tool", eventId: "$tool" }, answer: undefined }],
+	);
+});
+
+test("operator Matrix turns receive final answers without capturing local turns", async () => {
 	type Handler = (event: unknown, context: ExtensionContext) => unknown;
 	type CommandHandler = (args: string, context: ExtensionContext) => Promise<void>;
 
@@ -727,7 +768,13 @@ test("operator Matrix turns persist without mirroring routine answers", async ()
 			},
 			context,
 		);
-		assert.deepEqual(sendAttempts, [], "routine agent answers must not be mirrored to Matrix");
+		assert.deepEqual(
+			sendAttempts.map((attempt) => attempt.body),
+			[
+				{ msgtype: "m.text", body: "Matrix round trip succeeded" },
+				{ msgtype: "m.text", body: "Second Matrix turn succeeded" },
+			],
+		);
 
 		await remoteCommand("off", context);
 		const externalStore = new RemoteSessionStateStore(
@@ -739,7 +786,7 @@ test("operator Matrix turns persist without mirroring routine answers", async ()
 		]);
 		await handlers.get("session_start")?.({ reason: "resume" }, context);
 		await waitFor(() => userMessages.length === 3 && syncCursors.at(-1) === "cursor-crash");
-		assert.deepEqual(sendAttempts, []);
+		assert.equal(sendAttempts.length, 2);
 		assert.equal(userMessages.at(-1)?.text, "Recover accepted prompt");
 		assert.equal(syncCursors.at(-1), "cursor-crash");
 
@@ -753,8 +800,47 @@ test("operator Matrix turns persist without mirroring routine answers", async ()
 			},
 			context,
 		);
-		assert.deepEqual(sendAttempts, [], "recovered routine answers must remain terminal-only");
+		assert.deepEqual(sendAttempts.at(-1)?.body, { msgtype: "m.text", body: "Recovered accepted answer" });
 		assert.equal(createRoomCount, 1);
+
+		await remoteCommand("off", context);
+		await externalStore.acceptSync("room-006d66143d62a95c072f8e8fc50e3254", "cursor-persisted-answer", [
+			{ eventId: "$persisted-answer-crash", prompt: "Persisted answer prompt" },
+		]);
+		await externalStore.markInboundInjected(
+			"room-006d66143d62a95c072f8e8fc50e3254",
+			"$persisted-answer-crash",
+		);
+		sessionBranch.push(
+			{
+				type: "custom",
+				customType: "remote-session.inbound",
+				data: {
+					version: 1,
+					eventId: "$persisted-answer-crash",
+					status: "injecting",
+					prompt: "Persisted answer prompt",
+				},
+			},
+			{
+				type: "custom",
+				customType: "remote-session.inbound",
+				data: {
+					version: 1,
+					eventId: "$persisted-answer-crash",
+					status: "expanded",
+					prompt: "Persisted answer prompt",
+				},
+			},
+			{ type: "message", message: { role: "user", content: [{ type: "text", text: "Persisted answer prompt" }] } },
+			{
+				type: "message",
+				message: { role: "assistant", content: [{ type: "text", text: "Persisted answer recovered" }] },
+			},
+		);
+		await handlers.get("session_start")?.({ reason: "resume" }, context);
+		await waitFor(() => sendAttempts.length === 4);
+		assert.deepEqual(sendAttempts.at(-1)?.body, { msgtype: "m.text", body: "Persisted answer recovered" });
 
 		await remoteCommand("on conflicting concept", context);
 		assert.ok(notifications.some((message) => message.includes("already bound to concept: matrix round trip")));
@@ -1007,6 +1093,16 @@ test("remote input preserves idle, follow-up, steer, abort, command, skill, and 
 				(entry as { data?: { status?: unknown } }).data?.status === "waiting",
 		) as { data: Record<string, unknown> } | undefined;
 		assert.ok(waitingEntry);
+		await handlers.get("agent_end")?.(
+			{
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "<skill>expanded</skill>\n\nMatrix APIs" }] },
+					{ role: "assistant", content: [{ type: "text", text: "must not follow the checkpoint" }] },
+				],
+			},
+			context,
+		);
+		assert.equal(sentMatrixBodies.length, 2, "checkpoint-bound run output must not be mirrored");
 
 		await store.acceptSync(bindingId, "checkpoint-crash-cursor", [
 			{ eventId: "$checkpoint-crash", prompt: "approval boundary prompt" },
