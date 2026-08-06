@@ -17,6 +17,7 @@
   mermaidCli ? null,
   structurizrCli ? null,
   jq,
+  nodejs,
   playwrightAgentCli ? null,
 }:
 
@@ -102,6 +103,11 @@ EOF
     substituteInPlace "$out/bin/pi-playwright" \
       --replace-fail '@PI_HARNESS_JQ@' '${lib.getExe jq}'
     chmod +x "$out/bin/pi-playwright"
+
+    cp bin/pi-matrix-whoami "$out/bin/pi-matrix-whoami"
+    substituteInPlace "$out/bin/pi-matrix-whoami" \
+      --replace-fail '@PI_HARNESS_NODE@' '${lib.getExe nodejs}'
+    chmod +x "$out/bin/pi-matrix-whoami"
     ${lib.optionalString (agentgraphPackage != null) ''
       ln -s "${agentgraphPackage}/bin/ag" "$out/bin/ag"
     ''}

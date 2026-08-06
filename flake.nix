@@ -77,6 +77,46 @@
           xdgUtils = pkgs.xdg-utils;
           jq = pkgs.jq;
         };
+        remoteSessionModuleTest = lib.evalModules {
+          specialArgs = { inherit pkgs; };
+          modules = [
+            {
+              options = {
+                assertions = lib.mkOption {
+                  type = lib.types.listOf lib.types.attrs;
+                  default = [ ];
+                };
+                environment.systemPackages = lib.mkOption {
+                  type = lib.types.listOf lib.types.package;
+                  default = [ ];
+                };
+              };
+            }
+            ./nix/module.nix
+            {
+              services.pi-harness = {
+                enable = true;
+                package = piHarnessPackage;
+                remoteSession = {
+                  environmentFile = "/run/secrets/pi/matrix-test-env";
+                  homeserver = "https://matrix.example.com";
+                  botUserId = "@pi-test:example.com";
+                  operatorUserId = "@operator:example.com";
+                  hostName = "test-host";
+                };
+              };
+            }
+          ];
+        };
+        remoteSessionModulePackages = remoteSessionModuleTest.config.environment.systemPackages;
+        remoteSessionPiWrapper = builtins.elemAt remoteSessionModulePackages 0;
+        remoteSessionWhoamiWrapper = builtins.elemAt remoteSessionModulePackages 1;
+        remoteSessionModuleReport = pkgs.writeText "pi-harness-remote-session-module-test.json" (
+          builtins.toJSON {
+            assertions = map (item: item.assertion) remoteSessionModuleTest.config.assertions;
+            packageCount = builtins.length remoteSessionModulePackages;
+          }
+        );
         lspPackages = with pkgs; [
           nodejs
           nil
@@ -233,6 +273,14 @@
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -x ${piHarnessPackage}/bin/pi-playwright
+            test -x ${piHarnessPackage}/bin/pi-matrix-whoami
+            test -x ${remoteSessionPiWrapper}/bin/pi
+            test -x ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami
+            jq -e '.packageCount == 2 and (.assertions | all)' ${remoteSessionModuleReport} >/dev/null
+            grep -F 'PI_MATRIX_HOMESERVER' ${remoteSessionPiWrapper}/bin/pi >/dev/null
+            grep -F '/run/secrets/pi/matrix-test-env' ${remoteSessionPiWrapper}/bin/pi >/dev/null
+            grep -F 'exec ${piHarnessPackage}/bin/pi-matrix-whoami' \
+              ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami >/dev/null
             test -x ${playwrightAgentCli}/bin/playwright-cli-fallback
             ${playwrightAgentCli}/bin/playwright-cli-fallback --version | grep -Fx '0.1.17' >/dev/null
             test ! -e ${piHarnessPackage}/bin/tk
@@ -293,11 +341,14 @@
             tsc --noEmit --project tsconfig.json
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
-            PI_HARNESS_JQ=${lib.getExe pkgs.jq} node --test \
-              "$test_build_dir/tests/github-issues.test.js" \
-              "$test_build_dir/tests/playwright-resolver.test.js" \
-              "$test_build_dir/tests/review-agents.test.js" \
-              "$test_build_dir/tests/worker-runner.test.js"
+            PI_HARNESS_JQ=${lib.getExe pkgs.jq} \
+              PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
+              node --test \
+                "$test_build_dir/tests/github-issues.test.js" \
+                "$test_build_dir/tests/matrix-whoami.test.js" \
+                "$test_build_dir/tests/playwright-resolver.test.js" \
+                "$test_build_dir/tests/review-agents.test.js" \
+                "$test_build_dir/tests/worker-runner.test.js"
           '';
         };
         verifyLspLiveApp = pkgs.writeShellApplication {

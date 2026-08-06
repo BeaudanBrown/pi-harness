@@ -46,28 +46,46 @@ let
     cfg.playwright.package
   ];
   runtimeFeaturesEnabled = cfg.lsp.enable || cfg.diagrams.enable || cfg.playwright.enable;
+  remoteSessionEnabled = cfg.remoteSession.environmentFile != null;
+  nonNullString = value: if value == null then "" else value;
+  runtimeEnvironmentFiles = lib.filter (path: path != null) [
+    cfg.agentgraph.environmentFile
+    cfg.remoteSession.environmentFile
+  ];
+  runtimeEnvironmentSetup = lib.optionalString (runtimeEnvironmentFiles != [ ]) ''
+    set -a
+    ${lib.concatMapStringsSep "\n" (path: ''
+      # shellcheck disable=SC1090
+      . ${lib.escapeShellArg path}
+    '') runtimeEnvironmentFiles}
+    set +a
+  '';
+  remoteSessionEnvironment = lib.optionalString remoteSessionEnabled ''
+    export PI_MATRIX_HOMESERVER=${lib.escapeShellArg (nonNullString cfg.remoteSession.homeserver)}
+    export PI_MATRIX_BOT_USER_ID=${lib.escapeShellArg (nonNullString cfg.remoteSession.botUserId)}
+    export PI_MATRIX_OPERATOR_USER_ID=${lib.escapeShellArg (nonNullString cfg.remoteSession.operatorUserId)}
+    export PI_MATRIX_HOSTNAME=${lib.escapeShellArg (nonNullString cfg.remoteSession.hostName)}
+  '';
   lspExtensionArray =
     if cfg.lsp.enable then
       ''extension_args=(--extension "${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts")''
     else
       "extension_args=()";
 
-  piWithAgentGraphEnv = pkgs.writeShellScriptBin "pi" ''
+  piWithRuntime = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
-    set -a
-    # shellcheck disable=SC1090,SC1091
-    . ${lib.escapeShellArg cfg.agentgraph.environmentFile}
-    set +a
+    ${runtimeEnvironmentSetup}
+    ${remoteSessionEnvironment}
     export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspExtensionArray}
     exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
   '';
 
-  piWithRuntimePath = pkgs.writeShellScriptBin "pi" ''
+  matrixWhoami = pkgs.writeShellScriptBin "pi-matrix-whoami" ''
     set -euo pipefail
-    export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
-    ${lspExtensionArray}
-    exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
+    ${runtimeEnvironmentSetup}
+    ${remoteSessionEnvironment}
+    exec ${cfg.package}/bin/pi-matrix-whoami "$@"
   '';
 in
 {
@@ -92,6 +110,47 @@ in
         Use this for SOPS-managed LLM provider variables such as
         LITELLM_BASE_URL, LITELLM_API_KEY, and AG_LITELLM_DEFAULT_MODEL.
       '';
+    };
+
+    remoteSession = {
+      environmentFile = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = lib.literalExpression ''config.sops.secrets."pi/matrix-env".path'';
+        description = ''
+          Optional SOPS-managed environment file containing only
+          PI_MATRIX_ACCESS_TOKEN. When set, the pi command and
+          pi-matrix-whoami receive the Matrix remote-session configuration.
+        '';
+      };
+
+      homeserver = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "https://matrix.example.com";
+        description = "Matrix homeserver base URL for the host bot.";
+      };
+
+      botUserId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "@pi-host:example.com";
+        description = "Expected Matrix user ID for the host bot.";
+      };
+
+      operatorUserId = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "@operator:example.com";
+        description = "Only Matrix user ID authorized to send remote input.";
+      };
+
+      hostName = lib.mkOption {
+        type = lib.types.nullOr lib.types.str;
+        default = null;
+        example = "workstation";
+        description = "Literal host routing name used by the remote-session extension.";
+      };
     };
 
     diagrams.enable = lib.mkEnableOption "diagram rendering tools for Pi";
@@ -150,14 +209,24 @@ in
         assertion = !cfg.playwright.enable || cfg.playwright.package != null;
         message = "services.pi-harness.playwright.enable requires a Playwright Agent CLI package.";
       }
+      {
+        assertion =
+          !remoteSessionEnabled
+          || lib.all (value: value != null && value != "") [
+            cfg.remoteSession.homeserver
+            cfg.remoteSession.botUserId
+            cfg.remoteSession.operatorUserId
+            cfg.remoteSession.hostName
+          ];
+        message = ''
+          services.pi-harness.remoteSession.environmentFile requires homeserver,
+          botUserId, operatorUserId, and hostName.
+        '';
+      }
     ];
 
     environment.systemPackages =
-      if cfg.agentgraph.environmentFile == null && runtimeFeaturesEnabled then
-        [ piWithRuntimePath ]
-      else if cfg.agentgraph.environmentFile == null then
-        [ cfg.package ]
-      else
-        [ piWithAgentGraphEnv ];
+      (if runtimeEnvironmentFiles != [ ] || runtimeFeaturesEnabled then [ piWithRuntime ] else [ cfg.package ])
+      ++ lib.optional remoteSessionEnabled matrixWhoami;
   };
 }

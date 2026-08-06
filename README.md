@@ -75,6 +75,20 @@ The module installs the packaged `pi` binary. The binary injects the shared
 resource paths directly, while Pi's normal user config directory remains mutable
 for auth, sessions, user settings, and user-installed extras.
 
+## Matrix Host Bot Runtime
+
+The optional `services.pi-harness.remoteSession` settings provide a
+SOPS-backed runtime boundary for one Matrix host bot. The secret environment
+file contains only `PI_MATRIX_ACCESS_TOKEN`; homeserver, expected bot/operator
+MXIDs, and host routing name remain non-secret Nix options. When configured,
+both `pi` and `pi-matrix-whoami` receive those values at runtime without copying
+the token into the package or Nix store.
+
+`pi-matrix-whoami` calls Matrix's authenticated identity endpoint and succeeds
+only when it returns the configured bot MXID. See
+[`docs/matrix-bot-provisioning.md`](docs/matrix-bot-provisioning.md) for the
+non-admin account, stable device, SOPS, activation, and verification runbook.
+
 ## AgentGraph Mode
 
 The AgentGraph extension is sourced from the `agentgraph` flake input and wired
