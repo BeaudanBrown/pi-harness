@@ -114,7 +114,7 @@ in
 
     remoteSession = {
       environmentFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr lib.types.nonEmptyStr;
         default = null;
         example = lib.literalExpression ''config.sops.secrets."pi/matrix-env".path'';
         description = ''
@@ -125,28 +125,28 @@ in
       };
 
       homeserver = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr lib.types.nonEmptyStr;
         default = null;
         example = "https://matrix.example.com";
         description = "Matrix homeserver base URL for the host bot.";
       };
 
       botUserId = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr lib.types.nonEmptyStr;
         default = null;
         example = "@pi-host:example.com";
         description = "Expected Matrix user ID for the host bot.";
       };
 
       operatorUserId = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr lib.types.nonEmptyStr;
         default = null;
         example = "@operator:example.com";
         description = "Only Matrix user ID authorized to send remote input.";
       };
 
       hostName = lib.mkOption {
-        type = lib.types.nullOr lib.types.str;
+        type = lib.types.nullOr lib.types.nonEmptyStr;
         default = null;
         example = "workstation";
         description = "Literal host routing name used by the remote-session extension.";
@@ -212,7 +212,7 @@ in
       {
         assertion =
           !remoteSessionEnabled
-          || lib.all (value: value != null && value != "") [
+          || lib.all (value: value != null) [
             cfg.remoteSession.homeserver
             cfg.remoteSession.botUserId
             cfg.remoteSession.operatorUserId
