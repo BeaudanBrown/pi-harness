@@ -222,6 +222,7 @@
             test -f config/agent/extensions/review-agents/index.ts
             test -f config/agent/extensions/remote-session/index.ts
             test -f config/agent/extensions/remote-session/matrix-client.ts
+            test -f config/agent/extensions/remote-session/state-store.ts
             test -f config/agent/extensions/nix-runtime/index.ts
             test -f config/agent/extensions/codex-fast/index.ts
             test -f config/agent/extensions/tmux-cursor-focus/index.ts
@@ -237,6 +238,7 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/matrix-client.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/state-store.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts
@@ -359,6 +361,7 @@
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
+                "$test_build_dir/tests/remote-session-state.test.js" \
                 "$test_build_dir/tests/playwright-resolver.test.js" \
                 "$test_build_dir/tests/review-agents.test.js" \
                 "$test_build_dir/tests/worker-runner.test.js"

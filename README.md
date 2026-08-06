@@ -96,8 +96,12 @@ only when it returns the configured bot MXID. The packaged `remote-session`
 extension is inert until `/remote on <concept-name>` verifies that identity,
 creates a private room, and starts polling. `/remote status` reports non-secret
 binding state; `/remote off` disconnects without deleting the room or session
-binding. See [`docs/matrix-bot-provisioning.md`](docs/matrix-bot-provisioning.md)
-for provisioning and the live round-trip smoke test.
+binding. Bound conversations reconnect across restart, resume, compaction, and
+fork using synchronized shared binding metadata plus bot-specific progress
+files. See [`docs/matrix-bot-provisioning.md`](docs/matrix-bot-provisioning.md)
+for provisioning and the live round-trip smoke test, and
+[`docs/matrix-remote-session.md`](docs/matrix-remote-session.md) for durable
+state and interruption semantics.
 
 ## AgentGraph Mode
 

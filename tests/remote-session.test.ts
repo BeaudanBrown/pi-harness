@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtemp, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
@@ -8,7 +11,14 @@ import {
 	routeMatrixTextEvent,
 	type MatrixConfig,
 } from "../config/agent/extensions/remote-session/matrix-client.js";
-import remoteSessionExtension, { restoreRoomBinding } from "../config/agent/extensions/remote-session/index.js";
+import remoteSessionExtension, {
+	recoverInboundTurn,
+	restoreRoomBinding,
+} from "../config/agent/extensions/remote-session/index.js";
+import {
+	RemoteSessionStateStore,
+	stateRootForSessionDirectory,
+} from "../config/agent/extensions/remote-session/state-store.js";
 
 const config: MatrixConfig = {
 	homeserver: "https://matrix.example.com",
@@ -179,8 +189,57 @@ test("restores the latest room binding from the active session branch", () => {
 			{ type: "custom", customType: "remote-session.binding", data: { version: 1, roomId: "!old", conceptName: "old" } },
 			{ type: "message" },
 			{ type: "custom", customType: "remote-session.binding", data: { version: 1, roomId: "!new", conceptName: "new" } },
+			{ type: "compaction", summary: "compacted conversation", firstKeptEntryId: "entry-1" },
 		]),
 		{ version: 1, roomId: "!new", conceptName: "new" },
+	);
+});
+
+test("inbound recovery distinguishes missing, injected, and answered crash windows", () => {
+	const marker = {
+		type: "custom",
+		customType: "remote-session.inbound",
+		data: { version: 1, eventId: "$recover", status: "injecting", prompt: "Remote prompt" },
+	};
+	assert.deepEqual(recoverInboundTurn([], "$recover", "Remote prompt"), { state: "missing" });
+	assert.deepEqual(recoverInboundTurn([marker], "$recover", "Remote prompt"), { state: "missing" });
+	assert.deepEqual(
+		recoverInboundTurn(
+			[marker, { type: "message", message: { role: "user", content: [{ type: "text", text: "Remote prompt" }] } }],
+			"$recover",
+			"Remote prompt",
+		),
+		{ state: "injected" },
+	);
+	assert.deepEqual(
+		recoverInboundTurn(
+			[
+				marker,
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "Remote prompt" }] } },
+				{
+					type: "message",
+					message: {
+						role: "assistant",
+						content: [{ type: "text", text: "Working" }, { type: "toolCall", name: "bash" }],
+					},
+				},
+			],
+			"$recover",
+			"Remote prompt",
+		),
+		{ state: "injected" },
+	);
+	assert.deepEqual(
+		recoverInboundTurn(
+			[
+				marker,
+				{ type: "message", message: { role: "user", content: [{ type: "text", text: "Remote prompt" }] } },
+				{ type: "message", message: { role: "assistant", content: [{ type: "text", text: "Recovered answer" }] } },
+			],
+			"$recover",
+			"Remote prompt",
+		),
+		{ state: "answered", answer: "Recovered answer" },
 	);
 });
 
@@ -194,7 +253,12 @@ test("operator Matrix turns receive their own final answers without capturing lo
 	const userMessages: Array<{ text: string; deliverAs: string | undefined }> = [];
 	const notifications: string[] = [];
 	const statuses: Array<string | undefined> = [];
-	const sentMessages: unknown[] = [];
+	const sendAttempts: Array<{ transactionPath: string; body: unknown }> = [];
+	let failedSecondAnswer = false;
+	let createRoomCount = 0;
+	const syncCursors: Array<string | null> = [];
+	let sessionId = "roundtrip-session";
+	let sessionBranch: unknown[] = [];
 
 	const pi = {
 		on(event: string, handler: Handler) {
@@ -206,6 +270,7 @@ test("operator Matrix turns receive their own final answers without capturing lo
 		},
 		appendEntry(customType: string, data: unknown) {
 			appendedEntries.push({ customType, data });
+			sessionBranch.push({ type: "custom", customType, data });
 		},
 		sendUserMessage(text: string, options?: { deliverAs?: string }) {
 			userMessages.push({ text, deliverAs: options?.deliverAs });
@@ -216,6 +281,7 @@ test("operator Matrix turns receive their own final answers without capturing lo
 		},
 	} as unknown as ExtensionAPI;
 
+	const sessionRoot = await mkdtemp(join(tmpdir(), "pi-remote-extension-"));
 	const context = {
 		hasUI: true,
 		ui: {
@@ -226,7 +292,11 @@ test("operator Matrix turns receive their own final answers without capturing lo
 				statuses.push(value);
 			},
 		},
-		sessionManager: { getBranch: () => [] },
+		sessionManager: {
+			getBranch: () => sessionBranch,
+			getSessionId: () => sessionId,
+			getSessionDir: () => join(sessionRoot, "--project--"),
+		},
 	} as unknown as ExtensionContext;
 
 	const environment = {
@@ -246,16 +316,21 @@ test("operator Matrix turns receive their own final answers without capturing lo
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(input.toString());
 		if (url.pathname.endsWith("/account/whoami")) return jsonResponse({ user_id: config.botUserId });
-		if (url.pathname.endsWith("/createRoom")) return jsonResponse({ room_id: "!roundtrip:example.com" });
+		if (url.pathname.endsWith("/createRoom")) {
+			createRoomCount += 1;
+			return jsonResponse({ room_id: "!roundtrip:example.com" });
+		}
 		if (url.pathname.endsWith("/sync")) {
+			syncCursors.push(url.searchParams.get("since"));
 			syncCount += 1;
-			if (syncCount <= 2) {
+			if (syncCount === 1) return jsonResponse({ next_batch: "cursor-empty", rooms: { join: {} } });
+			if (syncCount <= 3) {
 				const prompt =
-					syncCount === 1
+					syncCount === 2
 						? "@grill Reply exactly: Matrix round trip succeeded"
 						: "@grill Reply exactly: Second Matrix turn succeeded";
 				return jsonResponse({
-					next_batch: `cursor-${syncCount}`,
+					next_batch: `cursor-${syncCount - 1}`,
 					rooms: {
 						join: {
 							"!roundtrip:example.com": {
@@ -263,7 +338,7 @@ test("operator Matrix turns receive their own final answers without capturing lo
 									events: [
 										{
 											type: "m.room.message",
-											event_id: `$operator-prompt-${syncCount}`,
+											event_id: `$operator-prompt-${syncCount - 1}`,
 											sender: config.operatorUserId,
 											content: { msgtype: "m.text", body: prompt },
 										},
@@ -285,7 +360,12 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			});
 		}
 		if (url.pathname.includes("/send/m.room.message/")) {
-			sentMessages.push(JSON.parse(String(init?.body)));
+			const body = JSON.parse(String(init?.body)) as { body?: unknown };
+			sendAttempts.push({ transactionPath: url.pathname, body });
+			if (body.body === "Second Matrix turn succeeded" && !failedSecondAnswer) {
+				failedSecondAnswer = true;
+				return jsonResponse({ error: "retry this transaction" }, 503);
+			}
 			return jsonResponse({ event_id: "$bot-answer" });
 		}
 		throw new Error(`Unexpected Matrix request: ${url.pathname}`);
@@ -313,32 +393,33 @@ test("operator Matrix turns receive their own final answers without capturing lo
 		);
 		await handlers.get("before_agent_start")?.({}, context);
 		await remoteCommand("on matrix round trip", context);
-		await waitFor(() => userMessages.length === 2);
+		await waitFor(
+			() =>
+				userMessages.length === 2 &&
+				appendedEntries.filter(
+					(entry) =>
+						entry.customType === "remote-session.inbound" &&
+						typeof entry.data === "object" &&
+						entry.data !== null &&
+						(entry.data as { status?: unknown }).status === "injected",
+				).length === 2,
+		);
+		assert.equal(syncCursors[1], "cursor-empty");
 
-		assert.deepEqual(appendedEntries, [
-			{
-				customType: "remote-session.binding",
-				data: { version: 1, roomId: "!roundtrip:example.com", conceptName: "matrix round trip" },
-			},
-			{
-				customType: "remote-session.binding",
-				data: {
-					version: 1,
-					roomId: "!roundtrip:example.com",
-					conceptName: "matrix round trip",
-					since: "cursor-1",
+		assert.deepEqual(
+			appendedEntries.filter((entry) => entry.customType === "remote-session.binding"),
+			[
+				{
+					customType: "remote-session.binding",
+					data: {
+						version: 2,
+						bindingId: "room-006d66143d62a95c072f8e8fc50e3254",
+						roomId: "!roundtrip:example.com",
+						conceptName: "matrix round trip",
+					},
 				},
-			},
-			{
-				customType: "remote-session.binding",
-				data: {
-					version: 1,
-					roomId: "!roundtrip:example.com",
-					conceptName: "matrix round trip",
-					since: "cursor-2",
-				},
-			},
-		]);
+			],
+		);
 		assert.deepEqual(userMessages, [
 			{ text: "Reply exactly: Matrix round trip succeeded", deliverAs: "followUp" },
 			{ text: "Reply exactly: Second Matrix turn succeeded", deliverAs: "followUp" },
@@ -353,7 +434,7 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			},
 			context,
 		);
-		assert.deepEqual(sentMessages, []);
+		assert.equal(sendAttempts.length, 0);
 
 		await handlers.get("before_agent_start")?.({}, context);
 		await handlers.get("agent_end")?.(
@@ -375,14 +456,75 @@ test("operator Matrix turns receive their own final answers without capturing lo
 			},
 			context,
 		);
-		assert.deepEqual(sentMessages, [
-			{ msgtype: "m.text", body: "Matrix round trip succeeded" },
-			{ msgtype: "m.text", body: "Second Matrix turn succeeded" },
-		]);
+		assert.deepEqual(
+			sendAttempts.map((attempt) => attempt.body),
+			[
+				{ msgtype: "m.text", body: "Matrix round trip succeeded" },
+				{ msgtype: "m.text", body: "Second Matrix turn succeeded" },
+			],
+		);
 
+		await remoteCommand("off", context);
+		const externalStore = new RemoteSessionStateStore(
+			stateRootForSessionDirectory(join(sessionRoot, "--project--")),
+			config.botUserId,
+		);
+		await externalStore.acceptSync("room-006d66143d62a95c072f8e8fc50e3254", "cursor-crash", [
+			{ eventId: "$accepted-before-crash", prompt: "Recover accepted prompt" },
+		]);
+		await handlers.get("session_start")?.({ reason: "resume" }, context);
+		await waitFor(
+			() => sendAttempts.length === 3 && userMessages.length === 3 && syncCursors.at(-1) === "cursor-crash",
+		);
+		assert.equal(sendAttempts[1]?.transactionPath, sendAttempts[2]?.transactionPath);
+		assert.deepEqual(sendAttempts[2]?.body, { msgtype: "m.text", body: "Second Matrix turn succeeded" });
+		assert.equal(userMessages.at(-1)?.text, "Recover accepted prompt");
+		assert.equal(syncCursors.at(-1), "cursor-crash");
+
+		await handlers.get("before_agent_start")?.({}, context);
+		await handlers.get("agent_end")?.(
+			{
+				messages: [
+					{ role: "user", content: [{ type: "text", text: "Recover accepted prompt" }] },
+					{ role: "assistant", content: [{ type: "text", text: "Recovered accepted answer" }] },
+				],
+			},
+			context,
+		);
+		assert.deepEqual(sendAttempts.at(-1)?.body, { msgtype: "m.text", body: "Recovered accepted answer" });
+		assert.equal(createRoomCount, 1);
+
+		await remoteCommand("on conflicting concept", context);
+		assert.ok(notifications.some((message) => message.includes("already bound to concept: matrix round trip")));
 		await remoteCommand("status", context);
 		assert.ok(notifications.some((message) => message.includes("Matrix remote: connected")));
 		assert.ok(statuses.includes("remote: matrix round trip"));
+		await remoteCommand("off", context);
+
+		await remoteCommand("on matrix round trip", context);
+		assert.equal(createRoomCount, 1);
+		await remoteCommand("off", context);
+
+		const parentSessionFile = join(sessionRoot, "parent.jsonl");
+		await writeFile(
+			parentSessionFile,
+			`${JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: "/project" })}\n`,
+		);
+		sessionId = "fork-session";
+		sessionBranch = [];
+		await handlers.get("session_start")?.(
+			{ reason: "fork", previousSessionFile: parentSessionFile },
+			context,
+		);
+		assert.equal(createRoomCount, 1);
+		assert.ok(
+			appendedEntries.some(
+				(entry) =>
+					typeof entry.data === "object" &&
+					entry.data !== null &&
+					(entry.data as { version?: unknown }).version === 2,
+			),
+		);
 		await remoteCommand("off", context);
 		assert.equal(statuses.at(-1), undefined);
 	} finally {
@@ -416,9 +558,14 @@ test("remote off cancels activation before a room can be created", async () => {
 			assert.fail("Activation cancellation must not inject a prompt");
 		},
 	} as unknown as ExtensionAPI;
+	const sessionRoot = await mkdtemp(join(tmpdir(), "pi-remote-cancel-"));
 	const context = {
 		hasUI: false,
-		sessionManager: { getBranch: () => [] },
+		sessionManager: {
+			getBranch: () => [],
+			getSessionId: () => "cancel-session",
+			getSessionDir: () => join(sessionRoot, "--project--"),
+		},
 	} as unknown as ExtensionContext;
 
 	const environment = {
