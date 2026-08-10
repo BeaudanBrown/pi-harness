@@ -14,12 +14,17 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
-	isWorkerMode,
+	nextWorkerPresetSelection,
+	parseWorkerModelCommand,
 	parseWorkerModelRef,
 	workerModelCandidates,
-	workerModelForMode,
-	type WorkerMode,
+	workerSelectionFromSettings,
+	workerSelectionLabel,
+	workerSelectionModelRef,
+	workerSelectionToSettings,
+	type WorkerModelSelection as WorkerSelection,
 } from "./core.js";
+import { selectWorkerModel } from "./model-selector.js";
 
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_LOG_BYTES_FOR_WORKER = 80_000;
@@ -148,17 +153,8 @@ async function runCommand(
 const STATUS_KEY = "worker-model";
 const SETTINGS_KEY = "pi-worker-runner";
 
-type WorkerSettings = {
-	mode?: WorkerMode;
-};
-
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function asWorkerSettings(value: unknown): WorkerSettings | undefined {
-	if (!isRecord(value) || !isWorkerMode(value.mode)) return undefined;
-	return { mode: value.mode };
 }
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
@@ -180,16 +176,18 @@ function workerSettingsPath(): string {
 	return path.join(getAgentDir(), "settings.json");
 }
 
-async function loadWorkerMode(): Promise<WorkerMode> {
+async function loadWorkerSelection(): Promise<WorkerSelection> {
 	const settings = await readJsonObject(workerSettingsPath());
-	return asWorkerSettings(settings[SETTINGS_KEY])?.mode ?? "spark";
+	return workerSelectionFromSettings(settings[SETTINGS_KEY]);
 }
 
-async function persistWorkerMode(mode: WorkerMode): Promise<void> {
+async function persistWorkerSelection(selection: WorkerSelection): Promise<void> {
 	const settingsPath = workerSettingsPath();
 	const settings = await readJsonObject(settingsPath);
 	const existing = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
-	settings[SETTINGS_KEY] = { ...existing, mode };
+	const next: Record<string, unknown> = { ...existing, ...workerSelectionToSettings(selection) };
+	delete next.mode;
+	settings[SETTINGS_KEY] = next;
 
 	await mkdir(path.dirname(settingsPath), { recursive: true });
 	const tempPath = `${settingsPath}.tmp-${process.pid}-${Date.now()}`;
@@ -197,13 +195,13 @@ async function persistWorkerMode(mode: WorkerMode): Promise<void> {
 	await rename(tempPath, settingsPath);
 }
 
-type WorkerModelSelection =
+type ResolvedWorkerModel =
 	| { model: NonNullable<ExtensionContext["model"]>; modelRef: string }
 	| { error: string };
 
-function selectedWorkerModel(ctx: ExtensionContext, mode: WorkerMode): WorkerModelSelection {
+function selectedWorkerModel(ctx: ExtensionContext, selection: WorkerSelection): ResolvedWorkerModel {
 	const candidates = workerModelCandidates({
-		mode,
+		selection,
 		environmentOverride: process.env.PI_HARNESS_WORKER_MODEL,
 		parentModel: ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined,
 	});
@@ -217,7 +215,7 @@ function selectedWorkerModel(ctx: ExtensionContext, mode: WorkerMode): WorkerMod
 	}
 
 	const override = process.env.PI_HARNESS_WORKER_MODEL?.trim();
-	const label = override ? `PI_HARNESS_WORKER_MODEL (${override})` : `${mode} worker model (${first})`;
+	const label = override ? `PI_HARNESS_WORKER_MODEL (${override})` : `worker model (${first})`;
 	return { error: `${label} is not registered or has no configured authentication.` };
 }
 
@@ -261,12 +259,12 @@ function extractAssistantText(session: { messages: unknown[] }): string {
 
 async function askWorker(
 	ctx: ExtensionContext,
-	mode: WorkerMode,
+	selection: WorkerSelection,
 	params: RunWorkerParamsType,
 	result: CommandResult,
 	logExcerpt: string,
 ): Promise<{ summary: string; modelRef: string }> {
-	const selected = selectedWorkerModel(ctx, mode);
+	const selected = selectedWorkerModel(ctx, selection);
 	if (!("model" in selected)) throw new Error(selected.error);
 	const { model, modelRef } = selected;
 
@@ -306,7 +304,7 @@ function fallbackSummary(params: RunWorkerParamsType, result: CommandResult): st
 }
 
 export default function workerRunnerExtension(pi: ExtensionAPI): void {
-	let workerMode: WorkerMode = "spark";
+	let workerSelection: WorkerSelection = { kind: "preset", preset: "spark" };
 	let settingsWriteQueue: Promise<void> = Promise.resolve();
 
 	function updateStatus(ctx: ExtensionContext): void {
@@ -317,13 +315,16 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 			return;
 		}
 
-		const selected = selectedWorkerModel(ctx, workerMode);
-		const label = `worker: ${workerMode}`;
-		ctx.ui.setStatus(STATUS_KEY, "model" in selected ? ctx.ui.theme.fg("accent", label) : ctx.ui.theme.fg("warning", `${label} (inactive)`));
+		const selected = selectedWorkerModel(ctx, workerSelection);
+		const label = `worker: ${workerSelectionLabel(workerSelection)}`;
+		ctx.ui.setStatus(
+			STATUS_KEY,
+			"model" in selected ? ctx.ui.theme.fg("accent", label) : ctx.ui.theme.fg("warning", `${label} (inactive)`),
+		);
 	}
 
-	function persistMode(mode: WorkerMode, ctx: ExtensionContext): void {
-		settingsWriteQueue = settingsWriteQueue.catch(() => undefined).then(() => persistWorkerMode(mode));
+	function persistSelection(selection: WorkerSelection, ctx: ExtensionContext): void {
+		settingsWriteQueue = settingsWriteQueue.catch(() => undefined).then(() => persistWorkerSelection(selection));
 		void settingsWriteQueue.catch((error: unknown) => {
 			if (!ctx.hasUI) return;
 			const message = error instanceof Error ? error.message : String(error);
@@ -331,22 +332,27 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 		});
 	}
 
-	function setWorkerMode(mode: WorkerMode, ctx: ExtensionContext, options?: { persist?: boolean; notify?: boolean }): boolean {
-		const selected = selectedWorkerModel(ctx, mode);
+	function setWorkerSelection(
+		selection: WorkerSelection,
+		ctx: ExtensionContext,
+		options?: { persist?: boolean; notify?: boolean },
+	): boolean {
+		const selected = selectedWorkerModel(ctx, selection);
 		if (!process.env.PI_HARNESS_WORKER_MODEL?.trim() && "error" in selected) {
 			if (ctx.hasUI) ctx.ui.notify(`worker-model: ${selected.error}`, "error");
 			return false;
 		}
 
-		workerMode = mode;
-		if (options?.persist !== false) persistMode(mode, ctx);
+		workerSelection = selection;
+		if (options?.persist !== false) persistSelection(selection, ctx);
 		updateStatus(ctx);
 		if (options?.notify !== false && ctx.hasUI) {
 			const override = process.env.PI_HARNESS_WORKER_MODEL?.trim();
+			const preference = workerSelectionLabel(selection);
 			ctx.ui.notify(
 				override
-					? `Worker preference saved as ${mode}, but PI_HARNESS_WORKER_MODEL (${override}) is active.`
-					: `Worker model set to ${mode} (${workerModelForMode(mode)}).`,
+					? `Worker preference saved as ${preference}, but PI_HARNESS_WORKER_MODEL (${override}) is active.`
+					: `Worker model set to ${preference} (${workerSelectionModelRef(selection)}).`,
 				"info",
 			);
 		}
@@ -354,29 +360,55 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 	}
 
 	pi.registerCommand("worker-model", {
-		description: "Toggle or set the delegated worker model: spark, luna, or status",
+		description: "Toggle, search, inspect, or directly set the delegated worker model",
+		getArgumentCompletions: (prefix) => {
+			const options = ["spark", "luna", "select", "status"];
+			const matches = options.filter((option) => option.startsWith(prefix.toLowerCase()));
+			return matches.length > 0 ? matches.map((value) => ({ value, label: value })) : null;
+		},
 		handler: async (args, ctx) => {
-			const requested = args.trim().toLowerCase();
-			if (requested === "status") {
+			const command = parseWorkerModelCommand(args);
+			if (command.type === "status") {
 				const override = process.env.PI_HARNESS_WORKER_MODEL?.trim();
-				const selected = selectedWorkerModel(ctx, workerMode);
-				const detail = override ? `PI_HARNESS_WORKER_MODEL=${override}` : workerModelForMode(workerMode);
-				ctx.ui.notify(`Worker preference: ${workerMode}; effective model: ${detail}.${"error" in selected ? ` ${selected.error}` : ""}`, "info");
+				const selected = selectedWorkerModel(ctx, workerSelection);
+				const detail = override
+					? `PI_HARNESS_WORKER_MODEL=${override}`
+					: workerSelectionModelRef(workerSelection);
+				ctx.ui.notify(
+					`Worker preference: ${workerSelectionLabel(workerSelection)}; effective model: ${detail}.${"error" in selected ? ` ${selected.error}` : ""}`,
+					"info",
+				);
 				return;
 			}
-			if (requested && !isWorkerMode(requested)) {
-				ctx.ui.notify("Usage: /worker-model [spark|luna|status]", "warning");
+			if (command.type === "select") {
+				const mode = (ctx as typeof ctx & { mode?: string }).mode;
+				if (mode !== "tui") {
+					ctx.ui.notify("/worker-model select requires TUI mode; use /worker-model provider/model instead", "warning");
+					return;
+				}
+				const modelRef = await selectWorkerModel(ctx, workerSelectionModelRef(workerSelection));
+				if (modelRef) setWorkerSelection({ kind: "model", modelRef }, ctx);
 				return;
 			}
-			const nextMode: WorkerMode = isWorkerMode(requested) ? requested : workerMode === "spark" ? "luna" : "spark";
-			setWorkerMode(nextMode, ctx);
+			if (command.type === "invalid") {
+				ctx.ui.notify("Usage: /worker-model [spark|luna|select|status|provider/model]", "warning");
+				return;
+			}
+			if (command.type === "model") ctx.modelRegistry.refresh();
+			const next =
+				command.type === "toggle"
+					? nextWorkerPresetSelection(workerSelection)
+					: command.type === "preset"
+						? { kind: "preset" as const, preset: command.preset }
+						: { kind: "model" as const, modelRef: command.modelRef };
+			setWorkerSelection(next, ctx);
 		},
 	});
 
 	pi.on("session_start", async (_event, ctx) => {
 		await settingsWriteQueue.catch(() => undefined);
 		try {
-			workerMode = await loadWorkerMode();
+			workerSelection = await loadWorkerSelection();
 		} catch (error) {
 			if (ctx.hasUI) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -425,7 +457,7 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 			let workerError: string | undefined;
 			try {
 				onUpdate?.({ content: [{ type: "text", text: `Delegating log summary: ${params.name}` }], details: { log: repoRelative(ctx.cwd, logPath) } });
-				const worker = await askWorker(ctx, workerMode, params, result, logExcerpt);
+				const worker = await askWorker(ctx, workerSelection, params, result, logExcerpt);
 				workerSummary = worker.summary;
 				workerModel = worker.modelRef;
 				if (!workerSummary) workerSummary = fallbackSummary(params, result);
