@@ -54,6 +54,7 @@ export PI_R_WORKER_SCRIPT="\''${PI_R_WORKER_SCRIPT:-${piRPackage.resourcePaths.w
 export PI_R_TARGET_RUNNER_SCRIPT="\''${PI_R_TARGET_RUNNER_SCRIPT:-${piRPackage.resourcePaths.targetRunner}}"
 export PI_R_ARTIFACT_INSPECTOR_SCRIPT="\''${PI_R_ARTIFACT_INSPECTOR_SCRIPT:-${piRPackage.resourcePaths.artifactInspector}}"
 export PI_R_NIXPKGS_PATH="\''${PI_R_NIXPKGS_PATH:-${piRPackage.resourcePaths.nixpkgs}}"
+export PI_R_NIXPKGS_PIN_PATH="\''${PI_R_NIXPKGS_PIN_PATH:-${piRPackage.resourcePaths.nixpkgsPin}}"
 export PI_R_SCOUT_PI="\''${PI_R_SCOUT_PI:-${lib.getExe piPackage}}"
 export PI_R_SCOUT_EXTENSION="\''${PI_R_SCOUT_EXTENSION:-${piRPackage.resourcePaths.scoutExtension}}"
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
@@ -136,6 +137,7 @@ export PI_R_WORKER_SCRIPT="\''${PI_R_WORKER_SCRIPT:-${piRPackage.resourcePaths.w
 export PI_R_TARGET_RUNNER_SCRIPT="\''${PI_R_TARGET_RUNNER_SCRIPT:-${piRPackage.resourcePaths.targetRunner}}"
 export PI_R_ARTIFACT_INSPECTOR_SCRIPT="\''${PI_R_ARTIFACT_INSPECTOR_SCRIPT:-${piRPackage.resourcePaths.artifactInspector}}"
 export PI_R_NIXPKGS_PATH="\''${PI_R_NIXPKGS_PATH:-${piRPackage.resourcePaths.nixpkgs}}"
+export PI_R_NIXPKGS_PIN_PATH="\''${PI_R_NIXPKGS_PIN_PATH:-${piRPackage.resourcePaths.nixpkgsPin}}"
 export PI_R_SCOUT_PI="\''${PI_R_SCOUT_PI:-${lib.getExe piPackage}}"
 export PI_R_SCOUT_EXTENSION="\''${PI_R_SCOUT_EXTENSION:-${piRPackage.resourcePaths.scoutExtension}}"
 export PI_R_INITIAL_TOOLS="\''${PI_R_INITIAL_TOOLS:-read,bash,edit,write,grep,find,ls}"

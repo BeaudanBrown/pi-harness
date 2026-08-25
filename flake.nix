@@ -305,6 +305,9 @@
             test -f ${piRPackage.resourcePaths.formatter}
             test -x ${piRPackage.resourcePaths.parserGrammar}
             test -f ${piRPackage.resourcePaths.parserQuery}
+            test -f ${piRPackage.resourcePaths.nixpkgsPin}
+            grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F 'expandPromptTemplates: options?.expandPromptTemplates ?? false' \
               ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js >/dev/null
             grep -F 'expandPromptTemplates?: boolean' \
