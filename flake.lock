@@ -228,11 +228,11 @@
         ]
       },
       "locked": {
-        "lastModified": 1787634891,
-        "narHash": "sha256-SK6EciOhp3PiYDlI8JKEAiIalgThVZvcagfikFMzpls=",
+        "lastModified": 1787650129,
+        "narHash": "sha256-JDwTPe56WonA2Ngfzs9ce70CoALYJOzjLhHzFkbbShc=",
         "owner": "BeaudanBrown",
         "repo": "pi-r",
-        "rev": "3d2947adcaef404a1e4815f3f20ad3e893a3fdae",
+        "rev": "d9995b5134518adfd94d34c24988afec2b0003f4",
         "type": "github"
       },
       "original": {
