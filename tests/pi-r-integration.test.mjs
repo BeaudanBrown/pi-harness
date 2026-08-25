@@ -89,7 +89,16 @@ export default function (pi) {
   ];
   const { stdout } = await rpc(launcher, ["--mode", "rpc", "--no-session", "--extension", probePath], {
     cwd: root,
-    env: { ...process.env, HOME: join(root, "home"), PI_R_PROBE: resultPath },
+    env: {
+      ...process.env,
+      HOME: join(root, "home"),
+      PI_R_PROBE: resultPath,
+      PI_R_RESOURCE_ROOT: "/stale/pi-r-resources",
+      PI_R_TREE_SITTER: "/stale/tree-sitter",
+      PI_R_RSCRIPT: "/stale/Rscript",
+      PI_R_WORKER_RSCRIPT: "/stale/Rscript",
+      PI_R_WORKER_SCRIPT: "/stale/worker.R",
+    },
     stdio: ["pipe", "pipe", "pipe"],
   }, commands);
   const events = stdout.trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
