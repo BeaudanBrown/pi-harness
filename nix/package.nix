@@ -4,6 +4,7 @@
   piPackage,
   piHarnessResources,
   mattPocockSkillsResources,
+  piRPackage,
   agentgraphPackage ? null,
   agentgraphPostgresPackage ? null,
   agentgraphPiResources ? null,
@@ -39,6 +40,22 @@ stdenvNoCC.mkDerivation {
 #!/usr/bin/env bash
 set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
+export PI_R_RESOURCE_ROOT="\''${PI_R_RESOURCE_ROOT:-${piRPackage.resourcePaths.root}}"
+export PI_R_TREE_SITTER="\''${PI_R_TREE_SITTER:-${piRPackage.resourcePaths.parser}}"
+export PI_R_TREE_SITTER_R="\''${PI_R_TREE_SITTER_R:-${piRPackage.resourcePaths.parserGrammar}}"
+export PI_R_TREE_SITTER_QUERY="\''${PI_R_TREE_SITTER_QUERY:-${piRPackage.resourcePaths.parserQuery}}"
+export PI_R_RSCRIPT="\''${PI_R_RSCRIPT:-${piRPackage.resourcePaths.rscript}}"
+export PI_R_BASE_RSCRIPT="\''${PI_R_BASE_RSCRIPT:-${piRPackage.resourcePaths.rscript}}"
+export PI_R_FORMATTER_SCRIPT="\''${PI_R_FORMATTER_SCRIPT:-${piRPackage.resourcePaths.formatter}}"
+export PI_R_CONTRACT_READER="\''${PI_R_CONTRACT_READER:-${piRPackage.resourcePaths.contractReader}}"
+export PI_R_BWRAP="\''${PI_R_BWRAP:-${piRPackage.resourcePaths.sandbox}}"
+export PI_R_WORKER_RSCRIPT="\''${PI_R_WORKER_RSCRIPT:-${piRPackage.resourcePaths.rscript}}"
+export PI_R_WORKER_SCRIPT="\''${PI_R_WORKER_SCRIPT:-${piRPackage.resourcePaths.worker}}"
+export PI_R_TARGET_RUNNER_SCRIPT="\''${PI_R_TARGET_RUNNER_SCRIPT:-${piRPackage.resourcePaths.targetRunner}}"
+export PI_R_ARTIFACT_INSPECTOR_SCRIPT="\''${PI_R_ARTIFACT_INSPECTOR_SCRIPT:-${piRPackage.resourcePaths.artifactInspector}}"
+export PI_R_NIXPKGS_PATH="\''${PI_R_NIXPKGS_PATH:-${piRPackage.resourcePaths.nixpkgs}}"
+export PI_R_SCOUT_PI="\''${PI_R_SCOUT_PI:-${lib.getExe piPackage}}"
+export PI_R_SCOUT_EXTENSION="\''${PI_R_SCOUT_EXTENSION:-${piRPackage.resourcePaths.scoutExtension}}"
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
 ${lib.optionalString (fzf != null) ''export PI_HARNESS_FZF="\''${PI_HARNESS_FZF:-${fzf}/bin/fzf}"''}
@@ -57,6 +74,7 @@ case "\''${1-}" in
 esac
 
 resource_args=(
+  --extension "${piRPackage.resourcePaths.extension}"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
@@ -100,6 +118,37 @@ exec "${lib.getExe piPackage}" "\''${resource_args[@]}" "\$@"
 EOF
     chmod +x "$out/bin/pi"
 
+    cat > "$out/bin/pi-r-local" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
+export PI_R_RESOURCE_ROOT="\''${PI_R_RESOURCE_ROOT:-${piRPackage.resourcePaths.root}}"
+export PI_R_TREE_SITTER="\''${PI_R_TREE_SITTER:-${piRPackage.resourcePaths.parser}}"
+export PI_R_TREE_SITTER_R="\''${PI_R_TREE_SITTER_R:-${piRPackage.resourcePaths.parserGrammar}}"
+export PI_R_TREE_SITTER_QUERY="\''${PI_R_TREE_SITTER_QUERY:-${piRPackage.resourcePaths.parserQuery}}"
+export PI_R_RSCRIPT="\''${PI_R_RSCRIPT:-${piRPackage.resourcePaths.rscript}}"
+export PI_R_BASE_RSCRIPT="\''${PI_R_BASE_RSCRIPT:-${piRPackage.resourcePaths.rscript}}"
+export PI_R_FORMATTER_SCRIPT="\''${PI_R_FORMATTER_SCRIPT:-${piRPackage.resourcePaths.formatter}}"
+export PI_R_CONTRACT_READER="\''${PI_R_CONTRACT_READER:-${piRPackage.resourcePaths.contractReader}}"
+export PI_R_BWRAP="\''${PI_R_BWRAP:-${piRPackage.resourcePaths.sandbox}}"
+export PI_R_WORKER_RSCRIPT="\''${PI_R_WORKER_RSCRIPT:-${piRPackage.resourcePaths.rscript}}"
+export PI_R_WORKER_SCRIPT="\''${PI_R_WORKER_SCRIPT:-${piRPackage.resourcePaths.worker}}"
+export PI_R_TARGET_RUNNER_SCRIPT="\''${PI_R_TARGET_RUNNER_SCRIPT:-${piRPackage.resourcePaths.targetRunner}}"
+export PI_R_ARTIFACT_INSPECTOR_SCRIPT="\''${PI_R_ARTIFACT_INSPECTOR_SCRIPT:-${piRPackage.resourcePaths.artifactInspector}}"
+export PI_R_NIXPKGS_PATH="\''${PI_R_NIXPKGS_PATH:-${piRPackage.resourcePaths.nixpkgs}}"
+export PI_R_SCOUT_PI="\''${PI_R_SCOUT_PI:-${lib.getExe piPackage}}"
+export PI_R_SCOUT_EXTENSION="\''${PI_R_SCOUT_EXTENSION:-${piRPackage.resourcePaths.scoutExtension}}"
+export PI_R_INITIAL_TOOLS="\''${PI_R_INITIAL_TOOLS:-read,bash,edit,write,grep,find,ls}"
+exec "${lib.getExe piPackage}" \
+  --no-extensions \
+  --no-skills \
+  --no-context-files \
+  --extension "${piRPackage.resourcePaths.extension}" \
+  --skill "${piRPackage.resourcePaths.skill}" \
+  "\$@"
+EOF
+    chmod +x "$out/bin/pi-r-local"
+
     cp bin/pi-playwright "$out/bin/pi-playwright"
     substituteInPlace "$out/bin/pi-playwright" \
       --replace-fail '@PI_HARNESS_JQ@' '${lib.getExe jq}'
@@ -121,6 +170,7 @@ EOF
 
   passthru = {
     pi = piPackage;
+    piR = piRPackage;
     piResources = piHarnessResources.piResources;
     harnessResources = piHarnessResources;
     mattpocockSkills = mattPocockSkillsResources;

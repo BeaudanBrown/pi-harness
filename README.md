@@ -30,15 +30,21 @@ layout is handled outside Pi with regular tmux.
 - a user-invoked `migrate-tk-to-github` migration inventory skill and dedicated migration launcher
 - a migration-only `tk` launcher for approval-gated GitHub cutovers
 - the AgentGraph pi resources imported from the AgentGraph flake input
+- the separately packaged pi-r extension, runtime resources, and lean `pi-r-local` launcher adapter imported from the pi-r flake input
 - empty skill, prompt, and theme directories for future additions
 
 The packaged `pi-harness` binary wraps upstream `pi` and passes explicit local
 resource paths from the Nix store with `--extension`, `--skill`,
-`--prompt-template`, and `--theme`. It does not depend on mutable `pi install`
-state or on copying generated settings into `~/.pi/agent`.
+`--prompt-template`, and `--theme`. It also loads the packaged pi-r extension in
+its inactive state: ordinary sessions gain only `/r`, with no R tools, skill,
+or prompt guidance until the user activates a workbench. It does not depend on
+mutable `pi install` state or on copying generated settings into `~/.pi/agent`.
 
 Harness-owned resources are packaged separately as `pi-harness-resources` and
-expose `passthru.piResources` for future Nix-packaged Pi extensions. AgentGraph
+expose `passthru.piResources` for future Nix-packaged Pi extensions. Pi-r stays
+separately owned and exposes stable paths for its CLI, main and scout extensions,
+skill/reference, R runtime, formatter, Tree-sitter parser/query, and Bubblewrap
+sandbox through `packages.pi-r.resourcePaths`. AgentGraph
 resources are consumed from the AgentGraph flake input by path, not copied into
 this repository's package output.
 
@@ -46,6 +52,25 @@ The harness defaults do not overwrite pre-set `AGENTGRAPH_CLI` or
 `AGENTGRAPH_POSTGRES`. Development launchers such as AgentGraph's `pi-ag` can
 keep web search, prompts/themes, models, and LSP from the global harness while
 shadowing only the packaged AgentGraph runtime and resources for that process.
+
+## Lean local Pi with pi-r
+
+The package also installs `pi-r-local`, a deliberately narrow wrapper around raw
+Pi. A host-owned `pi-local` command can set its dedicated model/configuration and delegate to this adapter without colliding with the harness package. It disables discovered extensions, skills, and project context, starts with
+only `read`, `bash`, `edit`, `write`, `grep`, `find`, and `ls`, and explicitly
+loads only the pi-r extension and pi-r skill. Provider/model flags and the
+dedicated `PI_CODING_AGENT_DIR` remain the consuming host's responsibility:
+
+```bash
+PI_CODING_AGENT_DIR="$HOME/.pi/local-agent" \
+  pi-r-local --model local-llm/qwen --thinking low
+```
+
+When pi-r activates, it replaces either launcher's original tools with the
+phase-specific constrained surface. Session shutdown restores the exact tool
+surface captured from that launcher. The dependency scout starts raw Pi from
+the same inherited configuration directory, so a local launcher uses its local
+provider/model without forwarding conversation or workspace context.
 
 ## NixOS Usage
 

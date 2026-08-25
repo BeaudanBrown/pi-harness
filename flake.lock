@@ -221,6 +221,26 @@
         "type": "github"
       }
     },
+    "pi-r": {
+      "inputs": {
+        "nixpkgs": [
+          "nixpkgs"
+        ]
+      },
+      "locked": {
+        "lastModified": 1787627378,
+        "narHash": "sha256-JrbisC1Se9zEcYes6Gd1piiAxa1MV4C/PiHlU45kXhQ=",
+        "owner": "BeaudanBrown",
+        "repo": "pi-r",
+        "rev": "2d160ab01007b5f8c4ee41cec5dc9b558706ad86",
+        "type": "github"
+      },
+      "original": {
+        "owner": "BeaudanBrown",
+        "repo": "pi-r",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "agentgraph": "agentgraph",
@@ -228,7 +248,8 @@
         "mattpocock-skills-src": "mattpocock-skills-src",
         "nix-ai-tools": "nix-ai-tools",
         "nixpkgs": "nixpkgs_2",
-        "pi-lsp-extension-src": "pi-lsp-extension-src_2"
+        "pi-lsp-extension-src": "pi-lsp-extension-src_2",
+        "pi-r": "pi-r"
       }
     },
     "systems": {

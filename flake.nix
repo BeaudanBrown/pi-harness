@@ -19,6 +19,10 @@
       url = "git+ssh://git@github.com/BeaudanBrown/agentgraph.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
+    pi-r = {
+      url = "github:BeaudanBrown/pi-r";
+      inputs.nixpkgs.follows = "nixpkgs";
+    };
     pi-lsp-extension-src = {
       url = "github:samfoy/pi-lsp-extension/73251632ad116c973844cc28fb1210417295c6fe";
       flake = false;
@@ -35,6 +39,7 @@
       flake-utils,
       nix-ai-tools,
       agentgraph,
+      pi-r,
       pi-lsp-extension-src,
       mattpocock-skills-src,
       ...
@@ -51,6 +56,7 @@
         agentgraphPackage = agentgraph.packages.${system}.ag-unchecked;
         agentgraphPostgresPackage = agentgraph.packages.${system}.agentgraph-postgres;
         agentgraphPiResources = agentgraph.packages.${system}.agentgraph-pi-resources;
+        piRPackage = pi-r.packages.${system}.pi-r;
         piLspExtension = pkgs.callPackage ./nix/pi-lsp-extension.nix {
           piLspExtensionSrc = pi-lsp-extension-src;
         };
@@ -70,6 +76,7 @@
             agentgraphPackage
             agentgraphPostgresPackage
             agentgraphPiResources
+            piRPackage
             piLspExtension
             playwrightAgentCli
             ;
@@ -209,6 +216,7 @@
           name = "verify";
           runtimeInputs = [
             pkgs.coreutils
+            pkgs.git
             pkgs.jq
             pkgs.nodejs
             pkgs.typescript
@@ -285,6 +293,18 @@
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -x ${piHarnessPackage}/bin/pi-playwright
             test -x ${piHarnessPackage}/bin/pi-matrix-whoami
+            test -x ${piHarnessPackage}/bin/pi-r-local
+            test -x ${piRPackage.resourcePaths.cli}
+            test -x ${piRPackage.resourcePaths.rscript}
+            test -x ${piRPackage.resourcePaths.parser}
+            test -x ${piRPackage.resourcePaths.sandbox}
+            test -f ${piRPackage.resourcePaths.extension}
+            test -f ${piRPackage.resourcePaths.scoutExtension}
+            test -f ${piRPackage.resourcePaths.skill}
+            test -f ${piRPackage.resourcePaths.reference}
+            test -f ${piRPackage.resourcePaths.formatter}
+            test -x ${piRPackage.resourcePaths.parserGrammar}
+            test -f ${piRPackage.resourcePaths.parserQuery}
             grep -F 'expandPromptTemplates: options?.expandPromptTemplates ?? false' \
               ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js >/dev/null
             grep -F 'expandPromptTemplates?: boolean' \
@@ -327,6 +347,7 @@
             test -x ${migrateTkApp}/bin/pi-migrate-tk
             grep -F 'no .tickets directory' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
             grep -F 'gh auth status' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
+            grep -F -- "--extension \"${piRPackage.resourcePaths.extension}\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -379,6 +400,19 @@
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/sesh/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+
+            grep -F -- '--no-extensions' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F -- '--no-skills' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F -- '--no-context-files' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F -- '--extension "${piRPackage.resourcePaths.extension}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F -- '--skill "${piRPackage.resourcePaths.skill}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            if grep -F "${piHarnessResources}/share/pi-harness/agent/extensions/" ${piHarnessPackage}/bin/pi-r-local >/dev/null; then
+              echo "pi-local must not load general harness extensions" >&2
+              exit 1
+            fi
+            PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
+              PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
+              node --test ${./tests/pi-r-integration.test.mjs}
 
             ${typeSetup}
             tsc --noEmit --project tsconfig.json
