@@ -98,6 +98,7 @@ export default function (pi) {
       PI_R_RSCRIPT: "/stale/Rscript",
       PI_R_WORKER_RSCRIPT: "/stale/Rscript",
       PI_R_WORKER_SCRIPT: "/stale/worker.R",
+      PI_R_VALUE_SUMMARY_SCRIPT: "/stale/value-summary.R",
     },
     stdio: ["pipe", "pipe", "pipe"],
   }, commands);
@@ -122,7 +123,7 @@ export default function (pi) {
   const restored = records.find((entry) => entry.kind === "restored").tools;
   const shutdown = records.find((entry) => entry.kind === "shutdown").tools;
   assert.equal(initial.some((name) => name.startsWith("r_") || name === "evaluate_r"), false);
-  assert.deepEqual(active, ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_worker_status", "r_worker_reset", "r_data_inspect"]);
+  assert.deepEqual(active, ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect"]);
   assert.deepEqual(restored, initial, `${expectedKind} launcher tools must be restored by /r stop`);
   assert.deepEqual(shutdown, initial, `${expectedKind} launcher tools must remain restored at shutdown`);
   if (expectedKind === "local") {

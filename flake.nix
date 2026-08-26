@@ -306,10 +306,13 @@
             test -f ${piRPackage.resourcePaths.parserQuery}
             test -f ${piRPackage.resourcePaths.nixpkgsPin}
             test -f ${piRPackage.resourcePaths.dataInspector}
+            test -f ${piRPackage.resourcePaths.valueSummary}
             test -n ${pkgs.lib.escapeShellArg piRPackage.resourcePaths.sandboxRuntimePath}
             grep -F 'PI_R_SANDBOX_PATH' ${piHarnessPackage}/bin/pi >/dev/null
             grep -F 'PI_R_SANDBOX_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F 'PI_R_DATA_INSPECTOR_SCRIPT' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F 'PI_R_VALUE_SUMMARY_SCRIPT' ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F 'PI_R_VALUE_SUMMARY_SCRIPT' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi >/dev/null
             grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F 'expandPromptTemplates: options?.expandPromptTemplates ?? false' \
