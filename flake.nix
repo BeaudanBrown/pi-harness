@@ -19,10 +19,9 @@
       url = "git+ssh://git@github.com/BeaudanBrown/agentgraph.git";
       inputs.nixpkgs.follows = "nixpkgs";
     };
-    pi-r = {
-      url = "github:BeaudanBrown/pi-r";
-      inputs.nixpkgs.follows = "nixpkgs";
-    };
+    # pi-r owns a tested native parser/R runtime set; do not substitute the
+    # harness Nixpkgs input because Tree-sitter CLI APIs differ across pins.
+    pi-r.url = "github:BeaudanBrown/pi-r";
     pi-lsp-extension-src = {
       url = "github:samfoy/pi-lsp-extension/73251632ad116c973844cc28fb1210417295c6fe";
       flake = false;
