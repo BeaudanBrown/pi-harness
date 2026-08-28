@@ -1,0 +1,84 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "sensor-smoke",
+  "version": "1.0.0",
+  "synthetic": true,
+  "variant": {
+    "id": "seed-17",
+    "seed": 17
+  },
+  "fabricatedQuestion": "Which fictional greenhouse sensor has the largest fabricated temperature range?",
+  "materialization": {
+    "fixture": {
+      "workspacePath": "fixtures/sensors.csv",
+      "oraclePath": "oracles/sensor-smoke.json"
+    }
+  },
+  "provenance": {
+    "synthetic": true,
+    "generatorId": "fictional-sensor-generator",
+    "generatorVersion": "1.2.0",
+    "seed": 17,
+    "scenarioVariantId": "seed-17",
+    "rowCount": 3,
+    "dataContentHash": "sha256:e9ddb8bda58cbf5c7d3ed295a11ec04832f17015b8076706c7fd70cb4b0b04f0",
+    "expectedOracleHash": "sha256:5c26bd3c782897c836069858a70179174062a6d7b2ef8f89538f79c8be6a890e"
+  },
+  "prompts": [
+    {
+      "id": "analyze",
+      "text": "Analyze the fabricated sensor data and write answer.json.",
+      "timeoutMs": 30000
+    },
+    {
+      "id": "analyze",
+      "text": "Analyze the fabricated sensor data and write answer.json.",
+      "timeoutMs": 30000
+    }
+  ],
+  "timeouts": {
+    "promptMs": 30000,
+    "runMs": 120000
+  },
+  "uiPolicy": {
+    "defaultAction": "deny",
+    "dialogs": []
+  },
+  "assertions": [
+    {
+      "id": "exec-required",
+      "type": "tool-required",
+      "tool": "r_exec"
+    },
+    {
+      "id": "answer-created",
+      "type": "file",
+      "path": "answer.json",
+      "operator": "exists"
+    },
+    {
+      "id": "oracle-match",
+      "type": "oracle",
+      "path": "answer.json",
+      "format": "json",
+      "operator": "equals"
+    },
+    {
+      "id": "final-answer",
+      "type": "final-text",
+      "operator": "contains",
+      "expected": "fictional-a"
+    },
+    {
+      "id": "git-state",
+      "type": "git",
+      "operator": "dirty"
+    },
+    {
+      "id": "ui-violations",
+      "type": "ui-policy",
+      "operator": "equals",
+      "expected": 0
+    }
+  ]
+}

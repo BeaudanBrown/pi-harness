@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "comparison.schema.json",
+  "title": "Synthetic evaluation result-set comparison",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "baselineLabel", "candidateLabel", "scenarios", "summary"],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "baselineLabel": { "$ref": "common.schema.json#/$defs/stableId" },
+    "candidateLabel": { "$ref": "common.schema.json#/$defs/stableId" },
+    "scenarios": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["scenarioId", "baselineRuns", "candidateRuns", "baselinePassRate", "candidatePassRate", "traceLinks"],
+        "properties": {
+          "scenarioId": { "$ref": "common.schema.json#/$defs/stableId" },
+          "baselineRuns": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+          "candidateRuns": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+          "baselinePassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "candidatePassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+          "traceLinks": {
+            "type": "array",
+            "items": { "$ref": "common.schema.json#/$defs/relativePackPath" }
+          }
+        }
+      }
+    },
+    "summary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["baselinePassRate", "candidatePassRate", "medianDurationDeltaMs", "medianTokenDelta", "medianToolCallDelta"],
+      "properties": {
+        "baselinePassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "candidatePassRate": { "type": "number", "minimum": 0, "maximum": 1 },
+        "medianDurationDeltaMs": { "type": "number" },
+        "medianTokenDelta": { "type": ["number", "null"] },
+        "medianToolCallDelta": { "type": "number" }
+      }
+    }
+  }
+}

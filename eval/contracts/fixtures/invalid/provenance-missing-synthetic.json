@@ -1,0 +1,9 @@
+{
+  "generatorId": "bad-generator",
+  "generatorVersion": "1",
+  "seed": 1,
+  "scenarioVariantId": "seed-1",
+  "rowCount": 1,
+  "dataContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "expectedOracleHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+}

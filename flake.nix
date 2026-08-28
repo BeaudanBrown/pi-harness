@@ -214,6 +214,7 @@
         verifyApp = pkgs.writeShellApplication {
           name = "verify";
           runtimeInputs = [
+            pkgs.check-jsonschema
             pkgs.coreutils
             pkgs.git
             pkgs.jq
@@ -224,6 +225,54 @@
             set -euo pipefail
             test -f config/agent/settings.json
             jq empty config/agent/settings.json
+            test -f docs/architecture/decisions/0001-synthetic-evaluation-contracts.md
+            test -f eval/contracts/path-policy.ts
+            schema_root=eval/contracts/schemas/v1
+            fixture_root=../../fixtures
+            (
+              cd "$schema_root"
+              for schema in *.schema.json; do
+                check-jsonschema --check-metaschema "$schema"
+              done
+              check-jsonschema --schemafile pack.schema.json "$fixture_root/valid/pack.json"
+              check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/sensor-smoke.json"
+              check-jsonschema --schemafile synthetic-provenance.schema.json "$fixture_root/valid/provenance.json"
+              check-jsonschema --schemafile metrics.schema.json "$fixture_root/valid/metrics.json"
+              check-jsonschema --schemafile run-result.schema.json "$fixture_root/valid/run-result.json"
+              check-jsonschema --schemafile comparison.schema.json "$fixture_root/valid/baselines/reviewed-summary.json"
+              for fixture in pack-traversal pack-absolute pack-external-uri pack-nul-path pack-trailing-slash; do
+                if check-jsonschema --schemafile pack.schema.json "$fixture_root/invalid/$fixture.json"; then
+                  echo "invalid eval pack fixture passed validation: $fixture" >&2
+                  exit 1
+                fi
+              done
+              for fixture in pack-duplicate-suite-id pack-unknown-scenario; do
+                check-jsonschema --schemafile pack.schema.json "$fixture_root/invalid/$fixture.json"
+              done
+              for fixture in scenario-generator-missing-outputs scenario-missing-provenance scenario-not-synthetic; do
+                if check-jsonschema --schemafile scenario.schema.json "$fixture_root/invalid/$fixture.json"; then
+                  echo "invalid synthetic scenario fixture passed validation: $fixture" >&2
+                  exit 1
+                fi
+              done
+              for fixture in provenance-extra-property provenance-missing-synthetic provenance-not-synthetic; do
+                if check-jsonschema --schemafile synthetic-provenance.schema.json "$fixture_root/invalid/$fixture.json"; then
+                  echo "invalid synthetic provenance fixture passed validation: $fixture" >&2
+                  exit 1
+                fi
+              done
+              for fixture in \
+                assertion-file-missing-expected \
+                assertion-final-text-missing-condition \
+                assertion-git-missing-condition \
+                assertion-oracle-missing-target \
+                assertion-ui-missing-condition; do
+                if check-jsonschema --schemafile assertion.schema.json "$fixture_root/invalid/$fixture.json"; then
+                  echo "incomplete assertion fixture passed validation: $fixture" >&2
+                  exit 1
+                fi
+              done
+            )
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
             test -f config/agent/extensions/github-issues/index.ts
@@ -431,6 +480,7 @@
             PI_HARNESS_JQ=${lib.getExe pkgs.jq} \
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
               node --test \
+                "$test_build_dir/tests/eval-contracts.test.js" \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \

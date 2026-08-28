@@ -1,0 +1,22 @@
+{
+  "schemaVersion": "1.0.0",
+  "baselineLabel": "baseline",
+  "candidateLabel": "candidate",
+  "scenarios": [
+    {
+      "scenarioId": "sensor-smoke",
+      "baselineRuns": 3,
+      "candidateRuns": 3,
+      "baselinePassRate": 0.6666666667,
+      "candidatePassRate": 1,
+      "traceLinks": ["runs/candidate/sensor-smoke-1/report.md"]
+    }
+  ],
+  "summary": {
+    "baselinePassRate": 0.6666666667,
+    "candidatePassRate": 1,
+    "medianDurationDeltaMs": -250,
+    "medianTokenDelta": null,
+    "medianToolCallDelta": -1
+  }
+}

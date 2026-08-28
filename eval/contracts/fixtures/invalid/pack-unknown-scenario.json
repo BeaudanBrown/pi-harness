@@ -1,0 +1,10 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "unknown-scenario-pack",
+  "version": "1",
+  "syntheticOnly": true,
+  "scenarios": ["scenarios/sensor-smoke.json"],
+  "suites": [
+    { "id": "smoke", "scenarios": ["not-loaded"] }
+  ]
+}

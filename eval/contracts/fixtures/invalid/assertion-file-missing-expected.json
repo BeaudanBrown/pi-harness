@@ -1,0 +1,6 @@
+{
+  "id": "answer-content",
+  "type": "file",
+  "path": "answer.md",
+  "operator": "contains"
+}

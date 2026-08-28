@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "run-result.schema.json",
+  "title": "Synthetic evaluation run result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "status", "manifest", "metrics", "grade", "artifacts"],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "runId": { "type": "string", "minLength": 1 },
+    "status": { "enum": ["passed", "failed", "timed-out", "crashed", "invalid"] },
+    "manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["scenarioId", "scenarioVersion", "scenarioHash", "packHash", "generatorVersion", "seed", "variantId", "fixtureHash", "expectedOracleHash", "harness", "candidateProject", "piVersion", "model", "thinkingLevel", "launcherIdentity", "system", "timeouts", "startedAt", "finishedAt", "runLabel"],
+      "properties": {
+        "scenarioId": { "$ref": "common.schema.json#/$defs/stableId" },
+        "scenarioVersion": { "type": "string", "minLength": 1 },
+        "scenarioHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "packHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "generatorVersion": { "type": "string", "minLength": 1 },
+        "seed": { "type": ["integer", "string"] },
+        "variantId": { "$ref": "common.schema.json#/$defs/stableId" },
+        "fixtureHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "expectedOracleHash": { "$ref": "common.schema.json#/$defs/sha256" },
+        "harness": { "$ref": "common.schema.json#/$defs/gitIdentity" },
+        "candidateProject": { "$ref": "common.schema.json#/$defs/gitIdentity" },
+        "piVersion": { "type": "string", "minLength": 1 },
+        "model": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["provider", "id"],
+          "properties": {
+            "provider": { "type": "string", "minLength": 1 },
+            "id": { "type": "string", "minLength": 1 },
+            "contextWindow": { "type": ["integer", "null"], "minimum": 1 },
+            "maximumOutputTokens": { "type": ["integer", "null"], "minimum": 1 }
+          }
+        },
+        "thinkingLevel": { "type": "string", "minLength": 1 },
+        "launcherIdentity": { "type": "string", "minLength": 1 },
+        "system": { "type": "string", "minLength": 1 },
+        "timeouts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["promptMs", "runMs"],
+          "properties": {
+            "promptMs": { "$ref": "common.schema.json#/$defs/positiveMilliseconds" },
+            "runMs": { "$ref": "common.schema.json#/$defs/positiveMilliseconds" }
+          }
+        },
+        "startedAt": { "type": "string", "format": "date-time" },
+        "finishedAt": { "type": "string", "format": "date-time" },
+        "runLabel": { "$ref": "common.schema.json#/$defs/stableId" }
+      }
+    },
+    "metrics": { "$ref": "metrics.schema.json" },
+    "grade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "failures"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "failures": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["assertionId", "message", "evidence"],
+            "properties": {
+              "assertionId": { "$ref": "common.schema.json#/$defs/stableId" },
+              "message": { "type": "string", "minLength": 1 },
+              "evidence": { "$ref": "common.schema.json#/$defs/relativePackPath" }
+            }
+          }
+        }
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": { "$ref": "common.schema.json#/$defs/relativePackPath" }
+    }
+  }
+}

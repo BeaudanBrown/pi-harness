@@ -1,0 +1,8 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "bad-pack",
+  "version": "1",
+  "syntheticOnly": true,
+  "scenarios": ["scenarios/evil\u0000.json"],
+  "suites": [{ "id": "bad", "scenarios": ["bad-scenario"] }]
+}

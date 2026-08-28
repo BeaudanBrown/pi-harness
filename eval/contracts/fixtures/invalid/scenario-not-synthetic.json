@@ -1,0 +1,28 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "bad-scenario",
+  "version": "1",
+  "synthetic": false,
+  "variant": { "id": "seed-1", "seed": 1 },
+  "fabricatedQuestion": "A fabricated question",
+  "materialization": {
+    "fixture": {
+      "workspacePath": "fixtures/data.csv",
+      "oraclePath": "oracles/result.json"
+    }
+  },
+  "provenance": {
+    "synthetic": true,
+    "generatorId": "fictional-generator",
+    "generatorVersion": "1",
+    "seed": 1,
+    "scenarioVariantId": "seed-1",
+    "rowCount": 1,
+    "dataContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expectedOracleHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "prompts": [{ "id": "run", "text": "Analyze it." }],
+  "timeouts": { "promptMs": 1000, "runMs": 2000 },
+  "uiPolicy": { "defaultAction": "deny", "dialogs": [] },
+  "assertions": [{ "id": "done", "type": "max-errors", "maximum": 0 }]
+}

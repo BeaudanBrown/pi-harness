@@ -1,0 +1,5 @@
+{
+  "id": "oracle-match",
+  "type": "oracle",
+  "operator": "equals"
+}

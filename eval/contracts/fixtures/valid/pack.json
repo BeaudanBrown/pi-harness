@@ -1,0 +1,14 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "fictional-sensor-pack",
+  "version": "1.0.0",
+  "syntheticOnly": true,
+  "scenarios": ["scenarios/sensor-smoke.json"],
+  "suites": [
+    {
+      "id": "smoke",
+      "scenarios": ["sensor-smoke"]
+    }
+  ],
+  "baselineSummaries": ["baselines/reviewed-summary.json"]
+}

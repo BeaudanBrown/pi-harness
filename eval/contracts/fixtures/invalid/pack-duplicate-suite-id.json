@@ -1,0 +1,11 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "ambiguous-pack",
+  "version": "1",
+  "syntheticOnly": true,
+  "scenarios": ["scenarios/sensor-smoke.json"],
+  "suites": [
+    { "id": "smoke", "scenarios": ["sensor-smoke"] },
+    { "id": "smoke", "scenarios": ["sensor-smoke"] }
+  ]
+}

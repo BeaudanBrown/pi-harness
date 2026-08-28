@@ -1,0 +1,11 @@
+{
+  "synthetic": true,
+  "generatorId": "fictional-sensor-generator",
+  "generatorVersion": "1.2.0",
+  "seed": 17,
+  "scenarioVariantId": "seed-17",
+  "rowCount": 3,
+  "dataContentHash": "sha256:e9ddb8bda58cbf5c7d3ed295a11ec04832f17015b8076706c7fd70cb4b0b04f0",
+  "expectedOracleHash": "sha256:5c26bd3c782897c836069858a70179174062a6d7b2ef8f89538f79c8be6a890e",
+  "sourceDataPath": "/srv/real-data"
+}

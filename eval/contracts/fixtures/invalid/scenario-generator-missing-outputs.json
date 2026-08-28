@@ -1,0 +1,51 @@
+{
+  "schemaVersion": "1.0.0",
+  "id": "missing-provenance",
+  "version": "1",
+  "synthetic": true,
+  "variant": {
+    "id": "seed-1",
+    "seed": 1
+  },
+  "fabricatedQuestion": "Which fictional machine has the highest fabricated reading?",
+  "materialization": {
+    "generator": {
+      "path": "generators/machines.mjs",
+      "args": [
+        "--seed",
+        "1"
+      ]
+    }
+  },
+  "prompts": [
+    {
+      "id": "run",
+      "text": "Analyze the fabricated data."
+    }
+  ],
+  "timeouts": {
+    "promptMs": 1000,
+    "runMs": 2000
+  },
+  "uiPolicy": {
+    "defaultAction": "deny",
+    "dialogs": []
+  },
+  "assertions": [
+    {
+      "id": "done",
+      "type": "max-errors",
+      "maximum": 0
+    }
+  ],
+  "provenance": {
+    "synthetic": true,
+    "generatorId": "fictional-machine-generator",
+    "generatorVersion": "1",
+    "seed": 1,
+    "scenarioVariantId": "seed-1",
+    "rowCount": 1,
+    "dataContentHash": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "expectedOracleHash": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  }
+}

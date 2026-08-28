@@ -1,0 +1,46 @@
+{
+  "schemaVersion": "1.0.0",
+  "reliability": {
+    "passed": true,
+    "processExitStatus": 0,
+    "timeoutCount": 0,
+    "extensionErrorCount": 0,
+    "toolErrorCount": 0,
+    "nonRetryableErrorCount": 0,
+    "truncatedCompletionCount": 0,
+    "agentSettled": true
+  },
+  "efficiency": {
+    "wallClockMs": 4200,
+    "timeToFirstToolCallMs": 500,
+    "timeToFirstUsefulToolCallMs": 500,
+    "agentTurns": 2,
+    "totalToolCalls": 2,
+    "uniqueToolCalls": 2,
+    "repeatedIdenticalToolCalls": 0,
+    "toolCallsBeforeUsefulAction": 0,
+    "inputTokens": 1200,
+    "outputTokens": 300,
+    "cacheTokens": null,
+    "totalTokens": 1500,
+    "peakContextTokens": 1200,
+    "compactionCount": 0,
+    "finalResponseCharacters": 180
+  },
+  "toolBehavior": {
+    "requiredToolsMissing": [],
+    "forbiddenToolsUsed": [],
+    "blockedAttempts": 0,
+    "staleToolNames": [],
+    "repeatedFailedCalls": 0,
+    "authorityChangingCommands": [],
+    "unexpectedUiRequests": 0
+  },
+  "workspaceBehavior": {
+    "changedPaths": ["answer.md"],
+    "protectedPathsChanged": [],
+    "gitClean": false,
+    "commitsCreated": 0,
+    "graderCommandFailures": 0
+  }
+}

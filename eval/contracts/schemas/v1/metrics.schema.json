@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "metrics.schema.json",
+  "title": "Deterministic evaluation metrics",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "reliability", "efficiency", "toolBehavior", "workspaceBehavior"],
+  "properties": {
+    "schemaVersion": { "$ref": "common.schema.json#/$defs/schemaVersion" },
+    "reliability": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["passed", "processExitStatus", "timeoutCount", "extensionErrorCount", "toolErrorCount", "nonRetryableErrorCount", "truncatedCompletionCount", "agentSettled"],
+      "properties": {
+        "passed": { "type": "boolean" },
+        "processExitStatus": { "type": ["integer", "null"] },
+        "timeoutCount": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "extensionErrorCount": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "toolErrorCount": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "nonRetryableErrorCount": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "truncatedCompletionCount": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "agentSettled": { "type": "boolean" }
+      }
+    },
+    "efficiency": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["wallClockMs", "agentTurns", "totalToolCalls", "uniqueToolCalls", "repeatedIdenticalToolCalls", "toolCallsBeforeUsefulAction", "compactionCount", "finalResponseCharacters"],
+      "properties": {
+        "wallClockMs": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "timeToFirstToolCallMs": { "type": ["integer", "null"], "minimum": 0 },
+        "timeToFirstUsefulToolCallMs": { "type": ["integer", "null"], "minimum": 0 },
+        "agentTurns": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "totalToolCalls": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "uniqueToolCalls": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "repeatedIdenticalToolCalls": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "toolCallsBeforeUsefulAction": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "inputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "outputTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "cacheTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "totalTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "peakContextTokens": { "type": ["integer", "null"], "minimum": 0 },
+        "compactionCount": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "finalResponseCharacters": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" }
+      }
+    },
+    "toolBehavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["requiredToolsMissing", "forbiddenToolsUsed", "blockedAttempts", "staleToolNames", "repeatedFailedCalls", "authorityChangingCommands", "unexpectedUiRequests"],
+      "properties": {
+        "requiredToolsMissing": { "type": "array", "items": { "type": "string" } },
+        "forbiddenToolsUsed": { "type": "array", "items": { "type": "string" } },
+        "blockedAttempts": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "staleToolNames": { "type": "array", "items": { "type": "string" } },
+        "repeatedFailedCalls": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "authorityChangingCommands": { "type": "array", "items": { "type": "string" } },
+        "unexpectedUiRequests": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" }
+      }
+    },
+    "workspaceBehavior": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["changedPaths", "protectedPathsChanged", "gitClean", "commitsCreated", "graderCommandFailures"],
+      "properties": {
+        "changedPaths": { "type": "array", "items": { "type": "string" } },
+        "protectedPathsChanged": { "type": "array", "items": { "type": "string" } },
+        "gitClean": { "type": "boolean" },
+        "commitsCreated": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+        "graderCommandFailures": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" }
+      }
+    }
+  }
+}
