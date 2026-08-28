@@ -242,11 +242,11 @@
         "nixpkgs": "nixpkgs_3"
       },
       "locked": {
-        "lastModified": 1787832214,
-        "narHash": "sha256-jhOW4E+CR9YH4CQrBC52z1KHAUtXCwjqNTSmJd7dd6Q=",
+        "lastModified": 1787881078,
+        "narHash": "sha256-AWC4swmKKoeuK77RZV8VoDlbufSb4h2MpadCh2ATaVA=",
         "owner": "BeaudanBrown",
         "repo": "pi-r",
-        "rev": "0feaa0c351dbe62e611895b118da9571cc6f45c5",
+        "rev": "8bea2f888f00c6ef0dc074bbf35c57ac3e2a6df9",
         "type": "github"
       },
       "original": {
