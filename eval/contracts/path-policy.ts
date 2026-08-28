@@ -16,16 +16,11 @@ function isContained(root: string, target: string): boolean {
 	);
 }
 
-/**
- * Resolve an existing pack reference beneath the canonical pack root.
- *
- * Pack references are portable POSIX-relative paths. Canonical filesystem
- * resolution is mandatory: lexical prefix checks alone do not catch symlink
- * escapes.
- */
-export async function resolvePackReference(packRoot: string, reference: string): Promise<string> {
+/** Validate the portable lexical subset used by pack and generated-output references. */
+export function assertPackRelativeReference(reference: string): void {
 	if (
 		reference.length === 0
+		|| reference.length > 1024
 		|| reference.includes("\0")
 		|| reference.includes("\\")
 		|| path.posix.isAbsolute(reference)
@@ -36,7 +31,17 @@ export async function resolvePackReference(packRoot: string, reference: string):
 	) {
 		throw new Error(`Invalid pack-relative path: ${JSON.stringify(reference)}`);
 	}
+}
 
+/**
+ * Resolve an existing pack reference beneath the canonical pack root.
+ *
+ * Pack references are portable POSIX-relative paths. Canonical filesystem
+ * resolution is mandatory: lexical prefix checks alone do not catch symlink
+ * escapes.
+ */
+export async function resolvePackReference(packRoot: string, reference: string): Promise<string> {
+	assertPackRelativeReference(reference);
 	const canonicalRoot = await realpath(packRoot);
 	const canonicalTarget = await realpath(path.join(canonicalRoot, ...reference.split("/")));
 	if (!isContained(canonicalRoot, canonicalTarget)) {
@@ -55,9 +60,82 @@ export async function assertHiddenOracleSeparated(
 		resolvePackReference(packRoot, workspaceReference),
 		resolvePackReference(packRoot, oracleReference),
 	]);
-	if (isContained(workspacePath, oraclePath) || isContained(oraclePath, workspacePath)) {
+	const [workspaceStat, oracleStat] = await Promise.all([lstat(workspacePath), lstat(oraclePath)]);
+	if (
+		isContained(workspacePath, oraclePath)
+		|| isContained(oraclePath, workspacePath)
+		|| (workspaceStat.dev === oracleStat.dev && workspaceStat.ino === oracleStat.ino)
+	) {
 		throw new Error("Hidden oracle aliases or overlaps model-visible workspace content");
 	}
+}
+
+/** Reject any model-visible tree entry that aliases or contains hidden evaluator content. */
+export async function assertModelVisibleTreeSeparated(
+	root: string,
+	workspaceReference: string,
+	hiddenReferences: string[],
+): Promise<void> {
+	const [canonicalRoot, workspacePath, ...hiddenPaths] = await Promise.all([
+		realpath(root),
+		resolvePackReference(root, workspaceReference),
+		...hiddenReferences.map(async (reference) => await resolvePackReference(root, reference)),
+	]);
+	const hiddenIdentities = new Set<string>();
+	const hiddenFileHashes = new Set<string>();
+	const collectHidden = async (target: string, active: Set<string>): Promise<void> => {
+		const canonicalTarget = await realpath(target);
+		const stat = await lstat(canonicalTarget);
+		hiddenIdentities.add(`${stat.dev}:${stat.ino}`);
+		if (stat.isFile()) {
+			hiddenFileHashes.add(createHash("sha256").update(await readFile(canonicalTarget)).digest("hex"));
+			return;
+		}
+		if (!stat.isDirectory()) return;
+		if (active.has(canonicalTarget)) throw new Error("Hidden evaluator tree contains a symlink cycle");
+		active.add(canonicalTarget);
+		for (const entry of await readdir(canonicalTarget)) await collectHidden(path.join(canonicalTarget, entry), active);
+		active.delete(canonicalTarget);
+	};
+	for (const hiddenPath of hiddenPaths) await collectHidden(hiddenPath, new Set());
+	const assertSeparated = async (target: string, logicalPath: string): Promise<void> => {
+		for (const hiddenPath of hiddenPaths) {
+			if (isContained(target, hiddenPath) || isContained(hiddenPath, target)) {
+				throw new Error(`Hidden evaluator content aliases or overlaps model-visible workspace content: ${logicalPath}`);
+			}
+		}
+		const stat = await lstat(target);
+		if (hiddenIdentities.has(`${stat.dev}:${stat.ino}`)) {
+			throw new Error(`Hidden evaluator content aliases or overlaps model-visible workspace content: ${logicalPath}`);
+		}
+		if (stat.isFile()) {
+			const contentHash = createHash("sha256").update(await readFile(target)).digest("hex");
+			if (hiddenFileHashes.has(contentHash)) {
+				throw new Error(`Hidden evaluator content is copied into model-visible workspace content: ${logicalPath}`);
+			}
+		}
+	};
+	const activeDirectories = new Set<string>();
+	const visit = async (target: string, logicalPath: string): Promise<void> => {
+		const canonicalTarget = await realpath(target);
+		if (!isContained(canonicalRoot, canonicalTarget)) {
+			throw new Error(`Pack tree entry escapes canonical root: ${logicalPath}`);
+		}
+		await assertSeparated(canonicalTarget, logicalPath);
+		const stat = await lstat(canonicalTarget);
+		if (stat.isFile()) return;
+		if (!stat.isDirectory()) throw new Error(`Workspace tree entry is not a file or directory: ${logicalPath}`);
+		if (activeDirectories.has(canonicalTarget)) throw new Error(`Pack tree contains a symlink cycle: ${logicalPath}`);
+		activeDirectories.add(canonicalTarget);
+		for (const entry of await readdir(canonicalTarget, { withFileTypes: true })) {
+			await visit(
+				path.join(canonicalTarget, entry.name),
+				logicalPath === "" ? entry.name : `${logicalPath}/${entry.name}`,
+			);
+		}
+		activeDirectories.delete(canonicalTarget);
+	};
+	await visit(workspacePath, workspaceReference);
 }
 
 /**
@@ -273,7 +351,7 @@ export async function verifyProvenanceHashes(
 	oracleReference: string,
 	expected: ExpectedProvenanceHashes,
 ): Promise<void> {
-	await assertHiddenOracleSeparated(packRoot, workspaceReference, oracleReference);
+	await assertModelVisibleTreeSeparated(packRoot, workspaceReference, [oracleReference]);
 	const [dataContentHash, expectedOracleHash] = await Promise.all([
 		hashPackReference(packRoot, workspaceReference),
 		hashPackReference(packRoot, oracleReference),
@@ -313,11 +391,9 @@ export async function verifyGeneratedProvenance(
 	expected: SyntheticProvenance,
 ): Promise<void> {
 	await Promise.all([
-		assertHiddenOracleSeparated(outputRoot, workspaceReference, oracleReference),
-		assertHiddenOracleSeparated(outputRoot, workspaceReference, provenanceReference),
-		assertHiddenOracleSeparated(outputRoot, oracleReference, provenanceReference),
-		assertHiddenOracleSeparated(outputRoot, questionReference, oracleReference),
-		assertHiddenOracleSeparated(outputRoot, questionReference, provenanceReference),
+		assertModelVisibleTreeSeparated(outputRoot, workspaceReference, [oracleReference, provenanceReference]),
+		assertModelVisibleTreeSeparated(outputRoot, questionReference, [oracleReference, provenanceReference]),
+		assertModelVisibleTreeSeparated(outputRoot, oracleReference, [provenanceReference]),
 	]);
 	const [questionPath, provenancePath] = await Promise.all([
 		resolvePackReference(outputRoot, questionReference),

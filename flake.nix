@@ -220,6 +220,8 @@
             pkgs.jq
             pkgs.nodejs
             pkgs.typescript
+          ] ++ lib.optionals pkgs.stdenv.isLinux [
+            pkgs.bubblewrap
           ];
           text = ''
             set -euo pipefail
@@ -229,6 +231,8 @@
             test -f eval/contracts/path-policy.ts
             test -f eval/rpc/engine.ts
             test -f eval/rpc/README.md
+            test -f eval/workspace/materialize.ts
+            test -f eval/workspace/README.md
             if grep -R -F 'node:readline' eval/rpc; then
               echo "eval RPC engine must use strict LF framing, not Node readline" >&2
               exit 1
@@ -506,6 +510,7 @@
               node --test \
                 "$test_build_dir/tests/eval-contracts.test.js" \
                 "$test_build_dir/tests/eval-rpc.test.js" \
+                "$test_build_dir/tests/eval-workspace.test.js" \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
@@ -575,6 +580,7 @@
             pkgs.graphviz
             pkgs.xdg-utils
           ]
+          ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ]
           ++ lspPackages;
 
           shellHook = ''

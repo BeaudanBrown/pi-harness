@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, realpath, symlink, writeFile } from "node:fs/promises";
+import { link, mkdtemp, mkdir, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -42,7 +42,7 @@ test("pack references resolve only beneath the canonical pack root", async () =>
 		path.join(await realpath(root), "fixtures", "data.csv"),
 	);
 
-	for (const invalid of ["", "/srv/data.csv", "C:\\data\\file.csv", "file:///srv/data.csv", "../data.csv", "fixtures/../oracles/expected.json", "fixtures\\data.csv", "./fixtures/data.csv"]) {
+	for (const invalid of ["", "a".repeat(1025), "/srv/data.csv", "C:\\data\\file.csv", "file:///srv/data.csv", "../data.csv", "fixtures/../oracles/expected.json", "fixtures\\data.csv", "./fixtures/data.csv"]) {
 		await assert.rejects(resolvePackReference(root, invalid), /Invalid pack-relative path/);
 	}
 });
@@ -122,6 +122,43 @@ test("generated output channels include the exact fabricated question and proven
 			{ id: "seed-7", seed: 7 },
 			question,
 			provenance,
+		),
+		/aliases or overlaps model-visible workspace content/,
+	);
+	await rm(path.join(root, "question.txt"));
+	await link(path.join(root, "oracles", "expected.json"), path.join(root, "question.txt"));
+	await assert.rejects(
+		verifyGeneratedProvenance(
+			root,
+			"fixtures/data.csv",
+			"question.txt",
+			"oracles/expected.json",
+			"provenance.json",
+			{ id: "seed-7", seed: 7 },
+			"{\"value\":1}\n",
+			provenance,
+		),
+		/aliases or overlaps model-visible workspace content/,
+	);
+	await rm(path.join(root, "question.txt"));
+	await mkdir(path.join(root, "oracle-tree"));
+	await link(path.join(root, "oracles", "expected.json"), path.join(root, "oracle-tree", "nested.json"));
+	await link(path.join(root, "oracle-tree", "nested.json"), path.join(root, "question.txt"));
+	const treeProvenance = {
+		...provenance,
+		expectedOracleHash: await hashPackReference(root, "oracle-tree"),
+	};
+	await writeFile(path.join(root, "provenance.json"), `${JSON.stringify(treeProvenance)}\n`);
+	await assert.rejects(
+		verifyGeneratedProvenance(
+			root,
+			"fixtures/data.csv",
+			"question.txt",
+			"oracle-tree",
+			"provenance.json",
+			{ id: "seed-7", seed: 7 },
+			"{\"value\":1}\n",
+			treeProvenance,
 		),
 		/aliases or overlaps model-visible workspace content/,
 	);
