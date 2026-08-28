@@ -1,0 +1,13 @@
+{
+  "defaultAction": "deny",
+  "dialogs": [
+    {
+      "request": {
+        "method": "select",
+        "title": "Choose a fabricated option",
+        "options": ["alpha", "beta"]
+      },
+      "response": { "confirmed": true }
+    }
+  ]
+}

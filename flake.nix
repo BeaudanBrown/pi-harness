@@ -227,6 +227,13 @@
             jq empty config/agent/settings.json
             test -f docs/architecture/decisions/0001-synthetic-evaluation-contracts.md
             test -f eval/contracts/path-policy.ts
+            test -f eval/rpc/engine.ts
+            test -f eval/rpc/README.md
+            if grep -R -F 'node:readline' eval/rpc; then
+              echo "eval RPC engine must use strict LF framing, not Node readline" >&2
+              exit 1
+            fi
+            test -f tests/fixtures/eval-rpc/fake-rpc.mjs
             schema_root=eval/contracts/schemas/v1
             fixture_root=../../fixtures
             (
@@ -236,6 +243,7 @@
               done
               check-jsonschema --schemafile pack.schema.json "$fixture_root/valid/pack.json"
               check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/sensor-smoke.json"
+              check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/ui-policy-v1.json"
               check-jsonschema --schemafile synthetic-provenance.schema.json "$fixture_root/valid/provenance.json"
               check-jsonschema --schemafile metrics.schema.json "$fixture_root/valid/metrics.json"
               check-jsonschema --schemafile run-result.schema.json "$fixture_root/valid/run-result.json"
@@ -272,6 +280,22 @@
                   exit 1
                 fi
               done
+              (
+                cd ../v2
+                for schema in *.schema.json; do
+                  check-jsonschema --check-metaschema "$schema"
+                done
+                check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/sensor-smoke-v2.json"
+                check-jsonschema --schemafile scenario.schema.json "$fixture_root/invalid/scenario-duplicate-ui-dialog.json"
+                if check-jsonschema --schemafile scenario.schema.json "$fixture_root/invalid/scenario-unsupported-version.json"; then
+                  echo "unsupported scenario version passed v2 validation" >&2
+                  exit 1
+                fi
+                if check-jsonschema --schemafile ui-policy.schema.json "$fixture_root/invalid/ui-policy-response-mismatch.json"; then
+                  echo "method-incompatible UI response fixture passed v2 validation" >&2
+                  exit 1
+                fi
+              )
             )
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
@@ -481,6 +505,7 @@
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
               node --test \
                 "$test_build_dir/tests/eval-contracts.test.js" \
+                "$test_build_dir/tests/eval-rpc.test.js" \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \

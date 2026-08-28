@@ -88,13 +88,15 @@ Version 1 schemas live in `eval/contracts/schemas/v1/`:
 | `run-result.schema.json` | run status, manifest, metrics, grade evidence, and artifact index |
 | `comparison.schema.json` | labeled repeated-run aggregates and per-scenario trace links |
 
-`schemaVersion` is `1.0.0`. Compatible additions require optional fields. Breaking changes require a new schema directory and explicit migration; validators must not silently reinterpret an unsupported version.
+The initial contract schemas use `schemaVersion: 1.0.0`. Compatible additions require optional fields. Breaking changes require a new schema directory and explicit migration; validators must not silently reinterpret an unsupported version.
+
+Scenario/UI policy v2 is defined under `eval/contracts/schemas/v2/`. It replaces v1's unobservable extension-ID policy with exact Pi RPC request payloads and method-compatible responses. The v1 files remain unchanged; [`v2/README.md`](../../../eval/contracts/schemas/v2/README.md) is the explicit migration. Other document types remain on v1.
 
 Sensitive environment values are never schema fields and must not appear in manifests or reports.
 
 ### 5. UI and grading are deterministic
 
-The undeclared extension-dialog action is always denial. A scenario may approve only an exact declared extension ID, request type, title, and response.
+The undeclared extension-dialog action is always denial. A v2 scenario may approve only an exact declared RPC request payload—method, title, and all method-specific fields—with one method-compatible response. Pi's current RPC request does not expose an extension identity, which is why the original v1 UI shape is preserved only for compatibility and requires migration before live execution.
 
 Initial grading uses declared assertions, workspace/Git evidence, deterministic commands, and hidden oracles. No LLM judge or scientific-prose scoring is included.
 

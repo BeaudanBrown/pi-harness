@@ -41,21 +41,11 @@
       {
         "request": {
           "method": "confirm",
-          "title": "Apply fabricated change?",
-          "message": "Only fabricated data."
+          "title": "Approve synthetic action?",
+          "message": "Only fabricated data is involved."
         },
         "response": {
           "confirmed": true
-        }
-      },
-      {
-        "request": {
-          "method": "confirm",
-          "title": "Apply fabricated change?",
-          "message": "Only fabricated data."
-        },
-        "response": {
-          "confirmed": false
         }
       }
     ]

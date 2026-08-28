@@ -1,6 +1,6 @@
 {
-  "schemaVersion": "2.0.0",
-  "id": "sensor-smoke",
+  "schemaVersion": "1.0.0",
+  "id": "v1-ui-compatibility",
   "version": "1.0.0",
   "synthetic": true,
   "variant": {
@@ -39,23 +39,20 @@
     "defaultAction": "deny",
     "dialogs": [
       {
-        "request": {
-          "method": "confirm",
-          "title": "Apply fabricated change?",
-          "message": "Only fabricated data."
-        },
+        "extensionId": "example-extension",
+        "requestType": "confirm",
+        "title": "Approve fabricated action?",
         "response": {
-          "confirmed": true
+          "action": "approve",
+          "value": true
         }
       },
       {
-        "request": {
-          "method": "confirm",
-          "title": "Apply fabricated change?",
-          "message": "Only fabricated data."
-        },
+        "extensionId": "example-extension",
+        "requestType": "input",
+        "title": "Enter fabricated label",
         "response": {
-          "confirmed": false
+          "action": "deny"
         }
       }
     ]

@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
 import path from "node:path";
+import { isDeepStrictEqual } from "node:util";
 
 const URI_SCHEME = /^[A-Za-z][A-Za-z0-9+.-]*:/;
 const WINDOWS_ABSOLUTE = /^[A-Za-z]:[\\/]/;
@@ -212,12 +213,16 @@ export function verifyPackSemantics(pack: PackSemanticContract, loadedScenarioId
 }
 
 export interface ScenarioSemanticContract {
+	schemaVersion: string;
 	variant: ScenarioVariant;
 	provenance: SyntheticProvenance;
 	prompts: Array<{ id: string }>;
 	assertions: Array<{ id: string }>;
 	uiPolicy: {
-		dialogs: Array<{ extensionId: string; requestType: string; title: string }>;
+		dialogs: Array<
+			| { request: Record<string, unknown> }
+			| { extensionId: string; requestType: string; title: string }
+		>;
 	};
 }
 
@@ -233,14 +238,32 @@ function assertUnique(values: string[], label: string): void {
 
 /** Enforce deterministic identities that JSON Schema cannot express. */
 export function verifyScenarioSemantics(scenario: ScenarioSemanticContract): void {
+	if (scenario.schemaVersion !== "1.0.0" && scenario.schemaVersion !== "2.0.0") {
+		throw new Error(`Unsupported scenario schemaVersion: ${scenario.schemaVersion}`);
+	}
 	verifyProvenanceIdentity(scenario.variant, scenario.provenance);
 	assertUnique(scenario.prompts.map((prompt) => prompt.id), "prompt ID");
 	assertUnique(scenario.assertions.map((assertion) => assertion.id), "assertion ID");
-	assertUnique(
-		scenario.uiPolicy.dialogs.map((dialog) =>
-			JSON.stringify([dialog.extensionId, dialog.requestType, dialog.title])),
-		"extension UI dialog match",
-	);
+	for (let left = 0; left < scenario.uiPolicy.dialogs.length; left++) {
+		for (let right = left + 1; right < scenario.uiPolicy.dialogs.length; right++) {
+			const leftDialog = scenario.uiPolicy.dialogs[left];
+			const rightDialog = scenario.uiPolicy.dialogs[right];
+			const duplicate = scenario.schemaVersion === "1.0.0"
+				? leftDialog !== undefined
+					&& rightDialog !== undefined
+					&& "extensionId" in leftDialog
+					&& "extensionId" in rightDialog
+					&& leftDialog.extensionId === rightDialog.extensionId
+					&& leftDialog.requestType === rightDialog.requestType
+					&& leftDialog.title === rightDialog.title
+				: leftDialog !== undefined
+					&& rightDialog !== undefined
+					&& "request" in leftDialog
+					&& "request" in rightDialog
+					&& isDeepStrictEqual(leftDialog.request, rightDialog.request);
+			if (duplicate) throw new Error("Duplicate extension UI dialog match");
+		}
+	}
 }
 
 /** Verify materialized model data and hidden oracle against scenario provenance. */

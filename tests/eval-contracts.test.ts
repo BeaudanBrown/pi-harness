@@ -152,6 +152,17 @@ test("pack suite identities and loaded scenario membership are unambiguous", asy
 });
 
 test("scenario prompt, assertion, and UI match identities are unique", async () => {
+	const compatibleV1 = JSON.parse(await readFile(
+		"eval/contracts/fixtures/valid/scenarios/ui-policy-v1.json",
+		"utf8",
+	)) as ScenarioSemanticContract;
+	assert.doesNotThrow(() => verifyScenarioSemantics(compatibleV1));
+	const unsupported = JSON.parse(await readFile(
+		"eval/contracts/fixtures/invalid/scenario-unsupported-version.json",
+		"utf8",
+	)) as ScenarioSemanticContract;
+	assert.throws(() => verifyScenarioSemantics(unsupported), /Unsupported scenario schemaVersion: 3.0.0/);
+
 	for (const [fixture, expected] of [
 		["scenario-duplicate-prompt-id.json", /Duplicate prompt ID/],
 		["scenario-duplicate-assertion-id.json", /Duplicate assertion ID/],

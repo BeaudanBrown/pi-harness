@@ -1,0 +1,105 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "assertion.schema.json",
+  "title": "Deterministic synthetic evaluation assertion",
+  "type": "object",
+  "required": ["id", "type"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/stableId" },
+    "type": {
+      "enum": [
+        "tool-required",
+        "tool-forbidden",
+        "max-tool-calls",
+        "max-errors",
+        "max-turns",
+        "final-text",
+        "file",
+        "protected-path",
+        "git",
+        "grader-command",
+        "oracle",
+        "ui-policy"
+      ]
+    },
+    "tool": { "type": "string", "minLength": 1 },
+    "maximum": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+    "path": { "$ref": "common.schema.json#/$defs/relativePackPath" },
+    "operator": {
+      "enum": ["exists", "absent", "unchanged", "equals", "contains", "matches", "clean", "dirty"]
+    },
+    "expected": { "type": ["string", "number", "integer", "boolean", "null"] },
+    "format": { "enum": ["bytes", "json", "text"] },
+    "command": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "type": "string", "minLength": 1 }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "type": { "enum": ["tool-required", "tool-forbidden"] } } },
+      "then": { "required": ["tool"] }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["max-tool-calls", "max-errors", "max-turns"] } } },
+      "then": { "required": ["maximum"] }
+    },
+    {
+      "if": { "properties": { "type": { "enum": ["file", "protected-path"] } } },
+      "then": { "required": ["path", "operator"] }
+    },
+    {
+      "if": {
+        "properties": {
+          "type": { "enum": ["file", "protected-path"] },
+          "operator": { "enum": ["equals", "contains", "matches"] }
+        },
+        "required": ["type", "operator"]
+      },
+      "then": {
+        "required": ["expected"],
+        "properties": { "expected": { "type": "string" } }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "grader-command" } } },
+      "then": { "required": ["command"] }
+    },
+    {
+      "if": { "properties": { "type": { "const": "final-text" } } },
+      "then": {
+        "required": ["operator", "expected"],
+        "properties": {
+          "operator": { "enum": ["equals", "contains", "matches"] },
+          "expected": { "type": "string" }
+        }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "git" } } },
+      "then": {
+        "required": ["operator"],
+        "properties": { "operator": { "enum": ["clean", "dirty"] } }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "oracle" } } },
+      "then": {
+        "required": ["path", "format", "operator"],
+        "properties": { "operator": { "const": "equals" } }
+      }
+    },
+    {
+      "if": { "properties": { "type": { "const": "ui-policy" } } },
+      "then": {
+        "required": ["operator", "expected"],
+        "properties": {
+          "operator": { "const": "equals" },
+          "expected": { "type": "integer", "minimum": 0 }
+        }
+      }
+    }
+  ],
+  "unevaluatedProperties": false
+}

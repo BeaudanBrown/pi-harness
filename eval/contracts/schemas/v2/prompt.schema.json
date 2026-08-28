@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "prompt.schema.json",
+  "title": "Synthetic evaluation prompt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "text"],
+  "properties": {
+    "id": { "$ref": "common.schema.json#/$defs/stableId" },
+    "text": { "type": "string", "minLength": 1, "maxLength": 100000 },
+    "timeoutMs": { "$ref": "common.schema.json#/$defs/positiveMilliseconds" }
+  }
+}
