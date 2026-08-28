@@ -32,8 +32,10 @@ export interface RpcRecord {
 export interface RpcDiagnostics {
 	commands: RpcRecord[];
 	records: RpcRecord[];
+	recordedAtMs?: number[];
 	stdoutLines: string[];
 	stderr: string;
+	stderrBytes?: Uint8Array;
 	malformedLine: string | null;
 	exit: { code: number | null; signal: NodeJS.Signals | null } | null;
 }
@@ -73,6 +75,7 @@ export class RpcEngineError extends Error {
 export class PiRpcEngine {
 	private readonly options: Required<Pick<PiRpcEngineOptions, "commandTimeoutMs" | "promptTimeoutMs" | "runTimeoutMs" | "shutdownGraceMs">> & PiRpcEngineOptions;
 	private child: ChildProcessWithoutNullStreams | null = null;
+	private childClosed: Promise<void> | null = null;
 	private decoder = new StringDecoder("utf8");
 	private stdoutBuffer = "";
 	private requestSequence = 0;
@@ -80,10 +83,11 @@ export class PiRpcEngine {
 	private eventWaiters = new Set<EventWaiter>();
 	private commands: RpcRecord[] = [];
 	private records: RpcRecord[] = [];
+	private recordTimesMs: number[] = [];
 	private recordIndexes = new WeakMap<object, number>();
 	private events: RpcRecord[] = [];
 	private stdoutLines: string[] = [];
-	private stderr = "";
+	private stderrChunks: Buffer[] = [];
 	private malformedLine: string | null = null;
 	private exit: RpcDiagnostics["exit"] = null;
 	private failure: RpcEngineError | null = null;
@@ -123,10 +127,11 @@ export class PiRpcEngine {
 			detached: true,
 		});
 		this.child = child;
+		this.childClosed = new Promise((resolve) => child.once("close", () => resolve()));
 		child.stdout.on("data", (chunk: Buffer) => this.consumeStdout(chunk));
 		child.stdout.on("end", () => this.finishStdout());
 		child.stderr.on("data", (chunk: Buffer) => {
-			this.stderr += chunk.toString("utf8");
+			this.stderrChunks.push(Buffer.from(chunk));
 		});
 		const spawned = new Promise<void>((resolve, reject) => {
 			child.once("spawn", resolve);
@@ -222,8 +227,10 @@ export class PiRpcEngine {
 		return {
 			commands: structuredClone(this.commands),
 			records: structuredClone(this.records),
+			recordedAtMs: [...this.recordTimesMs],
 			stdoutLines: [...this.stdoutLines],
-			stderr: this.stderr,
+			stderr: Buffer.concat(this.stderrChunks).toString("utf8"),
+			stderrBytes: Buffer.concat(this.stderrChunks),
 			malformedLine: this.malformedLine,
 			exit: this.exit ? { ...this.exit } : null,
 		};
@@ -236,8 +243,11 @@ export class PiRpcEngine {
 		if (!child) return;
 		this.stopping = true;
 		this.rejectOutstanding(new RpcEngineError("RPC engine stopped", this.getDiagnostics()));
+		const closed = this.childClosed;
 		await this.terminateProcessTree(child);
+		if (closed) await closed;
 		this.child = null;
+		this.childClosed = null;
 	}
 
 	private async requestData(command: RpcRecord): Promise<unknown> {
@@ -325,6 +335,7 @@ export class PiRpcEngine {
 			return;
 		}
 		this.records.push(record);
+		this.recordTimesMs.push(Date.now());
 		const recordIndex = this.records.length - 1;
 		this.recordIndexes.set(record, recordIndex);
 		if (record.type === "response") {

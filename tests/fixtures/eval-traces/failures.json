@@ -1,0 +1,90 @@
+[
+  {
+    "name": "timeout",
+    "startedAtMs": 5000,
+    "finishedAtMs": 6500,
+    "failure": { "kind": "timeout", "message": "Synthetic prompt deadline exceeded" },
+    "diagnostics": {
+      "commands": [{ "type": "prompt", "id": "eval-1", "message": "Fabricated timeout case" }],
+      "records": [
+        { "type": "response", "id": "eval-1", "command": "prompt", "success": true },
+        { "type": "agent_start", "timestamp": 5000 },
+        { "type": "turn_start", "turnIndex": 0, "timestamp": 5100 },
+        { "type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "r_exec", "args": { "code": "Sys.sleep(999)" } }
+      ],
+      "recordedAtMs": [5000, 5000, 5100, 5200],
+      "stdoutLines": ["{\"type\":\"agent_start\",\"timestamp\":5000}"],
+      "stderr": "",
+      "malformedLine": null,
+      "exit": { "code": null, "signal": "SIGTERM" }
+    },
+    "workspace": {
+      "before": { "inventory": [], "gitStatus": "", "gitDiff": "" },
+      "after": { "inventory": [], "gitStatus": "", "gitDiff": "" }
+    },
+    "policy": { "requiredTools": ["r_inspect"], "usefulTools": ["r_inspect"] }
+  },
+  {
+    "name": "crash",
+    "startedAtMs": 7000,
+    "finishedAtMs": 9000,
+    "failure": { "kind": "crash", "message": "Synthetic RPC child exited" },
+    "diagnostics": {
+      "commands": [],
+      "records": [
+        { "type": "agent_start", "timestamp": 7000 },
+        { "type": "turn_start", "turnIndex": 0, "timestamp": 7050 },
+        { "type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "evaluate_r", "args": { "code": "fabricated()" }, "timestamp": 7100 },
+        { "type": "tool_execution_end", "toolCallId": "tool-1", "toolName": "evaluate_r", "result": { "blocked": true }, "isError": true, "timestamp": 7200 },
+        { "type": "tool_execution_start", "toolCallId": "tool-2", "toolName": "evaluate_r", "args": { "code": "fabricated()" }, "timestamp": 7300 },
+        { "type": "tool_execution_end", "toolCallId": "tool-2", "toolName": "evaluate_r", "result": { "code": "BLOCKED" }, "isError": true, "timestamp": 7400 },
+        { "type": "extension_error", "message": "Synthetic extension failure", "timestamp": 7500 },
+        { "type": "error", "source": "model", "retryable": false, "message": "Synthetic non-retryable failure", "timestamp": 7600 },
+        { "type": "message_update", "assistantMessageEvent": { "type": "done", "reason": "length" }, "timestamp": 7700 },
+        { "type": "extension_ui_request", "id": "ui-1", "method": "confirm", "title": "Unexpected fabricated dialog", "message": "Synthetic only" },
+        { "type": "user_bash", "command": "git commit -m fabricated", "cwd": "/synthetic", "excludeFromContext": false }
+      ],
+      "stdoutLines": [],
+      "stderr": "synthetic crash details\n",
+      "malformedLine": null,
+      "exit": { "code": 7, "signal": null }
+    },
+    "run": {
+      "settled": true,
+      "events": [],
+      "state": null,
+      "messages": [],
+      "entries": [],
+      "sessionStats": {},
+      "finalAssistantText": "partial"
+    },
+    "workspace": {
+      "before": { "inventory": [{ "path": "locked/config.json", "type": "file", "bytes": 2, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }], "gitStatus": "", "gitDiff": "" },
+      "after": { "inventory": [{ "path": "locked/config.json", "type": "file", "bytes": 3, "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }], "gitStatus": " M locked/config.json", "gitDiff": "synthetic diff" }
+    },
+    "policy": {
+      "requiredTools": ["r_exec"],
+      "forbiddenTools": ["evaluate_r"],
+      "usefulTools": ["r_exec"],
+      "staleToolNames": ["evaluate_r"],
+      "protectedPaths": ["locked/"],
+      "declaredUiRequests": []
+    },
+    "commitsCreated": 1,
+    "graderCommandFailures": 1
+  },
+  {
+    "name": "malformed",
+    "startedAtMs": 10000,
+    "finishedAtMs": 10010,
+    "failure": { "kind": "malformed", "message": "Malformed synthetic JSONL record" },
+    "diagnostics": {
+      "commands": [{ "type": "prompt", "id": "eval-1", "message": "Malformed fabricated case" }],
+      "records": [{ "type": "agent_start", "timestamp": 10000 }],
+      "stdoutLines": ["{not-json"],
+      "stderr": "",
+      "malformedLine": "{not-json",
+      "exit": { "code": 1, "signal": null }
+    }
+  }
+]

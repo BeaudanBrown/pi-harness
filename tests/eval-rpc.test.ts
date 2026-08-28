@@ -304,6 +304,19 @@ test("settlement before correlated prompt acceptance is ignored", async () => {
 	}
 });
 
+test("stop waits for close and retains stderr bytes emitted during shutdown", async () => {
+	const engine = engineFor("shutdown-stderr");
+	await engine.start();
+	await engine.promptAndWait("Complete a fabricated run before shutdown.");
+	await engine.stop();
+	const diagnostics = engine.getDiagnostics();
+	assert.deepEqual(
+		Buffer.from(diagnostics.stderrBytes ?? []),
+		Buffer.from([0x73, 0x79, 0x6e, 0x74, 0x68, 0x65, 0x74, 0x69, 0x63, 0x2d, 0xff, 0x0a]),
+	);
+	assert.deepEqual(diagnostics.exit, { code: 0, signal: null });
+});
+
 test("accepted prompt waits for agent_settled and captures final RPC state", async () => {
 	const engine = engineFor("normal");
 	await engine.start();

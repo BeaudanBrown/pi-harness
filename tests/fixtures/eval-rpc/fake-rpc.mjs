@@ -7,6 +7,13 @@ let buffer = "";
 let uiStage = 0;
 let declaredConfirmed = false;
 
+if (mode === "shutdown-stderr") {
+	process.once("SIGTERM", () => {
+		process.stderr.write(Buffer.from([0x73, 0x79, 0x6e, 0x74, 0x68, 0x65, 0x74, 0x69, 0x63, 0x2d, 0xff, 0x0a]));
+		setTimeout(() => process.exit(0), 10);
+	});
+}
+
 function emit(record) {
 	process.stdout.write(`${JSON.stringify(record)}\n`);
 }

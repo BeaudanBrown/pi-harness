@@ -1,0 +1,59 @@
+{
+  "startedAtMs": 1000,
+  "finishedAtMs": 2000,
+  "diagnostics": {
+    "commands": [
+      { "type": "prompt", "id": "eval-1", "message": "Analyze fabricated values." },
+      { "type": "get_state", "id": "eval-2" }
+    ],
+    "records": [
+      { "type": "response", "id": "eval-1", "command": "prompt", "success": true },
+      { "type": "agent_start", "timestamp": 1000 },
+      { "type": "turn_start", "turnIndex": 0, "timestamp": 1100 },
+      { "type": "tool_execution_start", "toolCallId": "tool-1", "toolName": "r_exec", "args": { "code": "fabricated <- c(2, 4)" }, "timestamp": 1200 },
+      { "type": "tool_execution_end", "toolCallId": "tool-1", "toolName": "r_exec", "result": { "content": "synthetic ok" }, "isError": false, "timestamp": 1300 },
+      { "type": "turn_end", "turnIndex": 0, "timestamp": 1400 },
+      { "type": "turn_start", "turnIndex": 1, "timestamp": 1500 },
+      { "type": "tool_execution_start", "toolCallId": "tool-2", "toolName": "r_inspect", "args": { "name": "fabricated" }, "timestamp": 1600 },
+      { "type": "tool_execution_end", "toolCallId": "tool-2", "toolName": "r_inspect", "result": { "content": "synthetic values" }, "isError": false, "timestamp": 1700 },
+      { "type": "turn_end", "turnIndex": 1, "timestamp": 1800 },
+      { "type": "agent_end", "messages": [], "willRetry": false, "timestamp": 1900 },
+      { "type": "agent_settled", "timestamp": 1950 },
+      { "type": "response", "id": "eval-2", "command": "get_state", "success": true, "data": { "active": false } }
+    ],
+    "stdoutLines": [
+      "{\"type\":\"response\",\"id\":\"eval-1\",\"command\":\"prompt\",\"success\":true}",
+      "{\"type\":\"agent_start\",\"timestamp\":1000}"
+    ],
+    "stderr": "synthetic diagnostic note\n",
+    "malformedLine": null,
+    "exit": { "code": 0, "signal": null }
+  },
+  "run": {
+    "settled": true,
+    "events": [],
+    "state": { "active": false },
+    "messages": [{ "role": "assistant", "content": "synthetic answer" }],
+    "entries": [{ "type": "message", "id": "entry-1" }],
+    "sessionStats": {
+      "tokens": { "input": 100, "output": 20, "cacheRead": 5, "cacheWrite": 3, "total": 128 },
+      "contextUsage": { "tokens": 96 }
+    },
+    "finalAssistantText": "synthetic answer"
+  },
+  "workspace": {
+    "before": { "inventory": [], "gitStatus": "", "gitDiff": "" },
+    "after": {
+      "inventory": [{ "path": "answer.json", "type": "file", "bytes": 19, "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" }],
+      "gitStatus": "?? answer.json",
+      "gitDiff": ""
+    }
+  },
+  "policy": {
+    "requiredTools": ["r_exec"],
+    "forbiddenTools": ["evaluate_r"],
+    "usefulTools": ["r_inspect"],
+    "staleToolNames": ["evaluate_r"],
+    "protectedPaths": ["locked/"]
+  }
+}

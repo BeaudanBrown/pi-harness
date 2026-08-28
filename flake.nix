@@ -233,6 +233,8 @@
             test -f eval/rpc/README.md
             test -f eval/workspace/materialize.ts
             test -f eval/workspace/README.md
+            test -f eval/trace/capture.ts
+            test -f eval/trace/README.md
             if grep -R -F 'node:readline' eval/rpc; then
               echo "eval RPC engine must use strict LF framing, not Node readline" >&2
               exit 1
@@ -510,6 +512,7 @@
               node --test \
                 "$test_build_dir/tests/eval-contracts.test.js" \
                 "$test_build_dir/tests/eval-rpc.test.js" \
+                "$test_build_dir/tests/eval-trace-metrics.test.js" \
                 "$test_build_dir/tests/eval-workspace.test.js" \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
