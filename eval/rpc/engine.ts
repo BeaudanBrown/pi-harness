@@ -8,7 +8,7 @@ export interface RpcUiDialogPolicy {
 }
 
 export interface RpcUiPolicy {
-	schemaVersion: "2.0.0";
+	schemaVersion: "2.0.0" | "3.0.0";
 	dialogs: RpcUiDialogPolicy[];
 }
 
@@ -102,8 +102,8 @@ export class PiRpcEngine {
 			shutdownGraceMs: 1_000,
 			...options,
 		};
-		if (this.options.uiPolicy && this.options.uiPolicy.schemaVersion !== "2.0.0") {
-			throw new Error("Pi RPC UI policy requires scenario schemaVersion 2.0.0; migrate the v1 dialog policy");
+		if (this.options.uiPolicy && !["2.0.0", "3.0.0"].includes(this.options.uiPolicy.schemaVersion)) {
+			throw new Error("Pi RPC UI policy requires scenario schemaVersion 2.0.0 or 3.0.0; migrate the v1 dialog policy");
 		}
 		for (const dialog of this.options.uiPolicy?.dialogs ?? []) {
 			const response = dialog.response;

@@ -1,5 +1,5 @@
 {
-  "schemaVersion": "4.0.0",
+  "schemaVersion": "3.0.0",
   "id": "sensor-smoke",
   "version": "1.0.0",
   "synthetic": true,
@@ -85,6 +85,16 @@
       "type": "ui-policy",
       "operator": "equals",
       "expected": 0
+    },
+    {
+      "id": "stale-check",
+      "type": "stale-tool-forbidden",
+      "tool": "evaluate_r"
+    },
+    {
+      "id": "blocked-limit",
+      "type": "max-blocked-attempts",
+      "maximum": 0
     }
   ]
 }

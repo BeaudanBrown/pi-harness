@@ -35,7 +35,7 @@ malformed input, and exit status.
 - command responses are correlated by generated ID and command type;
 - prompt settlement is attributed only after its correlated successful response,
   then completion waits for `agent_settled`, never merely `agent_end`;
-- exact declared v2 extension dialogs receive their declared response; v1
+- exact declared v2/v3 extension dialogs receive their declared response; v1
   policies fail with an explicit migration error;
 - undeclared confirmations receive `confirmed: false`, and undeclared
   select/input/editor dialogs receive `cancelled: true`;

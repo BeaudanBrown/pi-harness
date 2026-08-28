@@ -316,7 +316,7 @@ function assertUnique(values: string[], label: string): void {
 
 /** Enforce deterministic identities that JSON Schema cannot express. */
 export function verifyScenarioSemantics(scenario: ScenarioSemanticContract): void {
-	if (scenario.schemaVersion !== "1.0.0" && scenario.schemaVersion !== "2.0.0") {
+	if (!["1.0.0", "2.0.0", "3.0.0"].includes(scenario.schemaVersion)) {
 		throw new Error(`Unsupported scenario schemaVersion: ${scenario.schemaVersion}`);
 	}
 	verifyProvenanceIdentity(scenario.variant, scenario.provenance);

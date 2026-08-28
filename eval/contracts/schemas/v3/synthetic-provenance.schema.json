@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "synthetic-provenance.schema.json",
+  "title": "Synthetic dataset provenance",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "synthetic",
+    "generatorId",
+    "generatorVersion",
+    "seed",
+    "scenarioVariantId",
+    "rowCount",
+    "dataContentHash",
+    "expectedOracleHash"
+  ],
+  "properties": {
+    "synthetic": { "const": true },
+    "generatorId": { "$ref": "common.schema.json#/$defs/stableId" },
+    "generatorVersion": { "type": "string", "minLength": 1, "maxLength": 64 },
+    "seed": { "type": ["integer", "string"] },
+    "scenarioVariantId": { "$ref": "common.schema.json#/$defs/stableId" },
+    "rowCount": { "$ref": "common.schema.json#/$defs/nonNegativeInteger" },
+    "dataContentHash": { "$ref": "common.schema.json#/$defs/sha256" },
+    "expectedOracleHash": { "$ref": "common.schema.json#/$defs/sha256" }
+  }
+}

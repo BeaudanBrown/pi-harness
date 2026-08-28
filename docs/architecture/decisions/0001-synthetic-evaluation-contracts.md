@@ -90,7 +90,9 @@ Version 1 schemas live in `eval/contracts/schemas/v1/`:
 
 The initial contract schemas use `schemaVersion: 1.0.0`. Compatible additions require optional fields. Breaking changes require a new schema directory and explicit migration; validators must not silently reinterpret an unsupported version.
 
-Scenario/UI policy v2 is defined under `eval/contracts/schemas/v2/`. It replaces v1's unobservable extension-ID policy with exact Pi RPC request payloads and method-compatible responses. The v1 files remain unchanged; [`v2/README.md`](../../../eval/contracts/schemas/v2/README.md) is the explicit migration. Other document types remain on v1.
+Scenario/UI policy v2 is defined under `eval/contracts/schemas/v2/`. It replaces v1's unobservable extension-ID policy with exact Pi RPC request payloads and method-compatible responses. The v1 files remain unchanged; [`v2/README.md`](../../../eval/contracts/schemas/v2/README.md) is the explicit migration.
+
+Scenario v3 adds the `stale-tool-forbidden` and `max-blocked-attempts` deterministic assertion types without redefining the v1/v2 assertion enums. [`v3/README.md`](../../../eval/contracts/schemas/v3/README.md) defines that migration. Other top-level document types remain on v1.
 
 Sensitive environment values are never schema fields and must not appear in manifests or reports.
 

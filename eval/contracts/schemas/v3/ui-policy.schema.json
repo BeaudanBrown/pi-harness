@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ui-policy.schema.json",
+  "title": "Extension UI response policy",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["defaultAction", "dialogs"],
+  "properties": {
+    "defaultAction": { "const": "deny" },
+    "dialogs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["request", "response"],
+        "properties": {
+          "request": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["method", "title", "options"],
+                "properties": {
+                  "method": { "const": "select" },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "options": { "type": "array", "minItems": 1, "items": { "type": "string" } },
+                  "timeout": { "$ref": "common.schema.json#/$defs/positiveMilliseconds" }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["method", "title", "message"],
+                "properties": {
+                  "method": { "const": "confirm" },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "message": { "type": "string" },
+                  "timeout": { "$ref": "common.schema.json#/$defs/positiveMilliseconds" }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["method", "title"],
+                "properties": {
+                  "method": { "const": "input" },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "placeholder": { "type": "string" },
+                  "timeout": { "$ref": "common.schema.json#/$defs/positiveMilliseconds" }
+                }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["method", "title"],
+                "properties": {
+                  "method": { "const": "editor" },
+                  "title": { "type": "string", "minLength": 1, "maxLength": 500 },
+                  "prefill": { "type": "string" }
+                }
+              }
+            ]
+          },
+          "response": {
+            "oneOf": [
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["cancelled"],
+                "properties": { "cancelled": { "const": true } }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["confirmed"],
+                "properties": { "confirmed": { "type": "boolean" } }
+              },
+              {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["value"],
+                "properties": { "value": { "type": "string" } }
+              }
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "request": {
+                  "properties": { "method": { "const": "confirm" } },
+                  "required": ["method"]
+                }
+              }
+            },
+            "then": {
+              "properties": {
+                "response": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["cancelled"],
+                      "properties": { "cancelled": { "const": true } }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["confirmed"],
+                      "properties": { "confirmed": { "type": "boolean" } }
+                    }
+                  ]
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "response": {
+                  "oneOf": [
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["cancelled"],
+                      "properties": { "cancelled": { "const": true } }
+                    },
+                    {
+                      "type": "object",
+                      "additionalProperties": false,
+                      "required": ["value"],
+                      "properties": { "value": { "type": "string" } }
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

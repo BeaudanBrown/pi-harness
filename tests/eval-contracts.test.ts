@@ -198,7 +198,7 @@ test("scenario prompt, assertion, and UI match identities are unique", async () 
 		"eval/contracts/fixtures/invalid/scenario-unsupported-version.json",
 		"utf8",
 	)) as ScenarioSemanticContract;
-	assert.throws(() => verifyScenarioSemantics(unsupported), /Unsupported scenario schemaVersion: 3.0.0/);
+	assert.throws(() => verifyScenarioSemantics(unsupported), /Unsupported scenario schemaVersion: 4.0.0/);
 
 	for (const [fixture, expected] of [
 		["scenario-duplicate-prompt-id.json", /Duplicate prompt ID/],

@@ -105,6 +105,7 @@ export interface EvalRunLifecycleInput {
 export interface CapturedEvalRunLifecycle {
 	run?: RpcRunResult;
 	failure?: EvalTraceFailure;
+	workspaceAfter: WorkspaceEvidence;
 	capture: CapturedEvalTrace;
 }
 
@@ -368,6 +369,7 @@ export async function executeAndCaptureEvalRun(input: EvalRunLifecycleInput): Pr
 	return {
 		...(run === undefined ? {} : { run }),
 		...(failure === undefined ? {} : { failure }),
+		workspaceAfter: after,
 		capture,
 	};
 }

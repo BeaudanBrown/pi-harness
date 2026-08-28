@@ -235,6 +235,8 @@
             test -f eval/workspace/README.md
             test -f eval/trace/capture.ts
             test -f eval/trace/README.md
+            test -f eval/grading/grade.ts
+            test -f eval/grading/README.md
             if grep -R -F 'node:readline' eval/rpc; then
               echo "eval RPC engine must use strict LF framing, not Node readline" >&2
               exit 1
@@ -301,6 +303,13 @@
                   echo "method-incompatible UI response fixture passed v2 validation" >&2
                   exit 1
                 fi
+              )
+              (
+                cd ../v3
+                for schema in *.schema.json; do
+                  check-jsonschema --check-metaschema "$schema"
+                done
+                check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/sensor-smoke-v3.json"
               )
             )
             test -d config/agent/extensions
@@ -511,6 +520,7 @@
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
               node --test \
                 "$test_build_dir/tests/eval-contracts.test.js" \
+                "$test_build_dir/tests/eval-grading.test.js" \
                 "$test_build_dir/tests/eval-rpc.test.js" \
                 "$test_build_dir/tests/eval-trace-metrics.test.js" \
                 "$test_build_dir/tests/eval-workspace.test.js" \

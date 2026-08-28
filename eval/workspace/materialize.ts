@@ -98,6 +98,15 @@ export interface MaterializedEvalRun {
 	cleanup(): Promise<void>;
 }
 
+const materializedOraclePaths = new WeakMap<MaterializedEvalRun, string>();
+
+/** Return the immutable oracle identity recorded by the materializer for this run. */
+export function oraclePathForMaterializedRun(run: MaterializedEvalRun): string {
+	const oraclePath = materializedOraclePaths.get(run);
+	if (oraclePath === undefined) throw new Error("Grading requires a materialization-owned evaluation run");
+	return oraclePath;
+}
+
 export class EvalMaterializationError extends Error {
 	constructor(
 		message: string,
@@ -194,7 +203,7 @@ function assertScenarioShape(scenario: MaterializationScenario): void {
 		"schemaVersion", "id", "version", "synthetic", "variant", "fabricatedQuestion",
 		"materialization", "provenance", "prompts", "timeouts", "uiPolicy", "assertions",
 	], "scenario");
-	if (scenario.schemaVersion !== "1.0.0" && scenario.schemaVersion !== "2.0.0") throw new Error("Unsupported scenario schemaVersion");
+	if (!["1.0.0", "2.0.0", "3.0.0"].includes(scenario.schemaVersion)) throw new Error("Unsupported scenario schemaVersion");
 	assertStableId(scenario.id, "Scenario id");
 	if (scenario.synthetic !== true) throw new Error("Scenario must declare synthetic: true");
 	if (typeof scenario.version !== "string" || scenario.version.length < 1 || scenario.version.length > 64) throw new Error("Scenario version must be a string");
@@ -222,13 +231,17 @@ function assertScenarioShape(scenario: MaterializationScenario): void {
 	}
 	if (!Array.isArray(scenario.assertions) || scenario.assertions.length < 1) throw new Error("Scenario assertions must be non-empty");
 	const assertionTypes = new Set(["tool-required", "tool-forbidden", "max-tool-calls", "max-errors", "max-turns", "final-text", "file", "protected-path", "git", "grader-command", "oracle", "ui-policy"]);
+	if (scenario.schemaVersion === "3.0.0") {
+		assertionTypes.add("stale-tool-forbidden");
+		assertionTypes.add("max-blocked-attempts");
+	}
 	for (const assertionValue of scenario.assertions as unknown[]) {
 		const assertion = objectRecord(assertionValue, "scenario assertion");
 		assertExactKeys(assertion, ["id", "type", "tool", "maximum", "path", "operator", "expected", "format", "command"], "scenario assertion");
 		assertStableId(assertion.id, "Scenario assertion id");
 		if (typeof assertion.type !== "string" || !assertionTypes.has(assertion.type)) throw new Error("Scenario assertion type is invalid");
-		if (["tool-required", "tool-forbidden"].includes(assertion.type) && (typeof assertion.tool !== "string" || assertion.tool.length < 1)) throw new Error("Tool assertion requires tool");
-		if (["max-tool-calls", "max-errors", "max-turns"].includes(assertion.type) && (!Number.isInteger(assertion.maximum) || (assertion.maximum as number) < 0)) throw new Error("Limit assertion requires non-negative maximum");
+		if (["tool-required", "tool-forbidden", "stale-tool-forbidden"].includes(assertion.type) && (typeof assertion.tool !== "string" || assertion.tool.length < 1)) throw new Error("Tool assertion requires tool");
+		if (["max-tool-calls", "max-blocked-attempts", "max-errors", "max-turns"].includes(assertion.type) && (!Number.isInteger(assertion.maximum) || (assertion.maximum as number) < 0)) throw new Error("Limit assertion requires non-negative maximum");
 		if (["file", "protected-path", "oracle"].includes(assertion.type)) {
 			if (typeof assertion.path !== "string") throw new Error("File assertion requires path");
 			assertPackRelativeReference(assertion.path);
@@ -360,6 +373,105 @@ function trustedBubblewrapExecutable(): string {
 		if (/^\/nix\/store\/[a-z0-9]{32}-bubblewrap-[^/]+\/bin\/bwrap$/.test(canonical)) return canonical;
 	}
 	throw new Error("A trusted Nix-store Bubblewrap executable is required for synthetic generators");
+}
+
+export interface ConfinedWorkspaceCommandResult {
+	exitCode: number | null;
+	signal: NodeJS.Signals | null;
+	stdout: string;
+	stderr: string;
+	timedOut: boolean;
+}
+
+function confinedWorkspaceCommand(
+	workspaceRoot: string,
+	command: string[],
+): { command: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv } {
+	if (command.length === 0 || command.some((part) => typeof part !== "string" || part.length === 0)) {
+		throw new Error("Confined workspace command must contain non-empty strings");
+	}
+	if (process.platform === "linux") {
+		return {
+			command: trustedBubblewrapExecutable(),
+			// Bubblewrap builds a fresh tmpfs root; only these explicit binds are visible.
+			args: [
+				"--die-with-parent", "--unshare-all", "--new-session",
+				"--ro-bind", "/nix/store", "/nix/store",
+				"--dir", "/usr", "--dir", "/usr/bin", "--ro-bind", "/usr/bin/env", "/usr/bin/env",
+				"--ro-bind", workspaceRoot, "/workspace",
+				"--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
+				"--chdir", "/workspace",
+				"--setenv", "PATH", process.env.PATH ?? "",
+				"--", ...command,
+			],
+			cwd: workspaceRoot,
+			env: { PATH: process.env.PATH ?? "" },
+		};
+	}
+	if (process.platform === "darwin") {
+		const profile = [
+			"(version 1)",
+			"(deny default)",
+			"(allow process-exec)",
+			`(allow file-read* (subpath \"${sandboxProfilePath(workspaceRoot)}\") (subpath \"/nix/store\") (subpath \"/System/Library\") (subpath \"/usr/lib\") (literal \"/usr/bin/env\"))`,
+		].join(" ");
+		return {
+			command: "/usr/bin/sandbox-exec",
+			args: ["-p", profile, ...command],
+			cwd: workspaceRoot,
+			env: { PATH: process.env.PATH ?? "" },
+		};
+	}
+	throw new Error(`Confined workspace commands are unsupported on platform: ${process.platform}`);
+}
+
+/** Run a bounded read-only command with no host filesystem or network access. */
+export async function runConfinedWorkspaceCommand(
+	workspaceRoot: string,
+	command: string[],
+	timeoutMs = 30_000,
+): Promise<ConfinedWorkspaceCommandResult> {
+	const sandbox = confinedWorkspaceCommand(await realpath(workspaceRoot), command);
+	return await new Promise((resolve, reject) => {
+		const child = spawn(sandbox.command, sandbox.args, {
+			cwd: sandbox.cwd,
+			detached: true,
+			env: sandbox.env,
+			stdio: ["ignore", "pipe", "pipe"],
+		});
+		const stdout: Buffer[] = [];
+		const stderr: Buffer[] = [];
+		child.stdout.on("data", (chunk: Buffer) => stdout.push(Buffer.from(chunk)));
+		child.stderr.on("data", (chunk: Buffer) => stderr.push(Buffer.from(chunk)));
+		let timedOut = false;
+		let killTimer: NodeJS.Timeout | undefined;
+		const timer = setTimeout(() => {
+			timedOut = true;
+			if (child.pid !== undefined) {
+				try { process.kill(-child.pid, "SIGTERM"); } catch {}
+				killTimer = setTimeout(() => {
+					try { process.kill(-child.pid!, "SIGKILL"); } catch {}
+				}, 250);
+				killTimer.unref();
+			}
+		}, timeoutMs);
+		child.once("error", (error) => {
+			clearTimeout(timer);
+			if (killTimer) clearTimeout(killTimer);
+			reject(error);
+		});
+		child.once("close", (exitCode, signal) => {
+			clearTimeout(timer);
+			if (killTimer) clearTimeout(killTimer);
+			resolve({
+				exitCode,
+				signal,
+				stdout: Buffer.concat(stdout).toString("utf8"),
+				stderr: Buffer.concat(stderr).toString("utf8"),
+				timedOut,
+			});
+		});
+	});
 }
 
 function generatorSandboxCommand(
@@ -701,7 +813,7 @@ export async function materializeEvalRun(options: MaterializeEvalRunOptions): Pr
 				throw new EvalMaterializationError("Failed to capture workspace after-state", runRoot, evidenceRoot, workspaceRoot, { cause: error });
 			}
 		};
-		return {
+		const materializedRun: MaterializedEvalRun = {
 			runRoot,
 			workspaceRoot,
 			hiddenRoot,
@@ -739,6 +851,8 @@ export async function materializeEvalRun(options: MaterializeEvalRunOptions): Pr
 				]);
 			},
 		};
+		materializedOraclePaths.set(materializedRun, oracleDestination);
+		return materializedRun;
 	} catch (error) {
 		await retainFailure(evidenceRoot, error);
 		throw new EvalMaterializationError("Synthetic workspace materialization failed", runRoot, evidenceRoot, workspaceRoot, { cause: error });

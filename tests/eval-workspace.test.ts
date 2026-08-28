@@ -57,6 +57,22 @@ test("generator arguments cannot attach external or traversal paths", async () =
 	);
 });
 
+test("v1 and v2 scenarios cannot use v3-only grading assertions", async () => {
+	const { root, runsRoot } = await syntheticPackCopy();
+	const scenarioPath = path.join(root, "scenarios", "sensor-smoke-v2.json");
+	const scenario = JSON.parse(await readFile(scenarioPath, "utf8")) as { assertions: unknown[] };
+	scenario.assertions.push({ id: "blocked-limit", type: "max-blocked-attempts", maximum: 0 });
+	await writeFile(path.join(root, "scenarios", "invalid-v2-assertion.json"), `${JSON.stringify(scenario, null, 2)}\n`);
+	const pack = JSON.parse(await readFile(path.join(root, "pack.json"), "utf8")) as Record<string, unknown>;
+	pack.scenarios = ["scenarios/invalid-v2-assertion.json"];
+	await writeFile(path.join(root, "pack.json"), `${JSON.stringify(pack, null, 2)}\n`);
+	await assert.rejects(
+		materializeEvalRun({ packRoot: root, packReference: "pack.json", scenarioId: "sensor-smoke", runsRoot }),
+		(error: unknown) => error instanceof EvalMaterializationError
+			&& String(error.cause).includes("Scenario assertion type is invalid"),
+	);
+});
+
 test("runtime schema guards reject duplicate pack references", async () => {
 	const { root, runsRoot } = await syntheticPackCopy();
 	const packPath = path.join(root, "pack.json");

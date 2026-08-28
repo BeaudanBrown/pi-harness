@@ -256,10 +256,16 @@ test("unknown extension UI method aborts instead of leaving a dialog pending", a
 	}
 });
 
+test("v3 scenarios retain the compatible observable extension UI policy", () => {
+	assert.doesNotThrow(() => engineFor("ui", {
+		uiPolicy: { schemaVersion: "3.0.0", dialogs: [] },
+	}));
+});
+
 test("v1 extension UI policy fails with an explicit migration error", () => {
 	assert.throws(() => engineFor("ui", {
 		uiPolicy: { schemaVersion: "1.0.0", dialogs: [] },
-	}), /requires scenario schemaVersion 2.0.0; migrate the v1 dialog policy/);
+	}), /requires scenario schemaVersion 2.0.0 or 3.0.0; migrate the v1 dialog policy/);
 });
 
 test("declared extension dialog is answered and undeclared dialog is denied", async () => {
