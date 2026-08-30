@@ -71,6 +71,25 @@ test("prompt timeout terminates the complete RPC process tree", async () => {
 	await waitForProcessExit(grandchildPid);
 });
 
+test("a declared per-prompt timeout overrides the launcher default", async () => {
+	const unstarted = engineFor("normal");
+	await assert.rejects(unstarted.promptAndWait("Reject an overflowing deadline.", undefined, 86_400_001), /integer from 1 through 86400000/);
+	const engine = engineFor("timeout", { promptTimeoutMs: 2_000, runTimeoutMs: 3_000 });
+	await engine.start();
+	let grandchildPid = 0;
+	await assert.rejects(
+		engine.promptAndWait("Use the scenario prompt deadline.", undefined, 60),
+		(error: unknown) => {
+			assert.ok(error instanceof RpcEngineError);
+			assert.match(error.message, /Prompt did not settle within 60ms/);
+			grandchildPid = Number(error.diagnostics.stderr.match(/grandchild:(\d+)/)?.[1]);
+			return true;
+		},
+	);
+	await engine.stop();
+	await waitForProcessExit(grandchildPid);
+});
+
 test("abort signal cancels and terminates a running prompt", async () => {
 	const engine = engineFor("timeout", { promptTimeoutMs: 2_000, runTimeoutMs: 3_000 });
 	await engine.start();

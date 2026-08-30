@@ -57,6 +57,8 @@
         agentgraphPostgresPackage = agentgraph.packages.${system}.agentgraph-postgres;
         agentgraphPiResources = agentgraph.packages.${system}.agentgraph-pi-resources;
         piRPackage = pi-r.packages.${system}.pi-r;
+        harnessSourceRevision = self.rev or self.dirtyRev or self.narHash or "unversioned";
+        piRSourceRevision = pi-r.rev or pi-r.dirtyRev or pi-r.narHash or "unversioned";
         piLspExtension = pkgs.callPackage ./nix/pi-lsp-extension.nix {
           piLspExtensionSrc = pi-lsp-extension-src;
         };
@@ -80,8 +82,8 @@
             piLspExtension
             playwrightAgentCli
             ;
-          harnessRevision = self.rev or self.dirtyRev or self.narHash or "unversioned";
-          piRRevision = pi-r.rev or pi-r.dirtyRev or pi-r.narHash or "unversioned";
+          harnessRevision = harnessSourceRevision;
+          piRRevision = piRSourceRevision;
           fzf = pkgs.fzf;
           tmux = pkgs.tmux;
           d2 = pkgs.d2;
@@ -195,6 +197,88 @@
           ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
           ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
         '';
+        evalTooling = pkgs.runCommand "pi-harness-eval-tooling" {
+          nativeBuildInputs = [ pkgs.typescript ];
+        } ''
+          mkdir -p source/tests source/tests/fixtures "$out/lib" "$out/bin" "$out/share/pi-harness-eval-self-test"
+          cp -r ${./eval} source/eval
+          cp ${./tests/eval-contracts.test.ts} source/tests/eval-contracts.test.ts
+          cp ${./tests/eval-cli.test.ts} source/tests/eval-cli.test.ts
+          cp ${./tests/eval-grading.test.ts} source/tests/eval-grading.test.ts
+          cp ${./tests/eval-launcher.test.ts} source/tests/eval-launcher.test.ts
+          cp ${./tests/eval-rpc.test.ts} source/tests/eval-rpc.test.ts
+          cp ${./tests/eval-trace-metrics.test.ts} source/tests/eval-trace-metrics.test.ts
+          cp ${./tests/eval-workspace.test.ts} source/tests/eval-workspace.test.ts
+          cp -r ${./tests/fixtures/eval-rpc} source/tests/fixtures/eval-rpc
+          cp -r ${./tests/fixtures/eval-traces} source/tests/fixtures/eval-traces
+          cat > tsconfig.json <<EOF
+          {
+            "compilerOptions": {
+              "target": "ES2022",
+              "module": "NodeNext",
+              "moduleResolution": "NodeNext",
+              "strict": true,
+              "skipLibCheck": true,
+              "types": ["node"],
+              "typeRoots": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types"],
+              "rootDir": "source",
+              "outDir": "$out/lib"
+            },
+            "include": ["source/eval/**/*.ts", "source/tests/**/*.ts"]
+          }
+          EOF
+          tsc --project tsconfig.json
+          cp -r source/eval "$out/share/pi-harness-eval-self-test/eval"
+          cp -r source/tests "$out/share/pi-harness-eval-self-test/tests"
+          cat > "$out/bin/pi-eval" <<EOF
+          #!${pkgs.runtimeShell}
+          exec ${lib.getExe pkgs.nodejs} "$out/lib/eval/cli/main.js" "\$@"
+          EOF
+          chmod +x "$out/bin/pi-eval"
+        '';
+        evalApp = pkgs.writeShellApplication {
+          name = "pi-eval";
+          runtimeInputs = [ pkgs.git pkgs.nodejs ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ];
+          text = ''
+            set -euo pipefail
+            export PI_EVAL_LAUNCHER_IDENTITY=${piHarnessPackage}/share/pi-harness/eval/launcher-identity.json
+            export PI_EVAL_EXPECTED_PI_VERSION=${lib.escapeShellArg piPackage.version}
+            export PI_EVAL_EXPECTED_HARNESS_REVISION=${lib.escapeShellArg harnessSourceRevision}
+            export PI_EVAL_EXPECTED_LAUNCHER_ID=pi-r-local
+            export PI_EVAL_EXPECTED_LAUNCHER_PATH=${piHarnessPackage}/bin/pi-r-local
+            export PI_EVAL_EXPECTED_PI_R_REVISION=${lib.escapeShellArg piRSourceRevision}
+            export PI_EVAL_EXPECTED_PI_R_ROOT=${piRPackage.resourcePaths.root}
+            export PI_EVAL_EXPECTED_PI_R_EXTENSION=${piRPackage.resourcePaths.extension}
+            export PI_EVAL_EXPECTED_PI_R_SKILL=${piRPackage.resourcePaths.skill}
+            exec ${evalTooling}/bin/pi-eval "$@"
+          '';
+        };
+        evalSelfTestApp = pkgs.writeShellApplication {
+          name = "pi-eval-self-test";
+          runtimeInputs = [ pkgs.coreutils pkgs.git pkgs.nodejs ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ];
+          text = ''
+            set -euo pipefail
+            home=$(mktemp -d)
+            trap 'rm -rf "$home"' EXIT
+            work="$home/work"
+            cp -R --no-preserve=mode ${evalTooling}/share/pi-harness-eval-self-test "$work"
+            chmod -R u+w "$work"
+            cd "$work"
+            env -i \
+              HOME="$home" \
+              TMPDIR="''${TMPDIR:-/tmp}" \
+              PATH="$PATH" \
+              ${lib.optionalString pkgs.stdenv.isLinux "PI_EVAL_BWRAP=${lib.getExe pkgs.bubblewrap} \\"}
+              ${lib.getExe pkgs.nodejs} --test --test-concurrency=1 \
+                ${evalTooling}/lib/tests/eval-contracts.test.js \
+                ${evalTooling}/lib/tests/eval-cli.test.js \
+                ${evalTooling}/lib/tests/eval-grading.test.js \
+                ${evalTooling}/lib/tests/eval-launcher.test.js \
+                ${evalTooling}/lib/tests/eval-rpc.test.js \
+                ${evalTooling}/lib/tests/eval-trace-metrics.test.js \
+                ${evalTooling}/lib/tests/eval-workspace.test.js
+          '';
+        };
         migrateTkApp = pkgs.writeShellApplication {
           name = "pi-migrate-tk";
           runtimeInputs = [
@@ -546,15 +630,10 @@
             tsc --noEmit --project tsconfig.json
             test_build_dir=$(mktemp -d)
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
+            ${evalSelfTestApp}/bin/pi-eval-self-test
             PI_HARNESS_JQ=${lib.getExe pkgs.jq} \
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
               node --test \
-                "$test_build_dir/tests/eval-contracts.test.js" \
-                "$test_build_dir/tests/eval-grading.test.js" \
-                "$test_build_dir/tests/eval-launcher.test.js" \
-                "$test_build_dir/tests/eval-rpc.test.js" \
-                "$test_build_dir/tests/eval-trace-metrics.test.js" \
-                "$test_build_dir/tests/eval-workspace.test.js" \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
@@ -601,6 +680,8 @@
         packages.default = piHarnessPackage;
 
         apps.migrate-tk = flake-utils.lib.mkApp { drv = migrateTkApp; };
+        apps.eval = flake-utils.lib.mkApp { drv = evalApp; };
+        apps.eval-self-test = flake-utils.lib.mkApp { drv = evalSelfTestApp; };
         apps.verify = flake-utils.lib.mkApp { drv = verifyApp; };
         apps.verify-lsp-live = flake-utils.lib.mkApp { drv = verifyLspLiveApp; };
         apps.default = flake-utils.lib.mkApp {

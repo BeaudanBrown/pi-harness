@@ -17,7 +17,7 @@ const engine = new PiRpcEngine({
 });
 
 await engine.start();
-const result = await engine.promptAndWait("A fabricated question");
+const result = await engine.promptAndWait("A fabricated question", undefined, 45_000);
 await engine.stop();
 ```
 
@@ -39,7 +39,8 @@ malformed input, and exit status.
   policies fail with an explicit migration error;
 - undeclared confirmations receive `confirmed: false`, and undeclared
   select/input/editor dialogs receive `cancelled: true`;
-- command, prompt, and whole-run deadlines are bounded;
+- command, per-scenario-prompt (with launcher-default fallback), and whole-run
+  deadlines are bounded;
 - cancellation and protocol failure issue a best-effort RPC `abort`, then
   terminate the complete detached process group with TERM/KILL escalation;
 - the engine supports the repository's Linux/macOS Nix platforms and refuses

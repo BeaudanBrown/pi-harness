@@ -14,6 +14,7 @@ import {
 	writeFile,
 } from "node:fs/promises";
 import path from "node:path";
+import { MAX_EVAL_TIMEOUT_MS } from "../contracts/limits.js";
 import {
 	assertModelVisibleTreeSeparated,
 	assertPackRelativeReference,
@@ -63,11 +64,12 @@ export interface MaterializationScenario extends ScenarioSemanticContract {
 	version: string;
 	synthetic: true;
 	fabricatedQuestion: string;
+	prompts: Array<{ id: string; text: string; timeoutMs: number }>;
 	materialization: FixtureMaterialization | GeneratorMaterialization;
 	timeouts: { promptMs: number; runMs: number };
 }
 
-interface EvalPack {
+export interface EvalPack {
 	schemaVersion: "1.0.0";
 	id: string;
 	version: string;
@@ -93,6 +95,7 @@ export interface MaterializedEvalRun {
 	provenancePath: string;
 	scenario: MaterializationScenario;
 	before: WorkspaceEvidence;
+	initialRevision: string;
 	captureAfter(): Promise<WorkspaceEvidence>;
 	withWorkspaceEvidence<T>(operation: (workspaceRoot: string) => Promise<T>): Promise<T>;
 	cleanup(): Promise<void>;
@@ -144,7 +147,6 @@ function assertExactKeys(value: unknown, allowed: readonly string[], label: stri
 }
 
 const STABLE_ID = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
-const MAX_TIMEOUT_MS = 86_400_000;
 
 function assertStableId(value: unknown, label: string): void {
 	if (typeof value !== "string" || value.length > 96 || !STABLE_ID.test(value)) {
@@ -153,8 +155,8 @@ function assertStableId(value: unknown, label: string): void {
 }
 
 function assertPositiveTimeout(value: unknown, label: string): void {
-	if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > MAX_TIMEOUT_MS) {
-		throw new Error(`${label} must be an integer from 1 through ${MAX_TIMEOUT_MS}`);
+	if (!Number.isInteger(value) || (value as number) < 1 || (value as number) > MAX_EVAL_TIMEOUT_MS) {
+		throw new Error(`${label} must be an integer from 1 through ${MAX_EVAL_TIMEOUT_MS}`);
 	}
 }
 
@@ -671,7 +673,7 @@ async function copyWorkspaceMaterial(source: string, workspaceRoot: string): Pro
 	}
 }
 
-async function initializeGit(workspaceRoot: string, templateRoot: string): Promise<void> {
+async function initializeGit(workspaceRoot: string, templateRoot: string): Promise<string> {
 	await mkdir(templateRoot);
 	const env = isolatedGitEnvironment();
 	await runCommand("git", ["init", "--quiet", `--template=${templateRoot}`], workspaceRoot, env);
@@ -682,6 +684,7 @@ async function initializeGit(workspaceRoot: string, templateRoot: string): Promi
 		"-c", "core.hooksPath=/dev/null", "commit", "--quiet", "--no-verify", "--allow-empty",
 		"-m", "Initial synthetic workspace",
 	], workspaceRoot, env);
+	return (await runCommand("git", ["rev-parse", "HEAD"], workspaceRoot, env)).stdout.trim();
 }
 
 async function retainFailure(evidenceRoot: string, error: unknown): Promise<void> {
@@ -689,6 +692,41 @@ async function retainFailure(evidenceRoot: string, error: unknown): Promise<void
 	await writeFile(path.join(evidenceRoot, "materialization-error.json"), `${JSON.stringify({
 		message: error instanceof Error ? error.message : String(error),
 	}, null, 2)}\n`);
+}
+
+export interface LoadedEvalPack {
+	canonicalPackRoot: string;
+	pack: EvalPack;
+	scenarios: MaterializationScenario[];
+}
+
+/** Load and semantically validate a wholly synthetic pack without materializing a run. */
+export async function loadEvalPack(packRoot: string, packReference: string): Promise<LoadedEvalPack> {
+	const canonicalPackRoot = await realpath(packRoot);
+	const packPath = await resolvePackReference(canonicalPackRoot, packReference);
+	const pack = await readJson<EvalPack>(packPath);
+	assertPackShape(pack);
+	for (const baseline of pack.baselineSummaries ?? []) await resolvePackReference(canonicalPackRoot, baseline);
+	const scenarios = await Promise.all(pack.scenarios.map(async (reference) => {
+		const scenarioPath = await resolvePackReference(canonicalPackRoot, reference);
+		return await readJson<MaterializationScenario>(scenarioPath);
+	}));
+	verifyPackSemantics(pack, scenarios.map((scenario) => scenario.id));
+	for (const scenario of scenarios) {
+		assertScenarioShape(scenario);
+		verifyScenarioSemantics(scenario);
+		if ("fixture" in scenario.materialization) {
+			await assertModelVisibleTreeSeparated(
+				canonicalPackRoot,
+				scenario.materialization.fixture.workspacePath,
+				[scenario.materialization.fixture.oraclePath],
+			);
+		} else {
+			await resolvePackReference(canonicalPackRoot, scenario.materialization.generator.path);
+			for (const reference of Object.values(scenario.materialization.generator.outputs)) assertPackRelativeReference(reference);
+		}
+	}
+	return { canonicalPackRoot, pack, scenarios };
 }
 
 /** Materialize one declared synthetic scenario into an evaluator-owned Git run. */
@@ -702,34 +740,12 @@ export async function materializeEvalRun(options: MaterializeEvalRunOptions): Pr
 	await Promise.all([mkdir(hiddenRoot), mkdir(evidenceRoot)]);
 
 	try {
-		const [canonicalPackRoot, canonicalRunsRoot] = await Promise.all([realpath(options.packRoot), realpath(runsRoot)]);
+		const [{ canonicalPackRoot, scenarios }, canonicalRunsRoot] = await Promise.all([
+			loadEvalPack(options.packRoot, options.packReference),
+			realpath(runsRoot),
+		]);
 		if (isContained(canonicalPackRoot, canonicalRunsRoot) || isContained(canonicalRunsRoot, canonicalPackRoot)) {
 			throw new Error("Evaluator run root must be separate from the synthetic pack root");
-		}
-		const packPath = await resolvePackReference(canonicalPackRoot, options.packReference);
-		const pack = await readJson<EvalPack>(packPath);
-		assertPackShape(pack);
-		for (const baseline of pack.baselineSummaries ?? []) await resolvePackReference(canonicalPackRoot, baseline);
-		const scenarios = await Promise.all(pack.scenarios.map(async (reference) => {
-			const scenarioPath = await resolvePackReference(canonicalPackRoot, reference);
-			return await readJson<MaterializationScenario>(scenarioPath);
-		}));
-		verifyPackSemantics(pack, scenarios.map((scenario) => scenario.id));
-		for (const loadedScenario of scenarios) {
-			assertScenarioShape(loadedScenario);
-			verifyScenarioSemantics(loadedScenario);
-			if ("fixture" in loadedScenario.materialization) {
-				await assertModelVisibleTreeSeparated(
-					canonicalPackRoot,
-					loadedScenario.materialization.fixture.workspacePath,
-					[loadedScenario.materialization.fixture.oraclePath],
-				);
-			} else {
-				await resolvePackReference(canonicalPackRoot, loadedScenario.materialization.generator.path);
-				for (const reference of Object.values(loadedScenario.materialization.generator.outputs)) {
-					assertPackRelativeReference(reference);
-				}
-			}
 		}
 		const scenario = scenarios.find((candidate) => candidate.id === options.scenarioId);
 		if (!scenario) throw new Error(`Unknown scenario ID: ${options.scenarioId}`);
@@ -799,7 +815,7 @@ export async function materializeEvalRun(options: MaterializeEvalRunOptions): Pr
 		} else {
 			await writeFile(provenancePath, `${JSON.stringify(scenario.provenance, null, 2)}\n`);
 		}
-		await initializeGit(workspaceRoot, path.join(hiddenRoot, "git-template"));
+		const initialRevision = await initializeGit(workspaceRoot, path.join(hiddenRoot, "git-template"));
 		const before = await captureWorkspace(workspaceRoot);
 		await writeFile(path.join(evidenceRoot, "before.json"), `${JSON.stringify(before, null, 2)}\n`);
 
@@ -822,6 +838,7 @@ export async function materializeEvalRun(options: MaterializeEvalRunOptions): Pr
 			provenancePath,
 			scenario,
 			before,
+			initialRevision,
 			captureAfter,
 			async withWorkspaceEvidence<T>(operation: (root: string) => Promise<T>): Promise<T> {
 				let operationFailure: unknown;

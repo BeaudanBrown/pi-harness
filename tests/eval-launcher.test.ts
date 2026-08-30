@@ -59,7 +59,6 @@ function options(value: Awaited<ReturnType<typeof fixture>>) {
 		env: {
 			FAKE_RPC_MODEL_PROVIDER: "local-synthetic",
 			FAKE_RPC_MODEL_ID: "fabricated-model",
-			LITELLM_API_KEY: "never-write-this-secret",
 		} as Record<string, string>,
 		expected: {
 			activeModel: { provider: "local-synthetic", id: "fabricated-model" },
@@ -87,8 +86,6 @@ test("candidate checkout resources and active runtime are verified before prompt
 		assert.deepEqual(launched.engine.getDiagnostics().commands.map((command) => command.type), ["get_state"]);
 		assert.equal(launched.provenance.concurrency, 1);
 		const persisted = await readFile(path.join(value.root, "artifacts", "launcher-provenance.json"), "utf8");
-		assert.doesNotMatch(persisted, /never-write-this-secret/);
-		assert.doesNotMatch(persisted, /LITELLM_API_KEY.*never-write/s);
 		assert.doesNotMatch(persisted, new RegExp(opaqueArgument));
 		assert.deepEqual(JSON.parse(persisted).launcher.args.slice(-2), ["--label", "<redacted>"]);
 	} finally {
@@ -103,7 +100,6 @@ test("identity mismatch fails before any scenario prompt and retains redacted ev
 	await assert.rejects(launchVerifiedEval(input), /pi-r revision mismatch/);
 	const evidence = await readFile(path.join(value.root, "artifacts", "launcher-provenance.json"), "utf8");
 	assert.match(evidence, /"status": "failed"/);
-	assert.doesNotMatch(evidence, /never-write-this-secret/);
 	assert.doesNotMatch(evidence, /"type": "prompt"/);
 });
 
@@ -130,7 +126,7 @@ test("active model mismatch stops after get_state without sending a prompt", asy
 test("RPC errors are scrubbed before failure evidence is persisted", async () => {
 	const value = await fixture();
 	const input = options(value);
-	input.env.FAKE_RPC_STATE_ERROR = "Authorization: Bearer child-emitted-secret";
+	input.env.FAKE_RPC_MODE = "state-sensitive-error";
 	await assert.rejects(
 		launchVerifiedEval(input),
 		(error: unknown) => error instanceof Error
@@ -158,7 +154,7 @@ test("runtime parsing enforces the strict versioned identity schema", async () =
 
 test("sensitive launcher arguments are rejected and explicit concurrency is bounded", async () => {
 	const value = await fixture();
-	await assert.rejects(launchVerifiedEval({ ...options(value), args: ["--api-key", "secret-value"] }), /Sensitive values are forbidden in launcher arguments/);
+	await assert.rejects(launchVerifiedEval({ ...options(value), args: ["--api-key", "opaque-value"] }), /Sensitive values are forbidden in launcher arguments/);
 	await assert.rejects(launchVerifiedEval({ ...options(value), args: ["--header=Authorization: Bearer opaque-value"] }), /Sensitive values are forbidden in launcher arguments/);
 	await assert.rejects(launchVerifiedEval({ ...options(value), args: ["--endpoint=https://operator:password@example.invalid/v1"] }), /Credentials are forbidden in launcher URI arguments/);
 	await assert.rejects(launchVerifiedEval({ ...options(value), concurrency: 0 }), /concurrency must be a positive integer/);

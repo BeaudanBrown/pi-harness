@@ -133,8 +133,8 @@ function handle(command) {
 			break;
 		case "get_state":
 			if (mode === "command-timeout") break;
-			if (process.env.FAKE_RPC_STATE_ERROR) {
-				emit({ type: "response", id: command.id, command: command.type, success: false, error: process.env.FAKE_RPC_STATE_ERROR });
+			if (mode === "state-sensitive-error") {
+				emit({ type: "response", id: command.id, command: command.type, success: false, error: "Authorization: Bearer child-emitted-secret" });
 				break;
 			}
 			respond(command, {

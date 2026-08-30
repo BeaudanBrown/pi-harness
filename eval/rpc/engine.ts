@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { StringDecoder } from "node:string_decoder";
 import { isDeepStrictEqual } from "node:util";
+import { MAX_EVAL_TIMEOUT_MS } from "../contracts/limits.js";
 
 export interface RpcUiDialogPolicy {
 	request: Record<string, unknown> & { method: "select" | "confirm" | "input" | "editor" };
@@ -159,7 +160,10 @@ export class PiRpcEngine {
 		}
 	}
 
-	async promptAndWait(message: string, signal?: AbortSignal): Promise<RpcRunResult> {
+	async promptAndWait(message: string, signal?: AbortSignal, timeoutMs = this.options.promptTimeoutMs): Promise<RpcRunResult> {
+		if (!Number.isInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > MAX_EVAL_TIMEOUT_MS) {
+			throw new Error(`Prompt timeout must be an integer from 1 through ${MAX_EVAL_TIMEOUT_MS}`);
+		}
 		if (signal?.aborted) {
 			this.fail("Prompt cancelled", true);
 			throw this.failure;
@@ -188,7 +192,7 @@ export class PiRpcEngine {
 		const firstEventIndex = this.events.findIndex((event) =>
 			(this.recordIndexes.get(event) ?? -1) > acceptanceRecordIndex);
 		const startIndex = firstEventIndex === -1 ? this.events.length : firstEventIndex;
-		const settledIndex = await this.waitForSettled(acceptanceRecordIndex, signal);
+		const settledIndex = await this.waitForSettled(acceptanceRecordIndex, signal, timeoutMs);
 		const events = this.events.slice(startIndex, settledIndex + 1);
 		const [state, messages, entries, sessionStats, finalAssistantText] = await Promise.all([
 			this.requestData({ type: "get_state" }),
@@ -265,7 +269,7 @@ export class PiRpcEngine {
 		return (value as Record<string, unknown>)[key];
 	}
 
-	private waitForSettled(afterRecordIndex: number, signal?: AbortSignal): Promise<number> {
+	private waitForSettled(afterRecordIndex: number, signal: AbortSignal | undefined, timeoutMs: number): Promise<number> {
 		const existing = this.events.findIndex((event) =>
 			event.type === "agent_settled" && (this.recordIndexes.get(event) ?? -1) > afterRecordIndex);
 		if (existing !== -1) return Promise.resolve(existing);
@@ -277,10 +281,10 @@ export class PiRpcEngine {
 			const timer = setTimeout(() => {
 				this.eventWaiters.delete(waiter);
 				cleanup();
-				const error = new RpcEngineError(`Prompt did not settle within ${this.options.promptTimeoutMs}ms`, this.getDiagnostics());
+				const error = new RpcEngineError(`Prompt did not settle within ${timeoutMs}ms`, this.getDiagnostics());
 				reject(error);
 				this.fail(error.message, true);
-			}, this.options.promptTimeoutMs);
+			}, timeoutMs);
 			const waiter: EventWaiter = { afterRecordIndex, resolve, reject, timer, cleanup };
 			this.eventWaiters.add(waiter);
 			if (signal) {

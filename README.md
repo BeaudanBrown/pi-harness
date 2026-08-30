@@ -97,8 +97,18 @@ jq .piR result/share/pi-harness/eval/launcher-identity.json
 ```
 
 The resulting manifest must name the override's store resources, rather than
-the deployed or lock-file pi-r package. The future live CLI consumes this same
-identity seam; this build command neither starts a model nor probes an endpoint.
+the deployed or lock-file pi-r package. The live CLI consumes this same identity
+seam; this build command neither starts a model nor probes an endpoint.
+
+## Synthetic evaluation CLI
+
+`nix run .#eval -- list|run|suite|report` exposes the synthetic evaluation
+stack. Live `run` and `suite` commands require the literal `--live-model` flag,
+default to one sequential run, preserve all partial artifacts, and assume the
+configured endpoint already exists. `nix run .#eval-self-test` runs only the
+synthetic fake-RPC laboratory with an empty credential environment; canonical
+verification invokes the same self-test. See [`eval/cli/README.md`](eval/cli/README.md)
+for commands, outputs, and exit codes.
 
 ## NixOS Usage
 
