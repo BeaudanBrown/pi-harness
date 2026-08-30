@@ -34,6 +34,7 @@
 
   outputs =
     {
+      self,
       nixpkgs,
       flake-utils,
       nix-ai-tools,
@@ -79,6 +80,8 @@
             piLspExtension
             playwrightAgentCli
             ;
+          harnessRevision = self.rev or self.dirtyRev or self.narHash or "unversioned";
+          piRRevision = pi-r.rev or pi-r.dirtyRev or pi-r.narHash or "unversioned";
           fzf = pkgs.fzf;
           tmux = pkgs.tmux;
           d2 = pkgs.d2;
@@ -381,6 +384,33 @@
             test -x ${piHarnessPackage}/bin/pi-playwright
             test -x ${piHarnessPackage}/bin/pi-matrix-whoami
             test -x ${piHarnessPackage}/bin/pi-r-local
+            launcher_identity=${piHarnessPackage}/share/pi-harness/eval/launcher-identity.json
+            check-jsonschema --check-metaschema eval/launcher/schemas/v1/launcher-identity.schema.json
+            check-jsonschema --check-metaschema eval/launcher/schemas/v1/runtime-provenance.schema.json
+            check-jsonschema --schemafile eval/launcher/schemas/v1/launcher-identity.schema.json "$launcher_identity"
+            jq -e '
+              .schemaVersion == "1.0.0"
+              and .launcher.id == "pi-r-local"
+              and .launcher.path == "${piHarnessPackage}/bin/pi-r-local"
+              and .launcher.defaultArgs == ["--mode", "rpc", "--no-session"]
+              and .launcher.requiredResourceBindings == [
+                "${piRPackage.resourcePaths.root}",
+                "${piRPackage.resourcePaths.extension}",
+                "${piRPackage.resourcePaths.skill}"
+              ]
+              and .piR.resourceRoot == "${piRPackage.resourcePaths.root}"
+              and .piR.extensionPath == "${piRPackage.resourcePaths.extension}"
+              and .piR.skillPath == "${piRPackage.resourcePaths.skill}"
+            ' "$launcher_identity" >/dev/null
+            launcher_attestation=$(mktemp)
+            PI_EVAL_ATTESTATION_PATH="$launcher_attestation" \
+              ${piHarnessPackage}/bin/pi-r-local --version >/dev/null
+            jq -e '
+              .launcherId == "pi-r-local"
+              and .resourceRoot == "${piRPackage.resourcePaths.root}"
+              and .extensionPath == "${piRPackage.resourcePaths.extension}"
+              and .skillPath == "${piRPackage.resourcePaths.skill}"
+            ' "$launcher_attestation" >/dev/null
             test -x ${piRPackage.resourcePaths.cli}
             test -x ${piRPackage.resourcePaths.rscript}
             test -x ${piRPackage.resourcePaths.parser}
@@ -521,6 +551,7 @@
               node --test \
                 "$test_build_dir/tests/eval-contracts.test.js" \
                 "$test_build_dir/tests/eval-grading.test.js" \
+                "$test_build_dir/tests/eval-launcher.test.js" \
                 "$test_build_dir/tests/eval-rpc.test.js" \
                 "$test_build_dir/tests/eval-trace-metrics.test.js" \
                 "$test_build_dir/tests/eval-workspace.test.js" \

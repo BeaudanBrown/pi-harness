@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pi-harness.invalid/eval/launcher/v1/launcher-identity.schema.json",
+  "title": "Evaluation launcher identity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "launcher", "pi", "harness", "piR"],
+  "properties": {
+    "schemaVersion": { "const": "1.0.0" },
+    "launcher": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "path", "defaultArgs", "requiredResourceBindings"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "path": { "$ref": "#/$defs/absolutePath" },
+        "defaultArgs": { "type": "array", "items": { "type": "string" } },
+        "requiredResourceBindings": { "type": "array", "minItems": 3, "uniqueItems": true, "items": { "$ref": "#/$defs/absolutePath" } }
+      }
+    },
+    "pi": { "$ref": "#/$defs/versionIdentity" },
+    "harness": { "$ref": "#/$defs/revisionIdentity" },
+    "piR": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "resourceRoot", "extensionPath", "skillPath"],
+      "properties": {
+        "revision": { "type": "string", "minLength": 1 },
+        "resourceRoot": { "$ref": "#/$defs/absolutePath" },
+        "extensionPath": { "$ref": "#/$defs/absolutePath" },
+        "skillPath": { "$ref": "#/$defs/absolutePath" }
+      }
+    }
+  },
+  "$defs": {
+    "absolutePath": { "type": "string", "pattern": "^/", "minLength": 2 },
+    "versionIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["version"],
+      "properties": { "version": { "type": "string", "minLength": 1 } }
+    },
+    "revisionIdentity": {
+      "type": "object", "additionalProperties": false, "required": ["revision"],
+      "properties": { "revision": { "type": "string", "minLength": 1 } }
+    }
+  }
+}

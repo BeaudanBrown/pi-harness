@@ -72,6 +72,34 @@ surface captured from that launcher. The dependency scout starts raw Pi from
 the same inherited configuration directory, so a local launcher uses its local
 provider/model without forwarding conversation or workspace context.
 
+## Synthetic evaluation launcher identity
+
+The package emits
+`share/pi-harness/eval/launcher-identity.json`. This Nix-generated manifest
+binds the `pi-r-local` RPC launcher to the selected Pi version, harness input
+revision, pi-r input revision (or immutable NAR hash for a path override), and
+exact pi-r resource/extension/skill store
+paths. The evaluation launcher in `eval/launcher/launch.ts` checks that manifest,
+the evaluated Git revision and clean state, the launcher's machine-readable
+startup attestation of effective pi-r paths, and RPC `get_state` model identity
+before any scenario prompt. It inherits configured provider/model environment
+variables but persists only environment key names; credential-like command-line
+arguments are rejected, and all persisted argument values are redacted. Live
+concurrency defaults to one.
+
+To evaluate a current pi-r checkout instead of the lock-file input, use an
+absolute path override (a clean Git checkout gives the most useful revision):
+
+```bash
+nix build .#default \
+  --override-input pi-r "path:$(realpath ../pi-r)"
+jq .piR result/share/pi-harness/eval/launcher-identity.json
+```
+
+The resulting manifest must name the override's store resources, rather than
+the deployed or lock-file pi-r package. The future live CLI consumes this same
+identity seam; this build command neither starts a model nor probes an endpoint.
+
 ## NixOS Usage
 
 In a consuming flake such as `nix-dotfiles`:

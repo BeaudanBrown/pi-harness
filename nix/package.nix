@@ -20,8 +20,37 @@
   jq,
   nodejs,
   playwrightAgentCli ? null,
+  harnessRevision ? "unversioned",
+  piRRevision ? "unversioned",
 }:
 
+let
+  evalLauncherIdentity = builtins.toJSON {
+    schemaVersion = "1.0.0";
+    launcher = {
+      id = "pi-r-local";
+      path = "@out@/bin/pi-r-local";
+      defaultArgs = [
+        "--mode"
+        "rpc"
+        "--no-session"
+      ];
+      requiredResourceBindings = [
+        piRPackage.resourcePaths.root
+        piRPackage.resourcePaths.extension
+        piRPackage.resourcePaths.skill
+      ];
+    };
+    pi.version = piPackage.version;
+    harness.revision = harnessRevision;
+    piR = {
+      revision = piRRevision;
+      resourceRoot = piRPackage.resourcePaths.root;
+      extensionPath = piRPackage.resourcePaths.extension;
+      skillPath = piRPackage.resourcePaths.skill;
+    };
+  };
+in
 stdenvNoCC.mkDerivation {
   pname = "pi-harness";
   version = "0.1.0";
@@ -148,6 +177,12 @@ export PI_R_NIXPKGS_PIN_PATH="${piRPackage.resourcePaths.nixpkgsPin}"
 export PI_R_SCOUT_PI="${lib.getExe piPackage}"
 export PI_R_SCOUT_EXTENSION="${piRPackage.resourcePaths.scoutExtension}"
 unset PI_R_TEST_TREE_SITTER PI_R_TEST_TREE_SITTER_R PI_R_TEST_TREE_SITTER_QUERY PI_R_TEST_BASE_RSCRIPT PI_R_TEST_RESOURCE_ROOT
+if [[ -n "\''${PI_EVAL_ATTESTATION_PATH:-}" ]]; then
+  umask 077
+  printf '{"launcherId":"pi-r-local","resourceRoot":"%s","extensionPath":"%s","skillPath":"%s"}\n' \
+    "\$PI_R_RESOURCE_ROOT" "${piRPackage.resourcePaths.extension}" "${piRPackage.resourcePaths.skill}" \
+    > "\$PI_EVAL_ATTESTATION_PATH"
+fi
 export PI_R_INITIAL_TOOLS="\''${PI_R_INITIAL_TOOLS:-read,bash,edit,write,grep,find,ls}"
 exec "${lib.getExe piPackage}" \
   --no-extensions \
@@ -158,6 +193,13 @@ exec "${lib.getExe piPackage}" \
   "\$@"
 EOF
     chmod +x "$out/bin/pi-r-local"
+
+    mkdir -p "$out/share/pi-harness/eval"
+    cat > "$out/share/pi-harness/eval/launcher-identity.json" <<'EOF'
+${evalLauncherIdentity}
+EOF
+    substituteInPlace "$out/share/pi-harness/eval/launcher-identity.json" \
+      --replace-fail '@out@' "$out"
 
     cp bin/pi-playwright "$out/bin/pi-playwright"
     substituteInPlace "$out/bin/pi-playwright" \
@@ -197,6 +239,10 @@ EOF
     mermaidCli = mermaidCli;
     structurizrCli = structurizrCli;
     playwrightAgentCli = playwrightAgentCli;
+    evalLauncherIdentity = {
+      path = "share/pi-harness/eval/launcher-identity.json";
+      inherit harnessRevision piRRevision;
+    };
   };
 
   meta = {

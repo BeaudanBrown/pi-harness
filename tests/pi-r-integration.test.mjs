@@ -123,7 +123,7 @@ export default function (pi) {
   const restored = records.find((entry) => entry.kind === "restored").tools;
   const shutdown = records.find((entry) => entry.kind === "shutdown").tools;
   assert.equal(initial.some((name) => name.startsWith("r_") || name === "evaluate_r"), false);
-  assert.deepEqual(active, ["read", "grep", "find", "ls", "r_contract_propose", "evaluate_r", "r_object_inspect", "r_worker_status", "r_worker_clear", "r_worker_reset", "r_data_inspect"]);
+  assert.deepEqual(active, ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_exec", "r_inspect", "r_status", "r_clear", "r_reset", "r_data_inspect"]);
   assert.deepEqual(restored, initial, `${expectedKind} launcher tools must be restored by /r stop`);
   assert.deepEqual(shutdown, initial, `${expectedKind} launcher tools must remain restored at shutdown`);
   if (expectedKind === "local") {

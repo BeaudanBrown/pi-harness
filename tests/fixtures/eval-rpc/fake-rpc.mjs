@@ -133,7 +133,17 @@ function handle(command) {
 			break;
 		case "get_state":
 			if (mode === "command-timeout") break;
-			respond(command, { isStreaming: false, sessionId: "synthetic-session" });
+			if (process.env.FAKE_RPC_STATE_ERROR) {
+				emit({ type: "response", id: command.id, command: command.type, success: false, error: process.env.FAKE_RPC_STATE_ERROR });
+				break;
+			}
+			respond(command, {
+				isStreaming: false,
+				sessionId: "synthetic-session",
+				...(process.env.FAKE_RPC_MODEL_PROVIDER && process.env.FAKE_RPC_MODEL_ID
+					? { model: { provider: process.env.FAKE_RPC_MODEL_PROVIDER, id: process.env.FAKE_RPC_MODEL_ID } }
+					: {}),
+			});
 			break;
 		case "get_messages":
 			respond(command, { messages: [{ role: "assistant", content: "synthetic answer" }] });
