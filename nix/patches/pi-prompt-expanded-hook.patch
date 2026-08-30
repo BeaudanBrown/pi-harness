@@ -1,28 +1,27 @@
 diff -ruN a/dist/core/agent-session.d.ts b/dist/core/agent-session.d.ts
---- a/dist/core/agent-session.d.ts	2026-08-06 17:32:00.197514280 +1000
-+++ b/dist/core/agent-session.d.ts	2026-08-06 17:53:08.668182969 +1000
-@@ -115,6 +115,8 @@
+--- a/dist/core/agent-session.d.ts	2026-08-30 17:16:25.246154081 +1000
++++ b/dist/core/agent-session.d.ts	2026-08-30 17:16:25.280355928 +1000
+@@ -154,6 +154,8 @@
  export interface PromptOptions {
-     /** Whether to expand file-based prompt templates (default: true) */
+     /** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
      expandPromptTemplates?: boolean;
 +    /** Called after command, skill, and prompt expansion, before delivery. */
 +    onPromptExpanded?: (text: string) => void;
      /** Image attachments */
      images?: ImageContent[];
      /** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
-@@ -372,6 +374,8 @@
-      */
+@@ -426,6 +428,7 @@
      sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
          deliverAs?: "steer" | "followUp";
-+        expandPromptTemplates?: boolean;
+         expandPromptTemplates?: boolean;
 +        onPromptExpanded?: (text: string) => void;
      }): Promise<void>;
      /**
       * Clear all queued messages and return them.
 diff -ruN a/dist/core/agent-session.js b/dist/core/agent-session.js
---- a/dist/core/agent-session.js	2026-08-06 17:32:00.195514279 +1000
-+++ b/dist/core/agent-session.js	2026-08-06 17:53:08.666727610 +1000
-@@ -722,6 +722,7 @@
+--- a/dist/core/agent-session.js	2026-08-30 17:16:25.249476124 +1000
++++ b/dist/core/agent-session.js	2026-08-30 17:16:25.280933411 +1000
+@@ -856,6 +856,7 @@
                  expandedText = this._expandSkillCommand(expandedText);
                  expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
              }
@@ -30,45 +29,37 @@ diff -ruN a/dist/core/agent-session.js b/dist/core/agent-session.js
              // If streaming, queue via steer() or followUp() based on option
              if (this.isStreaming) {
                  if (!options?.streamingBehavior) {
-@@ -1014,9 +1015,10 @@
-             if (images.length === 0)
-                 images = undefined;
+@@ -1182,6 +1183,7 @@
          }
--        // Use prompt() with expandPromptTemplates: false to skip command handling and template expansion
-+        // Extensions may opt into the same command/skill/template expansion as interactive input.
          await this.prompt(text, {
--            expandPromptTemplates: false,
-+            expandPromptTemplates: options?.expandPromptTemplates ?? false,
+             expandPromptTemplates: options?.expandPromptTemplates ?? false,
 +            onPromptExpanded: options?.onPromptExpanded,
              streamingBehavior: options?.deliverAs,
              images,
              source: "extension",
 diff -ruN a/dist/core/extensions/types.d.ts b/dist/core/extensions/types.d.ts
---- a/dist/core/extensions/types.d.ts	2026-08-06 17:32:00.198514281 +1000
-+++ b/dist/core/extensions/types.d.ts	2026-08-06 17:53:08.668959886 +1000
-@@ -286,6 +286,8 @@
-     }): Promise<void>;
+--- a/dist/core/extensions/types.d.ts	2026-08-30 17:16:25.253676634 +1000
++++ b/dist/core/extensions/types.d.ts	2026-08-30 17:16:25.281321419 +1000
+@@ -302,6 +302,7 @@
      sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
          deliverAs?: "steer" | "followUp";
-+        expandPromptTemplates?: boolean;
+         expandPromptTemplates?: boolean;
 +        onPromptExpanded?: (text: string) => void;
      }): Promise<void>;
  }
  /** Rendering options for tool results */
-@@ -840,6 +842,8 @@
-      */
+@@ -980,6 +981,7 @@
      sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
          deliverAs?: "steer" | "followUp";
-+        expandPromptTemplates?: boolean;
+         expandPromptTemplates?: boolean;
 +        onPromptExpanded?: (text: string) => void;
      }): void;
      /** Append a custom entry to the session for state persistence (not sent to LLM). */
      appendEntry<T = unknown>(customType: string, data?: T): void;
-@@ -1025,6 +1029,8 @@
- }) => void;
+@@ -1183,6 +1185,7 @@
  export type SendUserMessageHandler = (content: string | (TextContent | ImageContent)[], options?: {
      deliverAs?: "steer" | "followUp";
-+    expandPromptTemplates?: boolean;
+     expandPromptTemplates?: boolean;
 +    onPromptExpanded?: (text: string) => void;
  }) => void;
  export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;

@@ -51,7 +51,17 @@
         inherit (pkgs) lib;
         upstreamPiPackage = nix-ai-tools.packages.${system}.pi;
         piPackage = upstreamPiPackage.overrideAttrs (old: {
-          patches = (old.patches or [ ]) ++ [ ./nix/patches/pi-extension-expanded-input.patch ];
+          patches = (old.patches or [ ]) ++ [ ./nix/patches/pi-prompt-expanded-hook.patch ];
+          postInstall = (old.postInstall or "") + ''
+            sdk_root="$out/lib/node_modules/@earendil-works/pi-coding-agent"
+            mkdir -p "$sdk_root/node_modules/@earendil-works" "$sdk_root/node_modules/@types"
+            cp -R dist package.json "$sdk_root/"
+            cp -R node_modules/typebox "$sdk_root/node_modules/typebox"
+            cp -R node_modules/@types/node "$sdk_root/node_modules/@types/node"
+            for dependency in pi-agent-core pi-ai pi-tui; do
+              cp -R "node_modules/@earendil-works/$dependency" "$sdk_root/node_modules/@earendil-works/$dependency"
+            done
+          '';
         });
         agentgraphPackage = agentgraph.packages.${system}.ag-unchecked;
         agentgraphPostgresPackage = agentgraph.packages.${system}.agentgraph-postgres;

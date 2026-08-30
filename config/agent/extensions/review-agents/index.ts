@@ -68,7 +68,9 @@ Use read-only inspection tools to verify claims against the diff, changed files,
 Do not edit files. Do not run commands. Do not broaden the requested scope.
 Every finding must be concrete, actionable, and supported by a file path, hunk, or quoted requirement.
 Distinguish verified defects from judgement calls. If there are no findings, say so directly and briefly.`,
+		getSystemPromptSource: () => undefined,
 		getAppendSystemPrompt: () => [],
+		getAppendSystemPromptSources: () => [],
 		extendResources: () => {},
 		reload: async () => {},
 	};
@@ -158,7 +160,6 @@ async function askReviewer(
 		cwd: ctx.cwd,
 		model,
 		thinkingLevel: REVIEW_THINKING_LEVEL,
-		modelRegistry: ctx.modelRegistry,
 		tools: ["read", "grep", "find", "ls"],
 		sessionManager: SessionManager.inMemory(ctx.cwd),
 		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
