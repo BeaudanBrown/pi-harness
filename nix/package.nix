@@ -226,6 +226,7 @@ EOF
     piR = piRPackage;
     piResources = piHarnessResources.piResources;
     harnessResources = piHarnessResources;
+    managedSessionExtensions = piHarnessResources.managedSessionExtensions;
     mattpocockSkills = mattPocockSkillsResources;
     agentgraph = agentgraphPackage;
     agentgraphPostgres = agentgraphPostgresPackage;

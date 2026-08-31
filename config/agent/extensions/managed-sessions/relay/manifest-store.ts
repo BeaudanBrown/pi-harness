@@ -1,4 +1,4 @@
-import { lstat, readdir } from "node:fs/promises";
+import { lstat, readdir, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { type ConversationManifest, parseConversationManifest } from "../contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
@@ -31,5 +31,10 @@ export class ConversationManifestStore {
 	async write(manifest: ConversationManifest): Promise<void> {
 		const parsed = parseConversationManifest(manifest);
 		await new AtomicJsonFile(join(this.root, `${parsed.conversationId}.json`), parseConversationManifest).write(parsed);
+	}
+
+	async remove(conversationId: string): Promise<void> {
+		if (!/^conv_[a-f0-9]{32}$/.test(conversationId)) throw new Error("Invalid conversation ID");
+		await rm(join(this.root, `${conversationId}.json`), { force: true });
 	}
 }

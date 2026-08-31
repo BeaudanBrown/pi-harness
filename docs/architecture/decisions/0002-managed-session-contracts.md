@@ -48,7 +48,7 @@ Dormant text input is durably queued in Matrix event order before a wake is atte
 
 ### Protocol contract
 
-`config/agent/extensions/managed-sessions/contracts.ts` is the shared normative TypeScript contract. V1 uses one UTF-8 JSON object per LF-terminated frame with a 64 KiB maximum. Every object and payload rejects additional properties. Every envelope carries literal protocol version `1.0.0`, a message ID, role, type, and typed payload. Bound operations also carry the conversation ID; the sole exception is initial `self.bind`, because an unbound persisted Pi session has no conversation identity yet. Relay responses may correlate with `inReplyTo`.
+`config/agent/extensions/managed-sessions/contracts.ts` is the shared normative TypeScript contract. V1 uses one UTF-8 JSON object per LF-terminated frame with a 64 KiB maximum. Every object and payload rejects additional properties. Every envelope carries literal protocol version `1.0.0`, a message ID, role, type, and typed payload. Bound operations also carry the conversation ID; the sole exception is initial `self.bind`, because an unbound persisted Pi session has no conversation identity yet. Initial binding carries the process's bounded attachment nonce and host-owned portable workspace placement so the relay can persist the logical project manifest plus only the nonce's one-way verifier before accepting the subsequent attachment. Relay responses may correlate with `inReplyTo`.
 
 The schema permits only:
 
@@ -97,7 +97,7 @@ Derivations use SHA-256 with a distinct `pi-managed-sessions:<domain>:v1` prefix
 | Transcript chunk ID | entry ID, zero-based chunk index | `chunk_` + 32 hex |
 | Matrix transaction ID | conversation ID, source ID, zero-based chunk index | `pi_` + 48 hex |
 
-Creation keys are durable retry keys supplied by the trusted coordinator adapter, not display names. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
+Creation keys are durable retry keys, not display names. Coordinator-created conversation keys are supplied by the trusted coordinator adapter. Manual ordinary `/remote on` creates its key once, persists it with the binding-boundary attempt before contacting the relay, and reuses that key on retry. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
 
 ## Consequences
 

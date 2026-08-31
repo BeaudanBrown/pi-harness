@@ -14,6 +14,7 @@ import { type AcceptedAttachment, RelayRegistry, RelayRegistryError } from "./re
 
 export type PeerUidResolver = (socket: Socket) => number | undefined | Promise<number | undefined>;
 export type EnvelopeHandler = (envelope: ManagedSessionEnvelope, attachment: AcceptedAttachment) => Promise<ManagedSessionEnvelope | undefined>;
+export type UnboundEnvelopeHandler = (envelope: ManagedSessionEnvelope) => Promise<ManagedSessionEnvelope | undefined>;
 
 interface ConnectionState {
 	id: string;
@@ -56,6 +57,7 @@ export class ManagedSessionIpcServer {
 			expectedUid?: number;
 			peerUid?: PeerUidResolver;
 			onEnvelope?: EnvelopeHandler;
+			onUnboundEnvelope?: UnboundEnvelopeHandler;
 		},
 	) {
 		this.runtimeDirectory = resolve(options.runtimeDirectory);
@@ -64,11 +66,13 @@ export class ManagedSessionIpcServer {
 		this.expectedUid = options.expectedUid;
 		this.peerUid = options.peerUid;
 		this.onEnvelope = options.onEnvelope;
+		this.onUnboundEnvelope = options.onUnboundEnvelope;
 	}
 
 	private readonly expectedUid?: number;
 	private readonly peerUid?: PeerUidResolver;
 	private readonly onEnvelope?: EnvelopeHandler;
+	private readonly onUnboundEnvelope?: UnboundEnvelopeHandler;
 
 	async start(): Promise<void> {
 		if (this.server) throw new Error("Managed-session IPC server is already running");
@@ -164,6 +168,14 @@ export class ManagedSessionIpcServer {
 			}
 			state.messageIds.add(envelope.messageId);
 			try {
+				if (!state.attachment && envelope.type === "self.bind") {
+					const response = await this.onUnboundEnvelope?.(envelope);
+					if (!response || response.role !== "relay" || response.inReplyTo !== envelope.messageId || response.type !== "self.result") {
+						throw new RelayRegistryError("invalid_state", "Initial self binding is unavailable");
+					}
+					this.send(socket, response);
+					continue;
+				}
 				if (!state.attachment) {
 					state.attachment = await this.registry.attach(envelope, state.id);
 					this.send(socket, {
@@ -184,6 +196,7 @@ export class ManagedSessionIpcServer {
 					return;
 				}
 				const response = await this.onEnvelope?.(envelope, state.attachment);
+				if (!response && ["input.acknowledge", "session.change"].includes(envelope.type)) continue;
 				if (!response) throw new RelayRegistryError("invalid_state", "Operation is not available in the relay foundation");
 				if (response.role !== "relay" || response.conversationId !== state.attachment.conversationId || response.inReplyTo !== envelope.messageId) {
 					throw new Error("Relay handler returned an uncorrelated response");

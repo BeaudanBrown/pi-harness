@@ -1,0 +1,361 @@
+import { randomUUID } from "node:crypto";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+	MANAGED_SESSION_STATE_VERSION,
+	type ManagedSessionEnvelope,
+	type WorkspaceIdentity,
+} from "../contracts.js";
+import { BoundAdapterClient, ManagedAdapterError, requestSelfBind } from "./client.js";
+import {
+	BINDING_BOUNDARY_ENTRY_TYPE,
+	BINDING_ENTRY_TYPE,
+	DELIVERY_ENTRY_TYPE,
+	UNBOUND_ENTRY_TYPE,
+	type AdapterRole,
+	type DeliveryMarker,
+	type SessionBinding,
+	findDeliveredUserEntry,
+	normalizeConcept,
+	persistedEntryId,
+	restoreBindingAttempt,
+	restoreDeliveries,
+	restoreSessionBinding,
+} from "./state.js";
+
+interface AdapterEnvironment {
+	socketPath: string;
+	attachmentNonce?: string;
+	conversationId?: string;
+	concept?: string;
+	bindingBoundaryEntryId?: string;
+	placement?: WorkspaceIdentity;
+}
+
+function environmentConfig(environment: NodeJS.ProcessEnv): AdapterEnvironment {
+	const socketPath = environment.PI_MANAGED_SESSIONS_SOCKET?.trim();
+	if (!socketPath) throw new ManagedAdapterError("PI_MANAGED_SESSIONS_SOCKET is required");
+	const attachmentNonce = environment.PI_MANAGED_SESSION_ATTACHMENT_NONCE?.trim();
+	if (attachmentNonce && !/^[A-Za-z0-9_-]{32,128}$/.test(attachmentNonce)) throw new ManagedAdapterError("Managed-session attachment nonce is invalid");
+	const rootKey = environment.PI_MANAGED_SESSION_ROOT_KEY?.trim();
+	const workspace = environment.PI_MANAGED_SESSION_WORKSPACE?.trim();
+	const relativeCwd = environment.PI_MANAGED_SESSION_RELATIVE_CWD?.trim() ?? "";
+	if ((rootKey || workspace) && (!rootKey || !workspace)) throw new ManagedAdapterError("Managed-session workspace placement is incomplete");
+	return {
+		socketPath,
+		attachmentNonce,
+		conversationId: environment.PI_MANAGED_SESSION_CONVERSATION_ID?.trim(),
+		concept: environment.PI_MANAGED_SESSION_CONCEPT?.trim(),
+		bindingBoundaryEntryId: environment.PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID?.trim(),
+		placement: rootKey && workspace ? { rootKey, workspace, relativeCwd } : undefined,
+	};
+}
+
+function notify(ctx: ExtensionContext, message: string, level: "info" | "warning" | "error" = "info"): void {
+	if (ctx.hasUI) ctx.ui.notify(message, level);
+}
+
+function appendMarker<T>(pi: ExtensionAPI, ctx: ExtensionContext, customType: string, data: T): string {
+	pi.appendEntry(customType, data);
+	const entryId = ctx.sessionManager.getLeafId();
+	if (!entryId) throw new ManagedAdapterError(`Pi did not persist ${customType}`);
+	return entryId;
+}
+
+function bootstrapBinding(pi: ExtensionAPI, ctx: ExtensionContext, role: AdapterRole, config: AdapterEnvironment): SessionBinding | undefined {
+	if (!config.conversationId && !config.bindingBoundaryEntryId && !config.concept) return undefined;
+	if (!config.conversationId || !/^conv_[a-f0-9]{32}$/.test(config.conversationId) ||
+		!config.bindingBoundaryEntryId || !/^entry_[a-f0-9]{32}$/.test(config.bindingBoundaryEntryId) || !config.concept) {
+		throw new ManagedAdapterError("Managed-session bootstrap binding is incomplete");
+	}
+	const binding: SessionBinding = {
+		version: MANAGED_SESSION_STATE_VERSION,
+		conversationId: config.conversationId,
+		concept: config.concept,
+		sessionId: ctx.sessionManager.getSessionId(),
+		bindingBoundaryEntryId: config.bindingBoundaryEntryId,
+		role,
+	};
+	appendMarker(pi, ctx, BINDING_ENTRY_TYPE, binding);
+	return binding;
+}
+
+export function createManagedSessionAdapterExtension(role: AdapterRole, environment: NodeJS.ProcessEnv = process.env) {
+	return function managedSessionAdapter(pi: ExtensionAPI): void {
+		let config: AdapterEnvironment;
+		try { config = environmentConfig(environment); } catch (error) {
+			pi.on("session_start", (_event, ctx) => notify(ctx, error instanceof Error ? error.message : "Managed-session adapter configuration failed", "error"));
+			return;
+		}
+		let binding: SessionBinding | undefined;
+		let client: BoundAdapterClient | undefined;
+		let currentContext: ExtensionContext | undefined;
+		let reconnectTimer: NodeJS.Timeout | undefined;
+		let reconnectAttempt = 0;
+		let stopped = false;
+		let deliveries = new Map<string, DeliveryMarker>();
+		const activeDeliveries = new Map<string, string>();
+		const pendingUserPersistence: DeliveryMarker[] = [];
+		const inFlightDeliveries = new Set<string>();
+
+		function setStatus(ctx: ExtensionContext): void {
+			if (!ctx.hasUI) return;
+			ctx.ui.setStatus("managed-session", binding ? `${client?.connected ? "remote" : "remote offline"}: ${binding.concept}` : undefined);
+		}
+
+		function recordDelivery(ctx: ExtensionContext, marker: DeliveryMarker): string {
+			const key = appendMarker(pi, ctx, DELIVERY_ENTRY_TYPE, marker);
+			deliveries.set(marker.deliveryId, marker);
+			return key;
+		}
+
+		function persistExpanded(ctx: ExtensionContext, expanded: DeliveryMarker, piEntryKey: string): DeliveryMarker {
+			const persisted: DeliveryMarker = {
+				...expanded, status: "persisted", piEntryId: persistedEntryId(binding!.sessionId, piEntryKey),
+			};
+			recordDelivery(ctx, persisted);
+			activeDeliveries.set(persisted.deliveryId, persisted.piEntryId!);
+			inFlightDeliveries.delete(persisted.deliveryId);
+			acknowledge(persisted);
+			return persisted;
+		}
+
+		function acknowledge(marker: DeliveryMarker): void {
+			if (marker.status === "expanded") return;
+			try {
+				client?.acknowledgeInput(marker.deliveryId, marker.status, marker.piEntryId);
+			} catch {
+				// Durable markers are replayed after reconnect.
+			}
+		}
+
+		function replayAcknowledgements(): void {
+			for (const marker of deliveries.values()) {
+				if (["persisted", "completed", "cancelled"].includes(marker.status)) acknowledge(marker);
+			}
+		}
+
+		async function handleDelivery(envelope: ManagedSessionEnvelope, ctx: ExtensionContext): Promise<void> {
+			const payload = envelope.payload as {
+				deliveryId: string; matrixEventId: string; kind: "prompt" | "follow_up" | "steer" | "abort"; body?: string;
+			};
+			const previous = deliveries.get(payload.deliveryId);
+			let accepted: DeliveryMarker;
+			if (previous) {
+				if (previous.matrixEventId !== payload.matrixEventId || previous.kind !== payload.kind) throw new ManagedAdapterError("Conflicting duplicate delivery", "invalid_delivery");
+				if (inFlightDeliveries.has(previous.deliveryId)) return;
+				if (previous.status === "accepted") {
+					accepted = previous;
+					inFlightDeliveries.add(previous.deliveryId);
+				} else if (previous.status === "expanded") {
+					// Recovery of the crash window between expansion and Pi persistence belongs to #45.
+					// Retain the durable marker and do not risk injecting a duplicate here.
+					return;
+				} else {
+					acknowledge(previous);
+					return;
+				}
+			} else {
+				accepted = {
+					version: MANAGED_SESSION_STATE_VERSION,
+					deliveryId: payload.deliveryId, matrixEventId: payload.matrixEventId, kind: payload.kind, status: "accepted",
+				};
+				recordDelivery(ctx, accepted);
+				inFlightDeliveries.add(accepted.deliveryId);
+				acknowledge(accepted);
+			}
+			if (payload.kind === "abort") {
+				ctx.abort();
+				const cancelled = { ...accepted, status: "cancelled" as const };
+				recordDelivery(ctx, cancelled);
+				inFlightDeliveries.delete(cancelled.deliveryId);
+				acknowledge(cancelled);
+				return;
+			}
+			if (payload.body === undefined) throw new ManagedAdapterError("Relay delivery omitted input body");
+			const deliverAs = payload.kind === "steer" ? "steer" : payload.kind === "follow_up" ? "followUp" : undefined;
+			let provenanceRecorded = false;
+			const recordExpanded = (expandedText: string) => {
+				if (provenanceRecorded) return;
+				provenanceRecorded = true;
+				const expanded: DeliveryMarker = { ...accepted, status: "expanded", expandedText };
+				recordDelivery(ctx, expanded);
+				if (extensionCommand) inFlightDeliveries.delete(expanded.deliveryId);
+				else pendingUserPersistence.push(expanded);
+			};
+			const invocation = payload.body.match(/^\/([^\s]+)(?:\s|$)/)?.[1];
+			const extensionCommand = Boolean(invocation && pi.getCommands().some((command) => command.name === invocation && command.source === "extension"));
+			if (extensionCommand) recordExpanded(payload.body);
+			try {
+				pi.sendUserMessage(payload.body, {
+					...(deliverAs ? { deliverAs } : {}),
+					expandPromptTemplates: true,
+					onPromptExpanded: recordExpanded,
+				});
+			} catch (error) {
+				inFlightDeliveries.delete(accepted.deliveryId);
+				throw error;
+			}
+		}
+
+		async function handleEnvelope(envelope: ManagedSessionEnvelope): Promise<void> {
+			const ctx = currentContext;
+			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
+			if (envelope.type === "input.deliver") return handleDelivery(envelope, ctx);
+			if (envelope.type === "termination.request") {
+				const reason = String(envelope.payload.reason);
+				ctx.abort();
+				if (reason === "stop") ctx.shutdown();
+				return;
+			}
+			throw new ManagedAdapterError(`Unsupported relay operation ${envelope.type}`, "invalid_message");
+		}
+
+		function scheduleReconnect(ctx: ExtensionContext): void {
+			if (stopped || !binding || reconnectTimer) return;
+			const delay = Math.min(30_000, 250 * (2 ** Math.min(reconnectAttempt, 7)));
+			reconnectAttempt += 1;
+			reconnectTimer = setTimeout(() => {
+				reconnectTimer = undefined;
+				void connectBinding(ctx);
+			}, delay);
+			reconnectTimer.unref();
+		}
+
+		async function connectBinding(ctx: ExtensionContext): Promise<void> {
+			if (!binding || stopped || client?.connected) return;
+			if (!config.attachmentNonce) {
+				notify(ctx, "Managed-session attachment nonce is unavailable", "error");
+				return;
+			}
+			const next = new BoundAdapterClient({
+				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding,
+				onEnvelope: handleEnvelope,
+				onDisconnect: () => { setStatus(ctx); scheduleReconnect(ctx); },
+			});
+			client = next;
+			try {
+				await next.connect();
+				reconnectAttempt = 0;
+				replayAcknowledgements();
+			} catch (error) {
+				if (client === next) client = undefined;
+				notify(ctx, error instanceof Error ? error.message : "Managed-session relay connection failed", "warning");
+				scheduleReconnect(ctx);
+			}
+			setStatus(ctx);
+		}
+
+		pi.on("session_start", async (event, ctx) => {
+			stopped = false;
+			currentContext = ctx;
+			const sessionId = ctx.sessionManager.getSessionId();
+			if (event.reason === "new" || event.reason === "fork") {
+				appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId, reason: event.reason });
+				binding = undefined;
+			} else {
+				binding = restoreSessionBinding(ctx.sessionManager.getBranch(), sessionId, role) ??
+					(event.reason === "startup" ? bootstrapBinding(pi, ctx, role, config) : undefined);
+			}
+			deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
+			activeDeliveries.clear();
+			pendingUserPersistence.length = 0;
+			inFlightDeliveries.clear();
+			for (const marker of deliveries.values()) {
+				if (marker.status === "persisted" && marker.piEntryId) activeDeliveries.set(marker.deliveryId, marker.piEntryId);
+				if (binding && marker.status === "expanded") {
+					const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
+					if (piEntryKey) persistExpanded(ctx, marker, piEntryKey);
+				}
+			}
+			setStatus(ctx);
+			if (binding) await connectBinding(ctx);
+		});
+
+		pi.on("agent_settled", (_event, ctx) => {
+			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
+				const marker = pendingUserPersistence[index]!;
+				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
+				if (!piEntryKey) continue;
+				pendingUserPersistence.splice(index, 1);
+				persistExpanded(ctx, marker, piEntryKey);
+			}
+			for (const [deliveryId, piEntryId] of activeDeliveries) {
+				const previous = deliveries.get(deliveryId);
+				if (!previous) continue;
+				const completed: DeliveryMarker = { ...previous, status: "completed", piEntryId };
+				recordDelivery(ctx, completed);
+				acknowledge(completed);
+			}
+			activeDeliveries.clear();
+		});
+
+		pi.on("session_shutdown", async (event, ctx) => {
+			stopped = true;
+			if (reconnectTimer) clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
+			const reason = event.reason === "quit" || event.reason === "reload" ? "shutdown" : "session_change";
+			await client?.close(reason);
+			client = undefined;
+			currentContext = undefined;
+			setStatus(ctx);
+		});
+
+		pi.registerCommand("remote", {
+			description: role === "ordinary_adapter" ? "Bind, inspect, or delete this managed relay bridge" : "Inspect this coordinator relay bridge",
+			handler: async (args, ctx) => {
+				const input = args.trim();
+				if (input === "status") {
+					if (!binding) return notify(ctx, "This Pi session is not bound to a managed conversation");
+					if (!client?.connected) return notify(ctx, `Managed conversation ${binding.concept} is offline`, "warning");
+					try {
+						const result = await client.selfStatus();
+						notify(ctx, `Managed conversation ${binding.concept}: ${String(result.payload.conversationState)}`);
+					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed status failed", "error"); }
+					return;
+				}
+				if (role !== "ordinary_adapter") return notify(ctx, "Coordinator supports only /remote status", "error");
+				if (input === "delete --confirm") {
+					if (!binding || !client?.connected) return notify(ctx, "No connected managed bridge to delete", "error");
+					try {
+						const result = await client.selfDelete();
+						if (result.type !== "self.result" || result.payload.operation !== "self.delete" || result.payload.status !== "ok") throw new ManagedAdapterError("Relay did not confirm bridge deletion");
+						appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId: binding.sessionId, reason: "bridge_delete" });
+						await client.close("bridge_delete");
+						binding = undefined; client = undefined; setStatus(ctx);
+						notify(ctx, "Managed bridge deleted; Pi session and process were preserved");
+					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Bridge deletion failed", "error"); }
+					return;
+				}
+				if (input.startsWith("delete")) return notify(ctx, "Use /remote delete --confirm to delete only bridge metadata", "warning");
+				if (input.startsWith("on ")) {
+					if (binding) return notify(ctx, "This Pi session is already bound", "warning");
+					if (!ctx.sessionManager.getSessionFile()) return notify(ctx, "Persist this Pi session before binding it", "error");
+					if (!config.attachmentNonce) return notify(ctx, "Managed-session attachment nonce is unavailable", "error");
+					if (!config.placement) return notify(ctx, "Managed-session workspace placement is unavailable", "error");
+					const concept = normalizeConcept(input.slice(3));
+					if (!concept) return notify(ctx, "Usage: /remote on <concept> (1-128 printable characters)", "error");
+					const sessionId = ctx.sessionManager.getSessionId();
+					const existingAttempt = restoreBindingAttempt(ctx.sessionManager.getBranch(), sessionId, concept);
+					const creationKey = existingAttempt?.creationKey ?? `manual-${randomUUID()}`;
+					const boundaryKey = existingAttempt?.entryKey ?? appendMarker(pi, ctx, BINDING_BOUNDARY_ENTRY_TYPE, {
+						version: MANAGED_SESSION_STATE_VERSION, creationKey, concept, sessionId,
+					});
+					const bindingBoundaryEntryId = persistedEntryId(sessionId, boundaryKey);
+					try {
+						const conversationId = await requestSelfBind({
+							socketPath: config.socketPath, role: "ordinary_adapter", creationKey, concept, sessionId,
+							attachmentNonce: config.attachmentNonce, bindingBoundaryEntryId, placement: config.placement,
+						});
+						binding = { version: MANAGED_SESSION_STATE_VERSION, conversationId, concept, sessionId, bindingBoundaryEntryId, role };
+						appendMarker(pi, ctx, BINDING_ENTRY_TYPE, binding);
+						deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
+						await connectBinding(ctx);
+						notify(ctx, `Bound managed conversation ${concept}`);
+					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed binding failed", "error"); }
+					return;
+				}
+				notify(ctx, role === "ordinary_adapter" ? "Usage: /remote on <concept> | status | delete --confirm" : "Usage: /remote status", "warning");
+			},
+		});
+	};
+}

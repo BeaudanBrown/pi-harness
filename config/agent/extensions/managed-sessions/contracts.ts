@@ -156,7 +156,9 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		creationKey: identifier,
 		concept: boundedString(128),
 		sessionId: identifier,
+		attachmentNonce: Type.String({ pattern: "^[A-Za-z0-9_-]{32,128}$" }),
 		bindingBoundaryEntryId: TranscriptEntryIdSchema,
+		placement: WorkspaceIdentitySchema,
 	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.status", {}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.delete", { confirmed: Type.Literal(true) }),
@@ -446,6 +448,9 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		if ((payload.checkpoint.codeOrDiffRequested === true) !== (payload.checkpoint.requestedCodeOrDiff !== undefined)) {
 			throw new ManagedSessionContractError("malformed", "checkpoint requested-code fields must appear together");
 		}
+	}
+	if (envelope.type === "self.bind") {
+		assertWorkspaceIdentity((envelope.payload as { placement: WorkspaceIdentity }).placement);
 	}
 	if (envelope.type === "lifecycle.request") {
 		const payload = envelope.payload as { request: { operation: string; placement?: WorkspaceIdentity } };

@@ -38,6 +38,11 @@ let
       runHook postInstall
     '';
 
+    passthru.managedSessionExtensions = {
+      ordinary = "${drv}/share/pi-harness/agent/extensions/managed-sessions/adapter/ordinary.ts";
+      coordinator = "${drv}/share/pi-harness/agent/extensions/managed-sessions/adapter/coordinator.ts";
+    };
+
     passthru.piResources = {
       extensions = [
         "${drv}/share/pi-harness/agent/extensions/web-search/index.ts"

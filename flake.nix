@@ -330,6 +330,15 @@
             test -f docs/architecture/decisions/0001-synthetic-evaluation-contracts.md
             test -f docs/architecture/decisions/0002-managed-session-contracts.md
             test -f config/agent/extensions/managed-sessions/contracts.ts
+            test -f config/agent/extensions/managed-sessions/adapter/ordinary.ts
+            test -f config/agent/extensions/managed-sessions/adapter/coordinator.ts
+            test -f config/agent/extensions/managed-sessions/adapter/client.ts
+            test -f config/agent/extensions/managed-sessions/adapter/state.ts
+            if grep -R -E 'PI_MATRIX|MATRIX_ACCESS_TOKEN|https?://|node:child_process|tmux|send-keys' \
+              config/agent/extensions/managed-sessions/adapter; then
+              echo "managed-session adapter must have no Matrix, process, or tmux authority" >&2
+              exit 1
+            fi
             test -f config/agent/extensions/managed-sessions/relay/main.ts
             test -f config/agent/extensions/managed-sessions/relay/ipc-server.ts
             test -f config/agent/extensions/managed-sessions/relay/registry.ts
@@ -445,6 +454,10 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/matrix-client.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/state-store.ts
+            test -f ${piHarnessResources.managedSessionExtensions.ordinary}
+            test -f ${piHarnessResources.managedSessionExtensions.coordinator}
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/managed-sessions/adapter/client.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/managed-sessions/adapter/state.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts
@@ -590,6 +603,10 @@
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            if grep -F 'managed-sessions/adapter/' ${piHarnessPackage}/bin/pi >/dev/null; then
+              echo "disabled default Pi wrapper must not load managed-session adapters" >&2
+              exit 1
+            fi
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -630,6 +647,8 @@
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/remote-session/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '[.extensions[] | select(contains("managed-sessions/adapter/"))] | length == 0' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/codex-fast/index.ts")' \
@@ -659,6 +678,8 @@
             ${evalSelfTestApp}/bin/pi-eval-self-test
             PI_HARNESS_JQ=${lib.getExe pkgs.jq} \
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
+              PI_MANAGED_ADAPTER_TEST_PI=${piPackage}/bin/pi \
+              PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary} \
               PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid \
               PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock \
               node --test \
@@ -666,6 +687,9 @@
                 "$test_build_dir/tests/aloop-worker.test.js" \
                 "$test_build_dir/tests/aloop-supervisor.test.js" \
                 "$test_build_dir/tests/managed-session-contracts.test.js" \
+                "$test_build_dir/tests/managed-session-adapter.test.js" \
+                "$test_build_dir/tests/managed-session-adapter-real-pi.test.js" \
+                "$test_build_dir/tests/managed-session-relay-adapter.test.js" \
                 "$test_build_dir/tests/managed-session-relay-registry.test.js" \
                 "$test_build_dir/tests/managed-session-relay-ipc.test.js" \
                 "$test_build_dir/tests/managed-session-relay-matrix.test.js" \

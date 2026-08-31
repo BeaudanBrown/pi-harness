@@ -165,6 +165,19 @@ existing `PI_MATRIX_*` identity/credential variables. Packaging the executable
 does not enable or start it. The NixOS service and atomic managed-session
 feature switch are configured separately from this foundation.
 
+The resource package also exposes separate ordinary and coordinator adapter
+entry points through `passthru.managedSessionExtensions`. They speak only the
+private relay protocol, persist binding/delivery provenance in Pi session
+history, and preserve Pi's normal prompt-template, skill, and extension-command
+expansion. They are deliberately absent from default settings and the default
+Pi wrapper; an enabled managed-session host must select exactly one profile.
+The ordinary profile provides `/remote on <concept>`, `/remote status`, and
+`/remote delete --confirm`; there is no `/remote off` operation and no ordinary
+host-wide lifecycle tool surface. Initial binding requires the host-owned
+`PI_MANAGED_SESSION_ROOT_KEY`, `PI_MANAGED_SESSION_WORKSPACE`, and optional
+`PI_MANAGED_SESSION_RELATIVE_CWD` placement environment in addition to the
+private socket and attachment nonce.
+
 ## Matrix Host Bot Runtime
 
 The optional `services.pi-harness.remoteSession` settings provide a

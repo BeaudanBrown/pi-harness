@@ -38,6 +38,12 @@ function expectedRole(manifest: ConversationManifest): AdapterRole {
 	return manifest.kind === "coordinator" ? "coordinator_adapter" : "ordinary_adapter";
 }
 
+export interface DeletedConversation {
+	manifest: ConversationManifest;
+	runtime: RuntimeConversation;
+	connectionId?: string;
+}
+
 export interface AcceptedAttachment {
 	attachmentId: string;
 	conversationId: string;
@@ -133,6 +139,120 @@ export class RelayRegistry {
 		});
 	}
 
+	manifestByCreationKey(creationKey: string): ConversationManifest | undefined {
+		const manifest = [...this.manifests.values()].find((candidate) => candidate.creationKey === creationKey);
+		return manifest ? structuredClone(manifest) : undefined;
+	}
+
+	manifestByConversationId(conversationId: string): ConversationManifest | undefined {
+		const manifest = this.manifests.get(conversationId);
+		return manifest ? structuredClone(manifest) : undefined;
+	}
+
+	conversationState(conversationId: string): "starting" | "active" | "dormant" {
+		return this.runtimeConversation(conversationId).state;
+	}
+
+	async createProjectConversation(manifest: ConversationManifest, nonce: string): Promise<ConversationManifest> {
+		if (manifest.kind !== "project" || manifest.ownerHostId !== this.hostId || !manifest.placement) {
+			throw new RelayRegistryError("permission_denied", "Self binding requires a host-owned project manifest");
+		}
+		if (!/^[A-Za-z0-9_-]{32,128}$/.test(nonce)) throw new RelayRegistryError("invalid_nonce", "Attachment nonce is invalid");
+		let created = false;
+		try {
+			return await this.mutate(async () => {
+				const existing = [...this.manifests.values()].find((candidate) =>
+					candidate.creationKey === manifest.creationKey || candidate.conversationId === manifest.conversationId ||
+					candidate.piSessionId === manifest.piSessionId || candidate.concept === manifest.concept);
+				if (existing) {
+					if (existing.creationKey === manifest.creationKey && existing.conversationId === manifest.conversationId &&
+						existing.piSessionId === manifest.piSessionId && existing.concept === manifest.concept &&
+						existing.bindingBoundaryEntryId === manifest.bindingBoundaryEntryId &&
+						JSON.stringify(existing.placement) === JSON.stringify(manifest.placement)) {
+						const runtime = this.runtimeConversation(existing.conversationId);
+						if (!runtime.attachmentNonceHash || !equalHash(runtime.attachmentNonceHash, nonceHash(nonce))) {
+							throw new RelayRegistryError("invalid_nonce", "Attachment nonce does not match the existing binding");
+						}
+						return existing;
+					}
+					throw new RelayRegistryError("invalid_state", "Managed conversation identity already exists");
+				}
+				await this.manifestStore.write(manifest);
+				created = true;
+				this.manifests.set(manifest.conversationId, manifest);
+				this.state.conversations.push({
+					conversationId: manifest.conversationId,
+					state: "dormant",
+					attachmentNonceHash: nonceHash(nonce),
+					attachment: null,
+					pendingInputs: [],
+					projection: [],
+					managedWindow: null,
+				});
+				return manifest;
+			});
+		} catch (error) {
+			if (created) await this.manifestStore.remove(manifest.conversationId).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	async deleteConversation(conversationId: string): Promise<DeletedConversation> {
+		const manifest = this.manifests.get(conversationId);
+		const runtime = this.state.conversations.find((candidate) => candidate.conversationId === conversationId);
+		if (!manifest || !runtime) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+		const savedManifest = structuredClone(manifest);
+		const savedRuntime = structuredClone(runtime);
+		const savedConnection = this.liveConnections.get(conversationId);
+		await this.mutate(async () => {
+			this.manifests.delete(conversationId);
+			this.liveConnections.delete(conversationId);
+			this.state.conversations = this.state.conversations.filter((candidate) => candidate.conversationId !== conversationId);
+		});
+		try {
+			await this.manifestStore.remove(conversationId);
+		} catch (error) {
+			await this.mutate(async () => {
+				this.manifests.set(conversationId, savedManifest);
+				this.state.conversations.push(savedRuntime);
+				if (savedConnection) this.liveConnections.set(conversationId, savedConnection);
+			});
+			throw error;
+		}
+		return { manifest: savedManifest, runtime: savedRuntime, ...(savedConnection ? { connectionId: savedConnection } : {}) };
+	}
+
+	async restoreDeletedConversation(deleted: DeletedConversation): Promise<void> {
+		await this.manifestStore.write(deleted.manifest);
+		try {
+			await this.mutate(async () => {
+				if (this.manifests.has(deleted.manifest.conversationId)) return;
+				this.manifests.set(deleted.manifest.conversationId, deleted.manifest);
+				this.state.conversations.push(deleted.runtime);
+				if (deleted.connectionId) this.liveConnections.set(deleted.manifest.conversationId, deleted.connectionId);
+			});
+		} catch (error) {
+			await this.manifestStore.remove(deleted.manifest.conversationId).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	async acknowledgeInput(conversationId: string, deliveryId: string, status: string, piEntryId?: string): Promise<void> {
+		await this.mutate(async () => {
+			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
+			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
+			const rank: Record<string, number> = { accepted: 0, delivered: 1, persisted: 2, completed: 3, cancelled: 3 };
+			if (!(status in rank) || rank[status]! < rank[input.status]! ||
+				((input.status === "completed" || input.status === "cancelled") && input.status !== status)) {
+				throw new RelayRegistryError("invalid_state", "Managed delivery acknowledgement regressed");
+			}
+			if ((status === "persisted" || status === "completed") && !piEntryId) {
+				throw new RelayRegistryError("invalid_state", "Persisted delivery acknowledgement requires a Pi entry ID");
+			}
+			input.status = status;
+		});
+	}
+
 	async setAttachmentNonce(conversationId: string, nonce: string): Promise<void> {
 		if (!/^[A-Za-z0-9_-]{32,128}$/.test(nonce)) throw new RelayRegistryError("invalid_nonce", "Attachment nonce is invalid");
 		await this.mutate(async () => {
@@ -215,11 +335,13 @@ export class RelayRegistry {
 		const run = this.operations.then(async () => {
 			const before = structuredClone(this.state);
 			const liveBefore = new Map(this.liveConnections);
+			const manifestsBefore = new Map(this.manifests);
 			try {
 				result = await operation();
 				await this.runtimeFile.write(this.state);
 			} catch (error) {
 				this.state = before;
+				this.manifests = manifestsBefore;
 				this.liveConnections.clear();
 				for (const [conversationId, connectionId] of liveBefore) this.liveConnections.set(conversationId, connectionId);
 				failure = error;

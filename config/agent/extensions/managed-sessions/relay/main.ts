@@ -1,10 +1,19 @@
 #!/usr/bin/env node
+import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
+import {
+	MANAGED_SESSION_PROTOCOL_VERSION,
+	MANAGED_SESSION_STATE_VERSION,
+	deriveConversationId,
+	type ConversationManifest,
+	type ManagedSessionEnvelope,
+	type WorkspaceIdentity,
+} from "../contracts.js";
 import { ConversationManifestStore } from "./manifest-store.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { managedMatrixConfigFromEnvironment, ManagedMatrixClient } from "./matrix-client.js";
 import { peerUidFromHelper } from "./peer-uid.js";
-import { RelayRegistry } from "./registry.js";
+import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { hostRelayLockPath, HostRelayLock } from "./relay-lock.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
@@ -43,11 +52,87 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		const authenticatedUserId = await matrix.whoami();
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
 		registry.beginRestartReconciliation();
+		const response = (conversationId: string, inReplyTo: string, type: "self.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: `relay-${randomUUID()}`,
+			conversationId,
+			role: "relay",
+			type,
+			inReplyTo,
+			payload,
+		});
 		server = new ManagedSessionIpcServer(registry, {
 			runtimeDirectory,
 			socketPath: environment.PI_MANAGED_SESSIONS_SOCKET,
 			expectedUid,
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
+			onUnboundEnvelope: async (envelope) => {
+				if (envelope.type !== "self.bind" || envelope.role !== "ordinary_adapter") return undefined;
+				const payload = envelope.payload as {
+					creationKey: string; concept: string; sessionId: string; attachmentNonce: string;
+					bindingBoundaryEntryId: string; placement: WorkspaceIdentity;
+				};
+				const conversationId = deriveConversationId(hostId, payload.creationKey);
+				const existing = registry.manifestByCreationKey(payload.creationKey);
+				let manifest: ConversationManifest;
+				if (existing) {
+					if (existing.conversationId !== conversationId || existing.concept !== payload.concept ||
+						existing.piSessionId !== payload.sessionId || existing.bindingBoundaryEntryId !== payload.bindingBoundaryEntryId ||
+						JSON.stringify(existing.placement) !== JSON.stringify(payload.placement)) {
+						throw new RelayRegistryError("invalid_state", "Self-binding retry conflicts with the existing conversation");
+					}
+					manifest = await registry.createProjectConversation(existing, payload.attachmentNonce);
+				} else {
+					const roomId = await matrix.createPrivateRoom(`pi · ${payload.concept}`);
+					manifest = {
+						schemaVersion: MANAGED_SESSION_STATE_VERSION,
+						kind: "project",
+						conversationId,
+						ownerHostId: hostId,
+						creationKey: payload.creationKey,
+						concept: payload.concept,
+						piSessionId: payload.sessionId,
+						roomId,
+						placement: payload.placement,
+						bindingBoundaryEntryId: payload.bindingBoundaryEntryId,
+						createdAt: new Date().toISOString(),
+					};
+					try {
+						manifest = await registry.createProjectConversation(manifest, payload.attachmentNonce);
+					} catch (error) {
+						await matrix.leaveRoom(roomId).catch(() => undefined);
+						throw error;
+					}
+				}
+				return response(manifest.conversationId, envelope.messageId, "self.result", {
+					operation: "self.bind", status: "ok", boundConversationId: manifest.conversationId,
+				});
+			},
+			onEnvelope: async (envelope, attachment) => {
+				if (envelope.type === "input.acknowledge") {
+					const payload = envelope.payload as { deliveryId: string; status: string; piEntryId?: string };
+					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId);
+					return undefined;
+				}
+				if (envelope.type === "self.status") {
+					return response(attachment.conversationId, envelope.messageId, "self.result", {
+						operation: "self.status", status: "ok", conversationState: registry.conversationState(attachment.conversationId),
+					});
+				}
+				if (envelope.type === "self.delete") {
+					const deleted = await registry.deleteConversation(attachment.conversationId);
+					try {
+						await matrix.leaveRoom(deleted.manifest.roomId);
+					} catch (error) {
+						await registry.restoreDeletedConversation(deleted);
+						throw error;
+					}
+					return response(attachment.conversationId, envelope.messageId, "self.result", {
+						operation: "self.delete", status: "ok",
+					});
+				}
+				return undefined;
+			},
 		});
 		await server.start();
 	} catch (error) {
