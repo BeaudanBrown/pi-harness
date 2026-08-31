@@ -75,6 +75,9 @@
         piHarnessResources = pkgs.callPackage ./nix/pi-harness-resources.nix {
           inherit piPackage;
         };
+        managedSessionRelay = pkgs.callPackage ./nix/managed-session-relay.nix {
+          inherit piPackage;
+        };
         mattPocockSkillsResources = pkgs.callPackage ./nix/mattpocock-skills-resources.nix {
           mattPocockSkillsSrc = mattpocock-skills-src;
         };
@@ -327,6 +330,10 @@
             test -f docs/architecture/decisions/0001-synthetic-evaluation-contracts.md
             test -f docs/architecture/decisions/0002-managed-session-contracts.md
             test -f config/agent/extensions/managed-sessions/contracts.ts
+            test -f config/agent/extensions/managed-sessions/relay/main.ts
+            test -f config/agent/extensions/managed-sessions/relay/ipc-server.ts
+            test -f config/agent/extensions/managed-sessions/relay/registry.ts
+            test -f config/agent/extensions/managed-sessions/relay/matrix-client.ts
             test -f eval/contracts/path-policy.ts
             test -f eval/rpc/engine.ts
             test -f eval/rpc/README.md
@@ -481,6 +488,8 @@
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -x ${piHarnessPackage}/bin/pi-playwright
             test -x ${piHarnessPackage}/bin/pi-matrix-whoami
+            test ! -e ${piHarnessPackage}/bin/pi-managed-session-relay
+            test -x ${managedSessionRelay}/bin/pi-managed-session-relay
             test -x ${piHarnessPackage}/bin/pi-r-local
             launcher_identity=${piHarnessPackage}/share/pi-harness/eval/launcher-identity.json
             check-jsonschema --check-metaschema eval/launcher/schemas/v1/launcher-identity.schema.json
@@ -650,11 +659,16 @@
             ${evalSelfTestApp}/bin/pi-eval-self-test
             PI_HARNESS_JQ=${lib.getExe pkgs.jq} \
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
+              PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid \
+              PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock \
               node --test \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/aloop-worker.test.js" \
                 "$test_build_dir/tests/aloop-supervisor.test.js" \
                 "$test_build_dir/tests/managed-session-contracts.test.js" \
+                "$test_build_dir/tests/managed-session-relay-registry.test.js" \
+                "$test_build_dir/tests/managed-session-relay-ipc.test.js" \
+                "$test_build_dir/tests/managed-session-relay-matrix.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
                 "$test_build_dir/tests/remote-session-state.test.js" \
@@ -692,6 +706,7 @@
       {
         packages.pi-harness = piHarnessPackage;
         packages.pi-harness-resources = piHarnessResources;
+        packages.managed-session-relay = managedSessionRelay;
         packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
         packages.playwright-agent-cli = playwrightAgentCli;

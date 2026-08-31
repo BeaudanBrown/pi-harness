@@ -2,11 +2,13 @@
 
 Thin shared configuration for the Pi coding agent.
 
-This repository is intentionally small. It does not implement a workstream
-manager, tmux switcher, TUI, runtime registry, or context attachment model.
-Pi already provides the interactive agent UI, session storage, branching,
+This repository is intentionally small. It does not implement a general
+workstream manager, tmux switcher, TUI, or arbitrary context attachment model.
+It does provide the narrowly scoped managed-session host relay defined by ADR
+0002: a deterministic Matrix/IPC registry for host-owned Pi conversations. Pi
+still provides the interactive agent UI, session storage, branching,
 compaction, tools, extensions, skills, prompt templates, and themes. Session
-layout is handled outside Pi with regular tmux.
+layout remains external and uses regular tmux through fixed host-owned actions.
 
 ## What This Flake Provides
 
@@ -14,6 +16,7 @@ layout is handled outside Pi with regular tmux.
 - a Nix package named `pi-harness`
 - a Nix resource package named `pi-harness-resources`
 - a NixOS module named `nixosModules.pi-harness`
+- a packaged `pi-managed-session-relay` host-runtime executable
 - shared Pi resources under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
@@ -145,6 +148,22 @@ exact flat Pi session directory. The installed `pi` wrapper exports
 takes effect without requiring the desktop user to log out and back in. This
 option does not configure the parent of Pi's native per-project session tree;
 use a filesystem mount when that complete tree must live elsewhere.
+
+## Managed-session relay foundation
+
+The separate `managed-session-relay` package exposes
+`pi-managed-session-relay`. The default harness package intentionally does not
+expose it while managed sessions are disabled. The relay owns a private bounded NDJSON Unix socket,
+strict adapter attachment authorization, atomically replaced host-local
+registry state, synchronized logical manifest access, restart reconciliation,
+and the relay-only Matrix HTTPS client. Matrix credentials remain private
+fields of that process and are never accepted by or emitted over IPC.
+
+The executable requires `PI_MANAGED_SESSIONS_RUNTIME_DIR`,
+`PI_MANAGED_SESSIONS_MANIFEST_DIR`, `PI_MANAGED_SESSIONS_HOST_ID`, and the
+existing `PI_MATRIX_*` identity/credential variables. Packaging the executable
+does not enable or start it. The NixOS service and atomic managed-session
+feature switch are configured separately from this foundation.
 
 ## Matrix Host Bot Runtime
 
