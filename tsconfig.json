@@ -15,7 +15,8 @@
       "@earendil-works/pi-agent-core": [".pi-types/node_modules/@earendil-works/pi-agent-core"],
       "@earendil-works/pi-ai": [".pi-types/node_modules/@earendil-works/pi-ai"],
       "@earendil-works/pi-tui": [".pi-types/node_modules/@earendil-works/pi-tui"],
-      "typebox": [".pi-types/node_modules/typebox"]
+      "typebox": [".pi-types/node_modules/typebox"],
+      "typebox/value": [".pi-types/node_modules/typebox/build/value/index.d.mts"]
     }
   },
   "include": ["config/agent/extensions/**/*.ts", "eval/**/*.ts", "tests/**/*.ts"]

@@ -325,6 +325,8 @@
             test -f config/agent/settings.json
             jq empty config/agent/settings.json
             test -f docs/architecture/decisions/0001-synthetic-evaluation-contracts.md
+            test -f docs/architecture/decisions/0002-managed-session-contracts.md
+            test -f config/agent/extensions/managed-sessions/contracts.ts
             test -f eval/contracts/path-policy.ts
             test -f eval/rpc/engine.ts
             test -f eval/rpc/README.md
@@ -652,6 +654,7 @@
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/aloop-worker.test.js" \
                 "$test_build_dir/tests/aloop-supervisor.test.js" \
+                "$test_build_dir/tests/managed-session-contracts.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
                 "$test_build_dir/tests/remote-session-state.test.js" \
