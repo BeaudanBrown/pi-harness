@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { requestSelfBind, BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
-import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveMatrixTransactionId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import type { SessionBinding } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 
@@ -22,13 +22,14 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	const sessionId = "session-production-bind";
 	const boundaryEntryId = deriveTranscriptEntryId(sessionId, "boundary");
 	const originalFetch = globalThis.fetch;
-	const requests: Array<{ path: string; authorization: string | null }> = [];
+	const requests: Array<{ path: string; authorization: string | null; body?: string }> = [];
 	let failLeave = false;
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(String(input));
-		requests.push({ path: url.pathname, authorization: new Headers(init?.headers).get("authorization") });
+		requests.push({ path: url.pathname, authorization: new Headers(init?.headers).get("authorization"), ...(typeof init?.body === "string" ? { body: init.body } : {}) });
 		if (url.pathname.endsWith("/whoami")) return Response.json({ user_id: "@bot:example.com" });
 		if (url.pathname.endsWith("/createRoom")) return Response.json({ room_id: "!production:example.com" });
+		if (url.pathname.includes("/send/")) return Response.json({ event_id: "$projected" });
 		if (url.pathname.endsWith("/leave") && failLeave) return new Response("temporary", { status: 503 });
 		return Response.json({});
 	};
@@ -76,6 +77,13 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		onEnvelope: () => undefined,
 	});
 	await client.connect();
+	const transcript = {
+		entryId: deriveTranscriptEntryId(sessionId, "final-answer"), piSessionId: sessionId, piEntryKey: "final-answer",
+		kind: "assistant_final" as const, body: "final **answer** <script>unsafe</script>",
+	};
+	assert.equal((await client.offerTranscript(transcript)).payload.status, "projected");
+	assert.equal((await client.offerTranscript(transcript)).payload.status, "projected");
+	assert.equal(running.registry.snapshot().conversations[0]?.projection[0]?.status, "projected");
 	assert.equal((await client.selfStatus()).payload.conversationState, "active");
 	failLeave = true;
 	await assert.rejects(() => client.selfDelete(), /Relay operation failed/);
@@ -92,8 +100,14 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	assert.deepEqual(requests.map((request) => request.path), [
 		"/_matrix/client/v3/account/whoami",
 		"/_matrix/client/v3/createRoom",
+		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, transcript.entryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 	]);
 	assert.ok(requests.every((request) => request.authorization === "Bearer test-token-never-in-ipc"));
+	const sent = requests.find((request) => request.path.includes("/send/"));
+	const sentContent = JSON.parse(sent?.body ?? "{}") as { body?: string; formatted_body?: string };
+	assert.equal(sentContent.body, transcript.body, "plain fallback preserves readable source text");
+	assert.match(sentContent.formatted_body ?? "", /<strong>answer<\/strong>/);
+	assert.doesNotMatch(sentContent.formatted_body ?? "", /<script>/);
 });

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
 	MANAGED_SESSION_STATE_VERSION,
+	MAX_PROJECTION_ENTRIES,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
@@ -10,16 +11,24 @@ import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	BINDING_ENTRY_TYPE,
 	DELIVERY_ENTRY_TYPE,
+	PROJECTION_DIAGNOSTIC_ENTRY_TYPE,
+	PROJECTION_ENTRY_TYPE,
 	UNBOUND_ENTRY_TYPE,
 	type AdapterRole,
 	type DeliveryMarker,
+	type ProjectionMarker,
 	type SessionBinding,
 	findDeliveredUserEntry,
+	hasBackfillDiagnostic,
+	hasProjectionCapacityDiagnostic,
+	planTranscriptBackfill,
 	normalizeConcept,
 	persistedEntryId,
 	restoreBindingAttempt,
 	restoreDeliveries,
+	restoreProjections,
 	restoreSessionBinding,
+	transcriptOfferWithinFrame,
 } from "./state.js";
 
 interface AdapterEnvironment {
@@ -93,6 +102,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let reconnectAttempt = 0;
 		let stopped = false;
 		let deliveries = new Map<string, DeliveryMarker>();
+		let projections = restoreProjections([]);
+		let projectionRun: Promise<void> | undefined;
+		let projectionRequestedContext: ExtensionContext | undefined;
+		let projectionRetryTimer: NodeJS.Timeout | undefined;
+		let projectionRetryAttempt = 0;
 		const activeDeliveries = new Map<string, string>();
 		const pendingUserPersistence: DeliveryMarker[] = [];
 		const inFlightDeliveries = new Set<string>();
@@ -121,11 +135,101 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		function acknowledge(marker: DeliveryMarker): void {
 			if (marker.status === "expanded") return;
-			try {
-				client?.acknowledgeInput(marker.deliveryId, marker.status, marker.piEntryId);
-			} catch {
-				// Durable markers are replayed after reconnect.
+			const target = client;
+			const ctx = currentContext;
+			const currentBinding = binding;
+			if (!target) return;
+			void target.acknowledgeInput(marker.deliveryId, marker.status, marker.piEntryId).catch((error) => {
+				if (error instanceof ManagedAdapterError && error.code === "capacity_reached" && marker.piEntryId && ctx && currentBinding &&
+					currentContext === ctx && binding === currentBinding &&
+					!hasProjectionCapacityDiagnostic(ctx.sessionManager.getBranch(), currentBinding, marker.piEntryId)) {
+					appendMarker(pi, ctx, PROJECTION_DIAGNOSTIC_ENTRY_TYPE, {
+						version: MANAGED_SESSION_STATE_VERSION, bindingBoundaryEntryId: currentBinding.bindingBoundaryEntryId,
+						entryId: marker.piEntryId, limit: MAX_PROJECTION_ENTRIES, reason: "capacity_reached",
+					});
+					notify(ctx, `Managed Matrix-input provenance capacity was reached at ${marker.piEntryId}`, "error");
+				}
+				// All delivery states are durable and non-capacity failures replay after reconnect.
+			});
+		}
+
+		async function projectEligibleEntries(ctx: ExtensionContext): Promise<void> {
+			if (!binding || !client?.connected) return;
+			const projectionBinding = binding;
+			const projectionClient = client;
+			const plan = planTranscriptBackfill(ctx.sessionManager.getBranch(), projectionBinding, deliveries, projections);
+			if (plan.excessiveCount !== undefined) {
+				if (!hasBackfillDiagnostic(ctx.sessionManager.getBranch(), projectionBinding, plan.excessiveCount)) {
+					appendMarker(pi, ctx, PROJECTION_DIAGNOSTIC_ENTRY_TYPE, {
+						version: MANAGED_SESSION_STATE_VERSION, bindingBoundaryEntryId: projectionBinding.bindingBoundaryEntryId,
+						pendingCount: plan.excessiveCount, limit: MAX_PROJECTION_ENTRIES, reason: "backfill_limit",
+					});
+				}
+				notify(ctx, `Managed transcript backfill has ${plan.excessiveCount} pending entries; bounded projection refused the batch`, "error");
+				return;
 			}
+			for (const entry of plan.entries) {
+				if (!projectionClient.connected || binding !== projectionBinding || client !== projectionClient) return;
+				let marker = projections.get(entry.entryId);
+				if (!transcriptOfferWithinFrame(entry, projectionBinding)) {
+					marker = { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
+						kind: entry.kind, status: "blocked", reason: "oversized" };
+					recordProjectionMarker(ctx, marker);
+					notify(ctx, `Managed transcript entry ${entry.piEntryKey} exceeds the projection size limit`, "error");
+					continue;
+				}
+				if (!marker) {
+					marker = { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
+						kind: entry.kind, status: "offered" };
+					recordProjectionMarker(ctx, marker);
+				}
+				try {
+					await projectionClient.offerTranscript({ ...entry, piSessionId: projectionBinding.sessionId });
+				} catch (error) {
+					if (error instanceof ManagedAdapterError && error.code === "capacity_reached") {
+						const blocked: ProjectionMarker = { ...marker, status: "blocked", reason: "backfill_limit" };
+						recordProjectionMarker(ctx, blocked);
+						notify(ctx, `Managed transcript projection capacity was reached at ${entry.piEntryKey}`, "error");
+					} else {
+						notify(ctx, error instanceof Error ? error.message : "Managed transcript projection was interrupted", "warning");
+						scheduleProjectionRetry(ctx);
+					}
+					return;
+				}
+				recordProjectionMarker(ctx, { ...marker, status: "projected" });
+			}
+			projectionRetryAttempt = 0;
+			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);
+			projectionRetryTimer = undefined;
+		}
+
+		function recordProjectionMarker(ctx: ExtensionContext, marker: ProjectionMarker): void {
+			appendMarker(pi, ctx, PROJECTION_ENTRY_TYPE, marker);
+			projections.set(marker.entryId, marker);
+		}
+
+		function scheduleProjectionRetry(ctx: ExtensionContext): void {
+			if (projectionRetryTimer || stopped || !binding) return;
+			const delay = Math.min(30_000, 1_000 * (2 ** Math.min(projectionRetryAttempt, 5)));
+			projectionRetryAttempt += 1;
+			projectionRetryTimer = setTimeout(() => {
+				projectionRetryTimer = undefined;
+				queueProjection(ctx);
+			}, delay);
+			projectionRetryTimer.unref();
+		}
+
+		function queueProjection(ctx: ExtensionContext): void {
+			projectionRequestedContext = ctx;
+			if (projectionRun) return;
+			projectionRun = (async () => {
+				while (projectionRequestedContext) {
+					const requestedContext = projectionRequestedContext;
+					projectionRequestedContext = undefined;
+					try { await projectEligibleEntries(requestedContext); }
+					catch (error) { notify(requestedContext, error instanceof Error ? error.message : "Managed transcript projection failed", "error"); }
+				}
+			})().finally(() => { projectionRun = undefined; });
 		}
 
 		function replayAcknowledgements(): void {
@@ -237,6 +341,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				await next.connect();
 				reconnectAttempt = 0;
 				replayAcknowledgements();
+				queueProjection(ctx);
 			} catch (error) {
 				if (client === next) client = undefined;
 				notify(ctx, error instanceof Error ? error.message : "Managed-session relay connection failed", "warning");
@@ -257,6 +362,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					(event.reason === "startup" ? bootstrapBinding(pi, ctx, role, config) : undefined);
 			}
 			deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
+			projections = restoreProjections(ctx.sessionManager.getBranch());
 			activeDeliveries.clear();
 			pendingUserPersistence.length = 0;
 			inFlightDeliveries.clear();
@@ -287,12 +393,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				acknowledge(completed);
 			}
 			activeDeliveries.clear();
+			queueProjection(ctx);
 		});
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			stopped = true;
 			if (reconnectTimer) clearTimeout(reconnectTimer);
+			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);
 			reconnectTimer = undefined;
+			projectionRetryTimer = undefined;
 			const reason = event.reason === "quit" || event.reason === "reload" ? "shutdown" : "session_change";
 			await client?.close(reason);
 			client = undefined;

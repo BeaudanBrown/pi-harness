@@ -178,6 +178,14 @@ host-wide lifecycle tool surface. Initial binding requires the host-owned
 `PI_MANAGED_SESSION_RELATIVE_CWD` placement environment in addition to the
 private socket and attachment nonce.
 
+After binding, adapters classify persisted Pi branch entries and offer only
+terminal-origin text turns and final assistant answers. Matrix-origin users are
+mapped to their existing operator events rather than echoed. The relay records
+each offer before sending deterministic, sanitized Markdown chunks with stable
+Matrix transaction IDs; reconnect and restart retry the same transactions.
+Thinking, tool activity, compaction/internal entries, pre-binding history, and
+oversized or excessive backfills are excluded or fail closed with diagnostics.
+
 ## Matrix Host Bot Runtime
 
 The optional `services.pi-harness.remoteSession` settings provide a

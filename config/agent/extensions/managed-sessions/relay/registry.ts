@@ -2,6 +2,7 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
 	MANAGED_SESSION_STATE_VERSION,
+	MAX_PROJECTION_ENTRIES,
 	type ConversationManifest,
 	type HostRuntimeState,
 	type ManagedSessionEnvelope,
@@ -16,7 +17,7 @@ type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
 
 export class RelayRegistryError extends Error {
 	constructor(
-		readonly code: "permission_denied" | "invalid_nonce" | "attachment_conflict" | "not_found" | "invalid_state",
+		readonly code: "permission_denied" | "invalid_nonce" | "attachment_conflict" | "not_found" | "invalid_state" | "capacity_reached",
 		message: string,
 	) {
 		super(message);
@@ -139,6 +140,38 @@ export class RelayRegistry {
 		});
 	}
 
+	async beginProjection(
+		conversationId: string,
+		projection: RuntimeConversation["projection"][number],
+	): Promise<RuntimeConversation["projection"][number]> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const existing = conversation.projection.find((candidate) => candidate.entryId === projection.entryId);
+			if (existing) {
+				if (existing.kind !== projection.kind || existing.contentHash !== projection.contentHash ||
+					existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
+						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId)) {
+					throw new RelayRegistryError("invalid_state", "Conflicting transcript projection content");
+				}
+				return structuredClone(existing);
+			}
+			if (conversation.projection.length >= MAX_PROJECTION_ENTRIES) throw new RelayRegistryError("capacity_reached", "Transcript projection capacity was reached");
+			conversation.projection.push(projection);
+			parseHostRuntimeState(this.state);
+			return structuredClone(projection);
+		});
+	}
+
+	async markProjectionChunkSent(conversationId: string, entryId: string, chunkId: string): Promise<void> {
+		await this.mutate(async () => {
+			const projection = this.runtimeConversation(conversationId).projection.find((candidate) => candidate.entryId === entryId);
+			const chunk = projection?.chunks.find((candidate) => candidate.chunkId === chunkId);
+			if (!projection || !chunk) throw new RelayRegistryError("not_found", "Transcript projection chunk was not found");
+			chunk.status = "sent";
+			projection.status = projection.chunks.every((candidate) => candidate.status === "sent") ? "projected" : "projecting";
+		});
+	}
+
 	manifestByCreationKey(creationKey: string): ConversationManifest | undefined {
 		const manifest = [...this.manifests.values()].find((candidate) => candidate.creationKey === creationKey);
 		return manifest ? structuredClone(manifest) : undefined;
@@ -248,6 +281,21 @@ export class RelayRegistry {
 			}
 			if ((status === "persisted" || status === "completed") && !piEntryId) {
 				throw new RelayRegistryError("invalid_state", "Persisted delivery acknowledgement requires a Pi entry ID");
+			}
+			if (piEntryId && input.piEntryId && input.piEntryId !== piEntryId) {
+				throw new RelayRegistryError("invalid_state", "Managed delivery changed its persisted Pi entry identity");
+			}
+			if (piEntryId) input.piEntryId = piEntryId;
+			if (piEntryId) {
+				const conversation = this.runtimeConversation(conversationId);
+				const projection = conversation.projection.find((candidate) => candidate.entryId === piEntryId);
+				if (projection && (projection.kind !== "matrix_user" || projection.status !== "projected" || projection.chunks.length !== 0)) {
+					throw new RelayRegistryError("invalid_state", "Matrix-origin Pi entry conflicts with transcript projection state");
+				}
+				if (!projection) {
+					if (conversation.projection.length >= MAX_PROJECTION_ENTRIES) throw new RelayRegistryError("capacity_reached", "Transcript projection capacity was reached");
+					conversation.projection.push({ entryId: piEntryId, kind: "matrix_user", status: "projected", chunks: [] });
+				}
 			}
 			input.status = status;
 		});

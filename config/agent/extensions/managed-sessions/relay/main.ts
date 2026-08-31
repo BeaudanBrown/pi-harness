@@ -15,6 +15,7 @@ import { managedMatrixConfigFromEnvironment, ManagedMatrixClient } from "./matri
 import { peerUidFromHelper } from "./peer-uid.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { hostRelayLockPath, HostRelayLock } from "./relay-lock.js";
+import { TranscriptProjector } from "./transcript-projector.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -51,8 +52,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
 		const authenticatedUserId = await matrix.whoami();
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
+		const transcriptProjector = new TranscriptProjector(registry, matrix);
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -112,7 +114,15 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				if (envelope.type === "input.acknowledge") {
 					const payload = envelope.payload as { deliveryId: string; status: string; piEntryId?: string };
 					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId);
-					return undefined;
+					return response(attachment.conversationId, envelope.messageId, "input.result", {
+						deliveryId: payload.deliveryId, status: payload.status,
+					});
+				}
+				if (envelope.type === "transcript.offer") {
+					await transcriptProjector.project(envelope);
+					return response(attachment.conversationId, envelope.messageId, "transcript.acknowledge", {
+						entryId: envelope.payload.entryId, status: "projected",
+					});
 				}
 				if (envelope.type === "self.status") {
 					return response(attachment.conversationId, envelope.messageId, "self.result", {

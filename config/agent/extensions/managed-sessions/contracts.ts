@@ -180,6 +180,10 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		]),
 		body: Type.Optional(boundedString(MAX_INPUT_TEXT_LENGTH)),
 	}),
+	relayEnvelope("input.result", {
+		deliveryId: DeliveryIdSchema,
+		status: Type.Union([Type.Literal("accepted"), Type.Literal("persisted"), Type.Literal("completed"), Type.Literal("cancelled")]),
+	}),
 	relayEnvelope("transcript.acknowledge", {
 		entryId: TranscriptEntryIdSchema,
 		status: Type.Union([Type.Literal("accepted"), Type.Literal("projected")]),
@@ -284,6 +288,7 @@ const pendingInput = strictObject({
 		Type.Literal("abort"),
 	]),
 	body: Type.Optional(boundedString(MAX_INPUT_TEXT_LENGTH)),
+	piEntryId: Type.Optional(TranscriptEntryIdSchema),
 	status: Type.Union([
 		Type.Literal("accepted"),
 		Type.Literal("delivered"),
@@ -302,6 +307,7 @@ const projectionEntry = strictObject({
 		Type.Literal("notice"),
 	]),
 	status: Type.Union([Type.Literal("offered"), Type.Literal("projecting"), Type.Literal("projected")]),
+	contentHash: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	chunks: Type.Array(strictObject({
 		chunkId: ChunkIdSchema,
 		transactionId: MatrixTransactionIdSchema,
@@ -365,11 +371,12 @@ export interface HostRuntimeState {
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string };
 		matrixSince?: string;
-		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; status: string }>;
+		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string }>;
 		projection: Array<{
 			entryId: string;
 			kind: string;
 			status: string;
+			contentHash?: string;
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string };

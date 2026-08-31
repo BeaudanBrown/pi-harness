@@ -81,8 +81,8 @@ export class BoundAdapterClient {
 		}
 	}
 
-	acknowledgeInput(deliveryId: string, status: "accepted" | "persisted" | "completed" | "cancelled", piEntryId?: string): void {
-		this.send({
+	async acknowledgeInput(deliveryId: string, status: "accepted" | "persisted" | "completed" | "cancelled", piEntryId?: string): Promise<void> {
+		const result = await this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("ack"),
 			conversationId: this.options.binding.conversationId,
@@ -90,6 +90,27 @@ export class BoundAdapterClient {
 			type: "input.acknowledge",
 			payload: { deliveryId, status, ...(piEntryId ? { piEntryId } : {}) },
 		});
+		if (result.type !== "input.result" || result.payload.deliveryId !== deliveryId || result.payload.status !== status) {
+			throw new ManagedAdapterError("Relay did not confirm input acknowledgement", "invalid_response");
+		}
+	}
+
+	async offerTranscript(entry: {
+		entryId: string;
+		piSessionId: string;
+		piEntryKey: string;
+		kind: "local_user" | "assistant_final";
+		body: string;
+	}): Promise<ManagedSessionEnvelope> {
+		const result = await this.request({
+			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: messageId("transcript"), conversationId: this.options.binding.conversationId,
+			role: this.options.role, type: "transcript.offer", payload: entry,
+		});
+		if (result.type !== "transcript.acknowledge" || result.payload.entryId !== entry.entryId || result.payload.status !== "projected") {
+			throw new ManagedAdapterError("Relay did not confirm transcript projection", "invalid_response");
+		}
+		return result;
 	}
 
 	async selfStatus(): Promise<ManagedSessionEnvelope> {
@@ -123,12 +144,6 @@ export class BoundAdapterClient {
 		}
 		socket.end();
 		await waitForClose(socket, 1_000);
-	}
-
-	private send(envelope: ManagedSessionEnvelope): void {
-		const socket = this.#socket;
-		if (!socket || socket.destroyed) throw new ManagedAdapterError("Relay connection is unavailable");
-		socket.write(encodeNdjsonEnvelope(envelope));
 	}
 
 	private request(envelope: ManagedSessionEnvelope): Promise<ManagedSessionEnvelope> {

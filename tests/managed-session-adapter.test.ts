@@ -20,11 +20,19 @@ import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	BINDING_ENTRY_TYPE,
 	DELIVERY_ENTRY_TYPE,
+	PROJECTION_DIAGNOSTIC_ENTRY_TYPE,
+	PROJECTION_ENTRY_TYPE,
 	UNBOUND_ENTRY_TYPE,
+	eligibleTranscriptEntries,
 	findDeliveredUserEntry,
+	hasBackfillDiagnostic,
+	hasProjectionCapacityDiagnostic,
+	planTranscriptBackfill,
 	restoreBindingAttempt,
 	restoreDeliveries,
+	restoreProjections,
 	restoreSessionBinding,
+	transcriptOfferWithinFrame,
 	type SessionBinding,
 } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -110,6 +118,8 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId } }));
 		} else if (envelope.type === "attachment.attach") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active" } }));
+		} else if (envelope.type === "input.acknowledge") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
 		} else if (envelope.type === "self.status") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }));
 		} else if (envelope.type === "self.delete") {
@@ -154,6 +164,52 @@ test("binding and delivery history restore fail closed without fork inheritance"
 	]).size, 0);
 });
 
+test("transcript classification is boundary-ordered, provenance-aware, and final-only", () => {
+	const matrixDeliveryId = deriveDeliveryId(conversationId, "$matrix");
+	const matrixUserKey = "matrix-user";
+	const matrixEntryId = deriveTranscriptEntryId(sessionId, matrixUserKey);
+	const delivery = {
+		version: MANAGED_SESSION_STATE_VERSION, deliveryId: matrixDeliveryId, matrixEventId: "$matrix", kind: "prompt" as const,
+		status: "persisted" as const, expandedText: "from matrix", piEntryId: matrixEntryId,
+	};
+	const branch = [
+		{ type: "message", id: "before", message: { role: "assistant", content: [{ type: "text", text: "secret" }], stopReason: "stop" } },
+		custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }),
+		{ type: "message", id: matrixUserKey, message: { role: "user", content: [{ type: "text", text: "from matrix" }] } },
+		{ type: "message", id: "local-user", message: { role: "user", content: "terminal **input**" } },
+		{ type: "message", id: "tool-step", message: { role: "assistant", content: [{ type: "toolCall", name: "read" }], stopReason: "toolUse" } },
+		{ type: "message", id: "truncated", message: { role: "assistant", content: [{ type: "text", text: "partial limit output" }], stopReason: "length" } },
+		{ type: "message", id: "final", message: { role: "assistant", content: [{ type: "thinking", thinking: "private" }, { type: "text", text: "final answer" }], stopReason: "stop" } },
+		{ type: "compaction", id: "compact", summary: "private summary" },
+	];
+	const boundaryBinding = { ...binding, bindingBoundaryEntryId: deriveTranscriptEntryId(sessionId, "boundary") };
+	assert.deepEqual(eligibleTranscriptEntries(branch, boundaryBinding, new Map([[matrixDeliveryId, delivery]])), [
+		{ entryId: deriveTranscriptEntryId(sessionId, "local-user"), piEntryKey: "local-user", kind: "local_user", body: "terminal **input**" },
+		{ entryId: deriveTranscriptEntryId(sessionId, "final"), piEntryKey: "final", kind: "assistant_final", body: "final answer" },
+	]);
+	const offered = { version: MANAGED_SESSION_STATE_VERSION, entryId: deriveTranscriptEntryId(sessionId, "final"), piEntryKey: "final", kind: "assistant_final" as const, status: "offered" as const };
+	assert.equal(restoreProjections([custom("binding", BINDING_ENTRY_TYPE, binding), custom("offer", PROJECTION_ENTRY_TYPE, offered)]).get(offered.entryId)?.status, "offered");
+	assert.equal(restoreProjections([custom("offer", PROJECTION_ENTRY_TYPE, offered), custom("unbound", UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION })]).size, 0);
+	const escapedOffer = { entryId: deriveTranscriptEntryId(sessionId, "escaped"), piEntryKey: "escaped", kind: "local_user" as const, body: "\n\"".repeat(20_000) };
+	assert.equal(transcriptOfferWithinFrame(escapedOffer, binding), false, "the complete JSON-escaped NDJSON frame bounds offers");
+	assert.equal(transcriptOfferWithinFrame({ ...escapedOffer, body: "short" }, binding), true);
+	const excessive = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, {}), ...Array.from({ length: 4_097 }, (_, index) => ({
+		type: "message", id: `entry-${index}`, message: { role: "user", content: `local ${index}` },
+	}))];
+	assert.equal(planTranscriptBackfill(excessive, boundaryBinding, new Map(), new Map()).excessiveCount, 4_097);
+	assert.deepEqual(planTranscriptBackfill(excessive, boundaryBinding, new Map(), new Map()).entries, []);
+	const diagnostic = custom("diagnostic", PROJECTION_DIAGNOSTIC_ENTRY_TYPE, {
+		version: MANAGED_SESSION_STATE_VERSION, bindingBoundaryEntryId: boundaryBinding.bindingBoundaryEntryId,
+		pendingCount: 4_097, limit: 4_096, reason: "backfill_limit",
+	});
+	assert.equal(hasBackfillDiagnostic([...excessive, diagnostic], boundaryBinding, 4_097), true);
+	const capacityDiagnostic = custom("capacity", PROJECTION_DIAGNOSTIC_ENTRY_TYPE, {
+		version: MANAGED_SESSION_STATE_VERSION, bindingBoundaryEntryId: boundaryBinding.bindingBoundaryEntryId,
+		entryId: matrixEntryId, limit: 4_096, reason: "capacity_reached",
+	});
+	assert.equal(hasProjectionCapacityDiagnostic([...excessive, capacityDiagnostic], boundaryBinding, matrixEntryId), true);
+});
+
 test("ordinary adapter speaks only fixed role-bound operations and deduplicates request correlation", async (t) => {
 	const relay = await FakeRelay.start();
 	t.after(() => relay.close());
@@ -173,7 +229,7 @@ test("ordinary adapter speaks only fixed role-bound operations and deduplicates 
 	});
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.equal(received[0]?.type, "input.deliver");
-	client.acknowledgeInput(deliveryId, "accepted");
+	await client.acknowledgeInput(deliveryId, "accepted");
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.equal(relay.frames.at(-1)?.type, "input.acknowledge");
 	assert.equal(relay.frames.at(-1)?.role, "ordinary_adapter");

@@ -73,6 +73,7 @@ test("real Pi binds, expands once, persists provenance, leaves /new and /fork un
 	let sentDelivery = false;
 	let forcedReconnect = false;
 	let redeliveredAfterReconnect = false;
+	let failedTranscriptProjection = false;
 	const server = createServer((socket) => {
 		sockets.add(socket);
 		let buffer = Buffer.alloc(0);
@@ -113,9 +114,20 @@ test("real Pi binds, expands once, persists provenance, leaves /new and /fork un
 							payload: { deliveryId: normalDeliveryId, matrixEventId: "$normal-event", kind: "prompt", body: "ordinary persisted prompt" },
 						})), 100);
 					}
+				} else if (envelope.type === "transcript.offer") {
+					if (!failedTranscriptProjection) {
+						failedTranscriptProjection = true;
+						socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "matrix_unavailable", message: "temporary Matrix outage", retryable: true } }));
+					} else {
+						socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
+					}
 				} else if (envelope.type === "input.acknowledge" && envelope.payload.status === "accepted" && !forcedReconnect) {
 					forcedReconnect = true;
 					socket.destroy();
+				} else if (envelope.type === "input.acknowledge") {
+					socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: {
+						deliveryId: envelope.payload.deliveryId, status: envelope.payload.status,
+					} }));
 				}
 			}
 		});
@@ -157,7 +169,7 @@ export default function (pi) {
     streamSimple: fakeStream,
   });
   pi.registerCommand("adapter-expanded", { handler: async (args) => appendFileSync(process.env.ADAPTER_EXPANDED_PATH, args.trim() + "\\n") });
-  pi.registerCommand("adapter-wait", { handler: async () => new Promise((resolve) => setTimeout(resolve, 600)) });
+  pi.registerCommand("adapter-wait", { handler: async () => new Promise((resolve) => setTimeout(resolve, 1600)) });
 }
 `);
 	const sessionDirectory = join(root, "sessions");
@@ -221,6 +233,11 @@ export default function (pi) {
 		frame.payload.deliveryId === normalDeliveryId && frame.payload.status === "persisted"),
 		`frames=${JSON.stringify(frameSummary)} entries=${JSON.stringify(lines)}`);
 	assert.ok(frames.every((frame) => !("accessToken" in frame.payload)));
+	const transcriptOffers = frames.filter((frame) => frame.type === "transcript.offer");
+	assert.deepEqual(transcriptOffers.map((frame) => [frame.payload.kind, frame.payload.body]), [
+		["assistant_final", "probe answer"], ["assistant_final", "probe answer"],
+	], "the same eligible final is retried after Matrix downtime; Matrix user and pre-binding history are not echoed");
+	assert.equal(transcriptOffers[0]?.payload.entryId, transcriptOffers[1]?.payload.entryId);
 
 	assert.ok(lines.some((entry) => entry.type === "custom" && entry.customType === "managed-session.binding"));
 	assert.ok(lines.some((entry) => entry.type === "custom" && entry.customType === "managed-session.delivery" && (entry.data as { status?: string }).status === "expanded"));

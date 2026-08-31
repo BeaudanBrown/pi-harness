@@ -1,5 +1,8 @@
 import {
+	MANAGED_SESSION_PROTOCOL_VERSION,
 	MANAGED_SESSION_STATE_VERSION,
+	MAX_NDJSON_FRAME_BYTES,
+	MAX_PROJECTION_ENTRIES,
 	deriveTranscriptEntryId,
 } from "../contracts.js";
 
@@ -7,6 +10,8 @@ export const BINDING_ENTRY_TYPE = "managed-session.binding";
 export const BINDING_BOUNDARY_ENTRY_TYPE = "managed-session.binding-boundary";
 export const UNBOUND_ENTRY_TYPE = "managed-session.unbound";
 export const DELIVERY_ENTRY_TYPE = "managed-session.delivery";
+export const PROJECTION_ENTRY_TYPE = "managed-session.projection";
+export const PROJECTION_DIAGNOSTIC_ENTRY_TYPE = "managed-session.projection-diagnostic";
 
 export type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
 
@@ -25,6 +30,22 @@ export interface BindingAttempt {
 	concept: string;
 	sessionId: string;
 	entryKey: string;
+}
+
+export interface ProjectionMarker {
+	version: typeof MANAGED_SESSION_STATE_VERSION;
+	entryId: string;
+	piEntryKey: string;
+	kind: "local_user" | "assistant_final";
+	status: "offered" | "projected" | "blocked";
+	reason?: "oversized" | "backfill_limit";
+}
+
+export interface EligibleTranscriptEntry {
+	entryId: string;
+	piEntryKey: string;
+	kind: "local_user" | "assistant_final";
+	body: string;
 }
 
 export interface DeliveryMarker {
@@ -143,6 +164,116 @@ export function findDeliveredUserEntry(entries: readonly unknown[], deliveryId: 
 		return candidate.id;
 	}
 	return undefined;
+}
+
+export function restoreProjections(entries: readonly unknown[]): Map<string, ProjectionMarker> {
+	const projections = new Map<string, ProjectionMarker>();
+	for (const entry of entries) {
+		if (customData(entry, UNBOUND_ENTRY_TYPE) || customData(entry, BINDING_ENTRY_TYPE)) projections.clear();
+		const candidate = customData(entry, PROJECTION_ENTRY_TYPE);
+		if (!candidate) continue;
+		const value = candidate.data;
+		if (value.version !== MANAGED_SESSION_STATE_VERSION || typeof value.entryId !== "string" ||
+			!/^entry_[a-f0-9]{32}$/.test(value.entryId) || typeof value.piEntryKey !== "string" ||
+			(value.kind !== "local_user" && value.kind !== "assistant_final") ||
+			!(["offered", "projected", "blocked"] as unknown[]).includes(value.status) ||
+			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit")) continue;
+		const marker = value as unknown as ProjectionMarker;
+		const previous = projections.get(marker.entryId);
+		if (previous && (previous.piEntryKey !== marker.piEntryKey || previous.kind !== marker.kind ||
+			(previous.status === "projected" && marker.status !== "projected"))) {
+			throw new Error(`Conflicting managed-session projection history ${marker.entryId}`);
+		}
+		projections.set(marker.entryId, marker);
+	}
+	return projections;
+}
+
+function textContent(content: unknown, allowThinking: boolean): string | undefined {
+	if (typeof content === "string") return content;
+	if (!Array.isArray(content)) return undefined;
+	const text: string[] = [];
+	for (const block of content) {
+		if (typeof block !== "object" || block === null) return undefined;
+		const value = block as { type?: unknown; text?: unknown };
+		if (value.type === "text" && typeof value.text === "string") text.push(value.text);
+		else if (!(allowThinking && value.type === "thinking")) return undefined;
+	}
+	return text.join("");
+}
+
+export function eligibleTranscriptEntries(
+	entries: readonly unknown[],
+	binding: SessionBinding,
+	deliveries: ReadonlyMap<string, DeliveryMarker>,
+): EligibleTranscriptEntry[] {
+	const boundaryIndex = entries.findIndex((entry) =>
+		typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string" &&
+		persistedEntryId(binding.sessionId, (entry as { id: string }).id) === binding.bindingBoundaryEntryId);
+	if (boundaryIndex < 0) throw new Error("Managed-session binding boundary is absent from the Pi branch");
+	const matrixEntryIds = new Set([...deliveries.values()]
+		.filter((delivery) => delivery.status === "persisted" || delivery.status === "completed")
+		.map((delivery) => delivery.piEntryId).filter((value): value is string => value !== undefined));
+	const result: EligibleTranscriptEntry[] = [];
+	for (const value of entries.slice(boundaryIndex + 1)) {
+		if (typeof value !== "object" || value === null) continue;
+		const entry = value as { type?: unknown; id?: unknown; message?: unknown };
+		if (entry.type !== "message" || typeof entry.id !== "string" || typeof entry.message !== "object" || entry.message === null) continue;
+		const message = entry.message as { role?: unknown; content?: unknown; stopReason?: unknown };
+		const entryId = persistedEntryId(binding.sessionId, entry.id);
+		if (message.role === "user") {
+			if (matrixEntryIds.has(entryId)) continue;
+			const body = textContent(message.content, false);
+			if (body) result.push({ entryId, piEntryKey: entry.id, kind: "local_user", body });
+			continue;
+		}
+		if (message.role !== "assistant" || message.stopReason !== "stop") continue;
+		const body = textContent(message.content, true);
+		if (body) result.push({ entryId, piEntryKey: entry.id, kind: "assistant_final", body });
+	}
+	return result;
+}
+
+export function hasBackfillDiagnostic(entries: readonly unknown[], binding: SessionBinding, pendingCount: number): boolean {
+	return entries.some((entry) => {
+		const diagnostic = customData(entry, PROJECTION_DIAGNOSTIC_ENTRY_TYPE)?.data;
+		return diagnostic?.version === MANAGED_SESSION_STATE_VERSION &&
+			diagnostic.bindingBoundaryEntryId === binding.bindingBoundaryEntryId && diagnostic.pendingCount === pendingCount &&
+			diagnostic.limit === MAX_PROJECTION_ENTRIES && diagnostic.reason === "backfill_limit";
+	});
+}
+
+export function hasProjectionCapacityDiagnostic(entries: readonly unknown[], binding: SessionBinding, entryId: string): boolean {
+	return entries.some((entry) => {
+		const diagnostic = customData(entry, PROJECTION_DIAGNOSTIC_ENTRY_TYPE)?.data;
+		return diagnostic?.version === MANAGED_SESSION_STATE_VERSION &&
+			diagnostic.bindingBoundaryEntryId === binding.bindingBoundaryEntryId && diagnostic.entryId === entryId &&
+			diagnostic.reason === "capacity_reached";
+	});
+}
+
+export function transcriptOfferWithinFrame(entry: EligibleTranscriptEntry, binding: SessionBinding): boolean {
+	const envelope = {
+		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+		messageId: "transcript-00000000-0000-4000-8000-000000000000",
+		conversationId: binding.conversationId,
+		role: binding.role,
+		type: "transcript.offer",
+		payload: { ...entry, piSessionId: binding.sessionId },
+	};
+	return Buffer.byteLength(`${JSON.stringify(envelope)}\n`, "utf8") <= MAX_NDJSON_FRAME_BYTES;
+}
+
+export function planTranscriptBackfill(
+	entries: readonly unknown[],
+	binding: SessionBinding,
+	deliveries: ReadonlyMap<string, DeliveryMarker>,
+	projections: ReadonlyMap<string, ProjectionMarker>,
+): { entries: EligibleTranscriptEntry[]; excessiveCount?: number } {
+	const pending = eligibleTranscriptEntries(entries, binding, deliveries)
+		.filter((entry) => projections.get(entry.entryId)?.status !== "projected" && projections.get(entry.entryId)?.status !== "blocked");
+	if (pending.length > MAX_PROJECTION_ENTRIES) return { entries: [], excessiveCount: pending.length };
+	return { entries: pending };
 }
 
 export function persistedEntryId(sessionId: string, piEntryKey: string): string {
