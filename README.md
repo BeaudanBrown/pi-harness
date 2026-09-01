@@ -161,9 +161,12 @@ fields of that process and are never accepted by or emitted over IPC.
 
 The executable requires `PI_MANAGED_SESSIONS_RUNTIME_DIR`,
 `PI_MANAGED_SESSIONS_MANIFEST_DIR`, `PI_MANAGED_SESSIONS_HOST_ID`, and the
-existing `PI_MATRIX_*` identity/credential variables. Packaging the executable
-does not enable or start it. The NixOS service and atomic managed-session
-feature switch are configured separately from this foundation.
+existing `PI_MATRIX_*` identity/credential variables. Packaging the executable does not enable it. The NixOS module's atomic
+`managedSessions.enable` switch installs only the ordinary adapter into the
+interactive Pi wrapper, starts one lingered systemd user relay for the selected
+Unix user, and strictly parses the SOPS Matrix token file for the relay without
+sourcing arbitrary environment assignments. The coordinator uses a separate raw-Pi profile and never inherits
+`PI_MATRIX_*` credentials.
 
 The resource package also exposes separate ordinary and coordinator adapter
 entry points through `passthru.managedSessionExtensions`. They speak only the
@@ -185,6 +188,33 @@ each offer before sending deterministic, sanitized Markdown chunks with stable
 Matrix transaction IDs; reconnect and restart retry the same transactions.
 Thinking, tool activity, compaction/internal entries, pre-binding history, and
 oversized or excessive backfills are excluded or fail closed with diagnostics.
+
+An enabled host requires explicit Matrix identity, host identity, named
+workspace roots, a strict host launcher package, and a credential file that
+contains only `PI_MATRIX_ACCESS_TOKEN`:
+
+```nix
+services.pi-harness.managedSessions = {
+  enable = true;
+  user = "operator";
+  environmentFile = config.sops.templates."pi-managed-session.env".path;
+  homeserver = "https://matrix.example.com";
+  botUserId = "@pi-host:example.com";
+  operatorUserId = "@operator:example.com";
+  hostId = "workstation";
+  workspaceRoots.projects = "/home/operator/documents/projects";
+  launcherPackage = pkgs.tmux_project;
+};
+```
+
+The relay atomically creates the private neutral coordinator workspace and Pi
+session before creating the host Space and coordinator room. Authorized room
+text is persisted before the trusted `tmux_project managed
+coordinator-ensure` hook recreates `default/coordinator`. The coordinator
+session and binding survive restart; an inaccessible coordinator room is
+replaced against that same session and host Space. Project lifecycle operations
+remain implemented by the coordinator-only profile in subsequent managed
+lifecycle work.
 
 ## Matrix Host Bot Runtime
 

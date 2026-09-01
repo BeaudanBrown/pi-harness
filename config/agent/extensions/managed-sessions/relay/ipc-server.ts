@@ -15,6 +15,7 @@ import { type AcceptedAttachment, RelayRegistry, RelayRegistryError } from "./re
 export type PeerUidResolver = (socket: Socket) => number | undefined | Promise<number | undefined>;
 export type EnvelopeHandler = (envelope: ManagedSessionEnvelope, attachment: AcceptedAttachment) => Promise<ManagedSessionEnvelope | undefined>;
 export type UnboundEnvelopeHandler = (envelope: ManagedSessionEnvelope) => Promise<ManagedSessionEnvelope | undefined>;
+export type AttachmentHandler = (attachment: AcceptedAttachment) => Promise<void> | void;
 
 interface ConnectionState {
 	id: string;
@@ -45,6 +46,7 @@ function relayError(conversationId: string, inReplyTo: string, error: unknown): 
 export class ManagedSessionIpcServer {
 	private server?: Server;
 	private readonly sockets = new Set<Socket>();
+	private readonly attachedSockets = new Map<string, Socket>();
 	private preserveAttachmentsOnClose = false;
 	private readonly runtimeDirectory: string;
 	readonly socketPath: string;
@@ -58,6 +60,7 @@ export class ManagedSessionIpcServer {
 			peerUid?: PeerUidResolver;
 			onEnvelope?: EnvelopeHandler;
 			onUnboundEnvelope?: UnboundEnvelopeHandler;
+			onAttachment?: AttachmentHandler;
 		},
 	) {
 		this.runtimeDirectory = resolve(options.runtimeDirectory);
@@ -67,12 +70,22 @@ export class ManagedSessionIpcServer {
 		this.peerUid = options.peerUid;
 		this.onEnvelope = options.onEnvelope;
 		this.onUnboundEnvelope = options.onUnboundEnvelope;
+		this.onAttachment = options.onAttachment;
 	}
 
 	private readonly expectedUid?: number;
 	private readonly peerUid?: PeerUidResolver;
 	private readonly onEnvelope?: EnvelopeHandler;
 	private readonly onUnboundEnvelope?: UnboundEnvelopeHandler;
+	private readonly onAttachment?: AttachmentHandler;
+
+	sendToConversation(envelope: ManagedSessionEnvelope): boolean {
+		if (envelope.role !== "relay" || !envelope.conversationId || envelope.inReplyTo) throw new Error("Server push must be an uncorrelated relay envelope");
+		const socket = this.attachedSockets.get(envelope.conversationId);
+		if (!socket || socket.destroyed) return false;
+		this.send(socket, envelope);
+		return true;
+	}
 
 	async start(): Promise<void> {
 		if (this.server) throw new Error("Managed-session IPC server is already running");
@@ -135,6 +148,9 @@ export class ManagedSessionIpcServer {
 		socket.on("close", () => {
 			state.closed = true;
 			this.sockets.delete(socket);
+			if (state.attachment && this.attachedSockets.get(state.attachment.conversationId) === socket) {
+				this.attachedSockets.delete(state.attachment.conversationId);
+			}
 			if (state.attachment && !this.preserveAttachmentsOnClose) void this.registry.detach(state.id, state.attachment).catch(() => undefined);
 		});
 		socket.resume();
@@ -178,6 +194,7 @@ export class ManagedSessionIpcServer {
 				}
 				if (!state.attachment) {
 					state.attachment = await this.registry.attach(envelope, state.id);
+					this.attachedSockets.set(state.attachment.conversationId, socket);
 					this.send(socket, {
 						protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 						messageId: `relay-${randomUUID()}`,
@@ -187,6 +204,7 @@ export class ManagedSessionIpcServer {
 						inReplyTo: envelope.messageId,
 						payload: { attachmentId: state.attachment.attachmentId, state: "active" },
 					});
+					await this.onAttachment?.(state.attachment);
 					continue;
 				}
 				this.registry.assertAuthorized(envelope, state.id, state.attachment);

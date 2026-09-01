@@ -9,6 +9,7 @@
   agentgraphPostgresPackage ? null,
   agentgraphPiResources ? null,
   piLspExtension ? null,
+  managedSessionRelay ? null,
   fzf ? null,
   tmux ? null,
   d2 ? null,
@@ -227,6 +228,7 @@ EOF
     piResources = piHarnessResources.piResources;
     harnessResources = piHarnessResources;
     managedSessionExtensions = piHarnessResources.managedSessionExtensions;
+    inherit managedSessionRelay;
     mattpocockSkills = mattPocockSkillsResources;
     agentgraph = agentgraphPackage;
     agentgraphPostgres = agentgraphPostgresPackage;

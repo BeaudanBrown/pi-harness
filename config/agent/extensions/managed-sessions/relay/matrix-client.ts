@@ -76,6 +76,20 @@ export class ManagedMatrixClient {
 		return { nextBatch: requiredString(response, "next_batch"), response };
 	}
 
+	async createPrivateSpace(name: string, signal?: AbortSignal): Promise<string> {
+		const response = await this.request("POST", "/_matrix/client/v3/createRoom", {
+			visibility: "private",
+			preset: "private_chat",
+			name,
+			invite: [this.operatorUserId],
+			is_direct: false,
+			creation_content: { type: "m.space", "m.federate": false },
+		}, signal);
+		const roomId = requiredString(response, "room_id");
+		this.#managedRoomIds.add(roomId);
+		return roomId;
+	}
+
 	async createPrivateRoom(name: string, signal?: AbortSignal): Promise<string> {
 		const response = await this.request("POST", "/_matrix/client/v3/createRoom", {
 			visibility: "private",
@@ -88,6 +102,27 @@ export class ManagedMatrixClient {
 		const roomId = requiredString(response, "room_id");
 		this.#managedRoomIds.add(roomId);
 		return roomId;
+	}
+
+	async addSpaceChild(spaceId: string, roomId: string, signal?: AbortSignal): Promise<void> {
+		this.assertManagedRoom(spaceId);
+		this.assertManagedRoom(roomId);
+		const roomServer = roomId.slice(roomId.lastIndexOf(":") + 1);
+		if (!roomServer || roomServer === roomId) throw new ManagedMatrixError("invalid_response", "Matrix room ID omitted its server name");
+		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/m.space.child/${encodeURIComponent(roomId)}`, {
+			via: [roomServer], suggested: true,
+		}, signal);
+	}
+
+	async roomAccessible(roomId: string, signal?: AbortSignal): Promise<boolean> {
+		this.assertManagedRoom(roomId);
+		try {
+			await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.create/`, undefined, signal);
+			return true;
+		} catch (error) {
+			if (error instanceof ManagedMatrixError && (error.status === 403 || error.status === 404)) return false;
+			throw error;
+		}
 	}
 
 	async setRoomName(roomId: string, name: string, signal?: AbortSignal): Promise<void> {

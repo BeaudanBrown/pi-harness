@@ -45,6 +45,29 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 	await assert.rejects(() => client.sendText("!unmanaged:example.com", "pi_other", "no"), /not owned/);
 });
 
+test("Matrix host Space operations are fixed, managed-room scoped, and accessibility checked", async () => {
+	const calls: Array<{ method?: string; path: string; body?: string }> = [];
+	let creates = 0;
+	const client = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		calls.push({ method: init?.method, path, ...(typeof init?.body === "string" ? { body: init.body } : {}) });
+		if (path.endsWith("/createRoom")) return Response.json({ room_id: ++creates === 1 ? "!space:example.com" : "!child:example.com" });
+		return Response.json({});
+	});
+	const space = await client.createPrivateSpace("pi · host");
+	const room = await client.createPrivateRoom("pi · coordinator");
+	await client.addSpaceChild(space, room);
+	assert.equal(await client.roomAccessible(room), true);
+	assert.match(calls[0]?.body ?? "", /"type":"m.space"/);
+	assert.match(calls[2]?.body ?? "", /"via":\["example.com"\]/);
+	assert.deepEqual(calls.map((call) => [call.method, call.path]), [
+		["POST", "/_matrix/client/v3/createRoom"],
+		["POST", "/_matrix/client/v3/createRoom"],
+		["PUT", "/_matrix/client/v3/rooms/!space%3Aexample.com/state/m.space.child/!child%3Aexample.com"],
+		["GET", "/_matrix/client/v3/rooms/!child%3Aexample.com/state/m.room.create/"],
+	]);
+});
+
 test("Matrix errors are typed, cancellable, bounded, and credential-redacted", async () => {
 	const httpClient = new ManagedMatrixClient(config, async () => new Response(token, { status: 503 }));
 	await assert.rejects(() => httpClient.whoami(), (error: unknown) => {

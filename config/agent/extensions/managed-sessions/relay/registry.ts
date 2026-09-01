@@ -17,7 +17,7 @@ type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
 
 export class RelayRegistryError extends Error {
 	constructor(
-		readonly code: "permission_denied" | "invalid_nonce" | "attachment_conflict" | "not_found" | "invalid_state" | "capacity_reached",
+		readonly code: "permission_denied" | "invalid_nonce" | "attachment_conflict" | "not_found" | "invalid_state" | "capacity_reached" | "launch_failed" | "matrix_unavailable",
 		message: string,
 	) {
 		super(message);
@@ -99,7 +99,7 @@ export class RelayRegistry {
 	async finishRestartReconciliation(): Promise<void> {
 		await this.mutate(async () => {
 			for (const conversation of this.state.conversations) {
-				if (conversation.state === "active" && !this.liveConnections.has(conversation.conversationId)) {
+				if (conversation.state !== "dormant" && !this.liveConnections.has(conversation.conversationId)) {
 					conversation.state = "dormant";
 					conversation.attachment = null;
 				}
@@ -119,7 +119,8 @@ export class RelayRegistry {
 			const conversation = this.runtimeConversation(conversationId);
 			const existing = conversation.pendingInputs.find((candidate) => candidate.deliveryId === input.deliveryId || candidate.matrixEventId === input.matrixEventId);
 			if (existing) {
-				if (JSON.stringify(existing) !== JSON.stringify(input)) throw new RelayRegistryError("invalid_state", "Conflicting accepted Matrix input identity");
+				if (existing.deliveryId !== input.deliveryId || existing.matrixEventId !== input.matrixEventId || existing.kind !== input.kind ||
+					existing.body !== input.body) throw new RelayRegistryError("invalid_state", "Conflicting accepted Matrix input identity");
 				return;
 			}
 			conversation.pendingInputs.push(input);
@@ -230,10 +231,106 @@ export class RelayRegistry {
 		}
 	}
 
+	async createCoordinatorConversation(manifest: ConversationManifest): Promise<ConversationManifest> {
+		if (manifest.kind !== "coordinator" || manifest.ownerHostId !== this.hostId) {
+			throw new RelayRegistryError("permission_denied", "Coordinator bootstrap requires a host-owned coordinator manifest");
+		}
+		let written = false;
+		try {
+			return await this.mutate(async () => {
+			const existingCoordinator = [...this.manifests.values()].find((candidate) => candidate.kind === "coordinator");
+			if (existingCoordinator) {
+				if (JSON.stringify(existingCoordinator) === JSON.stringify(manifest)) return existingCoordinator;
+				throw new RelayRegistryError("invalid_state", "A different coordinator manifest already exists");
+			}
+			if ([...this.manifests.values()].some((candidate) => candidate.creationKey === manifest.creationKey ||
+				candidate.conversationId === manifest.conversationId || candidate.piSessionId === manifest.piSessionId || candidate.roomId === manifest.roomId)) {
+				throw new RelayRegistryError("invalid_state", "Coordinator identity conflicts with an existing conversation");
+			}
+			await this.manifestStore.write(manifest);
+			written = true;
+			this.manifests.set(manifest.conversationId, manifest);
+			this.state.conversations.push({
+				conversationId: manifest.conversationId, state: "dormant", attachment: null,
+				pendingInputs: [], projection: [], managedWindow: null,
+			});
+			return manifest;
+			});
+		} catch (error) {
+			if (written) await this.manifestStore.remove(manifest.conversationId).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	async replaceCoordinatorRoom(conversationId: string, roomId: string, hostSpace?: string): Promise<ConversationManifest> {
+		const existing = this.manifests.get(conversationId);
+		if (!existing || existing.kind !== "coordinator") throw new RelayRegistryError("not_found", "Coordinator conversation was not found");
+		const replacement = { ...existing, roomId, ...(hostSpace ? { hostSpace } : {}) };
+		await this.manifestStore.write(replacement);
+		try {
+			return await this.mutate(async () => {
+				this.manifests.set(conversationId, replacement);
+				return replacement;
+			});
+		} catch (error) {
+			await this.manifestStore.write(existing).catch(() => undefined);
+			throw error;
+		}
+	}
+
+	async beginLaunch(conversationId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (conversation.state === "active") return;
+			conversation.state = "starting";
+		});
+	}
+
+	async failLaunch(conversationId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (conversation.state === "starting") {
+				conversation.state = "dormant";
+				conversation.attachment = null;
+			}
+		});
+	}
+
+	async setManagedWindow(conversationId: string, window: RuntimeConversation["managedWindow"]): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			conversation.managedWindow = window;
+			conversation.lastLaunchError = undefined;
+		});
+	}
+
+	async recordLaunchError(conversationId: string, code: string, message: string): Promise<void> {
+		await this.mutate(async () => {
+			this.runtimeConversation(conversationId).lastLaunchError = {
+				code: code.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 128) || "launch_failed",
+				message: message.replace(/[\r\n]+/g, " ").slice(0, 500),
+				at: new Date().toISOString(),
+			};
+		});
+	}
+
+	pendingInputs(conversationId: string): RuntimeConversation["pendingInputs"] {
+		return structuredClone(this.runtimeConversation(conversationId).pendingInputs);
+	}
+
+	async markInputDelivered(conversationId: string, deliveryId: string): Promise<void> {
+		await this.mutate(async () => {
+			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
+			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
+			if (input.status === "accepted") input.status = "delivered";
+		});
+	}
+
 	async deleteConversation(conversationId: string): Promise<DeletedConversation> {
 		const manifest = this.manifests.get(conversationId);
 		const runtime = this.state.conversations.find((candidate) => candidate.conversationId === conversationId);
 		if (!manifest || !runtime) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+		if (manifest.kind === "coordinator") throw new RelayRegistryError("permission_denied", "The guaranteed coordinator conversation cannot be deleted");
 		const savedManifest = structuredClone(manifest);
 		const savedRuntime = structuredClone(runtime);
 		const savedConnection = this.liveConnections.get(conversationId);
@@ -368,7 +465,8 @@ export class RelayRegistry {
 	}
 
 	managedRoomIds(): string[] {
-		return [...this.manifests.values()].map((manifest) => manifest.roomId);
+		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace]
+			.filter((roomId): roomId is string => roomId !== undefined)))];
 	}
 
 	private runtimeConversation(conversationId: string): RuntimeConversation {

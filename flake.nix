@@ -93,6 +93,7 @@
             agentgraphPiResources
             piRPackage
             piLspExtension
+            managedSessionRelay
             playwrightAgentCli
             ;
           harnessRevision = harnessSourceRevision;
@@ -116,6 +117,14 @@
                 environment.systemPackages = lib.mkOption {
                   type = lib.types.listOf lib.types.package;
                   default = [ ];
+                };
+                systemd.lingerUsers = lib.mkOption {
+                  type = lib.types.listOf lib.types.str;
+                  default = [ ];
+                };
+                systemd.user.services = lib.mkOption {
+                  type = lib.types.attrsOf lib.types.anything;
+                  default = { };
                 };
               };
             }
@@ -143,8 +152,80 @@
           builtins.toJSON {
             assertions = map (item: item.assertion) remoteSessionModuleTest.config.assertions;
             packageCount = builtins.length remoteSessionModulePackages;
+            managedServicePresent = builtins.hasAttr "pi-managed-session-relay" remoteSessionModuleTest.config.systemd.user.services;
           }
         );
+        managedSessionLauncher = pkgs.writeShellApplication {
+          name = "tmux_project";
+          runtimeInputs = [ pkgs.gawk pkgs.jq pkgs.tmux ];
+          text = ''
+            set -euo pipefail
+            [[ "''${1-}" == managed && "''${2-}" == coordinator-ensure ]]
+            request=$(cat)
+            conversation_id=$(jq -er 'if (keys == ["conversationId"]) and (.conversationId | test("^conv_[a-f0-9]{32}$")) then .conversationId else error("invalid request") end' <<<"$request")
+            : "''${PI_MANAGED_TEST_TMUX_SOCKET:?}"
+            : "''${PI_MANAGED_TEST_COORDINATOR_PI:?}"
+            : "''${PI_MANAGED_TEST_PROVIDER:?}"
+            format='#{window_id}|#{pane_id}'
+            command="$PI_MANAGED_TEST_COORDINATOR_PI --mode rpc --model coordinator-probe/fake --extension $PI_MANAGED_TEST_PROVIDER"
+            if tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" has-session -t '=default' 2>/dev/null; then
+              created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -t '=default' -F "$format|#{window_name}" | \
+                awk -F '|' '$3 == "coordinator" { print $1 "|" $2; exit }')
+              if [[ -z "$created" ]]; then
+                created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" new-window -d -P -F "$format" \
+                  -t '=default:' -n coordinator -c "$PI_MANAGED_COORDINATOR_CWD" "$command")
+              fi
+            else
+              created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" new-session -d -P -F "$format" \
+                -s default -n coordinator -c "$PI_MANAGED_COORDINATOR_CWD" "$command")
+            fi
+            IFS='|' read -r window_id pane_id <<<"$created"
+            jq -cn --arg conversationId "$conversation_id" --arg windowId "$window_id" --arg paneId "$pane_id" \
+              '{conversationId:$conversationId,sessionName:"default",windowId:$windowId,paneId:$paneId,role:"coordinator"}'
+          '';
+        };
+        managedSessionModuleTest = lib.evalModules {
+          specialArgs = { inherit pkgs; };
+          modules = [
+            {
+              options = {
+                assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
+                environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
+                systemd.lingerUsers = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; };
+                systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+              };
+            }
+            ./nix/module.nix
+            {
+              services.pi-harness = {
+                enable = true;
+                package = piHarnessPackage;
+                managedSessions = {
+                  enable = true;
+                  user = "operator";
+                  environmentFile = "/run/secrets/pi-managed-session.env";
+                  homeserver = "https://matrix.example.com";
+                  botUserId = "@pi-test:example.com";
+                  operatorUserId = "@operator:example.com";
+                  hostId = "test-host";
+                  workspaceRoots.projects = "/home/operator/projects";
+                  launcherPackage = managedSessionLauncher;
+                };
+              };
+            }
+          ];
+        };
+        managedSessionService = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-relay;
+        managedSessionPiWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 0;
+        managedSessionCoordinatorPi = builtins.elemAt managedSessionService.path 0;
+        managedSessionModuleReport = pkgs.writeText "pi-harness-managed-session-module-test.json" (builtins.toJSON {
+          assertions = map (item: item.assertion) managedSessionModuleTest.config.assertions;
+          lingerUsers = managedSessionModuleTest.config.systemd.lingerUsers;
+          serviceEnvironment = managedSessionService.environment;
+          servicePathCount = builtins.length managedSessionService.path;
+          execStart = managedSessionService.serviceConfig.ExecStart;
+          hasGeneralEnvironmentFile = managedSessionService.serviceConfig ? EnvironmentFile;
+        });
         lspPackages = with pkgs; [
           nodejs
           nil
@@ -581,7 +662,7 @@
             rm -rf "$command_probe_dir"
             test -x ${remoteSessionPiWrapper}/bin/pi
             test -x ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami
-            jq -e '.packageCount == 2 and (.assertions | all)' ${remoteSessionModuleReport} >/dev/null
+            jq -e '.packageCount == 2 and (.assertions | all) and (.managedServicePresent | not)' ${remoteSessionModuleReport} >/dev/null
             grep -F 'PI_CODING_AGENT_SESSION_DIR' ${remoteSessionPiWrapper}/bin/pi >/dev/null
             grep -F '/home/operator/.local/state/syncthing/pi/sessions' \
               ${remoteSessionPiWrapper}/bin/pi >/dev/null
@@ -589,6 +670,18 @@
             grep -F '/run/secrets/pi/matrix-test-env' ${remoteSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'exec ${piHarnessPackage}/bin/pi-matrix-whoami' \
               ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami >/dev/null
+            test -x ${managedSessionPiWrapper}/bin/pi
+            jq -e '(.assertions | all) and .lingerUsers == ["operator"] and .servicePathCount == 4 and (.hasGeneralEnvironmentFile | not) and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"' \
+              ${managedSessionModuleReport} >/dev/null
+            managed_relay_launch=$(jq -r .execStart ${managedSessionModuleReport})
+            grep -F 'credential file may contain only one PI_MATRIX_ACCESS_TOKEN assignment' "$managed_relay_launch" >/dev/null
+            grep -F 'export PI_MATRIX_ACCESS_TOKEN=' "$managed_relay_launch" >/dev/null
+            grep -F '${piHarnessResources.managedSessionExtensions.ordinary}' ${managedSessionPiWrapper}/bin/pi >/dev/null
+            grep -F 'PI_MANAGED_SESSIONS_SOCKET' ${managedSessionPiWrapper}/bin/pi >/dev/null
+            if grep -F '/run/secrets/pi-managed-session.env' ${managedSessionPiWrapper}/bin/pi >/dev/null; then
+              echo "managed-session Matrix credential file leaked into the interactive Pi wrapper" >&2
+              exit 1
+            fi
             test -x ${playwrightAgentCli}/bin/playwright-cli-fallback
             ${playwrightAgentCli}/bin/playwright-cli-fallback --version | grep -Fx '0.1.17' >/dev/null
             test ! -e ${piHarnessPackage}/bin/tk
@@ -680,8 +773,12 @@
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
               PI_MANAGED_ADAPTER_TEST_PI=${piPackage}/bin/pi \
               PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary} \
+              PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator} \
               PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid \
               PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock \
+              PI_MANAGED_SESSIONS_TEST_TMUX=${pkgs.tmux}/bin/tmux \
+              PI_MANAGED_TEST_LAUNCHER=${managedSessionLauncher}/bin/tmux_project \
+              PI_MANAGED_TEST_COORDINATOR_PI=${managedSessionCoordinatorPi}/bin/pi \
               node --test \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/aloop-worker.test.js" \
@@ -689,10 +786,13 @@
                 "$test_build_dir/tests/managed-session-contracts.test.js" \
                 "$test_build_dir/tests/managed-session-adapter.test.js" \
                 "$test_build_dir/tests/managed-session-adapter-real-pi.test.js" \
+                "$test_build_dir/tests/managed-session-coordinator.test.js" \
                 "$test_build_dir/tests/managed-session-relay-adapter.test.js" \
                 "$test_build_dir/tests/managed-session-relay-registry.test.js" \
                 "$test_build_dir/tests/managed-session-relay-ipc.test.js" \
                 "$test_build_dir/tests/managed-session-relay-matrix.test.js" \
+                "$test_build_dir/tests/managed-session-transcript-projector.test.js" \
+                "$test_build_dir/tests/managed-session-transcript-renderer.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
                 "$test_build_dir/tests/remote-session-state.test.js" \
@@ -737,6 +837,9 @@
         packages.migrate-tk = migrateTkApp;
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
+
+        checks.managed-session-test-launcher = managedSessionLauncher;
+        checks.managed-session-test-coordinator-pi = managedSessionCoordinatorPi;
 
         apps.migrate-tk = flake-utils.lib.mkApp { drv = migrateTkApp; };
         apps.eval = flake-utils.lib.mkApp { drv = evalApp; };

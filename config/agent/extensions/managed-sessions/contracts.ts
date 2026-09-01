@@ -273,6 +273,7 @@ const coordinatorManifest = strictObject({
 	concept: boundedString(128),
 	piSessionId: identifier,
 	roomId: boundedString(255),
+	hostSpace: Type.Optional(boundedString(255)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
 });
@@ -359,6 +360,7 @@ export interface ConversationManifest {
 	roomId: string;
 	placement?: WorkspaceIdentity;
 	projectSpace?: string;
+	hostSpace?: string;
 	bindingBoundaryEntryId: string;
 	createdAt: string;
 }
