@@ -15,7 +15,7 @@ import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
-interface ManagedWindow {
+export interface ManagedWindow {
 	conversationId: string;
 	sessionName: string;
 	windowId: string;
@@ -36,6 +36,27 @@ function safeJsonObject(value: string, failure: string): Record<string, unknown>
 	try { parsed = JSON.parse(value); } catch { throw new RelayRegistryError("launch_failed", failure); }
 	if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) throw new RelayRegistryError("launch_failed", failure);
 	return parsed as Record<string, unknown>;
+}
+
+export function parseProjectWindow(result: Record<string, unknown>, manifest: ConversationManifest): ManagedWindow {
+	if (manifest.kind !== "project" || !manifest.placement) throw new RelayRegistryError("invalid_state", "Project window requires project placement");
+	const placement = manifest.placement;
+	const expected = {
+		conversationId: manifest.conversationId, role: "conversation", rootKey: placement.rootKey,
+		workspace: placement.workspace, relativeCwd: placement.relativeCwd,
+	} as const;
+	for (const [field, value] of Object.entries(expected)) {
+		if (result[field] !== value) throw new RelayRegistryError("launch_failed", `Project launcher returned an invalid ${field}`);
+	}
+	if (typeof result.sessionName !== "string" || !result.sessionName) throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid sessionName");
+	if (typeof result.windowId !== "string" || !/^@[0-9]+$/.test(result.windowId)) throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid windowId");
+	if (typeof result.paneId !== "string" || !/^%[0-9]+$/.test(result.paneId)) throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid paneId");
+	const fields = new Set(["conversationId", "sessionName", "windowId", "paneId", "role", "rootKey", "workspace", "relativeCwd"]);
+	if (Object.keys(result).some((field) => !fields.has(field))) throw new RelayRegistryError("launch_failed", "Project launcher returned unexpected fields");
+	return {
+		conversationId: manifest.conversationId, sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId,
+		rootKey: placement.rootKey, workspace: placement.workspace, relativeCwd: placement.relativeCwd, role: "conversation",
+	};
 }
 
 async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string): Promise<{ sessionId: string; boundaryEntryId: string }> {
@@ -267,7 +288,7 @@ export class HostLifecycle {
 					PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: manifest.bindingBoundaryEntryId,
 					PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
 				});
-				window = this.parseWindow(result, manifest);
+				window = parseProjectWindow(result, manifest);
 			}
 			await this.options.registry.setManagedWindow(manifest.conversationId, {
 				sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId,
@@ -284,19 +305,6 @@ export class HostLifecycle {
 			await this.options.registry.recordLaunchError(manifest.conversationId, "launch_failed", error instanceof Error ? error.message : "Project launch failed");
 			throw error;
 		}
-	}
-
-	private parseWindow(result: Record<string, unknown>, manifest: ConversationManifest): ManagedWindow {
-		const placement = manifest.placement!;
-		if (result.conversationId !== manifest.conversationId || result.role !== "conversation" || typeof result.sessionName !== "string" ||
-			typeof result.windowId !== "string" || !/^@[0-9]+$/.test(result.windowId) || typeof result.paneId !== "string" || !/^%[0-9]+$/.test(result.paneId) ||
-			result.rootKey !== placement.rootKey || result.workspace !== placement.workspace || result.relativeCwd !== placement.relativeCwd) {
-			throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid managed window");
-		}
-		return {
-			conversationId: manifest.conversationId, sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId,
-			rootKey: placement.rootKey, workspace: placement.workspace, relativeCwd: placement.relativeCwd, role: "conversation",
-		} as ManagedWindow;
 	}
 
 	private parseWindowInspection(result: Record<string, unknown>, manifest: ConversationManifest, expectedSessionName: string): ManagedWindow | undefined {

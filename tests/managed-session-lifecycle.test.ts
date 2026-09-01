@@ -9,7 +9,7 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, type ConversationManifest, type ManagedSessionEnvelope,
 	encodeNdjsonEnvelope, parseNdjsonEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { HostLifecycle } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import { HostLifecycle, parseProjectWindow } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { CoordinatorRouter } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
@@ -19,6 +19,19 @@ import { TranscriptProjector } from "../config/agent/extensions/managed-sessions
 
 const hostId = "lifecycle-host";
 const matrixConfig = { homeserver: "https://matrix.example.com", accessToken: "relay-secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
+
+test("project launcher contract preserves an empty relative cwd", () => {
+	const manifest: ConversationManifest = {
+		schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", conversationId: `conv_${"7".repeat(32)}`,
+		ownerHostId: hostId, creationKey: "empty-cwd", concept: "empty cwd", piSessionId: "session-empty-cwd",
+		roomId: "!empty:example.com", placement: { rootKey: "projects", workspace: "alpha", relativeCwd: "" },
+		bindingBoundaryEntryId: `entry_${"8".repeat(32)}`, createdAt: new Date().toISOString(),
+	};
+	const base = { conversationId: manifest.conversationId, sessionName: "alpha", windowId: "@7", paneId: "%8",
+		rootKey: "projects", workspace: "alpha", role: "conversation" };
+	assert.throws(() => parseProjectWindow(base, manifest), /relativeCwd/);
+	assert.equal(parseProjectWindow({ ...base, relativeCwd: "" }, manifest).relativeCwd, "");
+});
 
 async function readEnvelope(socket: Socket): Promise<ManagedSessionEnvelope> {
 	return new Promise((resolve, reject) => {
