@@ -9,9 +9,11 @@
 
 The tk-backed `/aloop` was disabled during the move to GitHub Issues and the curated Matt Pocock skills. The cutover deliberately deferred deciding whether a fresh-agent loop still had value: preserving the old implementation was not sufficient justification.
 
-The skills workflow is now packaged and documented as the normal interactive path. GitHub Issues is the repository's sole durable task source, and the repository has typed GitHub issue operations, recursive epic inspection, isolated worker attempts, and durable handoff conventions. During the cutover work, the fresh-worker pattern proved useful for bounded child-issue implementation while a supervisor retained issue ownership and reviewed the result. This decision attempt is itself being performed as a fresh implementation worker for GitHub issue #13 under that boundary, producing a single local commit and structured evidence for a supervisor rather than mutating the issue directly.
+The skills workflow is now packaged and documented as the normal interactive path. GitHub Issues is the repository's sole durable task source, and the repository has typed GitHub issue operations, recursive epic inspection, isolated worker attempts, and durable handoff conventions. During the cutover work, the fresh-worker pattern proved useful for bounded child-issue implementation while a supervisor retained issue ownership and reviewed the result.
 
-That observed use supports retaining automation for multi-issue epics, but not promoting it over interactive planning and implementation. The useful part is fresh context plus an independently reviewing supervisor. A second tracker, autonomous scope decisions, or preservation of tk behavior would negate the cutover.
+A self-hosted live trial then ran the packaged `/aloop #1` with an actual model. It selected the remaining executable children sequentially, produced clean one-commit changes for #12 and #13, retained complete local artifacts, independently verified the first result, published its structured handoff, and closed #12 before moving to #13. Interrupting the supervisor after the second result also demonstrated that GitHub, Git, and attempt artifacts retained enough evidence to resume. The same trial exposed that a long autonomous supervisor turn needed an explicit wall-clock and worker-count budget rather than relying only on per-worker timeouts.
+
+That observed use supports retaining automation for multi-issue epics, but not promoting it over interactive planning and implementation. The useful part is fresh context plus an independently reviewing supervisor. A second tracker, autonomous scope decisions, preservation of tk behavior, or an indefinitely running invocation would negate the cutover.
 
 ## Decision
 
@@ -41,7 +43,7 @@ Before another worker starts, the supervisor publishes a structured handoff comm
 
 The supervisor closes a child only after its matching handoff is durable and independent review confirms all acceptance criteria. It closes an epic only when every descendant is closed and review, project verification, and epic-level acceptance evidence all pass.
 
-A dirty worktree, another user's assignment, unresolved blocker, missing required verification, product or scope ambiguity, or two consecutive unsuccessful attempts without a materially new approach stops automation for a human decision. The loop does not invent corrective scope. Newly discovered work is reported; only the supervisor may create a narrowly necessary follow-up issue.
+A dirty worktree, another user's assignment, unresolved blocker, missing required verification, product or scope ambiguity, or two consecutive unsuccessful attempts without a materially new approach stops automation for a human decision. Every invocation also has an explicit wall-clock deadline and fresh-worker-attempt cap. Reaching either bound stops the turn and requires an explicit `/aloop` rerun, which reconstructs progress from durable state instead of waiting indefinitely. The loop does not invent corrective scope. Newly discovered work is reported; only the supervisor may create a narrowly necessary follow-up issue.
 
 The operational contract, recovery procedure, and artifact format are specified in [`docs/github-aloop.md`](../../github-aloop.md).
 
@@ -50,5 +52,5 @@ The operational contract, recovery procedure, and artifact format are specified 
 - The skills-based interactive workflow remains the advertised default and the place where work is understood and decomposed.
 - Multi-issue epics may use fresh sequential workers without restoring tk or introducing another durable queue.
 - GitHub assignment, blocker, handoff, verification, and close semantics are explicit and supervisor-owned.
-- Aloop remains intentionally conservative: ambiguous or repeatedly failing work returns to a person.
+- Aloop remains intentionally conservative: ambiguous or repeatedly failing work returns to a person, and every invocation has finite time and worker-count bounds.
 - If practical use no longer demonstrates value, the extension can be removed without migrating state because GitHub and Git already contain all durable progress.

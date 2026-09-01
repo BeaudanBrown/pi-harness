@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { promisify } from "node:util";
@@ -126,6 +126,27 @@ test("dirty worktrees are rejected before a worker starts", async () => {
 		await writeFile(path.join(cwd, "dirty.txt"), "dirty\n", "utf8");
 		await assert.rejects(runAloopWorker({ ...workerInput, cwd, launcher: [process.execPath, fakeWorker] }), /worktree is dirty/);
 	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
+test("deadline expiry during Git preflight prevents worker spawn", async () => {
+	const cwd = await createRepository();
+	const originalPath = process.env.PATH;
+	try {
+		const realGit = (await exec("sh", ["-c", "command -v git"])).stdout.trim();
+		const bin = path.join(cwd, "slow-bin");
+		await mkdir(bin);
+		await writeFile(path.join(bin, "git"), `#!/bin/sh\nsleep 1\nexec "${realGit}" "$@"\n`, "utf8");
+		await chmod(path.join(bin, "git"), 0o755);
+		process.env.PATH = `${bin}:${originalPath}`;
+		await assert.rejects(
+			runAloopWorker({ ...workerInput, cwd, launcher: [process.execPath, fakeWorker], deadlineMs: Date.now() + 100 }),
+			/Git command (?:timed out|deadline expired)/,
+		);
+		assert.equal((await exec(realGit, ["rev-list", "--count", "HEAD"], { cwd })).stdout.trim(), "1");
+	} finally {
+		process.env.PATH = originalPath;
 		await rm(cwd, { recursive: true, force: true });
 	}
 });

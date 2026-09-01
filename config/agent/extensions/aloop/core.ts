@@ -18,6 +18,17 @@ export type AloopAttemptHandoff = {
 	timestamp: string;
 };
 
+export const DEFAULT_ALOOP_MAX_MINUTES = 30;
+export const DEFAULT_ALOOP_MAX_ATTEMPTS = 3;
+export const MAX_ALOOP_MINUTES = 240;
+export const MAX_ALOOP_ATTEMPTS = 20;
+
+export type AloopRunRequest = {
+	epic: number;
+	maxMinutes: number;
+	maxAttempts: number;
+};
+
 export type AloopAttemptRecord = {
 	issue: number;
 	commit: string | null;
@@ -25,11 +36,56 @@ export type AloopAttemptRecord = {
 	status: string;
 };
 
+export type AloopRunBudget = {
+	deadlineMs: number;
+	maxAttempts: number;
+	attemptsStarted: number;
+	settled: boolean;
+};
+
 export type ClosureEvidence = {
 	verification: Array<{ check: string; passed: boolean; evidence: string }>;
 	acceptanceCriteria: Array<{ criterion: string; satisfied: boolean; evidence: string }>;
 	descendantReviews: Array<{ issue: number; reviewed: boolean; evidence: string }>;
 };
+
+function positiveBoundedInteger(value: string, option: string, maximum: number): number {
+	if (!/^\d+$/.test(value)) throw new Error(`${option} must be a positive integer.`);
+	const parsed = Number(value);
+	if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > maximum) throw new Error(`${option} must be between 1 and ${maximum}.`);
+	return parsed;
+}
+
+export function parseAloopRunRequest(value: string): AloopRunRequest {
+	const tokens = value.trim().split(/\s+/).filter(Boolean);
+	const epicMatch = tokens.shift()?.match(/^#?(\d+)$/);
+	if (!epicMatch) throw new Error("Usage: /aloop #<epic> [--max-minutes <1-240>] [--max-attempts <1-20>]");
+	const epic = positiveBoundedInteger(epicMatch[1]!, "Epic number", Number.MAX_SAFE_INTEGER);
+	let maxMinutes = DEFAULT_ALOOP_MAX_MINUTES;
+	let maxAttempts = DEFAULT_ALOOP_MAX_ATTEMPTS;
+	const seen = new Set<string>();
+	while (tokens.length > 0) {
+		const token = tokens.shift()!;
+		const equals = token.match(/^(--max-minutes|--max-attempts)=(.+)$/);
+		const option = equals?.[1] ?? token;
+		if (option !== "--max-minutes" && option !== "--max-attempts") throw new Error(`Unknown /aloop option: ${token}`);
+		if (seen.has(option)) throw new Error(`Duplicate /aloop option: ${option}`);
+		seen.add(option);
+		const raw = equals?.[2] ?? tokens.shift();
+		if (!raw) throw new Error(`${option} requires a value.`);
+		if (option === "--max-minutes") maxMinutes = positiveBoundedInteger(raw, option, MAX_ALOOP_MINUTES);
+		else maxAttempts = positiveBoundedInteger(raw, option, MAX_ALOOP_ATTEMPTS);
+	}
+	return { epic, maxMinutes, maxAttempts };
+}
+
+export function assessAloopRunBudget(budget: AloopRunBudget, nowMs: number): { allowed: boolean; reason?: string; remainingMs: number } {
+	const remainingMs = Math.max(0, budget.deadlineMs - nowMs);
+	if (budget.settled) return { allowed: false, remainingMs, reason: "This aloop invocation has settled. Run /aloop again to continue from durable state." };
+	if (remainingMs === 0) return { allowed: false, remainingMs, reason: "This aloop invocation reached its time limit. Run /aloop again to continue from durable state." };
+	if (budget.attemptsStarted >= budget.maxAttempts) return { allowed: false, remainingMs, reason: `This aloop invocation reached its ${budget.maxAttempts}-attempt limit. Run /aloop again to continue from durable state.` };
+	return { allowed: true, remainingMs };
+}
 
 function bounded(value: string, limit: number): string {
 	return value.length <= limit ? value : `${value.slice(0, Math.max(0, limit - 1))}…`;
@@ -218,7 +274,12 @@ function issueLine(issue: EpicIssueContext): string {
 	return `- #${issue.number} ${bounded(issue.title, 120)} — ${issue.state}; children=${issue.children.length}; open blockers=${blockers.join(",") || "none"}; assignee=${issue.assignee ?? "none"}`;
 }
 
-export function buildSupervisorKickoff(context: GitHubEpicContext, gitHistory: string, outstandingAttempts: AloopAttemptRecord[] = []): string {
+export function buildSupervisorKickoff(
+	context: GitHubEpicContext,
+	gitHistory: string,
+	outstandingAttempts: AloopAttemptRecord[] = [],
+	budget?: { deadlineMs: number; maxAttempts: number },
+): string {
 	const epicIssue = context.issues.find((issue) => issue.number === context.epic.number);
 	const handoffLines = context.issues.flatMap((issue) => parseAloopHandoffs(issue.recentHandoffs)
 		.filter((handoff) => handoff.issue === issue.number)
@@ -244,6 +305,9 @@ ${outstandingAttempts.length > 0 ? outstandingAttempts.map((attempt) => `- #${at
 Recent Git history:
 ${bounded(gitHistory || "(no commits returned)", 8_000)}
 
+Invocation budget:
+${budget ? `- Hard deadline: ${new Date(budget.deadlineMs).toISOString()}\n- Maximum fresh worker attempts: ${budget.maxAttempts}` : "- Use the configured hard deadline and worker-attempt cap."}
+
 Operating procedure:
 1. Reconstruct state from the recursive GitHub graph, recent issue comments, and Git history. GitHub and Git are authoritative; there is no loop database.
 2. Before worker launch, claim the selected issue for the authenticated GitHub user with github_issue_mutate (dry-run, review, then apply). Select one implementable open, unblocked descendant leaf and use aloop_launch_worker for one fresh sequential implementation or remediation attempt. Never run workers in parallel.
@@ -252,7 +316,8 @@ Operating procedure:
 5. Close an accepted child only after the handoff is durable and your independent acceptance assessment passes. The supervisor alone mutates GitHub. Create only tightly necessary corrective issues and use native sub-issue/blocker relationships.
 6. A remediation attempt may target the same issue. After two unsuccessful attempts without a materially new approach, or on material product/scope ambiguity, stop and ask the user for one explicit decision. Do not guess.
 7. Continue sequentially until no descendants remain open. Discover project verification requirements from repository guidance, run the applicable verification, review every descendant, and call aloop_check_closure. Close the epic only when that gate returns allowed.
-8. End with a concise epic report stating completed children, commits, verification, discovered/deferred work, and whether the epic was closed or stopped at a human-decision boundary.
+8. This invocation is deliberately bounded. When its deadline or worker-attempt cap is reached, stop cleanly and tell the user to rerun /aloop; durable GitHub/Git state makes that continuation safe.
+9. End with a concise epic report stating completed children, commits, verification, discovered/deferred work, and whether the epic was closed or stopped at a human-decision boundary.
 
 Do not push. Do not restore tk or create ticket files. Keep working in this supervisor turn until the epic is complete or a genuine human decision is required.`;
 }

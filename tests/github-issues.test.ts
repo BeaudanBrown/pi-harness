@@ -4,7 +4,7 @@ import { chmod, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bodyWithMarker, completeMigrationCleanup, executeMigration, frontierIssueNumbers, issueMarker, migrationIssuePlan, validateIssuePlan, type MigrationRecord, type MigrationReconciliation } from "../config/agent/extensions/github-issues/index.js";
+import { bodyWithMarker, completeMigrationCleanup, executeMigration, frontierIssueNumbers, inspectGraph, issueMarker, migrationIssuePlan, retrieveCurrentRepositoryEpicContext, validateIssuePlan, type MigrationRecord, type MigrationReconciliation } from "../config/agent/extensions/github-issues/index.js";
 import { retrieveGitHubEpicContext } from "../config/agent/extensions/github-issues/github-context.js";
 
 test("issue plans receive stable provenance markers", () => {
@@ -37,6 +37,19 @@ test("issue plans validate dependency keys and cycles before publication", () =>
 			{ key: "second", title: "Second", body: "", blockedBy: ["first"] },
 		],
 	}), /dependency cycle/);
+
+	assert.throws(() => validateIssuePlan({
+		key: "workflow",
+		issues: [
+			{ key: "first", title: "First", body: "", parent: "second" },
+			{ key: "second", title: "Second", body: "", parent: "first" },
+		],
+	}), /parent cycle/);
+
+	assert.throws(() => validateIssuePlan({
+		key: "workflow",
+		issues: Array.from({ length: 9 }, (_, index) => ({ key: `level-${index}`, title: `Level ${index}`, body: "", parent: index > 0 ? `level-${index - 1}` : undefined })),
+	}), /eight-level limit/);
 });
 
 test("migration fixtures produce an idempotent plan and omit approved stale records", async () => {
@@ -155,8 +168,9 @@ test("migration executor retries issues, resumes relationships, and gates cleanu
 	await mkdir(path.join(cwd, ".tickets"));
 	await mkdir(path.join(cwd, "docs/agents"), { recursive: true });
 	await writeFile(path.join(cwd, ".tickets/source.md"), "source");
-	await writeFile(path.join(cwd, "docs/agents/issue-tracker.md"), "tk is authoritative\n");
+	await writeFile(path.join(cwd, "docs/agents/issue-tracker.md"), "# Issue tracker: tk\n\ntk is authoritative\n\n## Conventions\n\n- Claim active work before changing code.\n");
 	const records = JSON.parse(await readFile("tests/fixtures/tk-migration/records.json", "utf8")) as MigrationRecord[];
+	assert.throws(() => migrationIssuePlan("unapproved", records.map((record) => record.disposition === "omit" ? { ...record, omissionApproved: false } : record)), /requires explicit approval/);
 	const plan = migrationIssuePlan("e2e-fixture", records);
 	await writeFile(path.join(cwd, ".pi/tmp/tk-to-github/migration.json"), JSON.stringify({ records }));
 	await writeFile(path.join(cwd, ".pi/tmp/tk-to-github/github-issue-plan.json"), JSON.stringify(plan));
@@ -169,7 +183,11 @@ test("migration executor retries issues, resumes relationships, and gates cleanu
 	process.env.PATH = `${bin}:${oldPath}`;
 	process.env.FAKE_GH_STATE = statePath;
 	const params = { manifest_path: ".pi/tmp/tk-to-github/migration.json", issue_plan_path: ".pi/tmp/tk-to-github/github-issue-plan.json", write_delay_ms: 0, batch_size: 50, apply: true } as const;
+	const cleanupOptions = { approved: true, repo: "fixture/repo", manifestPath: params.manifest_path, issuePlanPath: params.issue_plan_path } as const;
 	try {
+		await writeFile(path.join(cwd, params.issue_plan_path), JSON.stringify({ ...plan, issues: plan.issues.slice(0, -1) }));
+		await assert.rejects(executeMigration(cwd, "fixture/repo", { ...params, operation: "dry_run" }), /does not exactly match manifest records.*missing: tk-later/);
+		await writeFile(path.join(cwd, params.issue_plan_path), JSON.stringify(plan));
 		const dryRun = await executeMigration(cwd, "fixture/repo", { ...params, operation: "dry_run" }) as any;
 		assert.deepEqual({ issues: dryRun.issues, relationships: dryRun.relationships }, { issues: 3, relationships: 3 });
 		await executeMigration(cwd, "fixture/repo", { ...params, operation: "apply_issues" });
@@ -185,25 +203,120 @@ test("migration executor retries issues, resumes relationships, and gates cleanu
 		state = JSON.parse(await readFile(statePath, "utf8"));
 		assert.equal(state.relationships.length, 3, "relationship checkpoints must resume without duplicates");
 
+		process.env.FAKE_GH_HANG = "1";
+		await assert.rejects(
+			retrieveCurrentRepositoryEpicContext(cwd, 101, "fixture/repo", { timeoutMs: 50 }),
+			/GitHub command timed out after 50ms/,
+		);
+		delete process.env.FAKE_GH_HANG;
+
+		const childPidPath = path.join(cwd, "hanging-child.pid");
+		process.env.FAKE_GH_HANG_CHILD = "1";
+		process.env.FAKE_GH_CHILD_PID_PATH = childPidPath;
+		await assert.rejects(
+			retrieveCurrentRepositoryEpicContext(cwd, 101, "fixture/repo", { timeoutMs: 2_000 }),
+			/GitHub command timed out after 2000ms/,
+		);
+		delete process.env.FAKE_GH_HANG_CHILD;
+		delete process.env.FAKE_GH_CHILD_PID_PATH;
+		const childPid = Number(await readFile(childPidPath, "utf8"));
+		let childAlive = true;
+		for (let attempt = 0; attempt < 50 && childAlive; attempt += 1) {
+			try { process.kill(childPid, 0); await new Promise((resolve) => setTimeout(resolve, 10)); }
+			catch { childAlive = false; }
+		}
+		assert.equal(childAlive, false, "timeout must kill the complete gh process group");
+
+		state.issues.push({ ...state.issues[0], id: 77_777, number: 77_777, html_url: "https://fixture/77777" });
+		await writeFile(statePath, JSON.stringify(state));
+		process.env.FAKE_GH_SEARCH_NOISE = "1";
+		await assert.rejects(executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }), /matches multiple GitHub issues/);
+		delete process.env.FAKE_GH_SEARCH_NOISE;
+		state.issues.pop();
+		await writeFile(statePath, JSON.stringify(state));
+
+		const migrationState = structuredClone(state);
+		state.issues = Array.from({ length: 101 }, (_, index) => ({
+			id: 20_000 + index,
+			number: 2_000 + index,
+			title: `Graph child ${index}`,
+			body: "",
+			state: "open",
+			labels: [{ name: "ready-for-agent" }],
+			assignee: null,
+			issue_dependencies_summary: { blocked_by: 0 },
+		}));
+		state.relationships = state.issues.map((issue: any) => ({ kind: "subissue", owner: 900, target: issue.id }));
+		await writeFile(statePath, JSON.stringify(state));
+		const largeGraph = await inspectGraph(cwd, "fixture/repo", 900, "ready-for-agent") as any;
+		assert.equal(largeGraph.issues.length, 101);
+		assert.equal(largeGraph.frontier.length, 101);
+		state = migrationState;
+		await writeFile(statePath, JSON.stringify(state));
+
+		const originalRelationships = structuredClone(state.relationships);
+		const paginatedEdge = state.relationships[0];
+		state.relationships = [
+			...Array.from({ length: 100 }, (_, index) => ({ ...paginatedEdge, target: 50_000 + index })),
+			...originalRelationships,
+		];
+		await writeFile(statePath, JSON.stringify(state));
+		const paginatedRelationships = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
+		assert.equal(paginatedRelationships.passed, true, "relationship reconciliation must inspect pages after the first 100 edges");
+		state.relationships = originalRelationships;
+
+		const removedRelationship = state.relationships.pop();
+		await writeFile(statePath, JSON.stringify(state));
+		const missingRelationship = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
+		assert.equal(missingRelationship.passed, false);
+		assert.equal(missingRelationship.mismatches.some((mismatch) => mismatch.kind === "relationship" && mismatch.actual === "missing on GitHub"), true);
+		await assert.rejects(completeMigrationCleanup(cwd, cleanupOptions), /fresh successful reconciliation/);
+		state.relationships.push(removedRelationship);
+
+		const originalTitle = state.issues[1].title;
+		state.issues[1].title = "Drifted title";
+		await writeFile(statePath, JSON.stringify(state));
+		const contentDrift = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
+		assert.equal(contentDrift.mismatches.some((mismatch) => mismatch.kind === "title"), true);
+		state.issues[1].title = originalTitle;
+
+		state.issues.push({ id: 9999, number: 999, state: "open", title: "Unexpected omitted issue", body: "<!-- pi-harness-plan:e2e-fixture/tk-stale -->", labels: [] });
+		await writeFile(statePath, JSON.stringify(state));
+		const omissionDrift = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
+		assert.equal(omissionDrift.mismatches.some((mismatch) => mismatch.kind === "omission" && mismatch.key === "tk-stale"), true);
+		state.issues.pop();
+
 		state.issues[0].state = "closed";
 		await writeFile(statePath, JSON.stringify(state));
 		const failed = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
 		assert.equal(failed.passed, false);
 		assert.deepEqual(failed.mismatches[0], { key: "tk-epic", kind: "state", expected: "open", actual: "closed" });
-		await assert.rejects(completeMigrationCleanup(cwd, { approved: true, reconciliation: failed }), /successful reconciliation/);
+		await assert.rejects(completeMigrationCleanup(cwd, cleanupOptions), /fresh successful reconciliation/);
 		assert.equal(await readFile(path.join(cwd, ".tickets/source.md"), "utf8"), "source");
 
 		state.issues[0].state = "open";
 		await writeFile(statePath, JSON.stringify(state));
 		const passed = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
 		assert.equal(passed.passed, true);
-		await completeMigrationCleanup(cwd, { approved: true, reconciliation: passed });
+		state.issues[1].title = "Drift after reconciliation";
+		await writeFile(statePath, JSON.stringify(state));
+		await assert.rejects(completeMigrationCleanup(cwd, cleanupOptions), /fresh successful reconciliation/);
+		state.issues[1].title = originalTitle;
+		await writeFile(statePath, JSON.stringify(state));
+		await completeMigrationCleanup(cwd, cleanupOptions);
 		await assert.rejects(readFile(path.join(cwd, ".tickets/source.md")), /ENOENT/);
-		assert.match(await readFile(path.join(cwd, "docs/agents/issue-tracker.md"), "utf8"), /GitHub Issues are the sole durable task source of truth/);
+		const guidance = await readFile(path.join(cwd, "docs/agents/issue-tracker.md"), "utf8");
+		assert.match(guidance, /GitHub Issues are the sole durable task source of truth/);
+		assert.match(guidance, /Claim active work before changing code/);
+		assert.doesNotMatch(guidance, /tk is authoritative/);
 	} finally {
 		process.env.PATH = oldPath;
 		delete process.env.FAKE_GH_STATE;
 		delete process.env.FAKE_GH_FAIL_RELATIONSHIP_ONCE;
+		delete process.env.FAKE_GH_HANG;
+		delete process.env.FAKE_GH_HANG_CHILD;
+		delete process.env.FAKE_GH_CHILD_PID_PATH;
+		delete process.env.FAKE_GH_SEARCH_NOISE;
 	}
 });
 

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
 import {
+	assessAloopRunBudget,
 	buildEpicReport,
 	buildSupervisorKickoff,
 	evaluateEpicClosure,
@@ -10,6 +11,7 @@ import {
 	formatAloopHandoff,
 	handoffCommentsForIssue,
 	parseAloopHandoffs,
+	parseAloopRunRequest,
 	requireAloopClaim,
 	selectAloopLeaf,
 	type AloopAttemptHandoff,
@@ -66,6 +68,18 @@ function handoff(overrides: Partial<AloopAttemptHandoff> = {}): AloopAttemptHand
 function comment(id: number, body: string, createdAt: string): IssueHandoff {
 	return { id, author: "supervisor", body, createdAt, url: `comment/${id}` };
 }
+
+test("aloop invocations have explicit bounded runtime and attempt budgets", () => {
+	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 30, maxAttempts: 3 });
+	assert.deepEqual(parseAloopRunRequest("48 --max-minutes=12 --max-attempts 2"), { epic: 48, maxMinutes: 12, maxAttempts: 2 });
+	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 0"), /between 1 and 240/);
+	assert.throws(() => parseAloopRunRequest("#48 --max-attempts 21"), /between 1 and 20/);
+	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 5 --max-minutes 6"), /Duplicate/);
+	assert.equal(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 1, settled: false }, 1_000).allowed, true);
+	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 2, settled: false }, 1_000).reason ?? "", /attempt limit/);
+	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 0, settled: false }, 2_000).reason ?? "", /time limit/);
+	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 0, settled: true }, 1_000).reason ?? "", /settled/);
+});
 
 test("selection accepts only open unblocked descendant leaves", () => {
 	const parent = issue({ number: 2, title: "Parent", children: [3] });
@@ -127,11 +141,13 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 		{ issue: 99, commit: "abcdef4", artifactDirectory: ".pi/tmp/aloop/other-epic", status: "completed" },
 	]);
 	assert.deepEqual(outstanding.map((attempt) => attempt.commit), ["abcdef3"]);
-	const kickoff = buildSupervisorKickoff(graph, "abcdef2 accepted remediation", outstanding);
+	const kickoff = buildSupervisorKickoff(graph, "abcdef2 accepted remediation", outstanding, { deadlineMs: Date.parse("2026-09-01T04:00:00Z"), maxAttempts: 3 });
 	assert.match(kickoff, /#2 remediation abcdef2: accepted=true/);
 	assert.match(kickoff, /#2 abcdef3 completed: \.pi\/tmp\/aloop\/unrecorded/);
 	assert.doesNotMatch(kickoff, /#2 implementation abcdef3/);
 	assert.match(kickoff, /recover it from its result artifact and Git commit/);
+	assert.match(kickoff, /Maximum fresh worker attempts: 3/);
+	assert.match(kickoff, /deliberately bounded/);
 	assert.match(kickoff, /claim the selected issue/);
 	assert.match(kickoff, /GitHub and Git are authoritative/);
 	assert.match(kickoff, /After every attempt/);

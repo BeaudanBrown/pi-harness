@@ -5,6 +5,7 @@ import { Type } from "typebox";
 import { currentGitHubLogin, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
+	assessAloopRunBudget,
 	buildSupervisorKickoff,
 	evaluateEpicClosure,
 	evaluateRetryBoundary,
@@ -12,9 +13,11 @@ import {
 	formatAloopHandoff,
 	handoffCommentsForIssue,
 	parseAloopHandoffs,
+	parseAloopRunRequest,
 	requireAloopClaim,
 	selectAloopLeaf,
 	type AloopAttemptRecord,
+	type AloopRunBudget,
 	type ClosureEvidence,
 } from "./core.js";
 
@@ -69,14 +72,6 @@ const ClosureCheckParams = Type.Object({
 	})),
 });
 
-function parseEpicReference(value: string): number {
-	const match = value.trim().match(/^#?(\d+)$/);
-	if (!match) throw new Error("Usage: /aloop #<epic>");
-	const number = Number(match[1]);
-	if (!Number.isSafeInteger(number) || number < 1) throw new Error("Epic number must be a positive integer.");
-	return number;
-}
-
 function activeModelRef(ctx: ExtensionContext): string | undefined {
 	return ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
 }
@@ -130,26 +125,49 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 	let activeEpic: number | null = null;
 	let pendingHandoffs: PendingHandoff[] = [];
 	let workerRunning = false;
+	let runBudget: AloopRunBudget | null = null;
+	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+
+	function clearDeadlineTimer(): void {
+		if (deadlineTimer) clearTimeout(deadlineTimer);
+		deadlineTimer = null;
+	}
 
 	function deactivate(): void {
+		clearDeadlineTimer();
 		activeEpic = null;
 		pendingHandoffs = [];
 		workerRunning = false;
+		runBudget = null;
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
 	}
 
-	function activate(epic: number, ctx: ExtensionContext, recovered: PendingHandoff[]): void {
+	function activate(epic: number, ctx: ExtensionContext, recovered: PendingHandoff[], maxMinutes: number, maxAttempts: number): AloopRunBudget {
+		clearDeadlineTimer();
 		activeEpic = epic;
 		pendingHandoffs = recovered;
+		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxAttempts, attemptsStarted: 0, settled: false };
+		deadlineTimer = setTimeout(() => {
+			if (!runBudget || runBudget.settled) return;
+			ctx.abort();
+			if (ctx.hasUI) {
+				ctx.ui.notify(`Aloop #${epic} reached its ${maxMinutes}-minute limit. Run /aloop again to resume.`, "warning");
+				ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic} time limit reached`);
+			}
+		}, maxMinutes * 60_000);
+		deadlineTimer.unref?.();
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...TOOL_NAMES])]);
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic}`);
+		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic} · ${maxMinutes}m · ${maxAttempts} attempts`);
+		return runBudget;
 	}
 
-	async function currentContext(cwd: string) {
-		if (activeEpic === null) throw new Error("Run /aloop #<epic> before using aloop supervisor tools.");
+	async function currentContext(cwd: string, signal?: AbortSignal) {
+		if (activeEpic === null || !runBudget) throw new Error("Run /aloop #<epic> before using aloop supervisor tools.");
 		return await retrieveCurrentRepositoryEpicContext(cwd, activeEpic, undefined, {
 			commentLimit: MAX_COMMENT_LIMIT,
 			commentBodyLimit: MAX_COMMENT_BODY,
+			signal,
+			deadlineMs: runBudget.deadlineMs,
 		});
 	}
 
@@ -158,10 +176,18 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
+		clearDeadlineTimer();
 		activeEpic = null;
 		pendingHandoffs = [];
 		workerRunning = false;
+		runBudget = null;
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+	});
+	pi.on("agent_settled", (_event, ctx) => {
+		if (!runBudget || runBudget.settled) return;
+		runBudget.settled = true;
+		clearDeadlineTimer();
+		if (ctx.hasUI && activeEpic !== null) ctx.ui.setStatus(STATUS_KEY, `aloop: #${activeEpic} settled · rerun to continue`);
 	});
 
 	function refreshPending(context: Awaited<ReturnType<typeof retrieveCurrentRepositoryEpicContext>>): void {
@@ -172,44 +198,75 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		description: "Supervise a GitHub epic with fresh sequential implementation workers",
 		getArgumentCompletions: (prefix) => /^#?\d*$/.test(prefix) ? null : [{ value: "#", label: "#<epic>" }],
 		handler: async (args, ctx) => {
-			let epic: number;
+			let request;
 			try {
-				epic = parseEpicReference(args);
+				request = parseAloopRunRequest(args);
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "warning");
 				return;
 			}
-			await ctx.waitForIdle();
+			const epic = request.epic;
+			if (!ctx.isIdle()) {
+				ctx.ui.notify("/aloop must be started while Pi is idle; abort the active turn or wait for it to settle, then retry.", "warning");
+				return;
+			}
 			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000 });
 			if (status.code !== 0) throw new Error((status.stderr || status.stdout || "Could not inspect the worktree.").trim());
 			if (status.stdout.trim()) {
 				ctx.ui.notify("/aloop requires a clean worktree before supervision starts.", "error");
 				return;
 			}
-			const context = await retrieveCurrentRepositoryEpicContext(ctx.cwd, epic, undefined, {
-				commentLimit: MAX_COMMENT_LIMIT,
-				commentBodyLimit: MAX_COMMENT_BODY,
-			});
+			const budget = activate(epic, ctx, [], request.maxMinutes, request.maxAttempts);
+			let context;
+			try {
+				context = await retrieveCurrentRepositoryEpicContext(ctx.cwd, epic, undefined, {
+					commentLimit: MAX_COMMENT_LIMIT,
+					commentBodyLimit: MAX_COMMENT_BODY,
+					signal: ctx.signal,
+					deadlineMs: budget.deadlineMs,
+				});
+			} catch (error) {
+				deactivate();
+				if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+				throw error;
+			}
 			if (context.epic.state !== "open") {
+				deactivate();
 				ctx.ui.notify(`Epic #${epic} is not open.`, "warning");
 				return;
 			}
-			const history = await pi.exec("git", ["log", "--oneline", "--decorate", "-30"], { timeout: 10_000 });
-			if (history.code !== 0) throw new Error((history.stderr || history.stdout || "Could not inspect Git history.").trim());
-			const branchRecords: AloopAttemptRecord[] = [];
-			for (const record of await scanAttemptArtifacts(ctx.cwd)) {
-				if (record.commit === null) {
-					branchRecords.push(record);
-					continue;
+			const startupTimeout = () => {
+				const assessment = assessAloopRunBudget(budget, Date.now());
+				if (!assessment.allowed) throw new Error(assessment.reason);
+				return Math.max(1, Math.min(10_000, assessment.remainingMs));
+			};
+			try {
+				const history = await pi.exec("git", ["log", "--oneline", "--decorate", "-30"], { timeout: startupTimeout() });
+				if (history.code !== 0) throw new Error((history.stderr || history.stdout || "Could not inspect Git history.").trim());
+				startupTimeout();
+				const records = await scanAttemptArtifacts(ctx.cwd);
+				startupTimeout();
+				const branchRecords: AloopAttemptRecord[] = [];
+				for (const record of records) {
+					if (record.commit === null) {
+						branchRecords.push(record);
+						continue;
+					}
+					const ancestry = await pi.exec("git", ["merge-base", "--is-ancestor", record.commit, "HEAD"], { timeout: startupTimeout() });
+					if (ancestry.code === 0) branchRecords.push(record);
+					else if (ancestry.code !== 1) throw new Error((ancestry.stderr || ancestry.stdout || `Could not inspect attempt commit ${record.commit}.`).trim());
 				}
-				const ancestry = await pi.exec("git", ["merge-base", "--is-ancestor", record.commit, "HEAD"], { timeout: 10_000 });
-				if (ancestry.code === 0) branchRecords.push(record);
-				else if (ancestry.code !== 1) throw new Error((ancestry.stderr || ancestry.stdout || `Could not inspect attempt commit ${record.commit}.`).trim());
+				startupTimeout();
+				const outstanding = findOutstandingAttempts(context, branchRecords);
+				pendingHandoffs = outstanding;
+				pi.setSessionName(`aloop-${epic}`);
+				startupTimeout();
+				pi.sendUserMessage(buildSupervisorKickoff(context, history.stdout, outstanding, budget));
+			} catch (error) {
+				deactivate();
+				if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
+				throw error;
 			}
-			const outstanding = findOutstandingAttempts(context, branchRecords);
-			activate(epic, ctx, outstanding);
-			pi.setSessionName(`aloop-${epic}`);
-			pi.sendUserMessage(buildSupervisorKickoff(context, history.stdout, outstanding));
 		},
 	});
 
@@ -228,29 +285,50 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			workerRunning = true;
 			try {
 				if (params.attempt_type !== "implementation" && params.attempt_type !== "remediation") throw new Error("attempt_type must be implementation or remediation.");
-				const context = await currentContext(ctx.cwd);
+				if (!runBudget) throw new Error("Run /aloop #<epic> before launching a worker.");
+				const budgetAssessment = assessAloopRunBudget(runBudget, Date.now());
+				if (!budgetAssessment.allowed) throw new Error(budgetAssessment.reason);
+				const context = await currentContext(ctx.cwd, signal);
 				refreshPending(context);
 				if (pendingHandoffs.length > 0) {
 					throw new Error(`Outstanding attempts have no durable structured handoff comments: ${pendingHandoffs.map((pending) => `#${pending.issue} (${pending.artifactDirectory})`).join(", ")}. Record them before another worker.`);
 				}
 				const issue = selectAloopLeaf(context, params.issue);
-				const login = await currentGitHubLogin(ctx.cwd);
+				const login = await currentGitHubLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget.deadlineMs });
 				requireAloopClaim(issue, login);
 				const handoffs = parseAloopHandoffs(issue.recentHandoffs).filter((handoff) => handoff.issue === issue.number);
 				const retry = evaluateRetryBoundary(handoffs, params.materially_new_approach === true);
 				if (!retry.allowed) throw new Error(retry.reason);
 				const epic = context.issues.find((candidate) => candidate.number === context.epic.number)!;
-				onUpdate?.({ content: [{ type: "text", text: `Launching ${params.attempt_type} worker for #${issue.number}…` }], details: {} });
-				const outcome = await runAloopWorker({
-					cwd: ctx.cwd,
-					attemptType: params.attempt_type,
-					epic: { number: epic.number, title: epic.title, body: epic.body },
-					issue: { number: issue.number, title: issue.title, body: issue.body },
-					priorHandoffs: handoffCommentsForIssue(issue),
-					modelRef: activeModelRef(ctx),
-					timeoutMs: params.timeout_ms,
-					signal,
+				const launchBudget = assessAloopRunBudget(runBudget, Date.now());
+				if (!launchBudget.allowed) throw new Error(launchBudget.reason);
+				runBudget.attemptsStarted += 1;
+				const attemptNumber = runBudget.attemptsStarted;
+				const startedAt = Date.now();
+				const workerTimeoutMs = Math.min(params.timeout_ms ?? 30 * 60_000, launchBudget.remainingMs);
+				const progress = () => onUpdate?.({
+					content: [{ type: "text", text: `Aloop attempt ${attemptNumber}/${runBudget!.maxAttempts} for #${issue.number} is running (${Math.floor((Date.now() - startedAt) / 1_000)}s elapsed; hard timeout ${Math.ceil(workerTimeoutMs / 60_000)}m).` }],
+					details: { issue: issue.number, attemptNumber, maxAttempts: runBudget!.maxAttempts, elapsedMs: Date.now() - startedAt, timeoutMs: workerTimeoutMs },
 				});
+				progress();
+				const heartbeat = setInterval(progress, 15_000);
+				heartbeat.unref?.();
+				let outcome: Awaited<ReturnType<typeof runAloopWorker>>;
+				try {
+					outcome = await runAloopWorker({
+						cwd: ctx.cwd,
+						attemptType: params.attempt_type,
+						epic: { number: epic.number, title: epic.title, body: epic.body },
+						issue: { number: issue.number, title: issue.title, body: issue.body },
+						priorHandoffs: handoffCommentsForIssue(issue),
+						modelRef: activeModelRef(ctx),
+						timeoutMs: workerTimeoutMs,
+						deadlineMs: runBudget.deadlineMs,
+						signal,
+					});
+				} finally {
+					clearInterval(heartbeat);
+				}
 				pendingHandoffs.push({ issue: issue.number, commit: outcome.commit, artifactDirectory: outcome.artifacts.directory });
 				const text = [
 					`Attempt status: ${outcome.status}`,
@@ -278,8 +356,8 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		async execute(_id, params: {
 			issue: number; attempt_type: string; commit?: string; successful: boolean; approach: string; materially_new_approach: boolean;
 			verification: string[]; acceptance_criteria_assessment: string[]; discovered_work: string[]; next_action: string; artifact_directory: string;
-		}, _signal, _onUpdate, ctx) {
-			const context = await currentContext(ctx.cwd);
+		}, signal, _onUpdate, ctx) {
+			const context = await currentContext(ctx.cwd, signal);
 			refreshPending(context);
 			if (params.attempt_type !== "implementation" && params.attempt_type !== "remediation") throw new Error("attempt_type must be implementation or remediation.");
 			const pending = pendingHandoffs.find((candidate) =>
@@ -320,8 +398,8 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			verification: ClosureEvidence["verification"];
 			acceptance_criteria: ClosureEvidence["acceptanceCriteria"];
 			descendant_reviews: ClosureEvidence["descendantReviews"];
-		}, _signal, _onUpdate, ctx) {
-			const context = await currentContext(ctx.cwd);
+		}, signal, _onUpdate, ctx) {
+			const context = await currentContext(ctx.cwd, signal);
 			refreshPending(context);
 			const reasons: string[] = pendingHandoffs.map((pending) => `Attempt handoff for #${pending.issue} is not durable on GitHub (${pending.artifactDirectory}).`);
 			const gate = evaluateEpicClosure(context, {

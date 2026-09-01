@@ -24,12 +24,19 @@ loop database, queue file, or session state to restore.
 
    The status output must be empty. `/aloop` and every implementation worker
    refuse to start from a dirty worktree.
-4. Start the packaged Pi from that worktree and invoke the epic:
+4. Start the packaged Pi from that worktree. Invoke the epic only while Pi is
+   idle; `/aloop` rejects startup during another active turn rather than waiting
+   without a bound:
 
    ```text
    pi
    /aloop #<epic-number>
    ```
+
+   Each invocation defaults to a 30-minute hard deadline and at most three
+   fresh workers. Use `--max-minutes <1-240>` and `--max-attempts <1-20>` to
+   choose smaller or larger explicit bounds for that invocation, for example
+   `/aloop #123 --max-minutes 15 --max-attempts 1`.
 
 The command retrieves the complete descendant graph, recent structured
 handoffs, and recent Git history. An executable issue is an open, unblocked
@@ -59,7 +66,20 @@ discovered-work, and next-action evidence. Its `implemented` status is a claim,
 not acceptance; the supervisor must review the evidence and repository change.
 
 Workers never run in parallel in one supervisor session. The supervisor must
-publish the current attempt's handoff before launching another worker.
+publish the current attempt's handoff before launching another worker. While a
+worker is active, the tool emits elapsed-time heartbeats and caps the worker at
+the smaller of its requested timeout and the invocation's remaining time.
+
+The whole supervisor turn is also bounded. Reaching either the hard deadline or
+the worker-attempt cap stops that invocation; it never waits indefinitely or
+silently starts unlimited workers. GitHub CLI subprocesses have their own
+30-second timeout and honor turn cancellation, including during initial graph
+retrieval. Their timeout cleanup terminates the complete POSIX process group;
+GitHub issue tooling is therefore explicitly unsupported on Windows rather than
+leaving descendant processes unbounded. Run `/aloop` again to reconstruct
+durable state and continue. A
+settled supervisor turn cannot launch another worker without that explicit
+restart.
 
 ## Durable handoffs and issue closure
 
@@ -105,9 +125,10 @@ supervisor records the gap and stops rather than inventing a passing check.
 ## Resume and recovery
 
 Pi conversation state is convenient but not authoritative. To resume after an
-interruption, enter the same clean worktree, start Pi, and run `/aloop
-#<epic-number>` again. The supervisor reconstructs progress from the current
-GitHub graph and comments plus Git history.
+interruption, a deadline/attempt-budget stop, or a settled turn, enter the same
+clean worktree, start Pi, and run `/aloop #<epic-number>` again. The supervisor
+reconstructs progress from the current GitHub graph and comments plus Git
+history; invocation budgets intentionally do not persist as hidden loop state.
 
 On startup, aloop also scans local attempt results whose commits belong to the
 current branch. If it finds an attempt artifact with no matching durable GitHub

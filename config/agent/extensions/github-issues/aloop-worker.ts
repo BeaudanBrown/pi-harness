@@ -12,6 +12,8 @@ const MAX_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const SHUTDOWN_GRACE_MS = 1_000;
 const MAX_CAPTURE_BYTES = 10 * 1024 * 1024;
 const MAX_SUMMARY_BYTES = 2_000;
+const DEFAULT_GIT_TIMEOUT_MS = 30_000;
+const POSTFLIGHT_RESERVE_MS = 5_000;
 
 export type AloopAttemptType = "implementation" | "remediation";
 
@@ -24,6 +26,7 @@ export type AloopWorkerInput = {
 	launcher?: string[];
 	modelRef?: string;
 	timeoutMs?: number;
+	deadlineMs?: number;
 	signal?: AbortSignal;
 	env?: NodeJS.ProcessEnv;
 };
@@ -108,7 +111,7 @@ export async function prepareAloopArtifactDirectory(cwd: string, attemptId: stri
 	return directory;
 }
 
-export function buildAloopWorkerPrompt(input: Omit<AloopWorkerInput, "cwd" | "launcher" | "modelRef" | "timeoutMs" | "signal" | "env">): string {
+export function buildAloopWorkerPrompt(input: Omit<AloopWorkerInput, "cwd" | "launcher" | "modelRef" | "timeoutMs" | "deadlineMs" | "signal" | "env">): string {
 	positiveIssueNumber(input.epic.number, "epic.number");
 	positiveIssueNumber(input.issue.number, "issue.number");
 	const handoffs = (input.priorHandoffs ?? []).slice(-5).map((handoff) =>
@@ -261,16 +264,24 @@ export async function runIsolatedAloopProcess(options: {
 	stdoutPath: string;
 	stderrPath: string;
 	timeoutMs: number;
+	deadlineMs?: number;
 	shutdownGraceMs?: number;
 	signal?: AbortSignal;
 	env?: NodeJS.ProcessEnv;
 }): Promise<ProcessResult> {
 	if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("Aloop workers require process-group cleanup on Linux or macOS.");
 	if (options.command.length === 0) throw new Error("Aloop worker command is empty.");
+	if (options.signal?.aborted) throw new Error("Aloop worker launch was cancelled before spawn.");
+	if (options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) throw new Error("Aloop worker deadline expired before spawn.");
 	await mkdir(path.dirname(options.stdoutPath), { recursive: true });
 	const stdout = createWriteStream(options.stdoutPath, { flags: "wx", mode: 0o600 });
 	const stderr = createWriteStream(options.stderrPath, { flags: "wx", mode: 0o600 });
 	await Promise.all([once(stdout, "open"), once(stderr, "open")]);
+	const remainingMs = options.deadlineMs === undefined ? options.timeoutMs : Math.min(options.timeoutMs, options.deadlineMs - Date.now());
+	if (options.signal?.aborted || remainingMs <= 0) {
+		await Promise.all([new Promise<void>((done) => stdout.end(done)), new Promise<void>((done) => stderr.end(done))]);
+		throw new Error(options.signal?.aborted ? "Aloop worker launch was cancelled before spawn." : "Aloop worker deadline expired before spawn.");
+	}
 	const started = Date.now();
 	let stdoutTail = "";
 	let timedOut = false;
@@ -291,7 +302,7 @@ export async function runIsolatedAloopProcess(options: {
 			cancelled = reason === "cancelled";
 			termination = terminateProcessGroup(child.pid, options.shutdownGraceMs ?? SHUTDOWN_GRACE_MS);
 		};
-		const timer = setTimeout(() => stop("timeout"), options.timeoutMs);
+		const timer = setTimeout(() => stop("timeout"), remainingMs);
 		const abort = () => stop("cancelled");
 		options.signal?.addEventListener("abort", abort, { once: true });
 		if (options.signal?.aborted) abort();
@@ -325,28 +336,58 @@ export async function runIsolatedAloopProcess(options: {
 	});
 }
 
-async function git(cwd: string, args: string[]): Promise<string> {
+type GitCommandOptions = { signal?: AbortSignal; deadlineMs?: number; timeoutMs?: number };
+
+async function gitResult(cwd: string, args: string[], options: GitCommandOptions = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
+	if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("Aloop Git checks require process-group cleanup on Linux or macOS.");
+	if (options.signal?.aborted) throw new Error(`Git command aborted before spawn: git ${args.join(" ")}`);
+	const timeoutMs = Math.min(options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, options.deadlineMs === undefined ? Number.MAX_SAFE_INTEGER : options.deadlineMs - Date.now());
+	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error(`Git command deadline expired before spawn: git ${args.join(" ")}`);
 	return await new Promise((resolve, reject) => {
-		const child = spawn("git", args, { cwd, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn("git", args, { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 		let stdout = "";
 		let stderr = "";
+		let settled = false;
+		const cleanup = () => { clearTimeout(timer); options.signal?.removeEventListener("abort", abort); };
+		const finish = (error?: Error, code: number | null = null) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			if (error) reject(error);
+			else resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() });
+		};
+		const terminate = (reason: string) => {
+			if (settled) return;
+			try { if (child.pid) process.kill(-child.pid, "SIGKILL"); else child.kill("SIGKILL"); } catch { /* process group may have exited */ }
+			finish(new Error(`${reason}: git ${args.join(" ")}`));
+		};
+		const abort = () => terminate("Git command aborted");
+		const timer = setTimeout(() => terminate(`Git command timed out after ${Math.trunc(timeoutMs)}ms`), timeoutMs);
+		timer.unref?.();
+		options.signal?.addEventListener("abort", abort, { once: true });
 		child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
 		child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
-		child.once("error", reject);
-		child.once("close", (code) => code === 0 ? resolve(stdout.trim()) : reject(new Error((stderr || stdout || `git ${args.join(" ")} failed`).trim())));
+		child.once("error", (error) => finish(error));
+		child.once("close", (code) => finish(undefined, code));
+		if (options.signal?.aborted) abort();
 	});
 }
 
-async function worktreeStatus(cwd: string): Promise<string> {
-	return await git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"]);
+async function git(cwd: string, args: string[], options: GitCommandOptions = {}): Promise<string> {
+	const result = await gitResult(cwd, args, options);
+	if (result.code !== 0) throw new Error((result.stderr || result.stdout || `git ${args.join(" ")} failed`).trim());
+	return result.stdout;
 }
 
-async function isAncestor(cwd: string, ancestor: string, descendant: string): Promise<boolean> {
-	return await new Promise((resolve, reject) => {
-		const child = spawn("git", ["merge-base", "--is-ancestor", ancestor, descendant], { cwd, stdio: "ignore" });
-		child.once("error", reject);
-		child.once("close", (code) => code === 0 ? resolve(true) : code === 1 ? resolve(false) : reject(new Error("git merge-base --is-ancestor failed.")));
-	});
+async function worktreeStatus(cwd: string, options: GitCommandOptions = {}): Promise<string> {
+	return await git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"], options);
+}
+
+async function isAncestor(cwd: string, ancestor: string, descendant: string, options: GitCommandOptions = {}): Promise<boolean> {
+	const result = await gitResult(cwd, ["merge-base", "--is-ancestor", ancestor, descendant], options);
+	if (result.code === 0) return true;
+	if (result.code === 1) return false;
+	throw new Error(result.stderr || "git merge-base --is-ancestor failed.");
 }
 
 function defaultLauncher(): string[] {
@@ -356,9 +397,10 @@ function defaultLauncher(): string[] {
 }
 
 export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAttemptOutcome> {
-	const initialStatus = await worktreeStatus(input.cwd);
+	const gitOptions = { signal: input.signal, deadlineMs: input.deadlineMs };
+	const initialStatus = await worktreeStatus(input.cwd, gitOptions);
 	if (initialStatus) throw new Error("Aloop worker refused to start because the worktree is dirty.");
-	const beforeHead = await git(input.cwd, ["rev-parse", "HEAD"]);
+	const beforeHead = await git(input.cwd, ["rev-parse", "HEAD"], gitOptions);
 	const prompt = buildAloopWorkerPrompt(input);
 	const attemptId = `issue-${input.issue.number}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 	const directory = await prepareAloopArtifactDirectory(input.cwd, attemptId);
@@ -376,7 +418,9 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	const resultFile = await open(resultPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
 	try {
 	const command = buildAloopWorkerCommand({ launcher: input.launcher ?? defaultLauncher(), prompt, modelRef: input.modelRef });
-	const timeoutMs = Math.max(1, Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS));
+	const remainingBeforeSpawn = input.deadlineMs === undefined ? MAX_TIMEOUT_MS : input.deadlineMs - Date.now() - POSTFLIGHT_RESERVE_MS;
+	if (remainingBeforeSpawn <= 0) throw new Error("Aloop worker deadline expired during preflight; worker was not spawned.");
+	const timeoutMs = Math.max(1, Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, remainingBeforeSpawn));
 	const processStarted = Date.now();
 	let launchError: string | null = null;
 	let processResult: ProcessResult;
@@ -387,6 +431,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			stdoutPath,
 			stderrPath,
 			timeoutMs,
+			deadlineMs: input.deadlineMs === undefined ? undefined : input.deadlineMs - POSTFLIGHT_RESERVE_MS,
 			signal: input.signal,
 			env: input.env,
 		});
@@ -401,10 +446,10 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			stdoutTail: "",
 		};
 	}
-	const afterHead = await git(input.cwd, ["rev-parse", "HEAD"]);
-	const worktreeStatusAfter = await worktreeStatus(input.cwd);
-	const beforeIsAncestor = await isAncestor(input.cwd, beforeHead, afterHead);
-	const commitCount = beforeIsAncestor ? Number(await git(input.cwd, ["rev-list", "--count", `${beforeHead}..${afterHead}`])) : 0;
+	const afterHead = await git(input.cwd, ["rev-parse", "HEAD"], gitOptions);
+	const worktreeStatusAfter = await worktreeStatus(input.cwd, gitOptions);
+	const beforeIsAncestor = await isAncestor(input.cwd, beforeHead, afterHead, gitOptions);
+	const commitCount = beforeIsAncestor ? Number(await git(input.cwd, ["rev-list", "--count", `${beforeHead}..${afterHead}`], gitOptions)) : 0;
 	const contract = assessAttemptContract({ beforeHead, afterHead, commitCount, beforeIsAncestor, worktreeStatus: worktreeStatusAfter });
 	let workerResult: AloopWorkerResult | null = null;
 	let parseError: string | null = null;
