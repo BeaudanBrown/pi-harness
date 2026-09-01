@@ -223,6 +223,9 @@ export class ManagedSessionIpcServer {
 			} catch (error) {
 				const conversationId = envelope.conversationId;
 				if (conversationId) this.send(socket, relayError(conversationId, envelope.messageId, error));
+				const recoverable = state.attachment && error instanceof RelayRegistryError &&
+					["not_found", "invalid_state", "capacity_reached", "launch_failed", "matrix_unavailable"].includes(error.code);
+				if (recoverable) continue;
 				socket.destroySoon();
 				return;
 			}

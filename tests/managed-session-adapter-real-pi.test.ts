@@ -105,6 +105,7 @@ test("real Pi binds, expands once, persists provenance, leaves /new and /fork un
 					if (!sentDelivery) {
 						sentDelivery = true;
 						setTimeout(() => socket.write(encodeNdjsonEnvelope(delivery)), 25);
+						setTimeout(() => { forcedReconnect = true; socket.destroy(); }, 75);
 					} else if (forcedReconnect && !redeliveredAfterReconnect) {
 						redeliveredAfterReconnect = true;
 						setTimeout(() => socket.write(encodeNdjsonEnvelope(delivery)), 25);
@@ -121,9 +122,6 @@ test("real Pi binds, expands once, persists provenance, leaves /new and /fork un
 					} else {
 						socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
 					}
-				} else if (envelope.type === "input.acknowledge" && envelope.payload.status === "accepted" && !forcedReconnect) {
-					forcedReconnect = true;
-					socket.destroy();
 				} else if (envelope.type === "input.acknowledge") {
 					socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: {
 						deliveryId: envelope.payload.deliveryId, status: envelope.payload.status,

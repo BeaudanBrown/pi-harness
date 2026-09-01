@@ -117,7 +117,7 @@ test("coordinator launcher receives only fixed host configuration and records ex
 	await value.registry.createCoordinatorConversation(manifest);
 	await assert.rejects(() => value.registry.deleteConversation(conversationId), /cannot be deleted/);
 	const launcher = join(value.root, "launcher");
-	await writeFile(launcher, `#!/bin/sh\nset -eu\ntest "$1 $2" = "managed coordinator-ensure"\ngrep -F '"conversationId":"${conversationId}"' >/dev/null\ntest -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"\ntest -z "\${PI_MATRIX_ACCESS_TOKEN-}"\nprintf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n'\n`);
+	await writeFile(launcher, `#!/bin/sh\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	await launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
@@ -127,7 +127,16 @@ test("coordinator launcher receives only fixed host configuration and records ex
 	const runtime = value.registry.snapshot().conversations[0]!;
 	assert.deepEqual(runtime.managedWindow, { sessionName: "default", windowId: "@7", paneId: "%8" });
 	assert.match(runtime.attachmentNonceHash ?? "", /^[a-f0-9]{64}$/);
-	await writeFile(launcher, `#!/bin/sh\ncat >/dev/null\nprintf '{"conversationId":"conv_ffffffffffffffffffffffffffffffff","sessionName":"default","windowId":"@9","paneId":"%%9","role":"ordinary"}\\n'\n`);
+	const firstNonceHash = runtime.attachmentNonceHash;
+	await writeFile(launcher, `#!/bin/sh\ncat >/dev/null\nprintf '{"conversationId":"${conversationId}","exists":true,"sessionName":"default","windowId":"@7","paneId":"%%8"}\\n'\n`);
+	await chmod(launcher, 0o700);
+	await launchCoordinator({
+		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
+		socketPath: join(value.root, "relay.sock"), registry: value.registry, environment: { PATH: process.env.PATH },
+	});
+	assert.equal(value.registry.snapshot().conversations[0]!.attachmentNonceHash, firstNonceHash,
+		"reusing the same process preserves the nonce it can authenticate with");
+	await writeFile(launcher, `#!/bin/sh\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) cat >/dev/null; printf '{"conversationId":"conv_ffffffffffffffffffffffffffffffff","sessionName":"default","windowId":"@9","paneId":"%%9","role":"ordinary"}\\n';;\nesac\n`);
 	await chmod(launcher, 0o700);
 	await assert.rejects(() => launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
@@ -337,14 +346,12 @@ export default function (pi) {
 	assert.match(runtime.managedWindow?.windowId ?? "", /^@[0-9]+$/);
 	assert.match(runtime.managedWindow?.paneId ?? "", /^%[0-9]+$/);
 	assert.equal(execFileSync(tmux, ["-L", tmuxSocket, "list-windows", "-t", "=default", "-F", "#{window_name}"], { encoding: "utf8" }).trim(), "coordinator");
-	const retriedWindow = JSON.parse(execFileSync(launcher, ["managed", "coordinator-ensure"], {
+	const retriedWindow = JSON.parse(execFileSync(launcher, ["managed", "window-inspect"], {
 		input: `${JSON.stringify({ conversationId: running.registry.manifestByCreationKey("coordinator")!.conversationId })}\n`,
 		encoding: "utf8",
-		env: {
-			...process.env, PI_MANAGED_TEST_TMUX_SOCKET: tmuxSocket, PI_MANAGED_TEST_COORDINATOR_PI: coordinatorPi,
-			PI_MANAGED_TEST_PROVIDER: provider, PI_MANAGED_COORDINATOR_CWD: join(root, "workspace"),
-		},
-	})) as { windowId: string; paneId: string };
+		env: { ...process.env, PI_MANAGED_TEST_TMUX_SOCKET: tmuxSocket },
+	})) as { exists: boolean; windowId: string; paneId: string };
+	assert.equal(retriedWindow.exists, true);
 	assert.equal(retriedWindow.windowId, runtime.managedWindow!.windowId);
 	assert.equal(retriedWindow.paneId, runtime.managedWindow!.paneId);
 	assert.equal(execFileSync(tmux, ["-L", tmuxSocket, "list-windows", "-t", "=default", "-F", "#{window_name}"], { encoding: "utf8" }).trim().split("\n").length, 1);

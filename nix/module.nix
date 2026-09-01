@@ -405,7 +405,6 @@ in
         RestartSec = 2;
         UMask = "0077";
         NoNewPrivileges = true;
-        PrivateTmp = true;
       };
     };
 

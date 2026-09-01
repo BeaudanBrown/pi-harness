@@ -14,7 +14,7 @@ import {
 	parseNdjsonEnvelope,
 	type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { BoundAdapterClient, requestSelfBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, requestSelfBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { createManagedSessionAdapterExtension } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
@@ -63,13 +63,13 @@ class FakeRelay {
 	private server?: Server;
 	private counter = 0;
 
-	private constructor(root: string) {
+	private constructor(root: string, private readonly lifecycleDelayMs = 0) {
 		this.root = root;
 		this.socketPath = join(root, "relay.sock");
 	}
 
-	static async start(): Promise<FakeRelay> {
-		const relay = new FakeRelay(await mkdtemp(join(tmpdir(), "pi-adapter-relay-")));
+	static async start(lifecycleDelayMs = 0): Promise<FakeRelay> {
+		const relay = new FakeRelay(await mkdtemp(join(tmpdir(), "pi-adapter-relay-")), lifecycleDelayMs);
 		relay.server = createServer((socket) => relay.accept(socket));
 		await new Promise<void>((resolve, reject) => {
 			relay.server!.once("error", reject);
@@ -129,6 +129,10 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }));
 		} else if (envelope.type === "self.delete") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.delete", status: "ok" } }));
+		} else if (envelope.type === "lifecycle.request") {
+			setTimeout(() => socket.write(encodeNdjsonEnvelope({ ...base, type: "lifecycle.result", payload: {
+				operation: "workspace.list", workspaces: [{ rootKey: "projects", workspace: "pi-harness" }],
+			} })), this.lifecycleDelayMs);
 		}
 	}
 }
@@ -177,6 +181,15 @@ test("transcript classification is boundary-ordered, provenance-aware, and final
 		version: MANAGED_SESSION_STATE_VERSION, deliveryId: matrixDeliveryId, matrixEventId: "$matrix", kind: "prompt" as const,
 		status: "persisted" as const, expandedText: "from matrix", piEntryId: matrixEntryId,
 	};
+	const expandedDelivery = { ...delivery, status: "expanded" as const, piEntryId: undefined };
+	const preAcknowledgementBranch = [
+		custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }),
+		custom("expanded", DELIVERY_ENTRY_TYPE, expandedDelivery),
+		{ type: "message", id: matrixUserKey, parentId: "expanded", message: { role: "user", content: [{ type: "text", text: "from matrix" }] } },
+	];
+	const boundaryBinding = { ...binding, bindingBoundaryEntryId: deriveTranscriptEntryId(sessionId, "boundary") };
+	assert.deepEqual(eligibleTranscriptEntries(preAcknowledgementBranch, boundaryBinding,
+		new Map([[matrixDeliveryId, expandedDelivery]])), []);
 	const branch = [
 		{ type: "message", id: "before", message: { role: "assistant", content: [{ type: "text", text: "secret" }], stopReason: "stop" } },
 		custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }),
@@ -187,7 +200,6 @@ test("transcript classification is boundary-ordered, provenance-aware, and final
 		{ type: "message", id: "final", message: { role: "assistant", content: [{ type: "thinking", thinking: "private" }, { type: "text", text: "final answer" }], stopReason: "stop" } },
 		{ type: "compaction", id: "compact", summary: "private summary" },
 	];
-	const boundaryBinding = { ...binding, bindingBoundaryEntryId: deriveTranscriptEntryId(sessionId, "boundary") };
 	assert.deepEqual(eligibleTranscriptEntries(branch, boundaryBinding, new Map([[matrixDeliveryId, delivery]])), [
 		{ entryId: deriveTranscriptEntryId(sessionId, "local-user"), piEntryKey: "local-user", kind: "local_user", body: "terminal **input**" },
 		{ entryId: deriveTranscriptEntryId(sessionId, "final"), piEntryKey: "final", kind: "assistant_final", body: "final answer" },
@@ -221,6 +233,20 @@ test("transcript classification is boundary-ordered, provenance-aware, and final
 		entryId: matrixEntryId, limit: 4_096, reason: "capacity_reached",
 	});
 	assert.equal(hasProjectionCapacityDiagnostic([...excessive, capacityDiagnostic], boundaryBinding, matrixEntryId), true);
+});
+
+test("coordinator lifecycle requests allow the bounded launcher duration", async (t) => {
+	const relay = await FakeRelay.start(5_100);
+	t.after(() => relay.close());
+	const coordinatorBinding = { ...binding, role: "coordinator_adapter" as const };
+	const client = new CoordinatorAdapterClient({
+		socketPath: relay.socketPath, role: "coordinator_adapter", attachmentNonce: nonce,
+		binding: coordinatorBinding, onEnvelope: () => undefined,
+	});
+	t.after(() => client.close());
+	await client.connect();
+	const result = await client.lifecycleRequest({ operation: "workspace.list" });
+	assert.equal(result.type, "lifecycle.result");
 });
 
 test("ordinary adapter speaks only fixed role-bound operations and deduplicates request correlation", async (t) => {

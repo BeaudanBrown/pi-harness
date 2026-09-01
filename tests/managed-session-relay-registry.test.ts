@@ -98,6 +98,18 @@ test("registry enforces nonce, role, binding, and one live attachment per conver
 	assert.equal(registry.snapshot().conversations[0]?.state, "dormant");
 });
 
+test("adapter receipt acknowledgement is idempotent after relay socket delivery", async () => {
+	const value = manifest();
+	const { registry } = await fixture([value]);
+	const deliveryId = deriveDeliveryId(value.conversationId, "$ordered-delivery");
+	await registry.recordAcceptedInput(value.conversationId, {
+		deliveryId, matrixEventId: "$ordered-delivery", kind: "prompt", body: "hello", status: "accepted",
+	});
+	await registry.markInputDelivered(value.conversationId, deliveryId);
+	await registry.acknowledgeInput(value.conversationId, deliveryId, "accepted");
+	assert.equal(registry.pendingInputs(value.conversationId)[0]?.status, "delivered");
+});
+
 test("token rotation changes only request authorization and preserves rooms, sessions, cursor, and projection state", async () => {
 	const value = manifest(); const { root, store, registry } = await fixture([value]);
 	await registry.setMatrixCursor(value.conversationId, "rotation-cursor");

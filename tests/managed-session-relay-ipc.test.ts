@@ -15,10 +15,10 @@ import {
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { ManagedSessionIpcServer, type PeerUidResolver } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
+import { ManagedSessionIpcServer, type EnvelopeHandler, type PeerUidResolver } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { peerUidFromHelper } from "../config/agent/extensions/managed-sessions/relay/peer-uid.js";
-import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { RelayRegistry, RelayRegistryError } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { hostRelayLockPath, HostRelayLock } from "../config/agent/extensions/managed-sessions/relay/relay-lock.js";
 
 const hostId = "ipc-host";
@@ -80,7 +80,7 @@ function waitForClose(socket: Socket): Promise<void> {
 	return new Promise((resolve) => socket.once("close", () => resolve()));
 }
 
-async function setup(peerUidOverride?: PeerUidResolver): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[] }> {
+async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[] }> {
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-ipc-"));
 	const values = [manifest("one"), manifest("two")];
 	const store = new ConversationManifestStore(join(root, "manifests"));
@@ -93,6 +93,7 @@ async function setup(peerUidOverride?: PeerUidResolver): Promise<{ root: string;
 		runtimeDirectory: join(root, "run"),
 		expectedUid: process.getuid?.(),
 		peerUid: peerUidOverride ?? (peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : () => process.getuid?.()),
+		onEnvelope,
 	});
 	await server.start();
 	return { root, server, values };
@@ -146,6 +147,39 @@ test("IPC preserves immediately sent frames while asynchronous peer credentials 
 	const response = readEnvelope(socket);
 	socket.write(encodeNdjsonEnvelope(attach(values[0]!, "immediate-attach")));
 	assert.equal((await response).type, "attachment.accepted");
+});
+
+test("IPC keeps authenticated attachments after recoverable operation errors", async (t) => {
+	let attempts = 0;
+	const { server, values } = await setup(undefined, async (envelope) => {
+		attempts += 1;
+		if (attempts === 1) throw new RelayRegistryError("capacity_reached", "temporary capacity boundary");
+		return {
+			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: `response-${attempts}`,
+			conversationId: envelope.conversationId!,
+			role: "relay",
+			type: "self.result",
+			inReplyTo: envelope.messageId,
+			payload: { operation: "self.status", status: "ok", conversationState: "active" },
+		};
+	});
+	t.after(() => server.close());
+	const socket = await openSocket(server.socketPath);
+	t.after(() => socket.destroy());
+	let response = readEnvelope(socket);
+	socket.write(encodeNdjsonEnvelope(attach(values[0]!, "recoverable-attach")));
+	assert.equal((await response).type, "attachment.accepted");
+	const request = (messageId: string): ManagedSessionEnvelope => ({
+		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId, conversationId: values[0]!.conversationId,
+		role: "ordinary_adapter", type: "self.status", payload: {},
+	});
+	response = readEnvelope(socket);
+	socket.write(encodeNdjsonEnvelope(request("recoverable-error")));
+	assert.equal((await response).payload.code, "capacity_reached");
+	response = readEnvelope(socket);
+	socket.write(encodeNdjsonEnvelope(request("after-recoverable-error")));
+	assert.equal((await response).type, "self.result");
 });
 
 test("IPC fails closed on malformed, oversized, duplicate-ID, and wrong-UID clients", async (t) => {

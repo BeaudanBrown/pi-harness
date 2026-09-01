@@ -422,7 +422,8 @@ export class RelayRegistry {
 			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
 			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
 			const rank: Record<string, number> = { accepted: 0, delivered: 1, persisted: 2, completed: 3, cancelled: 3 };
-			if (!(status in rank) || rank[status]! < rank[input.status]! ||
+			const receiptAfterSocketDelivery = status === "accepted" && input.status === "delivered";
+			if (!(status in rank) || (!receiptAfterSocketDelivery && rank[status]! < rank[input.status]!) ||
 				((input.status === "completed" || input.status === "cancelled") && input.status !== status)) {
 				throw new RelayRegistryError("invalid_state", "Managed delivery acknowledgement regressed");
 			}
@@ -447,7 +448,7 @@ export class RelayRegistry {
 					conversation.projection.push({ entryId: piEntryId, kind: "matrix_user", status: "projected", chunks: [] });
 				}
 			}
-			input.status = status;
+			if (!receiptAfterSocketDelivery) input.status = status;
 		});
 	}
 

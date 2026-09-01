@@ -87,6 +87,8 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 }
 
 export class HostLifecycle {
+	private readonly launches = new Map<string, Promise<void>>();
+
 	constructor(private readonly options: {
 		hostId: string;
 		launcher: string;
@@ -231,26 +233,42 @@ export class HostLifecycle {
 	}
 
 	private async launchProject(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
+		const inProgress = this.launches.get(manifest.conversationId);
+		if (inProgress) return inProgress;
+		const launch = this.launchProjectOnce(manifest, existingNonce, existingSessionFile)
+			.finally(() => { if (this.launches.get(manifest.conversationId) === launch) this.launches.delete(manifest.conversationId); });
+		this.launches.set(manifest.conversationId, launch);
+		return launch;
+	}
+
+	private async launchProjectOnce(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
 		if (manifest.kind !== "project" || !manifest.placement) throw new RelayRegistryError("invalid_state", "Project launch requires project placement");
 		const nonce = existingNonce ?? randomBytes(32).toString("base64url");
 		const sessionFile = existingSessionFile ?? join(resolve(this.options.projectSessionDirectory), manifest.conversationId, "session.jsonl");
 		const resolved = await this.invoke("workspace-resolve", manifest.placement);
 		if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical cwd");
-		await this.invoke("root-ensure", manifest.placement);
+		const root = await this.invoke("root-ensure", manifest.placement);
+		if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
 		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept);
 		if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {
 			throw new RelayRegistryError("invalid_state", "Project Pi session identity conflicts with the conversation manifest");
 		}
-		await this.options.registry.setAttachmentNonce(manifest.conversationId, nonce);
 		await this.options.registry.beginLaunch(manifest.conversationId);
 		try {
-			const result = await this.invoke("window-create", { conversationId: manifest.conversationId, placement: manifest.placement }, {
-				PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_SESSIONS_SOCKET: this.options.socketPath,
-				PI_MANAGED_SESSION_CONVERSATION_ID: manifest.conversationId, PI_MANAGED_SESSION_CONCEPT: manifest.concept,
-				PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: manifest.bindingBoundaryEntryId,
-				PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
-			});
-			const window = this.parseWindow(result, manifest);
+			const inspected = this.parseWindowInspection(await this.invoke("window-inspect", { conversationId: manifest.conversationId }), manifest, root.sessionName);
+			let window: ManagedWindow;
+			if (inspected) {
+				window = inspected;
+			} else {
+				await this.options.registry.setAttachmentNonce(manifest.conversationId, nonce);
+				const result = await this.invoke("window-create", { conversationId: manifest.conversationId, placement: manifest.placement }, {
+					PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_SESSIONS_SOCKET: this.options.socketPath,
+					PI_MANAGED_SESSION_CONVERSATION_ID: manifest.conversationId, PI_MANAGED_SESSION_CONCEPT: manifest.concept,
+					PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: manifest.bindingBoundaryEntryId,
+					PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
+				});
+				window = this.parseWindow(result, manifest);
+			}
 			await this.options.registry.setManagedWindow(manifest.conversationId, {
 				sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId,
 			});
@@ -275,6 +293,28 @@ export class HostLifecycle {
 			result.rootKey !== placement.rootKey || result.workspace !== placement.workspace || result.relativeCwd !== placement.relativeCwd) {
 			throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid managed window");
 		}
+		return {
+			conversationId: manifest.conversationId, sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId,
+			rootKey: placement.rootKey, workspace: placement.workspace, relativeCwd: placement.relativeCwd, role: "conversation",
+		} as ManagedWindow;
+	}
+
+	private parseWindowInspection(result: Record<string, unknown>, manifest: ConversationManifest, expectedSessionName: string): ManagedWindow | undefined {
+		if (result.conversationId !== manifest.conversationId || typeof result.exists !== "boolean") {
+			throw new RelayRegistryError("launch_failed", "Managed window inspection returned invalid identity");
+		}
+		if (!result.exists) {
+			if (Object.keys(result).some((key) => !["conversationId", "exists"].includes(key))) {
+				throw new RelayRegistryError("launch_failed", "Managed window inspection returned invalid absence");
+			}
+			return undefined;
+		}
+		if (result.sessionName !== expectedSessionName || typeof result.windowId !== "string" || !/^@[0-9]+$/.test(result.windowId) ||
+			typeof result.paneId !== "string" || !/^%[0-9]+$/.test(result.paneId) ||
+			Object.keys(result).some((key) => !["conversationId", "exists", "sessionName", "windowId", "paneId"].includes(key))) {
+			throw new RelayRegistryError("launch_failed", "Managed window inspection returned invalid window identity");
+		}
+		const placement = manifest.placement!;
 		return {
 			conversationId: manifest.conversationId, sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId,
 			rootKey: placement.rootKey, workspace: placement.workspace, relativeCwd: placement.relativeCwd, role: "conversation",

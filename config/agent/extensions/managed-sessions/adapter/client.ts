@@ -11,6 +11,7 @@ import {
 import type { AdapterRole, SessionBinding } from "./state.js";
 
 const REQUEST_TIMEOUT_MS = 5_000;
+const LIFECYCLE_REQUEST_TIMEOUT_MS = 120_000;
 
 export class ManagedAdapterError extends Error {
 	constructor(message: string, readonly code = "adapter_error") {
@@ -159,14 +160,14 @@ export class BoundAdapterClient {
 		await waitForClose(socket, 1_000);
 	}
 
-	protected request(envelope: ManagedSessionEnvelope): Promise<ManagedSessionEnvelope> {
+	protected request(envelope: ManagedSessionEnvelope, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ManagedSessionEnvelope> {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return Promise.reject(new ManagedAdapterError("Relay connection is unavailable"));
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.#pending.delete(envelope.messageId);
 				reject(new ManagedAdapterError("Relay request timed out", "timeout"));
-			}, REQUEST_TIMEOUT_MS);
+			}, timeoutMs);
 			this.#pending.set(envelope.messageId, { resolve, reject, timer });
 			try {
 				socket.write(encodeNdjsonEnvelope(envelope));
@@ -233,7 +234,7 @@ export class CoordinatorAdapterClient extends BoundAdapterClient {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("lifecycle"), conversationId: this.options.binding.conversationId,
 			role: "coordinator_adapter", type: "lifecycle.request", payload: { request },
-		});
+		}, LIFECYCLE_REQUEST_TIMEOUT_MS);
 		if (result.type !== "lifecycle.result") throw new ManagedAdapterError("Relay did not return a lifecycle result", "invalid_response");
 		return result;
 	}

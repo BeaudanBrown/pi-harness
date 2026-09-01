@@ -245,21 +245,28 @@ export function eligibleTranscriptEntries(
 		typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string" &&
 		persistedEntryId(binding.sessionId, (entry as { id: string }).id) === binding.bindingBoundaryEntryId);
 	if (boundaryIndex < 0) throw new Error("Managed-session binding boundary is absent from the Pi branch");
+	const branch = entries.slice(boundaryIndex + 1);
 	const matrixEntryIds = new Set([...deliveries.values()]
 		.filter((delivery) => delivery.status === "persisted" || delivery.status === "completed")
 		.map((delivery) => delivery.piEntryId).filter((value): value is string => value !== undefined));
+	const pendingMatrixUserParents = new Set(branch.flatMap((value) => {
+		const marker = customData(value, DELIVERY_ENTRY_TYPE);
+		if (!marker || (marker.data.status !== "expanded" && marker.data.status !== "reinjecting") ||
+			typeof marker.data.deliveryId !== "string" || !deliveries.has(marker.data.deliveryId)) return [];
+		return [marker.id];
+	}));
 	const result: EligibleTranscriptEntry[] = [];
 	let checkpointBoundary = false;
-	for (const value of entries.slice(boundaryIndex + 1)) {
+	for (const value of branch) {
 		if (customData(value, CHECKPOINT_ENTRY_TYPE)?.data.status === "offered") { checkpointBoundary = true; continue; }
 		if (typeof value !== "object" || value === null) continue;
-		const entry = value as { type?: unknown; id?: unknown; message?: unknown };
+		const entry = value as { type?: unknown; id?: unknown; parentId?: unknown; message?: unknown };
 		if (entry.type !== "message" || typeof entry.id !== "string" || typeof entry.message !== "object" || entry.message === null) continue;
 		const message = entry.message as { role?: unknown; content?: unknown; stopReason?: unknown };
 		const entryId = persistedEntryId(binding.sessionId, entry.id);
 		if (message.role === "user") {
 			checkpointBoundary = false;
-			if (matrixEntryIds.has(entryId)) continue;
+			if (matrixEntryIds.has(entryId) || (typeof entry.parentId === "string" && pendingMatrixUserParents.has(entry.parentId))) continue;
 			const body = textContent(message.content, false);
 			if (body) result.push({ entryId, piEntryKey: entry.id, kind: "local_user", body });
 			continue;

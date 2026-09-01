@@ -213,6 +213,9 @@ export class CoordinatorRouter {
 					}
 					if (this.registry.conversationState(manifest.conversationId) !== "active") throw new Error("Managed conversation attachment timed out");
 				} catch (error) {
+					const message = error instanceof Error ? error.message : "Managed conversation launch failed";
+					this.diagnostic(message);
+					await this.registry.recordLaunchError(manifest.conversationId, "launch_failed", message);
 					await this.registry.failLaunch(manifest.conversationId);
 					const queuedAbort = this.registry.pendingInputs(manifest.conversationId)
 						.find((input) => input.kind === "abort" && (input.status === "accepted" || input.status === "delivered"));
@@ -220,7 +223,6 @@ export class CoordinatorRouter {
 						await this.registry.cancelPendingInputs(manifest.conversationId);
 						await this.projectNotice(queuedAbort.matrixEventId, manifest, "No active run to abort; managed conversation remains dormant.").catch(() => undefined);
 					} else await this.notifyLaunchFailure(pending.deliveryId, manifest).catch(() => undefined);
-					void error;
 				}
 			})().finally(() => { this.launching.delete(manifest.conversationId); });
 			this.launching.set(manifest.conversationId, launch);
