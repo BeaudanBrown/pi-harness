@@ -645,6 +645,7 @@
               PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
               node --test \
                 "$test_build_dir/tests/github-issues.test.js" \
+                "$test_build_dir/tests/aloop-worker.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
                 "$test_build_dir/tests/remote-session-state.test.js" \
