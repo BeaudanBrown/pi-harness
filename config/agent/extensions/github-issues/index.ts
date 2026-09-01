@@ -40,6 +40,7 @@ type GitHubIssueMutation =
 	| { op: "create_issue"; title: string; body: string; labels?: string[] }
 	| { op: "update_issue"; number: number; title?: string; body?: string; state?: "open" | "closed" }
 	| { op: "comment"; number: number; body: string }
+	| { op: "claim_issue"; number: number }
 	| { op: "close_issue"; number: number; comment?: string };
 
 const PlanItemSchema = Type.Object({
@@ -81,6 +82,10 @@ const MutationSchema = Type.Union([
 		op: Type.Literal("comment"),
 		number: Type.Number({ minimum: 1 }),
 		body: Type.String({ minLength: 1 }),
+	}),
+	Type.Object({
+		op: Type.Literal("claim_issue"),
+		number: Type.Number({ minimum: 1 }),
 	}),
 	Type.Object({
 		op: Type.Literal("close_issue"),
@@ -191,6 +196,14 @@ async function currentRepo(cwd: string, requested?: string): Promise<string> {
 }
 
 /** Read aloop context only from the repository belonging to the current checkout. */
+export async function currentGitHubLogin(cwd: string, requestedRepo?: string): Promise<string> {
+	await currentRepo(cwd, requestedRepo);
+	const user = await ghJson(cwd, ["api", "user"]);
+	const login = String(user.login ?? "").trim();
+	if (!login) throw new Error("Could not determine the authenticated GitHub login.");
+	return login;
+}
+
 export async function retrieveCurrentRepositoryEpicContext(
 	cwd: string,
 	epicNumber: number,
@@ -297,6 +310,18 @@ async function mutate(cwd: string, repo: string, mutation: GitHubIssueMutation, 
 		}
 		case "comment":
 			return await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues/${issueNumber(mutation.number)}/comments`], { body: nonEmpty(mutation.body, "body") });
+		case "claim_issue": {
+			const number = issueNumber(mutation.number);
+			const issue = await ghJson(cwd, ["api", `repos/${repo}/issues/${number}`]);
+			const user = await ghJson(cwd, ["api", "user"]);
+			const login = nonEmpty(String(user.login ?? ""), "authenticated GitHub login");
+			const assignees = Array.isArray(issue.assignees) ? issue.assignees.map((assignee: any) => String(assignee.login ?? "")).filter(Boolean) : [];
+			const labels = Array.isArray(issue.labels) ? issue.labels.map((label: any) => String(label.name ?? "")).filter((label: string) => label && label !== "ready-for-agent") : [];
+			const hadReadyLabel = Array.isArray(issue.labels) && issue.labels.some((label: any) => label?.name === "ready-for-agent");
+			if (assignees.includes(login) && !hadReadyLabel) return { status: "existing", number, assignee: login };
+			if (assignees.length > 0 && !assignees.includes(login)) throw new Error(`Issue #${number} is already assigned to ${assignees.join(", ")}.`);
+			return await ghJsonWithInput(cwd, ["api", "--method", "PATCH", `repos/${repo}/issues/${number}`], { assignees: [login], labels });
+		}
 		case "close_issue": {
 			const closed = await ghJsonWithInput(cwd, ["api", "--method", "PATCH", `repos/${repo}/issues/${issueNumber(mutation.number)}`], { state: "closed" });
 			if (mutation.comment?.trim()) await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues/${issueNumber(mutation.number)}/comments`], { body: mutation.comment });
@@ -551,6 +576,7 @@ function mutationSummary(mutation: GitHubIssueMutation, apply: boolean, result: 
 	const mode = apply ? "Applied" : "Dry run";
 	if (mutation.op === "ensure_label") return `${mode}: ${result?.status === "existing" ? "label already existed" : "ensure label"} ${mutation.name}.`;
 	if (mutation.op === "comment") return `${mode}: comment on #${mutation.number}.`;
+	if (mutation.op === "claim_issue") return `${mode}: claim #${mutation.number} for the authenticated GitHub user and remove ready-for-agent.`;
 	if (mutation.op === "close_issue") return `${mode}: close #${mutation.number}.`;
 	const issue = result?.number ? ` #${result.number}${result.html_url ? ` (${result.html_url})` : ""}` : mutation.op === "create_issue" ? ` ${mutation.title}` : ` #${mutation.number}`;
 	return `${mode}: ${mutation.op.replaceAll("_", " ")}${issue}.`;

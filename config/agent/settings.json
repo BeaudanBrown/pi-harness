@@ -3,6 +3,7 @@
   "extensions": [
     "./extensions/web-search/index.ts",
     "./extensions/github-issues/index.ts",
+    "./extensions/aloop/index.ts",
     "./extensions/diagram-tools/index.ts",
     "./extensions/worker-runner/index.ts",
     "./extensions/review-agents/index.ts",

@@ -111,6 +111,7 @@ resource_args=(
   --extension "${piRPackage.resourcePaths.extension}"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts"
+  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/aloop/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts"

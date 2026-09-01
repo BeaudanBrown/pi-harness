@@ -412,6 +412,7 @@
             test -d config/agent/extensions
             test -f config/agent/extensions/web-search/index.ts
             test -f config/agent/extensions/github-issues/index.ts
+            test -f config/agent/extensions/aloop/index.ts
             test -f config/agent/extensions/diagram-tools/index.ts
             test -f config/agent/extensions/worker-runner/index.ts
             test -f config/agent/extensions/review-agents/index.ts
@@ -428,6 +429,7 @@
             test -d config/agent/themes
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts
+            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/aloop/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts
@@ -572,6 +574,7 @@
             grep -F -- "--extension \"${piRPackage.resourcePaths.extension}\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/aloop/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
@@ -605,6 +608,8 @@
             grep -F 'bash: { command: "bash-language-server", args: ["start"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
             grep -F 'const runningStatuses = statuses.filter((s) => s.running);' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/tools/symbols.ts >/dev/null
             jq -e '.extensions | index("./extensions/github-issues/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/aloop/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/diagram-tools/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
@@ -646,6 +651,7 @@
               node --test \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/aloop-worker.test.js" \
+                "$test_build_dir/tests/aloop-supervisor.test.js" \
                 "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
                 "$test_build_dir/tests/remote-session-state.test.js" \
