@@ -202,7 +202,7 @@
               options = {
                 assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
                 environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
-                systemd.lingerUsers = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; };
+                users.users = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
                 systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
               };
             }
@@ -232,7 +232,7 @@
         managedSessionCoordinatorPi = builtins.elemAt managedSessionService.path 1;
         managedSessionModuleReport = pkgs.writeText "pi-harness-managed-session-module-test.json" (builtins.toJSON {
           assertions = map (item: item.assertion) managedSessionModuleTest.config.assertions;
-          lingerUsers = managedSessionModuleTest.config.systemd.lingerUsers;
+          relayUserLingers = managedSessionModuleTest.config.users.users.operator.linger;
           serviceEnvironment = managedSessionService.environment;
           servicePathCount = builtins.length managedSessionService.path;
           execStart = managedSessionService.serviceConfig.ExecStart;
@@ -676,7 +676,7 @@
             test -x ${managedSessionPiWrapper}/bin/pi
             test -x ${managedSessionStatusWrapper}/bin/pi-managed-session-status
             grep -F 'cursorConfigured' ${managedSessionStatusWrapper}/bin/pi-managed-session-status >/dev/null
-            jq -e '(.assertions | all) and .lingerUsers == ["operator"] and .servicePathCount == 4 and (.hasGeneralEnvironmentFile | not) and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"' \
+            jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4 and (.hasGeneralEnvironmentFile | not) and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"' \
               ${managedSessionModuleReport} >/dev/null
             managed_relay_launch=$(jq -r .execStart ${managedSessionModuleReport})
             grep -F 'credential file may contain only one PI_MATRIX_ACCESS_TOKEN assignment' "$managed_relay_launch" >/dev/null

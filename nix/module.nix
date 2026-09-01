@@ -378,7 +378,9 @@ in
       }
     ];
 
-    systemd.lingerUsers = lib.mkIf managedSessionsEnabled (lib.optional (cfg.managedSessions.user != null) cfg.managedSessions.user);
+    users.users = lib.optionalAttrs (managedSessionsEnabled && cfg.managedSessions.user != null) {
+      ${cfg.managedSessions.user}.linger = true;
+    };
 
     systemd.user.services.pi-managed-session-relay = lib.mkIf managedSessionsEnabled {
       description = "Boot-persistent Pi managed-session host relay";
