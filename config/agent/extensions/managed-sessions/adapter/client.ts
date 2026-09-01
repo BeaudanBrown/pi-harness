@@ -46,7 +46,7 @@ export class BoundAdapterClient {
 	#closing = false;
 	#inboundWork: Promise<void> = Promise.resolve();
 
-	constructor(private readonly options: BoundAdapterOptions) {}
+	constructor(protected readonly options: BoundAdapterOptions) {}
 
 	get connected(): boolean {
 		return this.#socket !== undefined && !this.#socket.destroyed && this.#attachmentId !== undefined;
@@ -146,7 +146,7 @@ export class BoundAdapterClient {
 		await waitForClose(socket, 1_000);
 	}
 
-	private request(envelope: ManagedSessionEnvelope): Promise<ManagedSessionEnvelope> {
+	protected request(envelope: ManagedSessionEnvelope): Promise<ManagedSessionEnvelope> {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return Promise.reject(new ManagedAdapterError("Relay connection is unavailable"));
 		return new Promise((resolve, reject) => {
@@ -211,6 +211,18 @@ export class BoundAdapterClient {
 		}
 		this.#pending.clear();
 		if (!this.#closing) this.options.onDisconnect?.();
+	}
+}
+
+export class CoordinatorAdapterClient extends BoundAdapterClient {
+	async lifecycleRequest(request: Record<string, unknown>): Promise<ManagedSessionEnvelope> {
+		const result = await this.request({
+			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: messageId("lifecycle"), conversationId: this.options.binding.conversationId,
+			role: "coordinator_adapter", type: "lifecycle.request", payload: { request },
+		});
+		if (result.type !== "lifecycle.result") throw new ManagedAdapterError("Relay did not return a lifecycle result", "invalid_response");
+		return result;
 	}
 }
 

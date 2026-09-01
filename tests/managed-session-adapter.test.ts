@@ -255,7 +255,7 @@ test("manual self binding is a strict one-shot relay operation", async (t) => {
 	assert.equal(relay.frames[0]?.payload.attachmentNonce, nonce);
 });
 
-test("ordinary and coordinator extension profiles expose no ordinary lifecycle tools or remote-off command", () => {
+test("only the coordinator profile exposes the bounded managed lifecycle tools", () => {
 	for (const role of ["ordinary_adapter", "coordinator_adapter"] as const) {
 		const commands = new Map<string, unknown>();
 		const tools: string[] = [];
@@ -268,7 +268,10 @@ test("ordinary and coordinator extension profiles expose no ordinary lifecycle t
 		createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: "/tmp/relay.sock" })(api);
 		assert.deepEqual([...commands.keys()], ["remote"]);
 		assert.equal(commands.has("remote-off"), false);
-		assert.deepEqual(tools, []);
+		assert.deepEqual(tools, role === "ordinary_adapter" ? [] : [
+			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_session_start",
+			"remote_session_resume", "remote_session_stop", "remote_session_delete",
+		]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));
 	}
 });

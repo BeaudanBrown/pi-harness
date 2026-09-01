@@ -15,6 +15,7 @@ import { launchCoordinator } from "./coordinator-launcher.js";
 import { CoordinatorRouter } from "./coordinator-router.js";
 import { ConversationManifestStore } from "./manifest-store.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
+import { HostLifecycle } from "./host-lifecycle.js";
 import { managedMatrixConfigFromEnvironment, ManagedMatrixClient } from "./matrix-client.js";
 import { peerUidFromHelper } from "./peer-uid.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
@@ -52,6 +53,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	const registry = new RelayRegistry(hostId, runtimeDirectory, new ConversationManifestStore(manifestDirectory));
 	let server: ManagedSessionIpcServer | undefined;
 	let coordinatorRouter: CoordinatorRouter | undefined;
+	let hostLifecycle: HostLifecycle | undefined;
 	try {
 		await registry.load();
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
@@ -75,7 +77,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		}
 		const transcriptProjector = new TranscriptProjector(registry, matrix);
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -90,7 +92,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			expectedUid,
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
 			onAttachment: async (attachment) => {
-				if (coordinator && attachment.conversationId === coordinator.manifest.conversationId) await coordinatorRouter?.attachmentReady();
+				await coordinatorRouter?.attachmentReady(attachment.conversationId);
 			},
 			onUnboundEnvelope: async (envelope) => {
 				if (envelope.type !== "self.bind" || envelope.role !== "ordinary_adapter") return undefined;
@@ -148,6 +150,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						entryId: envelope.payload.entryId, status: "projected",
 					});
 				}
+				if (envelope.type === "lifecycle.request") {
+					if (!hostLifecycle || attachment.role !== "coordinator_adapter") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle is unavailable");
+					return response(attachment.conversationId, envelope.messageId, "lifecycle.result", await hostLifecycle.request(envelope));
+				}
 				if (envelope.type === "self.status") {
 					return response(attachment.conversationId, envelope.messageId, "self.result", {
 						operation: "self.status", status: "ok", conversationState: registry.conversationState(attachment.conversationId),
@@ -170,30 +176,32 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		});
 		await server.start();
 		if (coordinator) {
+			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(runtimeDirectory, "project-sessions");
+			hostLifecycle = new HostLifecycle({
+				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
+				socketPath: server.socketPath, registry, matrix, server, environment,
+			});
 			const identity = coordinator;
-			coordinatorRouter = new CoordinatorRouter(identity.manifest, registry, matrix, server, async () => {
+			coordinatorRouter = new CoordinatorRouter(identity.manifest, registry, matrix, server, async (manifest) => {
 				try {
-					await launchCoordinator({
-						launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(),
-						manifest: identity.manifest,
-						sessionFile: identity.sessionFile,
-						workspaceDirectory: identity.workspaceDirectory,
-						socketPath: server!.socketPath,
-						registry,
-						environment,
+					if (manifest.kind === "project") await hostLifecycle!.wake(manifest);
+					else await launchCoordinator({
+						launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), manifest,
+						sessionFile: identity.sessionFile, workspaceDirectory: identity.workspaceDirectory,
+						socketPath: server!.socketPath, registry, environment,
 					});
 				} catch (error) {
-					await registry.recordLaunchError(identity.manifest.conversationId, "launch_failed",
-						error instanceof Error ? error.message : "Coordinator launch failed");
+					await registry.recordLaunchError(manifest.conversationId, "launch_failed",
+						error instanceof Error ? error.message : "Managed conversation launch failed");
 					throw error;
 				}
-			}, async (sourceId) => {
-				await matrix.sendText(identity.manifest.roomId,
-					deriveMatrixTransactionId(identity.manifest.conversationId, `${sourceId}:launch-failed`, 0),
-					"Coordinator wake failed; queued input remains available for retry.");
+			}, async (sourceId, manifest) => {
+				await matrix.sendText(manifest.roomId,
+					deriveMatrixTransactionId(manifest.conversationId, `${sourceId}:launch-failed`, 0),
+					"Managed conversation wake failed; queued input remains available for retry.");
 			});
 			coordinatorRouter.start();
-			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady();
+			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
 	} catch (error) {
 		await coordinatorRouter?.stop().catch(() => undefined);

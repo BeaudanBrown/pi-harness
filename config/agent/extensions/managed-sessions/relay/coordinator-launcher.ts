@@ -45,6 +45,7 @@ export async function launchCoordinator(options: {
 		stdio: ["pipe", "pipe", "pipe"],
 		env: {
 			...launcherEnvironment,
+			PI_MANAGED_SESSION_LAUNCH_ROLE: "coordinator",
 			PI_MANAGED_SESSIONS_SOCKET: options.socketPath,
 			PI_MANAGED_SESSION_CONVERSATION_ID: options.manifest.conversationId,
 			PI_MANAGED_SESSION_CONCEPT: options.manifest.concept,

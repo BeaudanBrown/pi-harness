@@ -212,9 +212,19 @@ session before creating the host Space and coordinator room. Authorized room
 text is persisted before the trusted `tmux_project managed
 coordinator-ensure` hook recreates `default/coordinator`. The coordinator
 session and binding survive restart; an inaccessible coordinator room is
-replaced against that same session and host Space. Project lifecycle operations
-remain implemented by the coordinator-only profile in subsequent managed
-lifecycle work.
+replaced against that same session and host Space.
+
+The coordinator-only profile exposes typed workspace and conversation
+list/status/start/resume/stop/delete tools. Starting a project conversation
+accepts only a named root, immediate-child workspace, safe relative cwd,
+optional project Space name, and immutable concept. The relay resolves placement
+through the fixed launcher, durably creates the Pi session and binding boundary
+before Matrix rooms, and launches the ordinary adapter through the trusted
+`direnv exec`/Pi dispatch. No objective or orientation is lifecycle metadata:
+the first Matrix text is the first task. Project room text routes directly
+without host addressing; dormant input resumes the same persisted session.
+Stop terminates only the exact managed window, while confirmed bridge deletion
+leaves the Pi session, process/window, workspace, and project files intact.
 
 ## Matrix Host Bot Runtime
 

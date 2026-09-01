@@ -103,7 +103,7 @@ let
     exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
   '';
 
-  coordinatorPi = pkgs.writeShellScriptBin "pi" ''
+  coordinatorPi = pkgs.writeShellScriptBin "pi-managed-coordinator" ''
     set -euo pipefail
     : "''${PI_MANAGED_COORDINATOR_CWD:?PI_MANAGED_COORDINATOR_CWD is required}"
     : "''${PI_MANAGED_COORDINATOR_SESSION_FILE:?PI_MANAGED_COORDINATOR_SESSION_FILE is required}"
@@ -113,6 +113,37 @@ let
       --extension "${managedExtensions.coordinator}" \
       --session "$PI_MANAGED_COORDINATOR_SESSION_FILE" \
       "$@"
+  '';
+
+  managedPiDispatch = pkgs.writeShellScriptBin "pi" ''
+    set -euo pipefail
+    case "''${PI_MANAGED_SESSION_LAUNCH_ROLE:-}" in
+      coordinator)
+        exec ${coordinatorPi}/bin/pi-managed-coordinator "$@"
+        ;;
+      project)
+        : "''${PI_MANAGED_PROJECT_SESSION_FILE:?PI_MANAGED_PROJECT_SESSION_FILE is required}"
+        exec ${managedRawPi}/bin/pi \
+          --no-extensions \
+          --extension "${managedExtensions.ordinary}" \
+          --session "$PI_MANAGED_PROJECT_SESSION_FILE" \
+          "$@"
+        ;;
+      *)
+        echo "pi-managed-session: trusted launch role is required" >&2
+        exit 1
+        ;;
+    esac
+  '';
+
+  managedDirenv = pkgs.writeShellScriptBin "direnv" ''
+    set -euo pipefail
+    if [[ "''${1:-}" == exec && "''${3:-}" == pi ]]; then
+      cwd=$2
+      shift 3
+      exec ${pkgs.direnv}/bin/direnv exec "$cwd" ${managedPiDispatch}/bin/pi "$@"
+    fi
+    exec ${pkgs.direnv}/bin/direnv "$@"
   '';
 
   managedRelayLaunch = pkgs.writeShellScript "pi-managed-session-relay-launch" ''
@@ -148,6 +179,7 @@ let
     export PI_MANAGED_SESSIONS_MANIFEST_DIR="$(expand_home ${lib.escapeShellArg cfg.managedSessions.manifestDirectory})"
     export PI_MANAGED_COORDINATOR_WORKSPACE_DIR="$(expand_home ${lib.escapeShellArg cfg.managedSessions.coordinator.workspaceDirectory})"
     export PI_MANAGED_COORDINATOR_SESSION_FILE="$(expand_home ${lib.escapeShellArg cfg.managedSessions.coordinator.sessionFile})"
+    export PI_MANAGED_PROJECT_SESSION_DIR="$(expand_home ${lib.escapeShellArg cfg.managedSessions.projectSessionDirectory})"
     exec ${lib.getExe managedRelayPackage}
   '';
 
@@ -273,6 +305,12 @@ in
         default = { };
         example = { projects = "/home/operator/documents/projects"; };
         description = "Named immediate-child workspace roots passed to trusted host lifecycle launchers.";
+      };
+
+      projectSessionDirectory = lib.mkOption {
+        type = lib.types.nonEmptyStr;
+        default = "%h/.local/state/pi-managed-sessions/project-sessions";
+        description = "Private host-local directory containing coordinator-created persisted project Pi sessions.";
       };
 
       manifestDirectory = lib.mkOption {
@@ -414,7 +452,7 @@ in
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       unitConfig.ConditionUser = nonNullString cfg.managedSessions.user;
-      path = [ coordinatorPi managedLauncherPackage pkgs.direnv pkgs.coreutils ];
+      path = [ managedDirenv managedPiDispatch managedLauncherPackage pkgs.coreutils ];
       environment = {
         PI_MANAGED_SESSIONS_HOST_ID = nonNullString cfg.managedSessions.hostId;
         PI_MANAGED_SESSIONS_WORKSPACE_ROOTS = builtins.toJSON cfg.managedSessions.workspaceRoots;

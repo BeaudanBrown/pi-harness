@@ -1,12 +1,13 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_PROJECTION_ENTRIES,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
-import { BoundAdapterClient, ManagedAdapterError, requestSelfBind } from "./client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind } from "./client.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	BINDING_ENTRY_TYPE,
@@ -110,6 +111,44 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const activeDeliveries = new Map<string, string>();
 		const pendingUserPersistence: DeliveryMarker[] = [];
 		const inFlightDeliveries = new Set<string>();
+
+		const lifecycle = async (request: Record<string, unknown>) => {
+			if (!binding || !client?.connected) throw new ManagedAdapterError("Coordinator relay connection is unavailable");
+			const coordinatorClient = client;
+			if (!(coordinatorClient instanceof CoordinatorAdapterClient)) throw new ManagedAdapterError("Coordinator lifecycle capability is unavailable");
+			const result = await coordinatorClient.lifecycleRequest(request);
+			return { content: [{ type: "text" as const, text: JSON.stringify(result.payload, null, 2) }], details: result.payload };
+		};
+		if (role === "coordinator_adapter") {
+			pi.registerTool({ name: "remote_workspace_list", label: "List Managed Workspaces",
+				description: "List immediate-child workspaces available for managed project conversations.", parameters: Type.Object({}, { additionalProperties: false }),
+				execute: async () => lifecycle({ operation: "workspace.list" }) });
+			pi.registerTool({ name: "remote_session_list", label: "List Managed Conversations",
+				description: "List all host-owned managed conversations and lifecycle states.", parameters: Type.Object({}, { additionalProperties: false }),
+				execute: async () => lifecycle({ operation: "conversation.list" }) });
+			pi.registerTool({ name: "remote_session_status", label: "Managed Conversation Status",
+				description: "Inspect one managed conversation lifecycle state.", parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "conversation.status", targetConversationId: params.conversationId }) });
+			pi.registerTool({ name: "remote_session_start", label: "Start Managed Conversation",
+				description: "Create an idle managed Pi conversation in an existing depth-one workspace. Do not include an objective or task context; the first Matrix message is the first task.",
+				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }),
+					relativeCwd: Type.Optional(Type.String({ maxLength: 512 })), projectSpace: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+					concept: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
+				execute: async (toolCallId, params) => lifecycle({ operation: "conversation.start",
+					creationKey: `coordinator-${createHash("sha256").update("pi-managed-sessions:coordinator-tool-call:v1\0").update(toolCallId).digest("hex").slice(0, 32)}`,
+					concept: params.concept, placement: { rootKey: params.rootKey, workspace: params.workspace, relativeCwd: params.relativeCwd ?? "" },
+					...(params.projectSpace ? { projectSpace: params.projectSpace } : {}) }) });
+			for (const operation of ["resume", "stop"] as const) pi.registerTool({
+				name: `remote_session_${operation}`, label: `${operation === "resume" ? "Resume" : "Stop"} Managed Conversation`,
+				description: `${operation === "resume" ? "Resume the same persisted Pi session in a new managed window" : "Terminate only the exact managed Pi window and leave the conversation dormant"}.`,
+				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: `conversation.${operation}`, targetConversationId: params.conversationId }),
+			});
+			pi.registerTool({ name: "remote_session_delete", label: "Delete Managed Bridge",
+				description: "Delete only relay/Matrix bridge state after explicit confirmation. Pi session, process, managed window, workspace, and project files are preserved.",
+				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "conversation.delete", targetConversationId: params.conversationId, confirmed: params.confirm }) });
+		}
 
 		function setStatus(ctx: ExtensionContext): void {
 			if (!ctx.hasUI) return;
@@ -309,6 +348,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				const reason = String(envelope.payload.reason);
 				ctx.abort();
 				if (reason === "stop") ctx.shutdown();
+				if (reason === "bridge_delete") {
+					appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId: binding.sessionId, reason: "bridge_delete" });
+					const detached = client;
+					binding = undefined; client = undefined; setStatus(ctx);
+					await detached?.close("bridge_delete");
+				}
 				return;
 			}
 			throw new ManagedAdapterError(`Unsupported relay operation ${envelope.type}`, "invalid_message");
@@ -331,7 +376,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				notify(ctx, "Managed-session attachment nonce is unavailable", "error");
 				return;
 			}
-			const next = new BoundAdapterClient({
+			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
+			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding,
 				onEnvelope: handleEnvelope,
 				onDisconnect: () => { setStatus(ctx); scheduleReconnect(ctx); },

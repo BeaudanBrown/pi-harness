@@ -187,6 +187,35 @@ export class RelayRegistry {
 		return this.runtimeConversation(conversationId).state;
 	}
 
+	listManifests(): ConversationManifest[] {
+		return [...this.manifests.values()].map((manifest) => structuredClone(manifest));
+	}
+
+	listConversations(): Array<{ conversationId: string; concept: string; kind: "project" | "coordinator"; state: "starting" | "active" | "dormant" }> {
+		return [...this.manifests.values()].map((manifest) => ({
+			conversationId: manifest.conversationId, concept: manifest.concept, kind: manifest.kind,
+			state: this.runtimeConversation(manifest.conversationId).state,
+		}));
+	}
+
+	async cancelPendingInputs(conversationId: string): Promise<void> {
+		await this.mutate(async () => {
+			for (const input of this.runtimeConversation(conversationId).pendingInputs) {
+				if (input.status !== "completed" && input.status !== "cancelled") input.status = "cancelled";
+			}
+		});
+	}
+
+	async markDormant(conversationId: string, clearManagedWindow = false): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			this.liveConnections.delete(conversationId);
+			conversation.state = "dormant";
+			conversation.attachment = null;
+			if (clearManagedWindow) conversation.managedWindow = null;
+		});
+	}
+
 	async createProjectConversation(manifest: ConversationManifest, nonce: string): Promise<ConversationManifest> {
 		if (manifest.kind !== "project" || manifest.ownerHostId !== this.hostId || !manifest.placement) {
 			throw new RelayRegistryError("permission_denied", "Self binding requires a host-owned project manifest");
@@ -312,6 +341,10 @@ export class RelayRegistry {
 				at: new Date().toISOString(),
 			};
 		});
+	}
+
+	managedWindow(conversationId: string): RuntimeConversation["managedWindow"] {
+		return structuredClone(this.runtimeConversation(conversationId).managedWindow);
 	}
 
 	pendingInputs(conversationId: string): RuntimeConversation["pendingInputs"] {
