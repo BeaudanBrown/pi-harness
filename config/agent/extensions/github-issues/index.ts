@@ -3,6 +3,11 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	retrieveGitHubEpicContext,
+	type GitHubEpicContext,
+	type GitHubEpicContextOptions,
+} from "./github-context.js";
 
 const MARKER_PREFIX = "pi-harness-plan";
 
@@ -183,6 +188,21 @@ async function currentRepo(cwd: string, requested?: string): Promise<string> {
 		throw new Error(`Cross-repository mutation is blocked: current checkout is ${repo}, requested ${requested}.`);
 	}
 	return repo;
+}
+
+/** Read aloop context only from the repository belonging to the current checkout. */
+export async function retrieveCurrentRepositoryEpicContext(
+	cwd: string,
+	epicNumber: number,
+	requestedRepo?: string,
+	options?: GitHubEpicContextOptions,
+): Promise<GitHubEpicContext> {
+	const repo = await currentRepo(cwd, requestedRepo);
+	return await retrieveGitHubEpicContext(
+		async (endpoint) => await ghJson(cwd, ["api", `repos/${repo}/${endpoint}`]),
+		epicNumber,
+		options,
+	);
 }
 
 export function issueMarker(planKey: string, issueKey: string): string {

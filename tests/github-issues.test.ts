@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 import { bodyWithMarker, frontierIssueNumbers, issueMarker, migrationIssuePlan, validateIssuePlan, type MigrationRecord } from "../config/agent/extensions/github-issues/index.js";
+import { retrieveGitHubEpicContext } from "../config/agent/extensions/github-issues/github-context.js";
 
 test("issue plans receive stable provenance markers", () => {
 	assert.equal(issueMarker("migration-2026", "closed-epic"), "<!-- pi-harness-plan:migration-2026/closed-epic -->");
@@ -54,6 +55,94 @@ test("frontier selection requires an open, ready, unassigned issue without block
 		{ number: 4, state: "open", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 1 } },
 		{ number: 5, state: "closed", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 0 } },
 	]), [2]);
+});
+
+test("recursive epic context normalizes nested issues and selects executable leaves", async () => {
+	const issues = new Map([
+		[1, { number: 1, title: "Epic", body: "Goal", state: "open", labels: [], assignee: null, comments: 0 }],
+		[2, { number: 2, title: "Nested parent", body: "Parent", state: "open", labels: [{ name: "enhancement" }], assignee: { login: "agent" }, comments: 0 }],
+		[3, { number: 3, title: "Closed leaf", body: "Done", state: "closed", labels: [], assignee: null, comments: 0 }],
+		[4, { number: 4, title: "Blocked leaf", body: "Wait", state: "open", labels: [], assignee: null, comments: 0 }],
+		[5, { number: 5, title: "Ready leaf", body: "Build", state: "open", labels: [{ name: "ready-for-agent" }], assignee: null, comments: 4 }],
+	]);
+	const children = new Map([[1, [issues.get(3), issues.get(2)]], [2, [issues.get(5), issues.get(4)]]]);
+	const blockers = new Map([[4, [{ number: 9, title: "Open blocker", state: "open" }]]]);
+	const comments = new Map([[5, [
+		{ id: 1, body: "first", created_at: "2026-01-01", html_url: "comment/1", user: { login: "one" } },
+		{ id: 2, body: "second", created_at: "2026-01-02", html_url: "comment/2", user: { login: "two" } },
+		{ id: 3, body: "third-long", created_at: "2026-01-03", html_url: "comment/3", user: { login: "three" } },
+		{ id: 4, body: "fourth", created_at: "2026-01-04", html_url: "comment/4", user: { login: "four" } },
+	]]]);
+	const client = async (endpoint: string): Promise<unknown> => {
+		const number = Number(endpoint.match(/^issues\/(\d+)/)?.[1]);
+		if (endpoint.includes("/sub_issues")) return children.get(number) ?? [];
+		if (endpoint.includes("/dependencies/blocked_by")) return blockers.get(number) ?? [];
+		if (endpoint.includes("/comments")) return comments.get(number) ?? [];
+		return issues.get(number);
+	};
+
+	const context = await retrieveGitHubEpicContext(client, 1, { commentLimit: 2, commentBodyLimit: 8 });
+
+	assert.deepEqual(context.issues.map((issue) => issue.number), [1, 2, 3, 4, 5]);
+	assert.deepEqual(context.executableLeaves, [5]);
+	assert.deepEqual(context.issues.find((issue) => issue.number === 5)?.parent, { number: 2, title: "Nested parent", state: "open" });
+	assert.deepEqual(context.issues.find((issue) => issue.number === 4)?.blockers, [{ number: 9, title: "Open blocker", state: "open" }]);
+	assert.deepEqual(context.issues.find((issue) => issue.number === 5)?.recentHandoffs.map((comment) => comment.id), [3, 4]);
+	assert.equal(context.issues.find((issue) => issue.number === 5)?.recentHandoffs[0]?.body, "third-l…");
+});
+
+test("epic context paginates sub-issues and blockers before selecting leaves", async () => {
+	const epic = { number: 100, title: "Large epic", state: "open", labels: [], comments: 0 };
+	const descendants = Array.from({ length: 101 }, (_, index) => ({
+		number: 101 + index,
+		title: `Child ${101 + index}`,
+		state: index === 100 ? "open" : "closed",
+		labels: [],
+		comments: 0,
+	}));
+	const blockers = Array.from({ length: 101 }, (_, index) => ({
+		number: 300 + index,
+		title: `Blocker ${300 + index}`,
+		state: index === 100 ? "open" : "closed",
+	}));
+	const issues = new Map([[epic.number, epic], ...descendants.map((issue) => [issue.number, issue] as const)]);
+	const client = async (endpoint: string): Promise<unknown> => {
+		const number = Number(endpoint.match(/^issues\/(\d+)/)?.[1]);
+		const page = Number(new URLSearchParams(endpoint.split("?")[1] ?? "").get("page") ?? 1);
+		if (endpoint.includes("/sub_issues")) {
+			const values = number === epic.number ? descendants : [];
+			return values.slice((page - 1) * 100, page * 100);
+		}
+		if (endpoint.includes("/dependencies/blocked_by")) {
+			const values = number === 201 ? blockers : [];
+			return values.slice((page - 1) * 100, page * 100);
+		}
+		if (endpoint.includes("/comments")) return [];
+		return issues.get(number);
+	};
+
+	const context = await retrieveGitHubEpicContext(client, epic.number);
+	assert.equal(context.issues.length, 102);
+	assert.equal(context.issues.find((issue) => issue.number === 201)?.blockers.length, 101);
+	assert.deepEqual(context.executableLeaves, []);
+});
+
+test("epic context reports no executable leaf when descendants are closed or blocked", async () => {
+	const issues = new Map([
+		[10, { number: 10, title: "Epic", state: "open", labels: [], comments: 0 }],
+		[11, { number: 11, title: "Closed", state: "closed", labels: [], comments: 0 }],
+		[12, { number: 12, title: "Blocked", state: "open", labels: [], comments: 0 }],
+	]);
+	const client = async (endpoint: string): Promise<unknown> => {
+		const number = Number(endpoint.match(/^issues\/(\d+)/)?.[1]);
+		if (endpoint.includes("/sub_issues")) return number === 10 ? [issues.get(11), issues.get(12)] : [];
+		if (endpoint.includes("/dependencies/blocked_by")) return number === 12 ? [{ number: 13, title: "Blocker", state: "open" }] : [];
+		if (endpoint.includes("/comments")) return [];
+		return issues.get(number);
+	};
+
+	const context = await retrieveGitHubEpicContext(client, 10);
+	assert.deepEqual(context.executableLeaves, []);
 });
 
 test("issue plans reject duplicate keys before mutation", () => {
