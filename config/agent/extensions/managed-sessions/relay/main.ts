@@ -5,7 +5,6 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
-	deriveMatrixTransactionId,
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
@@ -16,6 +15,7 @@ import { CoordinatorRouter } from "./coordinator-router.js";
 import { ConversationManifestStore } from "./manifest-store.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { HostLifecycle } from "./host-lifecycle.js";
+import { RelayEventProjector } from "./event-projector.js";
 import { managedMatrixConfigFromEnvironment, ManagedMatrixClient } from "./matrix-client.js";
 import { peerUidFromHelper } from "./peer-uid.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
@@ -76,8 +76,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			}, registry, matrix);
 		}
 		const transcriptProjector = new TranscriptProjector(registry, matrix);
+		const eventProjector = new RelayEventProjector(registry, matrix);
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -138,8 +139,14 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			},
 			onEnvelope: async (envelope, attachment) => {
 				if (envelope.type === "input.acknowledge") {
-					const payload = envelope.payload as { deliveryId: string; status: string; piEntryId?: string };
-					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId);
+					const payload = envelope.payload as { deliveryId: string; status: string; piEntryId?: string; completionKind?: string };
+					const input = registry.pendingInputs(attachment.conversationId).find((candidate) => candidate.deliveryId === payload.deliveryId);
+					const command = payload.completionKind === "extension_command" ? input?.body?.match(/^\/([^\s]+)/)?.[1] : undefined;
+					if (payload.completionKind === "extension_command" && !command) {
+						throw new RelayRegistryError("invalid_state", "Extension-command completion did not match a command delivery");
+					}
+					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId, payload.completionKind);
+					if (command) await eventProjector.projectNotice(attachment.conversationId, `${payload.deliveryId}:command`, `Command dispatched: /${command}`);
 					return response(attachment.conversationId, envelope.messageId, "input.result", {
 						deliveryId: payload.deliveryId, status: payload.status,
 					});
@@ -148,6 +155,12 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					await transcriptProjector.project(envelope);
 					return response(attachment.conversationId, envelope.messageId, "transcript.acknowledge", {
 						entryId: envelope.payload.entryId, status: "projected",
+					});
+				}
+				if (envelope.type === "checkpoint.offer") {
+					await eventProjector.projectCheckpoint(envelope);
+					return response(attachment.conversationId, envelope.messageId, "checkpoint.acknowledge", {
+						checkpointId: envelope.payload.checkpointId, status: "projected",
 					});
 				}
 				if (envelope.type === "lifecycle.request") {
@@ -196,10 +209,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					throw error;
 				}
 			}, async (sourceId, manifest) => {
-				await matrix.sendText(manifest.roomId,
-					deriveMatrixTransactionId(manifest.conversationId, `${sourceId}:launch-failed`, 0),
+				await eventProjector.projectNotice(manifest.conversationId, `${sourceId}:launch-failed`,
 					"Managed conversation wake failed; queued input remains available for retry.");
-			});
+			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body));
 			coordinatorRouter.start();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}

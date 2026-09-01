@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { RemoteCheckpointSchema, renderRemoteCheckpoint, validateRemoteCheckpoint } from "../checkpoint.js";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_PROJECTION_ENTRIES,
@@ -10,6 +11,7 @@ import {
 import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind } from "./client.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
+	CHECKPOINT_ENTRY_TYPE,
 	BINDING_ENTRY_TYPE,
 	DELIVERY_ENTRY_TYPE,
 	PROJECTION_DIAGNOSTIC_ENTRY_TYPE,
@@ -26,6 +28,7 @@ import {
 	normalizeConcept,
 	persistedEntryId,
 	restoreBindingAttempt,
+	restoreCheckpoints,
 	restoreDeliveries,
 	restoreProjections,
 	restoreSessionBinding,
@@ -104,13 +107,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let stopped = false;
 		let deliveries = new Map<string, DeliveryMarker>();
 		let projections = restoreProjections([]);
-		let projectionRun: Promise<void> | undefined;
+		let checkpoints = restoreCheckpoints([]);
+	let projectionRun: Promise<void> | undefined;
 		let projectionRequestedContext: ExtensionContext | undefined;
 		let projectionRetryTimer: NodeJS.Timeout | undefined;
 		let projectionRetryAttempt = 0;
 		const activeDeliveries = new Map<string, string>();
 		const pendingUserPersistence: DeliveryMarker[] = [];
 		const inFlightDeliveries = new Set<string>();
+		const persistedRecoveryPending = new Set<string>();
+		const expandedRecoveryPending = new Set<string>();
 
 		const lifecycle = async (request: Record<string, unknown>) => {
 			if (!binding || !client?.connected) throw new ManagedAdapterError("Coordinator relay connection is unavailable");
@@ -150,6 +156,48 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				execute: async (_id, params) => lifecycle({ operation: "conversation.delete", targetConversationId: params.conversationId, confirmed: params.confirm }) });
 		}
 
+		pi.registerTool({
+			name: "remote_checkpoint",
+			label: "Remote Checkpoint",
+			description: "Send one durable question, blocker, or issue-completion boundary to this managed Matrix conversation and hard-stop the current run pending a new reply.",
+			promptSnippet: "Use remote_checkpoint only for an intentional question, blocked state, or issue-completion approval boundary.",
+			promptGuidelines: [
+				"Do not mirror routine progress, thinking, tool activity, or ordinary terminal answers to Matrix.",
+				"Use issue_complete only with objective, implementation, verification, caveat, Git state, and exact approval-request evidence.",
+				"Omit code and diffs unless the operator explicitly requested them.",
+			],
+			parameters: RemoteCheckpointSchema,
+			async execute(toolCallId, params, _signal, _onUpdate, ctx) {
+				if (!binding || !client?.connected) throw new ManagedAdapterError("remote_checkpoint requires an active managed Matrix conversation");
+				for (const pending of [...pendingUserPersistence]) {
+					const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), pending.deliveryId);
+					if (piEntryKey) {
+						pendingUserPersistence.splice(pendingUserPersistence.indexOf(pending), 1);
+						persistExpanded(ctx, pending, piEntryKey);
+					}
+				}
+				const originDeliveryId = [...activeDeliveries.keys()].at(-1);
+				if (!originDeliveryId) throw new ManagedAdapterError("remote_checkpoint requires an active Matrix delivery");
+				const checkpointInput = validateRemoteCheckpoint(params);
+				renderRemoteCheckpoint(checkpointInput);
+				const checkpoint = checkpointInput as unknown as Record<string, unknown>;
+				const checkpointId = `checkpoint-${createHash("sha256").update("pi-managed-sessions:checkpoint:v1\0").update(binding.conversationId).update("\0").update(originDeliveryId).update("\0").update(toolCallId).digest("hex").slice(0, 32)}`;
+				const offered = { version: MANAGED_SESSION_STATE_VERSION, checkpointId, originDeliveryId, checkpoint, status: "offered" as const };
+				appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, offered); checkpoints.set(checkpointId, offered);
+				try {
+					await client.offerCheckpoint({ checkpointId, originDeliveryId, checkpoint });
+					const projected = { ...offered, status: "projected" as const };
+					appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, projected); checkpoints.set(checkpointId, projected);
+					const previous = deliveries.get(originDeliveryId);
+					if (!previous?.piEntryId) throw new ManagedAdapterError("Checkpoint origin was not durably persisted");
+					const completed = { ...previous, status: "completed" as const };
+					recordDelivery(ctx, completed); activeDeliveries.delete(originDeliveryId); acknowledge(completed);
+					return { content: [{ type: "text" as const, text: "Remote checkpoint projected. The run is stopped pending new Matrix input." }],
+						details: { checkpointId, kind: checkpoint.kind, waiting: true } };
+				} finally { ctx.abort(); }
+			},
+		});
+
 		function setStatus(ctx: ExtensionContext): void {
 			if (!ctx.hasUI) return;
 			ctx.ui.setStatus("managed-session", binding ? `${client?.connected ? "remote" : "remote offline"}: ${binding.concept}` : undefined);
@@ -173,12 +221,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		function acknowledge(marker: DeliveryMarker): void {
-			if (marker.status === "expanded") return;
+			if (marker.status === "expanded" || marker.status === "reinjecting") return;
 			const target = client;
 			const ctx = currentContext;
 			const currentBinding = binding;
 			if (!target) return;
-			void target.acknowledgeInput(marker.deliveryId, marker.status, marker.piEntryId).catch((error) => {
+			void target.acknowledgeInput(marker.deliveryId, marker.status, marker.piEntryId, marker.completionKind).catch((error) => {
 				if (error instanceof ManagedAdapterError && error.code === "capacity_reached" && marker.piEntryId && ctx && currentBinding &&
 					currentContext === ctx && binding === currentBinding &&
 					!hasProjectionCapacityDiagnostic(ctx.sessionManager.getBranch(), currentBinding, marker.piEntryId)) {
@@ -289,7 +337,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (previous.status === "accepted") {
 					accepted = previous;
 					inFlightDeliveries.add(previous.deliveryId);
-				} else if (previous.status === "expanded") {
+				} else if (previous.status === "expanded" || previous.status === "reinjecting") {
 					// Recovery of the crash window between expansion and Pi persistence belongs to #45.
 					// Retain the durable marker and do not risk injecting a duplicate here.
 					return;
@@ -307,6 +355,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				acknowledge(accepted);
 			}
 			if (payload.kind === "abort") {
+				for (const deliveryId of new Set([...activeDeliveries.keys(), ...pendingUserPersistence.map((item) => item.deliveryId)])) {
+					const interrupted = deliveries.get(deliveryId);
+					if (!interrupted || interrupted.status === "completed" || interrupted.status === "cancelled") continue;
+					const cancellation = { ...interrupted, status: "cancelled" as const };
+					recordDelivery(ctx, cancellation); acknowledge(cancellation);
+				}
+				activeDeliveries.clear(); pendingUserPersistence.length = 0; persistedRecoveryPending.clear();
 				ctx.abort();
 				const cancelled = { ...accepted, status: "cancelled" as const };
 				recordDelivery(ctx, cancelled);
@@ -315,15 +370,18 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			if (payload.body === undefined) throw new ManagedAdapterError("Relay delivery omitted input body");
-			const deliverAs = payload.kind === "steer" ? "steer" : payload.kind === "follow_up" ? "followUp" : undefined;
+			const idle = ctx.isIdle();
+			const deliverAs = idle ? undefined : payload.kind === "steer" ? "steer" : "followUp";
 			let provenanceRecorded = false;
 			const recordExpanded = (expandedText: string) => {
 				if (provenanceRecorded) return;
 				provenanceRecorded = true;
 				const expanded: DeliveryMarker = { ...accepted, status: "expanded", expandedText };
 				recordDelivery(ctx, expanded);
-				if (extensionCommand) inFlightDeliveries.delete(expanded.deliveryId);
-				else pendingUserPersistence.push(expanded);
+				if (extensionCommand) {
+					const completed: DeliveryMarker = { ...expanded, status: "completed", completionKind: "extension_command" };
+					recordDelivery(ctx, completed); inFlightDeliveries.delete(expanded.deliveryId); acknowledge(completed);
+				} else pendingUserPersistence.push(expanded);
 			};
 			const invocation = payload.body.match(/^\/([^\s]+)(?:\s|$)/)?.[1];
 			const extensionCommand = Boolean(invocation && pi.getCommands().some((command) => command.name === invocation && command.source === "extension"));
@@ -346,6 +404,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (envelope.type === "input.deliver") return handleDelivery(envelope, ctx);
 			if (envelope.type === "termination.request") {
 				const reason = String(envelope.payload.reason);
+				if (reason === "stop" || reason === "abort") {
+					for (const deliveryId of new Set([...activeDeliveries.keys(), ...pendingUserPersistence.map((item) => item.deliveryId)])) {
+						const interrupted = deliveries.get(deliveryId);
+						if (!interrupted || interrupted.status === "completed" || interrupted.status === "cancelled") continue;
+						const cancellation = { ...interrupted, status: "cancelled" as const };
+						recordDelivery(ctx, cancellation); acknowledge(cancellation);
+					}
+					activeDeliveries.clear(); pendingUserPersistence.length = 0; persistedRecoveryPending.clear();
+				}
 				ctx.abort();
 				if (reason === "stop") ctx.shutdown();
 				if (reason === "bridge_delete") {
@@ -387,8 +454,37 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				await next.connect();
 				reconnectAttempt = 0;
 				replayAcknowledgements();
+				for (const marker of checkpoints.values()) {
+					if (marker.status === "offered") {
+						await next.offerCheckpoint({ checkpointId: marker.checkpointId, originDeliveryId: marker.originDeliveryId, checkpoint: marker.checkpoint });
+						const projected = { ...marker, status: "projected" as const };
+						appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, projected); checkpoints.set(marker.checkpointId, projected);
+					}
+					const origin = deliveries.get(marker.originDeliveryId);
+					if (origin?.status === "persisted" && origin.piEntryId) {
+						const completed = { ...origin, status: "completed" as const };
+						recordDelivery(ctx, completed); activeDeliveries.delete(origin.deliveryId); acknowledge(completed);
+					}
+				}
+				for (const deliveryId of expandedRecoveryPending) {
+					expandedRecoveryPending.delete(deliveryId);
+					const marker = deliveries.get(deliveryId);
+					if (!marker?.expandedText) continue;
+					const dispatching: DeliveryMarker = { ...marker, status: "reinjecting" };
+					recordDelivery(ctx, dispatching); inFlightDeliveries.add(deliveryId); pendingUserPersistence.push(dispatching);
+					pi.sendUserMessage(dispatching.expandedText!, {
+						...(ctx.isIdle() ? {} : { deliverAs: marker.kind === "steer" ? "steer" as const : "followUp" as const }),
+						expandPromptTemplates: false, onPromptExpanded: () => undefined,
+					});
+				}
+				for (const deliveryId of persistedRecoveryPending) {
+					persistedRecoveryPending.delete(deliveryId);
+					pi.sendMessage({ customType: "managed-session.resume", content: "Continue the interrupted managed Matrix delivery.", display: false },
+						{ deliverAs: "followUp", triggerTurn: true });
+				}
 				queueProjection(ctx);
 			} catch (error) {
+				await next.close("shutdown").catch(() => undefined);
 				if (client === next) client = undefined;
 				notify(ctx, error instanceof Error ? error.message : "Managed-session relay connection failed", "warning");
 				scheduleReconnect(ctx);
@@ -409,14 +505,24 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 			deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
 			projections = restoreProjections(ctx.sessionManager.getBranch());
+			checkpoints = restoreCheckpoints(ctx.sessionManager.getBranch());
 			activeDeliveries.clear();
+			persistedRecoveryPending.clear();
+			expandedRecoveryPending.clear();
 			pendingUserPersistence.length = 0;
 			inFlightDeliveries.clear();
+			const checkpointOrigins = new Set([...checkpoints.values()].map((marker) => marker.originDeliveryId));
 			for (const marker of deliveries.values()) {
-				if (marker.status === "persisted" && marker.piEntryId) activeDeliveries.set(marker.deliveryId, marker.piEntryId);
-				if (binding && marker.status === "expanded") {
+				if (marker.status === "persisted" && marker.piEntryId) {
+					activeDeliveries.set(marker.deliveryId, marker.piEntryId);
+					if (!checkpointOrigins.has(marker.deliveryId)) persistedRecoveryPending.add(marker.deliveryId);
+				}
+				if (binding && (marker.status === "expanded" || marker.status === "reinjecting")) {
 					const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
-					if (piEntryKey) persistExpanded(ctx, marker, piEntryKey);
+					if (piEntryKey) {
+						persistExpanded(ctx, marker, piEntryKey);
+						if (!checkpointOrigins.has(marker.deliveryId)) persistedRecoveryPending.add(marker.deliveryId);
+					} else expandedRecoveryPending.add(marker.deliveryId);
 				}
 			}
 			setStatus(ctx);

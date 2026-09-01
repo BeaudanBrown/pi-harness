@@ -18,6 +18,7 @@ stdenv.mkDerivation {
     runHook preBuild
     mkdir -p source/managed-sessions
     cp config/agent/extensions/managed-sessions/contracts.ts source/managed-sessions/contracts.ts
+    cp config/agent/extensions/managed-sessions/checkpoint.ts source/managed-sessions/checkpoint.ts
     cp -R config/agent/extensions/managed-sessions/relay source/managed-sessions/relay
     cat > tsconfig.json <<EOF
     {

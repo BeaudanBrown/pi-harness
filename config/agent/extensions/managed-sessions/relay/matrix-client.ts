@@ -76,6 +76,13 @@ export class ManagedMatrixClient {
 		return { nextBatch: requiredString(response, "next_batch"), response };
 	}
 
+	async eventSender(roomId: string, eventId: string, signal?: AbortSignal): Promise<string | undefined> {
+		this.assertManagedRoom(roomId);
+		const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
+		if (typeof response !== "object" || response === null || Array.isArray(response)) return undefined;
+		return typeof (response as JsonObject).sender === "string" ? String((response as JsonObject).sender) : undefined;
+	}
+
 	async createPrivateSpace(name: string, signal?: AbortSignal): Promise<string> {
 		const response = await this.request("POST", "/_matrix/client/v3/createRoom", {
 			visibility: "private",

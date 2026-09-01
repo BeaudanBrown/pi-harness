@@ -13,6 +13,28 @@ import { RelayRegistry } from "./registry.js";
 interface MatrixTextEvent {
 	eventId: string;
 	body: string;
+	replyToEventId?: string;
+}
+
+function stripReplyFallback(body: string): string | undefined {
+	if (!body.startsWith(">")) return body;
+	const boundary = body.indexOf("\n\n");
+	if (boundary === -1) return undefined;
+	const quoted = body.slice(0, boundary).split("\n");
+	if (!/^> <@[^>\n]+> /.test(quoted[0] ?? "") || quoted.some((line) => !line.startsWith("> "))) return undefined;
+	return body.slice(boundary + 2);
+}
+
+function inputKind(body: string): { kind: "prompt" | "steer" | "abort"; body?: string } | undefined {
+	const text = body.trim();
+	if (!text) return undefined;
+	if (text === "!abort") return { kind: "abort" };
+	if (text === "!steer") return undefined;
+	if (text.startsWith("!steer ")) {
+		const steering = text.slice(7).trim();
+		return steering ? { kind: "steer", body: steering } : undefined;
+	}
+	return { kind: "prompt", body: text };
 }
 
 function operatorTextEvents(response: unknown, roomId: string, operatorUserId: string): MatrixTextEvent[] {
@@ -32,9 +54,17 @@ function operatorTextEvents(response: unknown, roomId: string, operatorUserId: s
 		if (event.sender !== operatorUserId || event.type !== "m.room.message" || typeof event.event_id !== "string" ||
 			typeof event.content !== "object" || event.content === null) continue;
 		const content = event.content as { msgtype?: unknown; body?: unknown; "m.relates_to"?: unknown };
-		if (content.msgtype !== "m.text" || typeof content.body !== "string" || content.body.length < 1 ||
-			content.body.length > MAX_INPUT_TEXT_LENGTH || content["m.relates_to"] !== undefined) continue;
-		result.push({ eventId: event.event_id, body: content.body });
+		if (content.msgtype !== "m.text" || typeof content.body !== "string" || content.body.length < 1 || content.body.length > MAX_INPUT_TEXT_LENGTH) continue;
+		let replyToEventId: string | undefined;
+		if (content["m.relates_to"] !== undefined) {
+			const relation = content["m.relates_to"];
+			if (typeof relation !== "object" || relation === null || Array.isArray(relation) || Object.keys(relation).length !== 1) continue;
+			const reply = (relation as { "m.in_reply_to"?: unknown })["m.in_reply_to"];
+			if (typeof reply !== "object" || reply === null || Array.isArray(reply) || Object.keys(reply).length !== 1 ||
+				typeof (reply as { event_id?: unknown }).event_id !== "string") continue;
+			replyToEventId = String((reply as { event_id: string }).event_id);
+		}
+		result.push({ eventId: event.event_id, body: content.body, ...(replyToEventId ? { replyToEventId } : {}) });
 	}
 	return result;
 }
@@ -51,6 +81,7 @@ export class CoordinatorRouter {
 		private readonly server: ManagedSessionIpcServer,
 		private readonly launch: (manifest: ConversationManifest) => Promise<void>,
 		private readonly notifyLaunchFailure: (sourceId: string, manifest: ConversationManifest) => Promise<void> = async () => undefined,
+		private readonly projectNotice: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void> = async () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -101,20 +132,49 @@ export class CoordinatorRouter {
 	}
 
 	private async accept(manifest: ConversationManifest, event: MatrixTextEvent): Promise<void> {
-		const deliveryId = deriveDeliveryId(manifest.conversationId, event.eventId);
-		await this.registry.recordAcceptedInput(manifest.conversationId, {
-			deliveryId, matrixEventId: event.eventId, kind: "prompt", body: event.body, status: "accepted",
-		});
-		if (this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, { deliveryId, matrixEventId: event.eventId, kind: "prompt", body: event.body }))) {
-			await this.registry.markInputDelivered(manifest.conversationId, deliveryId);
+		let body = event.body;
+		if (event.replyToEventId) {
+			const sender = await this.matrix.eventSender(manifest.roomId, event.replyToEventId).catch(() => undefined);
+			if (sender !== this.matrix.botUserId) return;
+			const stripped = stripReplyFallback(body);
+			if (stripped === undefined) return;
+			body = stripped;
+		}
+		const input = inputKind(body);
+		if (!input) return;
+		const state = this.registry.conversationState(manifest.conversationId);
+		if (state === "dormant" && (input.kind === "steer" || input.kind === "abort")) {
+			await this.projectNotice(event.eventId, manifest, input.kind === "steer"
+				? "No active run to steer; managed conversation remains dormant."
+				: "No active run to abort; managed conversation remains dormant.");
 			return;
 		}
+		const deliveryId = deriveDeliveryId(manifest.conversationId, event.eventId);
+		await this.registry.recordAcceptedInput(manifest.conversationId, {
+			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
+		});
+		const recordedState = this.registry.conversationState(manifest.conversationId);
+		if (recordedState === "starting" && input.kind === "abort") {
+			if (this.launching.has(manifest.conversationId)) {
+				await this.registry.cancelPendingInputsExcept(manifest.conversationId, deliveryId);
+				return;
+			}
+			await this.registry.cancelPendingInputs(manifest.conversationId);
+			await this.registry.failLaunch(manifest.conversationId);
+			await this.projectNotice(event.eventId, manifest, "No active run to abort; managed conversation remains dormant.");
+			return;
+		}
+		if (recordedState === "active" && input.kind === "abort") await this.registry.cancelPendingInputs(manifest.conversationId);
+		if (this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, {
+			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}),
+		}))) await this.registry.markInputDelivered(manifest.conversationId, deliveryId);
+		else if (recordedState === "dormant") await this.registry.beginLaunch(manifest.conversationId);
 	}
 
 	private async ensureWake(manifest: ConversationManifest): Promise<void> {
 		if (this.registry.conversationState(manifest.conversationId) === "active") return;
 		const pending = this.registry.pendingInputs(manifest.conversationId)
-			.find((input) => input.status === "accepted" || input.status === "delivered");
+			.find((input) => input.status === "accepted" || input.status === "delivered" || input.status === "persisted");
 		if (!pending) return;
 		if (!this.launching.has(manifest.conversationId)) {
 			const launch = (async () => {
@@ -127,13 +187,18 @@ export class CoordinatorRouter {
 					if (this.registry.conversationState(manifest.conversationId) !== "active") throw new Error("Managed conversation attachment timed out");
 				} catch (error) {
 					await this.registry.failLaunch(manifest.conversationId);
-					await this.notifyLaunchFailure(pending.deliveryId, manifest).catch(() => undefined);
-					throw error;
+					const queuedAbort = this.registry.pendingInputs(manifest.conversationId)
+						.find((input) => input.kind === "abort" && (input.status === "accepted" || input.status === "delivered"));
+					if (queuedAbort) {
+						await this.registry.cancelPendingInputs(manifest.conversationId);
+						await this.projectNotice(queuedAbort.matrixEventId, manifest, "No active run to abort; managed conversation remains dormant.").catch(() => undefined);
+					} else await this.notifyLaunchFailure(pending.deliveryId, manifest).catch(() => undefined);
+					void error;
 				}
 			})().finally(() => { this.launching.delete(manifest.conversationId); });
 			this.launching.set(manifest.conversationId, launch);
 		}
-		await this.launching.get(manifest.conversationId)!.catch(() => undefined);
+		// Wake runs independently so later Matrix controls can cancel or steer queued input while attachment is pending.
 	}
 
 	private deliveryEnvelope(conversationId: string, input: { deliveryId: string; matrixEventId: string; kind: string; body?: string }): ManagedSessionEnvelope {
@@ -143,7 +208,7 @@ export class CoordinatorRouter {
 			conversationId,
 			role: "relay",
 			type: "input.deliver",
-			payload: { deliveryId: input.deliveryId, matrixEventId: input.matrixEventId, kind: "prompt", body: input.body },
+			payload: { deliveryId: input.deliveryId, matrixEventId: input.matrixEventId, kind: input.kind, ...(input.body ? { body: input.body } : {}) },
 		};
 	}
 }

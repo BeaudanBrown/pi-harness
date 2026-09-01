@@ -226,6 +226,17 @@ without host addressing; dormant input resumes the same persisted session.
 Stop terminates only the exact managed window, while confirmed bridge deletion
 leaves the Pi session, process/window, workspace, and project files intact.
 
+Managed room controls retain Pi's established control semantics while using
+host-owned room routing: ordinary text is an idle prompt or busy follow-up, `!steer <text>` steers an active run, `!abort`
+durably cancels it, and valid replies to bot events use their unquoted fallback
+text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
+queued during wake cancels that wake input. The `remote_checkpoint` tool emits
+one durable structured question, blocker, or issue-completion boundary, then
+hard-aborts the run until a new operator reply. Accepted input, persisted
+unfinished work, checkpoint/final projection, launch failure, explicit
+cancellation, and restart recovery all reuse stable identities so retries do
+not lose or duplicate operator turns.
+
 ## Matrix Host Bot Runtime
 
 The optional `services.pi-harness.remoteSession` settings provide a

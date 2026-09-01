@@ -139,6 +139,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			Type.Literal("cancelled"),
 		]),
 		piEntryId: Type.Optional(TranscriptEntryIdSchema),
+		completionKind: Type.Optional(Type.Literal("extension_command")),
 	}),
 	clientEnvelope(adapterRole, "transcript.offer", {
 		entryId: TranscriptEntryIdSchema,
@@ -309,6 +310,7 @@ const projectionEntry = strictObject({
 	]),
 	status: Type.Union([Type.Literal("offered"), Type.Literal("projecting"), Type.Literal("projected")]),
 	contentHash: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
+	originDeliveryId: Type.Optional(DeliveryIdSchema),
 	chunks: Type.Array(strictObject({
 		chunkId: ChunkIdSchema,
 		transactionId: MatrixTransactionIdSchema,
@@ -379,6 +381,7 @@ export interface HostRuntimeState {
 			kind: string;
 			status: string;
 			contentHash?: string;
+			originDeliveryId?: string;
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string };
@@ -447,9 +450,14 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		assertInputBody(payload.kind, payload.body);
 	}
 	if (envelope.type === "input.acknowledge") {
-		const payload = envelope.payload as { status: string; piEntryId?: string };
-		if ((payload.status === "persisted" || payload.status === "completed") && !payload.piEntryId) {
-			throw new ManagedSessionContractError("malformed", "persisted/completed input acknowledgement requires piEntryId");
+		const payload = envelope.payload as { status: string; piEntryId?: string; completionKind?: string };
+		if (payload.status === "persisted" && !payload.piEntryId) {
+			throw new ManagedSessionContractError("malformed", "persisted input acknowledgement requires piEntryId");
+		}
+		if (payload.completionKind === "extension_command") {
+			if (payload.status !== "completed" || payload.piEntryId) throw new ManagedSessionContractError("malformed", "extension-command completion must be terminal and omit piEntryId");
+		} else if (payload.status === "completed" && !payload.piEntryId) {
+			throw new ManagedSessionContractError("malformed", "ordinary completed input acknowledgement requires piEntryId");
 		}
 	}
 	if (envelope.type === "checkpoint.offer") {
@@ -562,6 +570,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		if (conversation.attachment) assertTimestamp(conversation.attachment.connectedAt, "attachment.connectedAt");
 		if (conversation.lastLaunchError) assertTimestamp(conversation.lastLaunchError.at, "lastLaunchError.at");
 		const entries = new Set<string>();
+		const checkpointOrigins = new Set<string>();
 		const chunks = new Set<string>();
 		const transactions = new Set<string>();
 		for (const projection of conversation.projection) {
@@ -569,6 +578,13 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 				throw new ManagedSessionContractError("conflict", `duplicate projection entry ${projection.entryId}`);
 			}
 			entries.add(projection.entryId);
+			if ((projection.kind === "checkpoint") !== (projection.originDeliveryId !== undefined)) {
+				throw new ManagedSessionContractError("invalid_state", `checkpoint projection ${projection.entryId} has invalid origin metadata`);
+			}
+			if (projection.originDeliveryId) {
+				if (checkpointOrigins.has(projection.originDeliveryId)) throw new ManagedSessionContractError("conflict", `duplicate checkpoint origin ${projection.originDeliveryId}`);
+				checkpointOrigins.add(projection.originDeliveryId);
+			}
 			for (const chunk of projection.chunks) {
 				if (chunks.has(chunk.chunkId)) {
 					throw new ManagedSessionContractError("conflict", `duplicate projection chunk ${chunk.chunkId}`);

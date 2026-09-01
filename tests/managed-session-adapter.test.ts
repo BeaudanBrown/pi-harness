@@ -18,6 +18,7 @@ import { BoundAdapterClient, requestSelfBind } from "../config/agent/extensions/
 import { createManagedSessionAdapterExtension } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
+	CHECKPOINT_ENTRY_TYPE,
 	BINDING_ENTRY_TYPE,
 	DELIVERY_ENTRY_TYPE,
 	PROJECTION_DIAGNOSTIC_ENTRY_TYPE,
@@ -120,6 +121,10 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active" } }));
 		} else if (envelope.type === "input.acknowledge") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
+		} else if (envelope.type === "checkpoint.offer") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
+		} else if (envelope.type === "transcript.offer") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
 		} else if (envelope.type === "self.status") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }));
 		} else if (envelope.type === "self.delete") {
@@ -187,6 +192,14 @@ test("transcript classification is boundary-ordered, provenance-aware, and final
 		{ entryId: deriveTranscriptEntryId(sessionId, "local-user"), piEntryKey: "local-user", kind: "local_user", body: "terminal **input**" },
 		{ entryId: deriveTranscriptEntryId(sessionId, "final"), piEntryKey: "final", kind: "assistant_final", body: "final answer" },
 	]);
+	const checkpointBranch = [...branch.slice(0, 7), custom("checkpoint", CHECKPOINT_ENTRY_TYPE, {
+		version: MANAGED_SESSION_STATE_VERSION, checkpointId: `checkpoint-${"a".repeat(32)}`, originDeliveryId: matrixDeliveryId,
+		checkpoint: { kind: "question", decision: "Approve?" }, status: "offered",
+	}), { type: "message", id: "duplicate-final", message: { role: "assistant", content: "must not duplicate checkpoint", stopReason: "stop" } },
+	{ type: "message", id: "reply", message: { role: "user", content: "new reply" } },
+	{ type: "message", id: "reply-final", message: { role: "assistant", content: "resumed answer", stopReason: "stop" } }];
+	assert.equal(eligibleTranscriptEntries(checkpointBranch, boundaryBinding, new Map([[matrixDeliveryId, delivery]])).some((entry) => entry.body.includes("duplicate checkpoint")), false);
+	assert.equal(eligibleTranscriptEntries(checkpointBranch, boundaryBinding, new Map([[matrixDeliveryId, delivery]])).some((entry) => entry.body === "resumed answer"), true);
 	const offered = { version: MANAGED_SESSION_STATE_VERSION, entryId: deriveTranscriptEntryId(sessionId, "final"), piEntryKey: "final", kind: "assistant_final" as const, status: "offered" as const };
 	assert.equal(restoreProjections([custom("binding", BINDING_ENTRY_TYPE, binding), custom("offer", PROJECTION_ENTRY_TYPE, offered)]).get(offered.entryId)?.status, "offered");
 	assert.equal(restoreProjections([custom("offer", PROJECTION_ENTRY_TYPE, offered), custom("unbound", UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION })]).size, 0);
@@ -268,10 +281,72 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 		createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: "/tmp/relay.sock" })(api);
 		assert.deepEqual([...commands.keys()], ["remote"]);
 		assert.equal(commands.has("remote-off"), false);
-		assert.deepEqual(tools, role === "ordinary_adapter" ? [] : [
+		assert.deepEqual(tools, role === "ordinary_adapter" ? ["remote_checkpoint"] : [
 			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_session_start",
-			"remote_session_resume", "remote_session_stop", "remote_session_delete",
+			"remote_session_resume", "remote_session_stop", "remote_session_delete", "remote_checkpoint",
 		]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));
 	}
+});
+
+test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoint boundaries", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
+	let leaf = "binding"; let sequence = 0; let idle = true; let aborts = 0;
+	const handlers = new Map<string, (...args: any[]) => any>(); const tools = new Map<string, any>();
+	const deliveriesSeen: Array<{ text: string; deliverAs?: string }> = [];
+	const api = {
+		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
+		registerCommand: () => undefined,
+		registerTool: (tool: any) => tools.set(tool.name, tool),
+		getCommands: () => [],
+		appendEntry: (customType: string, data: unknown) => { const id = `custom-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id; },
+		sendUserMessage: (text: string, options: any) => { deliveriesSeen.push({ text, ...(options.deliverAs ? { deliverAs: options.deliverAs } : {}) }); options.onPromptExpanded(text);
+			const id = `user-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content: text } }); leaf = id; },
+		sendMessage: () => undefined,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath,
+		PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => idle, abort: () => { aborts += 1; }, shutdown: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
+			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const send = async (eventId: string, kind: "prompt" | "steer", body: string) => {
+		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-${eventId.replace(/[^A-Za-z0-9]/g, "")}`, conversationId, role: "relay", type: "input.deliver",
+			payload: { deliveryId: deriveDeliveryId(conversationId, eventId), matrixEventId: eventId, kind, body } });
+		await new Promise((resolve) => setTimeout(resolve, 30));
+	};
+	await send("$idle", "prompt", "idle task");
+	const checkpoint = tools.get("remote_checkpoint");
+	const checkpointResult = await checkpoint.execute("tool-call-stable", { kind: "question", decision: "Approve?" }, undefined, undefined, ctx);
+	assert.equal(checkpointResult.details.waiting, true); assert.equal(aborts, 1);
+	assert.equal(relay.frames.filter((frame) => frame.type === "checkpoint.offer").length, 1);
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "completed"));
+	idle = false; await send("$follow", "prompt", "busy follow-up"); await send("$steer", "steer", "redirect");
+	assert.deepEqual(deliveriesSeen, [{ text: "idle task" }, { text: "busy follow-up", deliverAs: "followUp" }, { text: "redirect", deliverAs: "steer" }]);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+
+	const recoveryId = deriveDeliveryId(conversationId, "$persisted-crash");
+	const expandedCrashId = deriveDeliveryId(conversationId, "$expanded-crash");
+	const recoveryBranch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }),
+		custom("binding", BINDING_ENTRY_TYPE, binding), custom("persisted", DELIVERY_ENTRY_TYPE, {
+			version: MANAGED_SESSION_STATE_VERSION, deliveryId: recoveryId, matrixEventId: "$persisted-crash", kind: "prompt", status: "persisted",
+			expandedText: "unfinished", piEntryId: deriveTranscriptEntryId(sessionId, "unfinished-user"),
+		}), custom("expanded-crash", DELIVERY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, deliveryId: expandedCrashId,
+			matrixEventId: "$expanded-crash", kind: "prompt", status: "expanded", expandedText: "expanded but not persisted" })];
+	let resumeTriggers = 0; let reinjectedExpanded = 0; let recoveryLeaf = "expanded-crash";
+	const recoveryHandlers = new Map<string, (...args: any[]) => any>();
+	const recoveryApi = { on: (name: string, handler: (...args: any[]) => any) => recoveryHandlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [], appendEntry: (customType: string, data: unknown) => { const id = `recovery-${++sequence}`;
+			recoveryBranch.push({ ...custom(id, customType, data), parentId: recoveryLeaf }); recoveryLeaf = id; },
+		sendMessage: (_message: unknown, options: { triggerTurn?: boolean }) => { if (options.triggerTurn) resumeTriggers += 1; },
+		sendUserMessage: (text: string, options: { onPromptExpanded?: (text: string) => void }) => { reinjectedExpanded += 1; options.onPromptExpanded?.(text);
+			const id = `recovery-user-${++sequence}`; recoveryBranch.push({ type: "message", id, parentId: recoveryLeaf, message: { role: "user", content: text } }); recoveryLeaf = id; } } as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(recoveryApi);
+	const recoveryCtx: any = { ...ctx, sessionManager: { ...ctx.sessionManager, getBranch: () => recoveryBranch, getLeafId: () => recoveryLeaf } };
+	await recoveryHandlers.get("session_start")!({ reason: "resume" }, recoveryCtx);
+	assert.equal(resumeTriggers, 1, "persisted unfinished delivery resumes without reinjecting its Pi user entry");
+	assert.equal(reinjectedExpanded, 1, "expanded-before-persistence crash is reinjected exactly once from its durable expansion");
+	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
 });

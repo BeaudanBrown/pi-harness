@@ -149,7 +149,7 @@ export class RelayRegistry {
 			const conversation = this.runtimeConversation(conversationId);
 			const existing = conversation.projection.find((candidate) => candidate.entryId === projection.entryId);
 			if (existing) {
-				if (existing.kind !== projection.kind || existing.contentHash !== projection.contentHash ||
+				if (existing.kind !== projection.kind || existing.contentHash !== projection.contentHash || existing.originDeliveryId !== projection.originDeliveryId ||
 					existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
 						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId)) {
 					throw new RelayRegistryError("invalid_state", "Conflicting transcript projection content");
@@ -161,6 +161,12 @@ export class RelayRegistry {
 			parseHostRuntimeState(this.state);
 			return structuredClone(projection);
 		});
+	}
+
+	checkpointProjectionForOrigin(conversationId: string, originDeliveryId: string): RuntimeConversation["projection"][number] | undefined {
+		const projection = this.runtimeConversation(conversationId).projection.find((candidate) =>
+			candidate.kind === "checkpoint" && candidate.originDeliveryId === originDeliveryId);
+		return projection ? structuredClone(projection) : undefined;
 	}
 
 	async markProjectionChunkSent(conversationId: string, entryId: string, chunkId: string): Promise<void> {
@@ -196,6 +202,14 @@ export class RelayRegistry {
 			conversationId: manifest.conversationId, concept: manifest.concept, kind: manifest.kind,
 			state: this.runtimeConversation(manifest.conversationId).state,
 		}));
+	}
+
+	async cancelPendingInputsExcept(conversationId: string, preservedDeliveryId: string): Promise<void> {
+		await this.mutate(async () => {
+			for (const input of this.runtimeConversation(conversationId).pendingInputs) {
+				if (input.deliveryId !== preservedDeliveryId && input.status !== "completed" && input.status !== "cancelled") input.status = "cancelled";
+			}
+		});
 	}
 
 	async cancelPendingInputs(conversationId: string): Promise<void> {
@@ -400,7 +414,7 @@ export class RelayRegistry {
 		}
 	}
 
-	async acknowledgeInput(conversationId: string, deliveryId: string, status: string, piEntryId?: string): Promise<void> {
+	async acknowledgeInput(conversationId: string, deliveryId: string, status: string, piEntryId?: string, completionKind?: string): Promise<void> {
 		await this.mutate(async () => {
 			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
 			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
@@ -409,8 +423,11 @@ export class RelayRegistry {
 				((input.status === "completed" || input.status === "cancelled") && input.status !== status)) {
 				throw new RelayRegistryError("invalid_state", "Managed delivery acknowledgement regressed");
 			}
-			if ((status === "persisted" || status === "completed") && !piEntryId) {
-				throw new RelayRegistryError("invalid_state", "Persisted delivery acknowledgement requires a Pi entry ID");
+			if (status === "persisted" && !piEntryId) throw new RelayRegistryError("invalid_state", "Persisted delivery acknowledgement requires a Pi entry ID");
+			if (completionKind === "extension_command") {
+				if (status !== "completed" || piEntryId) throw new RelayRegistryError("invalid_state", "Extension-command completion is malformed");
+			} else if (status === "completed" && !piEntryId) {
+				throw new RelayRegistryError("invalid_state", "Ordinary completed delivery acknowledgement requires a Pi entry ID");
 			}
 			if (piEntryId && input.piEntryId && input.piEntryId !== piEntryId) {
 				throw new RelayRegistryError("invalid_state", "Managed delivery changed its persisted Pi entry identity");

@@ -81,14 +81,15 @@ export class BoundAdapterClient {
 		}
 	}
 
-	async acknowledgeInput(deliveryId: string, status: "accepted" | "persisted" | "completed" | "cancelled", piEntryId?: string): Promise<void> {
+	async acknowledgeInput(deliveryId: string, status: "accepted" | "persisted" | "completed" | "cancelled", piEntryId?: string,
+		completionKind?: "extension_command"): Promise<void> {
 		const result = await this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("ack"),
 			conversationId: this.options.binding.conversationId,
 			role: this.options.role,
 			type: "input.acknowledge",
-			payload: { deliveryId, status, ...(piEntryId ? { piEntryId } : {}) },
+			payload: { deliveryId, status, ...(piEntryId ? { piEntryId } : {}), ...(completionKind ? { completionKind } : {}) },
 		});
 		if (result.type !== "input.result" || result.payload.deliveryId !== deliveryId || result.payload.status !== status) {
 			throw new ManagedAdapterError("Relay did not confirm input acknowledgement", "invalid_response");
@@ -109,6 +110,18 @@ export class BoundAdapterClient {
 		});
 		if (result.type !== "transcript.acknowledge" || result.payload.entryId !== entry.entryId || result.payload.status !== "projected") {
 			throw new ManagedAdapterError("Relay did not confirm transcript projection", "invalid_response");
+		}
+		return result;
+	}
+
+	async offerCheckpoint(checkpoint: { checkpointId: string; originDeliveryId: string; checkpoint: Record<string, unknown> }): Promise<ManagedSessionEnvelope> {
+		const result = await this.request({
+			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: messageId("checkpoint"), conversationId: this.options.binding.conversationId,
+			role: this.options.role, type: "checkpoint.offer", payload: checkpoint,
+		});
+		if (result.type !== "checkpoint.acknowledge" || result.payload.checkpointId !== checkpoint.checkpointId || result.payload.status !== "projected") {
+			throw new ManagedAdapterError("Relay did not confirm checkpoint projection", "invalid_response");
 		}
 		return result;
 	}

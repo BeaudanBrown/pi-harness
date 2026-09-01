@@ -850,6 +850,7 @@
                 "$test_build_dir/tests/managed-session-adapter.test.js" \
                 "$test_build_dir/tests/managed-session-adapter-real-pi.test.js" \
                 "$test_build_dir/tests/managed-session-coordinator.test.js" \
+                "$test_build_dir/tests/managed-session-controls.test.js" \
                 "$test_build_dir/tests/managed-session-lifecycle.test.js" \
                 "$test_build_dir/tests/managed-session-relay-adapter.test.js" \
                 "$test_build_dir/tests/managed-session-relay-registry.test.js" \

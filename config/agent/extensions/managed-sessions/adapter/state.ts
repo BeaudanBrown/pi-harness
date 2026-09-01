@@ -12,6 +12,7 @@ export const UNBOUND_ENTRY_TYPE = "managed-session.unbound";
 export const DELIVERY_ENTRY_TYPE = "managed-session.delivery";
 export const PROJECTION_ENTRY_TYPE = "managed-session.projection";
 export const PROJECTION_DIAGNOSTIC_ENTRY_TYPE = "managed-session.projection-diagnostic";
+export const CHECKPOINT_ENTRY_TYPE = "managed-session.checkpoint";
 
 export type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
 
@@ -48,14 +49,23 @@ export interface EligibleTranscriptEntry {
 	body: string;
 }
 
+export interface ManagedCheckpointMarker {
+	version: typeof MANAGED_SESSION_STATE_VERSION;
+	checkpointId: string;
+	originDeliveryId: string;
+	checkpoint: Record<string, unknown>;
+	status: "offered" | "projected";
+}
+
 export interface DeliveryMarker {
 	version: typeof MANAGED_SESSION_STATE_VERSION;
 	deliveryId: string;
 	matrixEventId: string;
 	kind: "prompt" | "follow_up" | "steer" | "abort";
-	status: "accepted" | "expanded" | "persisted" | "completed" | "cancelled";
+	status: "accepted" | "expanded" | "reinjecting" | "persisted" | "completed" | "cancelled";
 	piEntryId?: string;
 	expandedText?: string;
+	completionKind?: "extension_command";
 }
 
 interface CustomEntry {
@@ -87,11 +97,14 @@ function isDelivery(value: Record<string, unknown>): boolean {
 		typeof value.deliveryId === "string" && /^delivery_[a-f0-9]{32}$/.test(value.deliveryId) &&
 		typeof value.matrixEventId === "string" &&
 		["prompt", "follow_up", "steer", "abort"].includes(String(value.kind)) &&
-		["accepted", "expanded", "persisted", "completed", "cancelled"].includes(String(value.status)) &&
+		["accepted", "expanded", "reinjecting", "persisted", "completed", "cancelled"].includes(String(value.status)) &&
 		(value.piEntryId === undefined || (typeof value.piEntryId === "string" && /^entry_[a-f0-9]{32}$/.test(value.piEntryId))) &&
 		(value.expandedText === undefined || typeof value.expandedText === "string") &&
-		(!["expanded", "persisted", "completed"].includes(String(value.status)) || typeof value.expandedText === "string") &&
-		(!["persisted", "completed"].includes(String(value.status)) || typeof value.piEntryId === "string");
+		(value.completionKind === undefined || value.completionKind === "extension_command") &&
+		(!["expanded", "reinjecting", "persisted", "completed"].includes(String(value.status)) || typeof value.expandedText === "string") &&
+		(value.status !== "persisted" || typeof value.piEntryId === "string") &&
+		(value.status !== "completed" || typeof value.piEntryId === "string" || value.completionKind === "extension_command") &&
+		(value.completionKind !== "extension_command" || (value.status === "completed" && value.piEntryId === undefined));
 }
 
 export function restoreSessionBinding(entries: readonly unknown[], sessionId: string, role: AdapterRole): SessionBinding | undefined {
@@ -131,7 +144,7 @@ export function restoreBindingAttempt(entries: readonly unknown[], sessionId: st
 
 export function restoreDeliveries(entries: readonly unknown[]): Map<string, DeliveryMarker> {
 	const deliveries = new Map<string, DeliveryMarker>();
-	const rank: Record<DeliveryMarker["status"], number> = { accepted: 0, expanded: 1, persisted: 2, completed: 3, cancelled: 3 };
+	const rank: Record<DeliveryMarker["status"], number> = { accepted: 0, expanded: 1, reinjecting: 1, persisted: 2, completed: 3, cancelled: 3 };
 	for (const entry of entries) {
 		if (customData(entry, UNBOUND_ENTRY_TYPE) || customData(entry, BINDING_ENTRY_TYPE)) deliveries.clear();
 		const candidate = customData(entry, DELIVERY_ENTRY_TYPE);
@@ -140,6 +153,7 @@ export function restoreDeliveries(entries: readonly unknown[]): Map<string, Deli
 		const previous = deliveries.get(marker.deliveryId);
 		if (previous) {
 			if (previous.matrixEventId !== marker.matrixEventId || previous.kind !== marker.kind || rank[marker.status] < rank[previous.status] ||
+				(previous.status === "reinjecting" && marker.status === "expanded") ||
 				((previous.status === "completed" || previous.status === "cancelled") && marker.status !== previous.status)) {
 				throw new Error(`Conflicting managed-session delivery history ${marker.deliveryId}`);
 			}
@@ -153,7 +167,7 @@ export function findDeliveredUserEntry(entries: readonly unknown[], deliveryId: 
 	let expandedEntryId: string | undefined;
 	for (const entry of entries) {
 		const marker = customData(entry, DELIVERY_ENTRY_TYPE);
-		if (marker?.data.deliveryId === deliveryId && marker.data.status === "expanded") expandedEntryId = marker.id;
+		if (marker?.data.deliveryId === deliveryId && (marker.data.status === "expanded" || marker.data.status === "reinjecting")) expandedEntryId = marker.id;
 	}
 	if (!expandedEntryId) return undefined;
 	for (const entry of entries) {
@@ -164,6 +178,26 @@ export function findDeliveredUserEntry(entries: readonly unknown[], deliveryId: 
 		return candidate.id;
 	}
 	return undefined;
+}
+
+export function restoreCheckpoints(entries: readonly unknown[]): Map<string, ManagedCheckpointMarker> {
+	const checkpoints = new Map<string, ManagedCheckpointMarker>();
+	for (const entry of entries) {
+		if (customData(entry, UNBOUND_ENTRY_TYPE) || customData(entry, BINDING_ENTRY_TYPE)) checkpoints.clear();
+		const candidate = customData(entry, CHECKPOINT_ENTRY_TYPE);
+		if (!candidate) continue;
+		const value = candidate.data;
+		if (value.version !== MANAGED_SESSION_STATE_VERSION || typeof value.checkpointId !== "string" ||
+			!/^checkpoint-[a-f0-9]{32}$/.test(value.checkpointId) || typeof value.originDeliveryId !== "string" ||
+			!/^delivery_[a-f0-9]{32}$/.test(value.originDeliveryId) || typeof value.checkpoint !== "object" || value.checkpoint === null ||
+			(value.status !== "offered" && value.status !== "projected")) continue;
+		const marker = value as unknown as ManagedCheckpointMarker;
+		const previous = checkpoints.get(marker.checkpointId);
+		if (previous && (previous.originDeliveryId !== marker.originDeliveryId || JSON.stringify(previous.checkpoint) !== JSON.stringify(marker.checkpoint) ||
+			(previous.status === "projected" && marker.status !== "projected"))) throw new Error(`Conflicting managed-session checkpoint history ${marker.checkpointId}`);
+		checkpoints.set(marker.checkpointId, marker);
+	}
+	return checkpoints;
 }
 
 export function restoreProjections(entries: readonly unknown[]): Map<string, ProjectionMarker> {
@@ -215,19 +249,22 @@ export function eligibleTranscriptEntries(
 		.filter((delivery) => delivery.status === "persisted" || delivery.status === "completed")
 		.map((delivery) => delivery.piEntryId).filter((value): value is string => value !== undefined));
 	const result: EligibleTranscriptEntry[] = [];
+	let checkpointBoundary = false;
 	for (const value of entries.slice(boundaryIndex + 1)) {
+		if (customData(value, CHECKPOINT_ENTRY_TYPE)?.data.status === "offered") { checkpointBoundary = true; continue; }
 		if (typeof value !== "object" || value === null) continue;
 		const entry = value as { type?: unknown; id?: unknown; message?: unknown };
 		if (entry.type !== "message" || typeof entry.id !== "string" || typeof entry.message !== "object" || entry.message === null) continue;
 		const message = entry.message as { role?: unknown; content?: unknown; stopReason?: unknown };
 		const entryId = persistedEntryId(binding.sessionId, entry.id);
 		if (message.role === "user") {
+			checkpointBoundary = false;
 			if (matrixEntryIds.has(entryId)) continue;
 			const body = textContent(message.content, false);
 			if (body) result.push({ entryId, piEntryKey: entry.id, kind: "local_user", body });
 			continue;
 		}
-		if (message.role !== "assistant" || message.stopReason !== "stop") continue;
+		if (message.role !== "assistant" || message.stopReason !== "stop" || checkpointBoundary) continue;
 		const body = textContent(message.content, true);
 		if (body) result.push({ entryId, piEntryKey: entry.id, kind: "assistant_final", body });
 	}

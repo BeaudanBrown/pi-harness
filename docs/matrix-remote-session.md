@@ -49,7 +49,8 @@ directories use private user permissions and atomic replacement.
 
 ## Matrix input and control
 
-New instructions in a shared room require the configured host prefix:
+The legacy direct-bridge extension requires the configured host prefix for new
+instructions in a shared room:
 
 ```text
 @grill investigate the failing test
@@ -63,6 +64,11 @@ A direct Matrix reply to an event authored by the grill bot infers `@grill`, so
 a short reply such as `yes` needs no prefix. The extension verifies the replied
 event's sender through the bound room before accepting it. An explicit different
 host prefix still wins and is ignored by grill.
+
+Managed relay rooms are different: each room is permanently owned by one host
+conversation, so authorized operator text routes directly without any host
+prefix. Valid replies to that room's bot use the same sender verification and
+fallback stripping; malformed or foreign relations remain ignored.
 
 Idle prompts start immediately. Ordinary input received while Pi is busy queues
 as a `followUp`; `!steer` strips its control prefix and queues the remaining text
@@ -78,7 +84,10 @@ prompts and receive a small Matrix dispatch acknowledgement. Skill input is
 expanded by Pi and persisted with the same semantics as interactive input.
 
 Text-only v1 ignores edits, reactions, attachments, thread events, voice, and
-other media. It does not turn fallback reply quotations into prompt content.
+other media. A valid reply to an event sent by the configured bot may omit host
+addressing; its well-formed Matrix fallback quotation is stripped and only the
+operator's unquoted reply becomes prompt content. Missing, inaccessible,
+non-bot, malformed-fallback, and other relation targets fail closed.
 
 ## Explicit checkpoints
 
