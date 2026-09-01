@@ -5,7 +5,8 @@
     "title": "Example migration epic",
     "body": "Open parent work.",
     "labels": ["ready-for-agent"],
-    "blockedBy": []
+    "blockedBy": [],
+    "links": ["tk-ambiguous"]
   },
   {
     "sourceId": "tk-first",
@@ -13,6 +14,7 @@
     "title": "First vertical slice",
     "body": "Runnable end-to-end slice.",
     "labels": ["ready-for-agent"],
+    "parent": "tk-epic",
     "blockedBy": []
   },
   {
@@ -21,14 +23,28 @@
     "title": "Historical completed slice",
     "body": "Closed historical work.",
     "labels": ["migration"],
-    "blockedBy": ["tk-first"]
+    "parent": "tk-epic",
+    "blockedBy": ["tk-first"],
+    "links": ["tk-ambiguous"]
   },
   {
     "sourceId": "tk-stale",
     "disposition": "omit",
-    "title": "Superseded work",
-    "body": "User-approved omission.",
+    "proposedDisposition": "superseded-or-duplicate",
+    "classificationEvidence": ["Replacement behavior is present in tk-first; age was not used."],
+    "title": "Superseded stale work",
+    "body": "User-approved evidence-backed omission.",
     "labels": [],
     "blockedBy": ["tk-first"]
+  },
+  {
+    "sourceId": "tk-ambiguous",
+    "disposition": "omit",
+    "proposedDisposition": "needs-user-decision",
+    "classificationEvidence": ["Repository evidence does not establish whether this remains wanted.", "User approved omission in fixture."],
+    "title": "Ambiguous product decision",
+    "body": "Explicitly reviewed ambiguity.",
+    "labels": [],
+    "blockedBy": []
   }
 ]

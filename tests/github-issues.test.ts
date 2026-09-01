@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { readFile } from "node:fs/promises";
-import { bodyWithMarker, frontierIssueNumbers, issueMarker, migrationIssuePlan, validateIssuePlan, type MigrationRecord } from "../config/agent/extensions/github-issues/index.js";
+import { chmod, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { bodyWithMarker, completeMigrationCleanup, executeMigration, frontierIssueNumbers, issueMarker, migrationIssuePlan, validateIssuePlan, type MigrationRecord, type MigrationReconciliation } from "../config/agent/extensions/github-issues/index.js";
 import { retrieveGitHubEpicContext } from "../config/agent/extensions/github-issues/github-context.js";
 
 test("issue plans receive stable provenance markers", () => {
@@ -42,6 +45,7 @@ test("migration fixtures produce an idempotent plan and omit approved stale reco
 
 	assert.deepEqual(plan.issues.map((issue) => issue.key), ["tk-epic", "tk-first", "tk-later"]);
 	assert.equal(plan.issues[2]?.state, "closed");
+	assert.equal(plan.issues[1]?.parent, "tk-epic");
 	assert.deepEqual(plan.issues[2]?.blockedBy, ["tk-first"]);
 	assert.match(plan.issues[0]?.body ?? "", /Migrated from tk ticket `tk-epic`/);
 	assert.equal(plan.issues.some((issue) => issue.key === "tk-stale"), false);
@@ -143,6 +147,64 @@ test("epic context reports no executable leaf when descendants are closed or blo
 
 	const context = await retrieveGitHubEpicContext(client, 10);
 	assert.deepEqual(context.executableLeaves, []);
+});
+
+test("migration executor retries issues, resumes relationships, and gates cleanup", async () => {
+	const cwd = await mkdtemp(path.join(tmpdir(), "tk-migration-e2e-"));
+	await mkdir(path.join(cwd, ".pi/tmp/tk-to-github"), { recursive: true });
+	await mkdir(path.join(cwd, ".tickets"));
+	await mkdir(path.join(cwd, "docs/agents"), { recursive: true });
+	await writeFile(path.join(cwd, ".tickets/source.md"), "source");
+	await writeFile(path.join(cwd, "docs/agents/issue-tracker.md"), "tk is authoritative\n");
+	const records = JSON.parse(await readFile("tests/fixtures/tk-migration/records.json", "utf8")) as MigrationRecord[];
+	const plan = migrationIssuePlan("e2e-fixture", records);
+	await writeFile(path.join(cwd, ".pi/tmp/tk-to-github/migration.json"), JSON.stringify({ records }));
+	await writeFile(path.join(cwd, ".pi/tmp/tk-to-github/github-issue-plan.json"), JSON.stringify(plan));
+	const bin = path.join(cwd, "bin");
+	await mkdir(bin);
+	await cp("tests/fixtures/tk-migration/fake-gh.mjs", path.join(bin, "gh"));
+	await chmod(path.join(bin, "gh"), 0o755);
+	const statePath = path.join(cwd, "github-state.json");
+	const oldPath = process.env.PATH;
+	process.env.PATH = `${bin}:${oldPath}`;
+	process.env.FAKE_GH_STATE = statePath;
+	const params = { manifest_path: ".pi/tmp/tk-to-github/migration.json", issue_plan_path: ".pi/tmp/tk-to-github/github-issue-plan.json", write_delay_ms: 0, batch_size: 50, apply: true } as const;
+	try {
+		const dryRun = await executeMigration(cwd, "fixture/repo", { ...params, operation: "dry_run" }) as any;
+		assert.deepEqual({ issues: dryRun.issues, relationships: dryRun.relationships }, { issues: 3, relationships: 3 });
+		await executeMigration(cwd, "fixture/repo", { ...params, operation: "apply_issues" });
+		await executeMigration(cwd, "fixture/repo", { ...params, operation: "apply_issues" });
+		let state = JSON.parse(await readFile(statePath, "utf8"));
+		assert.equal(state.issues.length, 3, "issue retry must reuse outcomes/markers");
+
+		process.env.FAKE_GH_FAIL_RELATIONSHIP_ONCE = "1";
+		await assert.rejects(executeMigration(cwd, "fixture/repo", { ...params, operation: "apply_relationships" }), /injected relationship failure/);
+		delete process.env.FAKE_GH_FAIL_RELATIONSHIP_ONCE;
+		await executeMigration(cwd, "fixture/repo", { ...params, operation: "apply_relationships", batch_size: 1 });
+		await executeMigration(cwd, "fixture/repo", { ...params, operation: "resume" });
+		state = JSON.parse(await readFile(statePath, "utf8"));
+		assert.equal(state.relationships.length, 3, "relationship checkpoints must resume without duplicates");
+
+		state.issues[0].state = "closed";
+		await writeFile(statePath, JSON.stringify(state));
+		const failed = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
+		assert.equal(failed.passed, false);
+		assert.deepEqual(failed.mismatches[0], { key: "tk-epic", kind: "state", expected: "open", actual: "closed" });
+		await assert.rejects(completeMigrationCleanup(cwd, { approved: true, reconciliation: failed }), /successful reconciliation/);
+		assert.equal(await readFile(path.join(cwd, ".tickets/source.md"), "utf8"), "source");
+
+		state.issues[0].state = "open";
+		await writeFile(statePath, JSON.stringify(state));
+		const passed = await executeMigration(cwd, "fixture/repo", { ...params, operation: "reconcile" }) as MigrationReconciliation;
+		assert.equal(passed.passed, true);
+		await completeMigrationCleanup(cwd, { approved: true, reconciliation: passed });
+		await assert.rejects(readFile(path.join(cwd, ".tickets/source.md")), /ENOENT/);
+		assert.match(await readFile(path.join(cwd, "docs/agents/issue-tracker.md"), "utf8"), /GitHub Issues are the sole durable task source of truth/);
+	} finally {
+		process.env.PATH = oldPath;
+		delete process.env.FAKE_GH_STATE;
+		delete process.env.FAKE_GH_FAIL_RELATIONSHIP_ONCE;
+	}
 });
 
 test("issue plans reject duplicate keys before mutation", () => {

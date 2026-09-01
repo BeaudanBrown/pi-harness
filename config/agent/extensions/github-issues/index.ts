@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -33,6 +33,21 @@ export type MigrationRecord = {
 	body: string;
 	labels?: string[];
 	blockedBy?: string[];
+	parent?: string;
+	links?: string[];
+};
+
+export type ReconciliationMismatch = {
+	key?: string;
+	kind: "marker" | "state" | "relationship";
+	expected: unknown;
+	actual: unknown;
+};
+
+export type MigrationReconciliation = {
+	phase: "reconcile";
+	passed: boolean;
+	mismatches: ReconciliationMismatch[];
 };
 
 type GitHubIssueMutation =
@@ -236,9 +251,10 @@ export function migrationIssuePlan(planKey: string, records: MigrationRecord[]):
 			.map((record) => ({
 				key: record.sourceId,
 				title: record.title,
-				body: `${record.body.trim()}\n\n## Migration provenance\n\nMigrated from tk ticket \`${record.sourceId}\`.`,
+				body: `${record.body.trim()}${record.links?.length ? `\n\n## Related tk tickets\n\n${record.links.map((link) => `- \`${link}\``).join("\n")}` : ""}\n\n## Migration provenance\n\nMigrated from tk ticket \`${record.sourceId}\`.`,
 				labels: record.labels ?? [],
 				blockedBy: (record.blockedBy ?? []).filter((id) => migrated.has(id)),
+				parent: record.parent && migrated.has(record.parent) ? record.parent : undefined,
 				state: record.disposition === "migrate-closed" ? "closed" as const : "open" as const,
 			})),
 	};
@@ -441,7 +457,7 @@ async function rateLimitPause(cwd: string, repo: string, phase: string, complete
 	return { paused: true, reason: "github-rate-limit", repo, phase, completed, retryAfter, outcomePath: path.relative(cwd, outcomePath), error: String(error) };
 }
 
-async function executeMigration(cwd: string, repo: string, params: { operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile" | "resume"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number; write_delay_ms?: number; apply?: boolean }): Promise<unknown> {
+export async function executeMigration(cwd: string, repo: string, params: { operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile" | "resume"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number; write_delay_ms?: number; apply?: boolean }): Promise<unknown> {
 	const { plan, outcomePath } = await readMigrationPlan(cwd, params.manifest_path, params.issue_plan_path);
 	const batchSize = Math.max(1, Math.min(50, Math.trunc(params.batch_size ?? 10)));
 	const delay = Math.max(0, Math.min(10_000, Math.trunc(params.write_delay_ms ?? 750)));
@@ -496,15 +512,31 @@ async function executeMigration(cwd: string, repo: string, params: { operation: 
 		}
 		return { phase: "relationships", processed: batch, remaining: edges.length - Object.keys(outcome.relationships).length, nextOperation: Object.keys(outcome.relationships).length < edges.length ? "apply_relationships" : "reconcile", outcomePath: path.relative(cwd, outcomePath) };
 	}
-	const mismatches: string[] = [];
+	const mismatches: ReconciliationMismatch[] = [];
 	for (const item of plan.issues) {
 		const expected = outcome.issues[item.key];
 		const found = expected ? await findByMarker(cwd, repo, issueMarker(plan.key, item.key)) : undefined;
-		if (!expected || !found || expected.number !== found.number) mismatches.push(`${item.key}: missing or mismatched provenance marker`);
-		else if (found.state !== (item.state ?? "open")) mismatches.push(`${item.key}: expected ${item.state ?? "open"}, found ${found.state}`);
+		if (!expected || !found || expected.number !== found.number) mismatches.push({ key: item.key, kind: "marker", expected: expected?.number ?? "mapped issue", actual: found?.number ?? null });
+		else if (found.state !== (item.state ?? "open")) mismatches.push({ key: item.key, kind: "state", expected: item.state ?? "open", actual: found.state });
 	}
-	if (pendingEdges.length > 0) mismatches.push(`${pendingEdges.length} relationship(s) remain unpublished`);
+	for (const edge of edges) {
+		const checkpoint = outcome.relationships[`${edge.kind}:${edge.child}:${edge.other}`] === true;
+		if (!checkpoint) mismatches.push({ key: edge.child, kind: "relationship", expected: `${edge.kind}:${edge.other}`, actual: "unpublished" });
+	}
 	return { phase: "reconcile", repo, planKey: plan.key, passed: mismatches.length === 0, mismatches, outcomePath: path.relative(cwd, outcomePath) };
+}
+
+/** Destructive cutover boundary used only after an explicit approval and clean reconciliation. */
+export async function completeMigrationCleanup(cwd: string, options: { approved: boolean; reconciliation: MigrationReconciliation; guidancePath?: string }): Promise<void> {
+	if (!options.approved) throw new Error("Migration cleanup requires explicit approval.");
+	if (options.reconciliation.phase !== "reconcile" || !options.reconciliation.passed || options.reconciliation.mismatches.length > 0) {
+		throw new Error("Migration cleanup requires a successful reconciliation.");
+	}
+	const guidance = path.resolve(cwd, options.guidancePath ?? "docs/agents/issue-tracker.md");
+	if (guidance !== path.resolve(cwd, "docs/agents/issue-tracker.md")) throw new Error("Migration guidance path must be docs/agents/issue-tracker.md.");
+	await rm(path.resolve(cwd, ".tickets"), { recursive: true, force: true });
+	await mkdir(path.dirname(guidance), { recursive: true });
+	await writeFile(guidance, "# Issue tracker: GitHub\n\nGitHub Issues are the sole durable task source of truth for this repository. Do not create or update tk tickets.\n", "utf8");
 }
 
 async function issueDatabaseId(cwd: string, repo: string, number: number): Promise<number> {
