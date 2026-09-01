@@ -270,6 +270,7 @@ export class PiRpcEngine {
 	}
 
 	private waitForSettled(afterRecordIndex: number, signal: AbortSignal | undefined, timeoutMs: number): Promise<number> {
+		if (this.failure) return Promise.reject(this.failure);
 		const existing = this.events.findIndex((event) =>
 			event.type === "agent_settled" && (this.recordIndexes.get(event) ?? -1) > afterRecordIndex);
 		if (existing !== -1) return Promise.resolve(existing);
