@@ -25,6 +25,7 @@ layout is handled outside Pi with regular tmux.
 - reusable architecture diagram tools under `config/agent/extensions/diagram-tools`
 - a `playwright-browser` skill and `pi-playwright` resolver for project-first browser automation with an optional Nix-pinned fallback
 - typed dry-run-first GitHub Issue tools under `config/agent/extensions/github-issues`
+- a GitHub-native `/aloop #<epic>` supervisor with fresh sequential implementation workers
 - an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
 - a curated, pinned distribution of Matt Pocock's engineering skills
 - a user-invoked `migrate-tk-to-github` migration inventory skill and dedicated migration launcher
@@ -428,6 +429,12 @@ for the queue, parent/sub-issue hierarchy, native blockers, labels, comments,
 and handoffs. Claim an issue before changing code; record verification and a
 concise handoff before closing it.
 
+For multi-issue epics, the packaged `/aloop #<epic>` command supervises fresh,
+sequential implementation workers from a clean worktree while keeping GitHub
+and Git authoritative. See [GitHub-native aloop](docs/github-aloop.md) for setup,
+worker and supervisor responsibilities, retry boundaries, verification
+discovery, interruption recovery, and attempt artifacts.
+
 The primary workflow is the curated Matt Pocock skill chain:
 
 ```text
@@ -476,9 +483,9 @@ approved publication and reconciliation phases.
 
 ## Legacy tk Support
 
-Ordinary Pi sessions do not load `tk`, `/aplan`, or `/aloop`. `tk` is supplied
-only by `pi-migrate-tk` while a project completes the explicit, approval-gated
-GitHub migration described above.
+Ordinary Pi sessions load the GitHub-native `/aloop` command, but do not load
+`tk` or `/aplan`. `tk` is supplied only by `pi-migrate-tk` while a project
+completes the explicit, approval-gated GitHub migration described above.
 
 ## Local Workflow
 
