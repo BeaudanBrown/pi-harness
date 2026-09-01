@@ -16,6 +16,10 @@ interface MatrixTextEvent {
 	replyToEventId?: string;
 }
 
+const MAX_TIMELINE_EVENTS = 512;
+const MAX_INITIAL_EVENT_AGE_MS = 24 * 60 * 60 * 1_000;
+const MAX_FUTURE_EVENT_SKEW_MS = 5 * 60 * 1_000;
+
 function stripReplyFallback(body: string): string | undefined {
 	if (!body.startsWith(">")) return body;
 	const boundary = body.indexOf("\n\n");
@@ -37,7 +41,7 @@ function inputKind(body: string): { kind: "prompt" | "steer" | "abort"; body?: s
 	return { kind: "prompt", body: text };
 }
 
-function operatorTextEvents(response: unknown, roomId: string, operatorUserId: string): MatrixTextEvent[] {
+export function operatorTextEvents(response: unknown, roomId: string, operatorUserId: string, hasCursor: boolean, now = Date.now()): MatrixTextEvent[] {
 	if (typeof response !== "object" || response === null) return [];
 	const rooms = (response as { rooms?: unknown }).rooms;
 	if (typeof rooms !== "object" || rooms === null) return [];
@@ -45,13 +49,25 @@ function operatorTextEvents(response: unknown, roomId: string, operatorUserId: s
 	if (typeof joined !== "object" || joined === null) return [];
 	const room = (joined as Record<string, unknown>)[roomId];
 	if (typeof room !== "object" || room === null) return [];
-	const timeline = (room as { timeline?: unknown }).timeline;
+	const roomValue = room as { timeline?: unknown; state?: unknown };
+	const stateEvents = typeof roomValue.state === "object" && roomValue.state !== null && Array.isArray((roomValue.state as { events?: unknown }).events)
+		? (roomValue.state as { events: unknown[] }).events : [];
+	const operatorMembership = [...stateEvents].reverse().find((value) => typeof value === "object" && value !== null &&
+		(value as { type?: unknown }).type === "m.room.member" && (value as { state_key?: unknown }).state_key === operatorUserId) as { content?: unknown } | undefined;
+	if (operatorMembership && (typeof operatorMembership.content !== "object" || operatorMembership.content === null ||
+		(operatorMembership.content as { membership?: unknown }).membership !== "join")) return [];
+	const timeline = roomValue.timeline;
 	if (typeof timeline !== "object" || timeline === null || !Array.isArray((timeline as { events?: unknown }).events)) return [];
+	const timelineValue = timeline as { events: unknown[]; limited?: unknown; prev_batch?: unknown };
+	const events = timelineValue.events;
+	if (timelineValue.limited === true || events.length > MAX_TIMELINE_EVENTS) throw new Error("Matrix room timeline requires bounded gap recovery before advancing the cursor");
 	const result: MatrixTextEvent[] = [];
-	for (const value of (timeline as { events: unknown[] }).events) {
+	for (const value of events) {
 		if (typeof value !== "object" || value === null) continue;
-		const event = value as { event_id?: unknown; sender?: unknown; type?: unknown; content?: unknown };
-		if (event.sender !== operatorUserId || event.type !== "m.room.message" || typeof event.event_id !== "string" ||
+		const event = value as { event_id?: unknown; sender?: unknown; type?: unknown; content?: unknown; origin_server_ts?: unknown };
+		if (event.sender !== operatorUserId || event.type !== "m.room.message" || typeof event.event_id !== "string" || event.event_id.length > 255 ||
+			typeof event.origin_server_ts !== "number" || !Number.isSafeInteger(event.origin_server_ts) || event.origin_server_ts > now + MAX_FUTURE_EVENT_SKEW_MS ||
+			(!hasCursor && event.origin_server_ts < now - MAX_INITIAL_EVENT_AGE_MS) ||
 			typeof event.content !== "object" || event.content === null) continue;
 		const content = event.content as { msgtype?: unknown; body?: unknown; "m.relates_to"?: unknown };
 		if (content.msgtype !== "m.text" || typeof content.body !== "string" || content.body.length < 1 || content.body.length > MAX_INPUT_TEXT_LENGTH) continue;
@@ -82,6 +98,7 @@ export class CoordinatorRouter {
 		private readonly launch: (manifest: ConversationManifest) => Promise<void>,
 		private readonly notifyLaunchFailure: (sourceId: string, manifest: ConversationManifest) => Promise<void> = async () => undefined,
 		private readonly projectNotice: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void> = async () => undefined,
+		private readonly diagnostic: (message: string) => void = () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -113,9 +130,17 @@ export class CoordinatorRouter {
 		while (!signal.aborted) {
 			try {
 				const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === this.manifest.conversationId);
-				const sync = await this.matrix.sync(runtime?.matrixSince, signal);
+				if (!runtime) throw new Error("Coordinator Matrix cursor state is unavailable");
+				const cursor = runtime.matrixCursor;
+				const established = cursor.status === "established";
+				const sync = await this.matrix.sync(cursor.status === "established" ? cursor.since : undefined, signal);
 				for (const manifest of this.registry.listManifests()) {
-					for (const event of operatorTextEvents(sync.response, manifest.roomId, this.matrix.operatorUserId)) await this.accept(manifest, event);
+					const events = operatorTextEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
+					if (established) {
+						if (events.length > 0 && await this.matrix.memberJoined(manifest.roomId, this.matrix.operatorUserId, signal)) {
+							for (const event of events) await this.accept(manifest, event);
+						}
+					}
 					await this.ensureWake(manifest);
 				}
 				await this.registry.setMatrixCursor(this.manifest.conversationId, sync.nextBatch);
@@ -123,8 +148,10 @@ export class CoordinatorRouter {
 			} catch (error) {
 				if (signal.aborted) return;
 				failures += 1;
+				this.diagnostic(error instanceof Error ? error.message : "Matrix synchronization failed");
 				await new Promise<void>((resolve) => {
-					const timer = setTimeout(resolve, Math.min(30_000, 500 * (2 ** Math.min(failures, 6))));
+					const ceiling = Math.min(30_000, 500 * (2 ** Math.min(failures - 1, 6)));
+					const timer = setTimeout(resolve, Math.floor(ceiling * (0.5 + Math.random() * 0.5)));
 					signal.addEventListener("abort", () => { clearTimeout(timer); resolve(); }, { once: true });
 				});
 			}

@@ -109,11 +109,11 @@ export default function (pi) {
   assert.ok(names.includes("r"));
   assert.ok(names.includes("pi-r-probe"));
   if (expectedKind === "normal") {
-    assert.ok(names.includes("remote"), "normal Pi must retain harness commands");
+    assert.ok(names.includes("sesh"), "normal Pi must retain harness commands");
     assert.equal(names.includes("skill:pi-r"), false, "normal Pi must not add inactive R guidance");
   } else {
     assert.ok(names.includes("skill:pi-r"), "local Pi must explicitly load only the pi-r skill");
-    assert.equal(names.includes("remote"), false, "local Pi must not load general harness extensions");
+    assert.equal(names.includes("sesh"), false, "local Pi must not load general harness extensions");
     assert.equal(names.some((name) => name.startsWith("skill:") && name !== "skill:pi-r"), false);
   }
 

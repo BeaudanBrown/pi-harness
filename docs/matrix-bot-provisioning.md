@@ -1,148 +1,55 @@
-# Matrix host-bot provisioning
+# Managed Matrix host-bot provisioning
 
-Pi remote sessions use one non-admin Matrix account per host. Access tokens are
-runtime credentials: they must not be committed, copied into the Nix store,
-placed in Pi settings/session files, pasted into issues, or sent to an agent.
+Managed sessions use one non-admin Matrix bot account per enabled host. The bot is a relay identity, not a human account. It owns that host's private Space and rooms; only the configured operator MXID is authorized for input.
 
-The first identity is `@pi-grill:matrix.bepis.lol`. Its stable Matrix device ID
-is `PI_GRILL_RELAY`.
+The legacy `pi-matrix-whoami` command, per-Pi `remote-session` extension, `/remote on|off`, and `services.pi-harness.remoteSession` option have been removed. Legacy rooms and sidecar state are not imported.
 
-## 1. Create the non-admin account
+## Provision the account
 
-Run this interactively on `nas`, where the Synapse shared-registration secret is
-available to root. Do not put the password or registration secret in command
-arguments:
+1. Create one normal, non-admin Matrix account for the host.
+2. Record its full MXID as `managedSessions.botUserId` and the authorized human MXID as `managedSessions.operatorUserId`.
+3. Create a dedicated Matrix login/device and obtain its access token through the homeserver's supported login flow. Do not paste the token into Pi, Git, issues, command arguments, Nix expressions, or tmux.
+4. Render a private SOPS-managed file containing exactly:
 
-```sh
-sudo matrix-synapse-register_new_matrix_user
-```
+   ```text
+   PI_MATRIX_ACCESS_TOKEN=<opaque-token>
+   ```
 
-The NixOS Synapse module generates this wrapper because the configured client
-listener has a TCP bind address. The wrapper already appends the generated
-homeserver config, SOPS extra config, and local listener URL; do not pass another
-`-c` or homeserver URL.
+   The file must be a regular non-symlink owned by the relay user, mode `0400` or `0600`. The token is preserved as opaque bounded single-line data.
+5. Configure the host:
 
-Enter `pi-grill`, a generated one-time password, and answer **no** when asked
-whether the account is an administrator. Public Matrix registration can remain
-disabled; the wrapper authenticates with Synapse's existing
-`registration_shared_secret`.
+   ```nix
+   services.pi-harness.managedSessions = {
+     enable = true;
+     user = "operator";
+     environmentFile = config.sops.templates."pi-managed-session.env".path;
+     homeserver = "https://matrix.example.com";
+     botUserId = "@pi-host:example.com";
+     operatorUserId = "@operator:example.com";
+     hostId = "workstation";
+     workspaceRoots.projects = "/home/operator/documents/projects";
+     launcherPackage = pkgs.tmux_project;
+   };
+   ```
 
-## 2. Log in the relay device
+The homeserver must be a credential-free HTTPS origin. The bot must remain non-admin. Use separate accounts/tokens for separate hosts.
 
-Still in a trusted shell, read the password without echoing it and call the
-Matrix password-login endpoint. Nothing below places the password in shell
-history:
+## Activate and verify
 
-```sh
-read -rsp 'pi-grill Matrix password: ' MATRIX_PASSWORD; printf '\n'
-login_response="$({
-  MATRIX_PASSWORD="$MATRIX_PASSWORD" jq -n \
-    '{
-      type: "m.login.password",
-      identifier: {type: "m.id.user", user: "pi-grill"},
-      password: env.MATRIX_PASSWORD,
-      device_id: "PI_GRILL_RELAY",
-      initial_device_display_name: "Pi relay on grill"
-    }'
-} | curl --fail-with-body --silent --show-error \
-  -H 'Content-Type: application/json' \
-  --data-binary @- \
-  https://matrix.bepis.lol/_matrix/client/v3/login)"
-unset MATRIX_PASSWORD
-```
-
-Do not print `login_response`. Extract the token directly into the SOPS update
-step below, then unset it:
+After switching the host configuration, run as the relay user:
 
 ```sh
-MATRIX_ACCESS_TOKEN="$(jq -er '.access_token' <<<"$login_response")"
-unset login_response
+pi-managed-session-status
+systemctl --user status pi-managed-session-relay.service
+journalctl --user -u pi-managed-session-relay.service -n 50
 ```
 
-## 3. Store the runtime environment through SOPS
+The first successful relay start verifies `/account/whoami` against the configured bot MXID, creates or recovers the private host Space and coordinator room, and performs a cursor bootstrap without executing retained historical commands. Send ordinary text to the coordinator room and confirm one normal response. Then use coordinator lifecycle tools to create a disposable project conversation and verify its first Matrix message reaches the persisted Pi session.
 
-The grill NixOS module declares the `pi/matrix-grill-env` SOPS secret, mapped by
-the dotfiles convention to `secrets/grill.yaml`. In the private SOPS checkout on
-`nas`, write a YAML string whose decrypted content is exactly:
+Do not invite additional users. A removed or unknown operator membership fails closed. The relay ignores unauthorized senders, foreign rooms, malformed relations, unsupported event/media types, stale bootstrap events, and oversized/limited timelines until safe cursor recovery is possible.
 
-```text
-PI_MATRIX_ACCESS_TOKEN=<token>
-```
+## Rotation and recovery
 
-From `/home/beau/sops-secrets` on `nas`, use `sops set --value-stdin` so the
-token is not exposed in process arguments:
+Token rotation does not recreate rooms, manifests, Pi sessions, queues, or projections. Create a replacement login for the same bot MXID, atomically replace the SOPS-rendered token file, restart the user service, run `pi-managed-session-status`, verify an existing room round trip, and only then revoke the old device.
 
-```sh
-cd /home/beau/sops-secrets
-printf '%s' "$MATRIX_ACCESS_TOKEN" |
-  jq -Rs '"PI_MATRIX_ACCESS_TOKEN=" + . + "\n"' |
-  sops set --value-stdin secrets/grill.yaml '["pi/matrix-grill-env"]'
-unset MATRIX_ACCESS_TOKEN
-```
-
-Do not send the token or decrypted environment line to an agent. Commit and
-push the encrypted SOPS change using the repository's normal human-operated
-secret workflow.
-
-## 4. Activate and verify on grill
-
-After the pi-harness and dotfiles changes are available to grill, activate the
-new configuration through the normal NixOS deployment workflow. The rendered
-environment file is owned by the primary user with mode `0400`.
-
-Verify the identity without displaying the token:
-
-```sh
-pi-matrix-whoami
-```
-
-The only successful output is:
-
-```text
-@pi-grill:matrix.bepis.lol
-```
-
-A different identity, rejected token, missing secret, or unreachable homeserver
-returns non-zero. The command never includes the token in process arguments or
-prints Matrix response bodies.
-
-## 5. Live grill round-trip smoke test
-
-Start a disposable ordinary Pi session on grill and activate one concept room:
-
-```text
-/remote on matrix-roundtrip-smoke
-```
-
-The command must verify `@pi-grill:matrix.bepis.lol` before it creates or polls
-the private, unencrypted room `pi · matrix-roundtrip-smoke`. In Element X,
-accept the invitation as `@beau:matrix.bepis.lol` and send:
-
-```text
-@grill Reply exactly: Matrix round trip succeeded
-```
-
-Acceptance requires one ordinary persisted Pi user turn containing only
-`Reply exactly: Matrix round trip succeeded`, followed by one Matrix text event
-from the bot containing the final assistant answer. Input from another sender,
-room, or host prefix must be ignored.
-
-Then run:
-
-```text
-/remote status
-/remote off
-/remote status
-```
-
-The first status must identify the connected concept and room without revealing
-the token. After `off`, polling must stop while the room and persisted session
-binding remain available. Record only room-independent pass/fail evidence in the
-GitHub issue; do not record credentials or decrypted environment content.
-
-## Rotation or revocation
-
-Until the full remote-session runbook lands, rotate by logging in a replacement
-`PI_GRILL_RELAY` device, replacing the SOPS value, activating grill, running
-`pi-matrix-whoami`, and then deleting the old device/session from Matrix. Never
-reuse the human Element access token for a Pi host bot.
+For outage, rate-limit, cursor, registry, lifecycle, transcript, checkpoint, stop/delete, troubleshooting, and deferred-scope details, use the complete [managed Matrix sessions runbook](managed-matrix-sessions.md).

@@ -328,7 +328,10 @@ const runtimeConversation = strictObject({
 			connectedAt: timestamp,
 		}),
 	),
-	matrixSince: Type.Optional(boundedString(2_048)),
+	matrixCursor: Type.Union([
+		strictObject({ status: Type.Literal("bootstrap") }),
+		strictObject({ status: Type.Literal("established"), since: boundedString(2_048) }),
+	]),
 	pendingInputs: Type.Array(pendingInput, { maxItems: MAX_PENDING_INPUTS }),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	managedWindow: nullable(
@@ -374,7 +377,7 @@ export interface HostRuntimeState {
 		state: "starting" | "active" | "dormant";
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string };
-		matrixSince?: string;
+		matrixCursor: { status: "bootstrap" } | { status: "established"; since: string };
 		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string }>;
 		projection: Array<{
 			entryId: string;
@@ -543,8 +546,21 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		(value as { schemaVersion?: unknown }).schemaVersion !== MANAGED_SESSION_STATE_VERSION) {
 		throw new ManagedSessionContractError("unsupported_version", "unsupported host runtime state version");
 	}
-	assertSchema(HostRuntimeStateSchema, value, "host runtime state");
-	const state = value as HostRuntimeState;
+	let candidate = value;
+	if (typeof value === "object" && value !== null && Array.isArray((value as { conversations?: unknown }).conversations)) {
+		const migrated = structuredClone(value) as { conversations: Array<Record<string, unknown>> };
+		let changed = false;
+		for (const conversation of migrated.conversations) {
+			if (!("matrixCursor" in conversation)) {
+				conversation.matrixCursor = typeof conversation.matrixSince === "string"
+					? { status: "established", since: conversation.matrixSince } : { status: "bootstrap" };
+				delete conversation.matrixSince; changed = true;
+			}
+		}
+		if (changed) candidate = migrated;
+	}
+	assertSchema(HostRuntimeStateSchema, candidate, "host runtime state");
+	const state = candidate as HostRuntimeState;
 	const conversationIds = new Set<string>();
 	for (const conversation of state.conversations) {
 		if (conversationIds.has(conversation.conversationId)) {

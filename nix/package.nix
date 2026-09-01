@@ -19,7 +19,6 @@
   mermaidCli ? null,
   structurizrCli ? null,
   jq,
-  nodejs,
   playwrightAgentCli ? null,
   harnessRevision ? "unversioned",
   piRRevision ? "unversioned",
@@ -116,7 +115,6 @@ resource_args=(
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts"
   --extension "${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
@@ -208,10 +206,6 @@ EOF
       --replace-fail '@PI_HARNESS_JQ@' '${lib.getExe jq}'
     chmod +x "$out/bin/pi-playwright"
 
-    cp bin/pi-matrix-whoami "$out/bin/pi-matrix-whoami"
-    substituteInPlace "$out/bin/pi-matrix-whoami" \
-      --replace-fail '@PI_HARNESS_NODE@' '${lib.getExe nodejs}'
-    chmod +x "$out/bin/pi-matrix-whoami"
     ${lib.optionalString (agentgraphPackage != null) ''
       ln -s "${agentgraphPackage}/bin/ag" "$out/bin/ag"
     ''}

@@ -64,6 +64,7 @@ function runtime(overrides: Record<string, unknown> = {}) {
 				conversationId,
 				state: "dormant",
 				attachment: null,
+				matrixCursor: { status: "bootstrap" },
 				pendingInputs: [],
 				projection: [],
 				managedWindow: null,
@@ -227,6 +228,14 @@ test("portable manifests reject unknown versions, fields, and unsafe workspace i
 		() => parseConversationManifest(manifest({ placement: { rootKey: "projects", workspace: "nested/repo", relativeCwd: "" } })),
 		/immediate child/,
 	);
+});
+
+test("legacy optional matrixSince runtime is migrated to explicit safe cursor state", () => {
+	const established = runtime() as { conversations: Array<Record<string, unknown>> };
+	delete established.conversations[0]!.matrixCursor; established.conversations[0]!.matrixSince = "legacy-cursor";
+	assert.deepEqual(parseHostRuntimeState(established).conversations[0]?.matrixCursor, { status: "established", since: "legacy-cursor" });
+	const fresh = runtime() as { conversations: Array<Record<string, unknown>> }; delete fresh.conversations[0]!.matrixCursor;
+	assert.deepEqual(parseHostRuntimeState(fresh).conversations[0]?.matrixCursor, { status: "bootstrap" });
 });
 
 test("runtime parser rejects malformed lifecycle state and duplicate durable identities", () => {

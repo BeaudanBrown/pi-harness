@@ -105,56 +105,6 @@
           xdgUtils = pkgs.xdg-utils;
           jq = pkgs.jq;
         };
-        remoteSessionModuleTest = lib.evalModules {
-          specialArgs = { inherit pkgs; };
-          modules = [
-            {
-              options = {
-                assertions = lib.mkOption {
-                  type = lib.types.listOf lib.types.attrs;
-                  default = [ ];
-                };
-                environment.systemPackages = lib.mkOption {
-                  type = lib.types.listOf lib.types.package;
-                  default = [ ];
-                };
-                systemd.lingerUsers = lib.mkOption {
-                  type = lib.types.listOf lib.types.str;
-                  default = [ ];
-                };
-                systemd.user.services = lib.mkOption {
-                  type = lib.types.attrsOf lib.types.anything;
-                  default = { };
-                };
-              };
-            }
-            ./nix/module.nix
-            {
-              services.pi-harness = {
-                enable = true;
-                package = piHarnessPackage;
-                sessionDirectory = "/home/operator/.local/state/syncthing/pi/sessions";
-                remoteSession = {
-                  environmentFile = "/run/secrets/pi/matrix-test-env";
-                  homeserver = "https://matrix.example.com";
-                  botUserId = "@pi-test:example.com";
-                  operatorUserId = "@operator:example.com";
-                  hostName = "test-host";
-                };
-              };
-            }
-          ];
-        };
-        remoteSessionModulePackages = remoteSessionModuleTest.config.environment.systemPackages;
-        remoteSessionPiWrapper = builtins.elemAt remoteSessionModulePackages 0;
-        remoteSessionWhoamiWrapper = builtins.elemAt remoteSessionModulePackages 1;
-        remoteSessionModuleReport = pkgs.writeText "pi-harness-remote-session-module-test.json" (
-          builtins.toJSON {
-            assertions = map (item: item.assertion) remoteSessionModuleTest.config.assertions;
-            packageCount = builtins.length remoteSessionModulePackages;
-            managedServicePresent = builtins.hasAttr "pi-managed-session-relay" remoteSessionModuleTest.config.systemd.user.services;
-          }
-        );
         managedSessionLauncher = pkgs.writeShellApplication {
           name = "tmux_project";
           runtimeInputs = [ pkgs.coreutils pkgs.direnv pkgs.findutils pkgs.gawk pkgs.jq pkgs.tmux ];
@@ -278,6 +228,7 @@
         };
         managedSessionService = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-relay;
         managedSessionPiWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 0;
+        managedSessionStatusWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 1;
         managedSessionCoordinatorPi = builtins.elemAt managedSessionService.path 1;
         managedSessionModuleReport = pkgs.writeText "pi-harness-managed-session-module-test.json" (builtins.toJSON {
           assertions = map (item: item.assertion) managedSessionModuleTest.config.assertions;
@@ -324,7 +275,6 @@
                   --extension "$PWD/config/agent/extensions/diagram-tools/index.ts" \
                   --extension "$PWD/config/agent/extensions/worker-runner/index.ts" \
                   --extension "$PWD/config/agent/extensions/review-agents/index.ts" \
-                  --extension "$PWD/config/agent/extensions/remote-session/index.ts" \
                   --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
                   --extension "$PWD/config/agent/extensions/codex-fast/index.ts" \
                   --extension "$PWD/config/agent/extensions/tmux-cursor-focus/index.ts" \
@@ -593,9 +543,11 @@
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/matrix-client.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/state-store.ts
+            test ! -e ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session
+            if grep -F 'remoteSession =' nix/module.nix >/dev/null; then
+              echo "legacy remoteSession NixOS option still exists" >&2
+              exit 1
+            fi
             test -f ${piHarnessResources.managedSessionExtensions.ordinary}
             test -f ${piHarnessResources.managedSessionExtensions.coordinator}
             test -f ${piHarnessResources}/share/pi-harness/agent/extensions/managed-sessions/adapter/client.ts
@@ -642,7 +594,7 @@
             test -e ${piHarnessPackage}/bin/ag
             test -e ${piHarnessPackage}/bin/agentgraph-postgres
             test -x ${piHarnessPackage}/bin/pi-playwright
-            test -x ${piHarnessPackage}/bin/pi-matrix-whoami
+            test ! -e ${piHarnessPackage}/bin/pi-matrix-whoami
             test ! -e ${piHarnessPackage}/bin/pi-managed-session-relay
             test -x ${managedSessionRelay}/bin/pi-managed-session-relay
             test -x ${piHarnessPackage}/bin/pi-r-local
@@ -721,22 +673,18 @@
                 --extension "$command_probe_dir/extension.ts" >/dev/null
             test "$(cat "$command_probe_dir/result")" = expanded
             rm -rf "$command_probe_dir"
-            test -x ${remoteSessionPiWrapper}/bin/pi
-            test -x ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami
-            jq -e '.packageCount == 2 and (.assertions | all) and (.managedServicePresent | not)' ${remoteSessionModuleReport} >/dev/null
-            grep -F 'PI_CODING_AGENT_SESSION_DIR' ${remoteSessionPiWrapper}/bin/pi >/dev/null
-            grep -F '/home/operator/.local/state/syncthing/pi/sessions' \
-              ${remoteSessionPiWrapper}/bin/pi >/dev/null
-            grep -F 'PI_MATRIX_HOMESERVER' ${remoteSessionPiWrapper}/bin/pi >/dev/null
-            grep -F '/run/secrets/pi/matrix-test-env' ${remoteSessionPiWrapper}/bin/pi >/dev/null
-            grep -F 'exec ${piHarnessPackage}/bin/pi-matrix-whoami' \
-              ${remoteSessionWhoamiWrapper}/bin/pi-matrix-whoami >/dev/null
             test -x ${managedSessionPiWrapper}/bin/pi
+            test -x ${managedSessionStatusWrapper}/bin/pi-managed-session-status
+            grep -F 'cursorConfigured' ${managedSessionStatusWrapper}/bin/pi-managed-session-status >/dev/null
             jq -e '(.assertions | all) and .lingerUsers == ["operator"] and .servicePathCount == 4 and (.hasGeneralEnvironmentFile | not) and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"' \
               ${managedSessionModuleReport} >/dev/null
             managed_relay_launch=$(jq -r .execStart ${managedSessionModuleReport})
             grep -F 'credential file may contain only one PI_MATRIX_ACCESS_TOKEN assignment' "$managed_relay_launch" >/dev/null
             grep -F 'export PI_MATRIX_ACCESS_TOKEN=' "$managed_relay_launch" >/dev/null
+            if grep -F 'echo' "$managed_relay_launch" | grep -F 'matrix_token' >/dev/null; then
+              echo "managed relay launcher prints its Matrix token" >&2
+              exit 1
+            fi
             grep -F '${piHarnessResources.managedSessionExtensions.ordinary}' ${managedSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'PI_MANAGED_SESSIONS_SOCKET' ${managedSessionPiWrapper}/bin/pi >/dev/null
             if grep -F '/run/secrets/pi-managed-session.env' ${managedSessionPiWrapper}/bin/pi >/dev/null; then
@@ -756,7 +704,10 @@
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/remote-session/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
+            if grep -F 'extensions/remote-session/' ${piHarnessPackage}/bin/pi >/dev/null; then
+              echo "legacy direct Matrix bridge must not load in packaged Pi" >&2
+              exit 1
+            fi
             if grep -F 'managed-sessions/adapter/' ${piHarnessPackage}/bin/pi >/dev/null; then
               echo "disabled default Pi wrapper must not load managed-session adapters" >&2
               exit 1
@@ -799,7 +750,7 @@
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/review-agents/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/remote-session/index.ts")' \
+            jq -e '.extensions | index("./extensions/remote-session/index.ts") | not' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '[.extensions[] | select(contains("managed-sessions/adapter/"))] | length == 0' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
@@ -831,7 +782,6 @@
             tsc --project tsconfig.test.json --outDir "$test_build_dir"
             ${evalSelfTestApp}/bin/pi-eval-self-test
             PI_HARNESS_JQ=${lib.getExe pkgs.jq} \
-              PI_MATRIX_WHOAMI=${piHarnessPackage}/bin/pi-matrix-whoami \
               PI_MANAGED_ADAPTER_TEST_PI=${piPackage}/bin/pi \
               PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary} \
               PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator} \
@@ -858,7 +808,6 @@
                 "$test_build_dir/tests/managed-session-relay-matrix.test.js" \
                 "$test_build_dir/tests/managed-session-transcript-projector.test.js" \
                 "$test_build_dir/tests/managed-session-transcript-renderer.test.js" \
-                "$test_build_dir/tests/matrix-whoami.test.js" \
                 "$test_build_dir/tests/remote-session.test.js" \
                 "$test_build_dir/tests/remote-session-state.test.js" \
                 "$test_build_dir/tests/playwright-resolver.test.js" \

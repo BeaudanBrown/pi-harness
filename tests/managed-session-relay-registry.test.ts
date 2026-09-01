@@ -20,6 +20,7 @@ import {
 import { AtomicJsonFile, ensurePrivateDirectory } from "../config/agent/extensions/managed-sessions/relay/atomic-json.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { RelayRegistry, RelayRegistryError } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 
 const hostId = "test-host";
 const nonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
@@ -97,6 +98,27 @@ test("registry enforces nonce, role, binding, and one live attachment per conver
 	assert.equal(registry.snapshot().conversations[0]?.state, "dormant");
 });
 
+test("token rotation changes only request authorization and preserves rooms, sessions, cursor, and projection state", async () => {
+	const value = manifest(); const { root, store, registry } = await fixture([value]);
+	await registry.setMatrixCursor(value.conversationId, "rotation-cursor");
+	const entryId = deriveTranscriptEntryId(value.piSessionId, "rotation-final");
+	await registry.recordProjection(value.conversationId, { entryId, kind: "assistant_final", status: "projected", chunks: [] });
+	const authorizations: string[] = [];
+	for (const accessToken of ["old-rotation-token", "new-rotation-token"]) {
+		const client = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken,
+			botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" }, async (_input, init) => {
+			authorizations.push(new Headers(init?.headers).get("authorization") ?? ""); return Response.json({ user_id: "@bot:example.com" });
+		}, [value.roomId]);
+		assert.equal(await client.whoami(), "@bot:example.com");
+		const restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+		assert.equal(restarted.manifestByConversationId(value.conversationId)?.roomId, value.roomId);
+		assert.equal(restarted.manifestByConversationId(value.conversationId)?.piSessionId, value.piSessionId);
+		assert.deepEqual(restarted.snapshot().conversations[0]?.matrixCursor, { status: "established", since: "rotation-cursor" });
+		assert.equal(restarted.snapshot().conversations[0]?.projection[0]?.entryId, entryId);
+	}
+	assert.deepEqual(authorizations, ["Bearer old-rotation-token", "Bearer new-rotation-token"]);
+});
+
 test("restart preserves cursor, accepted input, projections, and permits nonce-authorized reattachment", async () => {
 	const value = manifest();
 	const { root, store, registry } = await fixture([value]);
@@ -118,7 +140,7 @@ test("restart preserves cursor, accepted input, projections, and permits nonce-a
 	await restarted.load();
 	restarted.beginRestartReconciliation();
 	const before = restarted.snapshot().conversations[0]!;
-	assert.equal(before.matrixSince, "cursor-1");
+	assert.deepEqual(before.matrixCursor, { status: "established", since: "cursor-1" });
 	assert.equal(before.pendingInputs[0]?.body, "hello");
 	assert.equal(before.projection[0]?.status, "projecting");
 	const reattached = await restarted.attach(attach(value, "ordinary_adapter"), "new-process");

@@ -144,14 +144,16 @@ test("unprefixed authorized coordinator text is durable before wake and delivere
 		bindingBoundaryEntryId: "entry_00000000000000000000000000000000", createdAt: "2026-08-31T00:00:00.000Z",
 	};
 	await value.registry.createCoordinatorConversation(manifest);
+	await value.registry.setMatrixCursor(conversationId, "coordinator-test-cursor");
 	let syncCount = 0;
 	const matrix = {
 		operatorUserId: matrixConfig.operatorUserId,
+		memberJoined: async () => true,
 		sync: async (_since?: string, signal?: AbortSignal) => {
 			syncCount += 1;
 			if (syncCount === 1) return { nextBatch: "cursor-1", response: { rooms: { join: { [manifest.roomId]: { timeline: { events: [
-				{ event_id: "$operator", sender: matrixConfig.operatorUserId, type: "m.room.message", content: { msgtype: "m.text", body: "resume please" } },
-				{ event_id: "$other", sender: "@other:example.com", type: "m.room.message", content: { msgtype: "m.text", body: "ignore" } },
+				{ event_id: "$operator", origin_server_ts: Date.now(), sender: matrixConfig.operatorUserId, type: "m.room.message", content: { msgtype: "m.text", body: "resume please" } },
+				{ event_id: "$other", origin_server_ts: Date.now(), sender: "@other:example.com", type: "m.room.message", content: { msgtype: "m.text", body: "ignore" } },
 			] } } } } } };
 			await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
 			throw new Error("cancelled");
@@ -197,14 +199,16 @@ test("failed coordinator wake returns dormant, retains input, and emits one stab
 		bindingBoundaryEntryId: "entry_00000000000000000000000000000000", createdAt: "2026-08-31T00:00:00.000Z",
 	};
 	await value.registry.createCoordinatorConversation(manifest);
+	await value.registry.setMatrixCursor(conversationId, "coordinator-failure-cursor");
 	let synced = false;
 	const matrix = {
 		operatorUserId: matrixConfig.operatorUserId,
+		memberJoined: async () => true,
 		sync: async (_since?: string, signal?: AbortSignal) => {
 			if (!synced) {
 				synced = true;
 				return { nextBatch: "failure-cursor", response: { rooms: { join: { [manifest.roomId]: { timeline: { events: [
-					{ event_id: "$wake-failure", sender: matrixConfig.operatorUserId, type: "m.room.message", content: { msgtype: "m.text", body: "wake" } },
+					{ event_id: "$wake-failure", origin_server_ts: Date.now(), sender: matrixConfig.operatorUserId, type: "m.room.message", content: { msgtype: "m.text", body: "wake" } },
 				] } } } } } };
 			}
 			await new Promise<void>((resolve) => signal?.addEventListener("abort", () => resolve(), { once: true }));
@@ -272,10 +276,12 @@ export default function (pi) {
 			createCount += 1;
 			return Response.json({ room_id: createCount === 1 ? "!space:example.com" : "!coordinator:example.com" });
 		}
+		if (url.pathname.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (url.pathname.endsWith("/sync")) {
 			syncCount += 1;
-			if (syncCount === 1) return Response.json({ next_batch: "cursor-phone", rooms: { join: { "!coordinator:example.com": { timeline: { events: [
-				{ event_id: "$phone", sender: matrixConfig.operatorUserId, type: "m.room.message", content: { msgtype: "m.text", body: "hello coordinator" } },
+			if (syncCount === 1) return Response.json({ next_batch: "cursor-bootstrap", rooms: { join: {} } });
+			if (syncCount === 2) return Response.json({ next_batch: "cursor-phone", rooms: { join: { "!coordinator:example.com": { timeline: { events: [
+				{ event_id: "$phone", origin_server_ts: Date.now(), sender: matrixConfig.operatorUserId, type: "m.room.message", content: { msgtype: "m.text", body: "hello coordinator" } },
 			] } } } } });
 			await new Promise<void>((resolve) => init?.signal?.addEventListener("abort", () => resolve(), { once: true }));
 			throw Object.assign(new Error("aborted"), { name: "AbortError" });

@@ -5,6 +5,7 @@ import {
 	ManagedMatrixError,
 	managedMatrixConfigFromEnvironment,
 } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
+import { redactManagedValue } from "../config/agent/extensions/managed-sessions/relay/redaction.js";
 
 const token = "super-secret-matrix-token";
 const config = {
@@ -22,6 +23,7 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 		if (url.pathname.endsWith("/whoami")) return Response.json({ user_id: config.botUserId });
 		if (url.pathname.endsWith("/sync")) return Response.json({ next_batch: "cursor-2", rooms: {} });
 		if (url.pathname.endsWith("/createRoom")) return Response.json({ room_id: "!room:example.com" });
+		if (url.pathname.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (url.pathname.includes("/send/")) return Response.json({ event_id: "$sent" });
 		return Response.json({});
 	};
@@ -30,6 +32,7 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 	assert.equal((await client.sync("cursor-1")).nextBatch, "cursor-2");
 	assert.equal(await client.createPrivateRoom("pi · work"), "!room:example.com");
 	await client.setRoomName("!room:example.com", "work");
+	assert.equal(await client.memberJoined("!room:example.com", config.operatorUserId), true);
 	assert.equal(await client.sendText("!room:example.com", "pi_txn", "hello"), "$sent");
 	await client.leaveRoom("!room:example.com");
 	assert.deepEqual(calls.map((call) => [call.init?.method, call.url.pathname]), [
@@ -37,6 +40,7 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 		["GET", "/_matrix/client/v3/sync"],
 		["POST", "/_matrix/client/v3/createRoom"],
 		["PUT", "/_matrix/client/v3/rooms/!room%3Aexample.com/state/m.room.name/"],
+		["GET", "/_matrix/client/v3/rooms/!room%3Aexample.com/state/m.room.member/%40operator%3Aexample.com"],
 		["PUT", "/_matrix/client/v3/rooms/!room%3Aexample.com/send/m.room.message/pi_txn"],
 		["POST", "/_matrix/client/v3/rooms/!room%3Aexample.com/leave"],
 	]);
@@ -69,7 +73,7 @@ test("Matrix host Space operations are fixed, managed-room scoped, and accessibi
 });
 
 test("Matrix errors are typed, cancellable, bounded, and credential-redacted", async () => {
-	const httpClient = new ManagedMatrixClient(config, async () => new Response(token, { status: 503 }));
+	const httpClient = new ManagedMatrixClient(config, async () => new Response(token, { status: 503 }), [], { maxAttempts: 1 });
 	await assert.rejects(() => httpClient.whoami(), (error: unknown) => {
 		assert.ok(error instanceof ManagedMatrixError);
 		assert.equal(error.code, "http");
@@ -85,6 +89,39 @@ test("Matrix errors are typed, cancellable, bounded, and credential-redacted", a
 	await assert.rejects(() => oversized.whoami(), /size limit/);
 });
 
+test("Matrix retries rate limits and uncertain sends with bounded deterministic delay and one transaction", async () => {
+	const delays: number[] = []; const calls: Array<{ path: string; body?: BodyInit | null }> = []; let attempt = 0;
+	const client = new ManagedMatrixClient(config, async (input, init) => {
+		calls.push({ path: new URL(String(input)).pathname, body: init?.body }); attempt += 1;
+		if (attempt === 1) return Response.json({ errcode: "M_LIMIT_EXCEEDED", retry_after_ms: 1_234, secret: token }, { status: 429 });
+		if (attempt === 2) throw new Error(token);
+		return Response.json({ event_id: "$retry-sent" });
+	}, ["!retry:example.com"], { maxAttempts: 3, baseDelayMs: 100, maxDelayMs: 2_000, random: () => 0,
+		sleep: async (delay) => { delays.push(delay); } });
+	assert.equal(await client.sendText("!retry:example.com", "pi_stable_retry", "retry"), "$retry-sent");
+	assert.deepEqual(delays, [1_234, 100]);
+	assert.equal(new Set(calls.map((call) => `${call.path}\0${String(call.body)}`)).size, 1);
+	assert.ok(calls.every((call) => call.path.endsWith("/pi_stable_retry")));
+	assert.ok(!JSON.stringify(delays).includes(token));
+});
+
+test("Matrix backoff cancellation stops retries without a busy loop", async () => {
+	const controller = new AbortController(); let calls = 0;
+	const client = new ManagedMatrixClient(config, async () => { calls += 1; return new Response("{}", { status: 503 }); }, [], {
+		maxAttempts: 5, sleep: async (_delay, signal) => { controller.abort(); if (signal?.aborted) throw new ManagedMatrixError("cancelled", "Matrix request was cancelled"); },
+	});
+	await assert.rejects(() => client.whoami(controller.signal), (error: unknown) => error instanceof ManagedMatrixError && error.code === "cancelled");
+	assert.equal(calls, 1);
+});
+
+test("fault diagnostics redact bearer and credential environment values", () => {
+	const rendered = redactManagedValue(new Error(`Bearer ${token}\npassword=${token}`), { PI_MATRIX_ACCESS_TOKEN: token, OTHER: "visible" });
+	assert.equal(rendered.includes(token), false);
+	assert.equal(rendered.includes("[REDACTED]"), true);
+	assert.equal(rendered.includes("\n"), false);
+	assert.equal(redactManagedValue("token=x", { PI_MATRIX_ACCESS_TOKEN: "x" }).includes("x"), false);
+});
+
 test("Matrix environment validation rejects non-HTTPS and credential-bearing homeservers", () => {
 	const environment = {
 		PI_MATRIX_HOMESERVER: "http://matrix.example.com",
@@ -94,4 +131,6 @@ test("Matrix environment validation rejects non-HTTPS and credential-bearing hom
 	};
 	assert.throws(() => managedMatrixConfigFromEnvironment(environment), /credential-free HTTPS/);
 	assert.throws(() => managedMatrixConfigFromEnvironment({ ...environment, PI_MATRIX_HOMESERVER: "https://user:password@matrix.example.com" }), /credential-free HTTPS/);
+	assert.equal(managedMatrixConfigFromEnvironment({ ...environment, PI_MATRIX_HOMESERVER: config.homeserver,
+		PI_MATRIX_ACCESS_TOKEN: " =opaque-token= " }).accessToken, " =opaque-token= ");
 });

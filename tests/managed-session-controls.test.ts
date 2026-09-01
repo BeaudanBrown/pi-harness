@@ -10,7 +10,7 @@ import {
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { renderRemoteCheckpoint } from "../config/agent/extensions/managed-sessions/checkpoint.js";
 import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
-import { CoordinatorRouter } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
+import { CoordinatorRouter, operatorTextEvents } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
@@ -18,7 +18,7 @@ import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay
 
 const config = { homeserver: "https://matrix.example.com", accessToken: "secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
 
-async function fixture() {
+async function fixture(establishCursor = true) {
 	const root = await mkdtemp(join(tmpdir(), "managed-controls-"));
 	const registry = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
 	await registry.load();
@@ -27,12 +27,13 @@ async function fixture() {
 		ownerHostId: "controls-host", creationKey: "coordinator", concept: "controls", piSessionId: "session-controls",
 		roomId: "!room:example.com", bindingBoundaryEntryId: `entry_${"1".repeat(32)}`, createdAt: new Date().toISOString() };
 	await registry.createCoordinatorConversation(manifest);
+	if (establishCursor) await registry.setMatrixCursor(conversationId, "controls-fixture-cursor");
 	await registry.setAttachmentNonce(conversationId, "abcdefghijklmnopqrstuvwxyzABCDEF");
 	return { root, registry, manifest };
 }
 
 function sync(events: unknown[]) { return { next_batch: "next", rooms: { join: { "!room:example.com": { timeline: { events } } } } }; }
-function event(id: string, body: string, relation?: unknown) { return { event_id: id, sender: config.operatorUserId, type: "m.room.message",
+function event(id: string, body: string, relation?: unknown) { return { event_id: id, origin_server_ts: Date.now(), sender: config.operatorUserId, type: "m.room.message",
 	content: { msgtype: "m.text", body, ...(relation === undefined ? {} : { "m.relates_to": relation }) } }; }
 
 async function attach(server: ManagedSessionIpcServer, manifest: ConversationManifest): Promise<Socket> {
@@ -59,6 +60,66 @@ async function readMany(socket: Socket, count: number): Promise<ManagedSessionEn
 	});
 }
 
+test("fresh relay bootstraps a cursor without replaying retained room commands", async () => {
+	const { registry, manifest } = await fixture(false); let syncCount = 0; let launches = 0;
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		if (!new URL(String(input)).pathname.endsWith("/sync")) return Response.json({ event_id: "$ok" });
+		syncCount += 1;
+		if (syncCount === 1) return Response.json({ next_batch: "safe-start", rooms: { join: { [manifest.roomId]: { timeline: { events: [event("$retained", "must not replay")] } } } } });
+		await new Promise<void>((resolve) => init?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+		throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+	}, [manifest.roomId]);
+	const router = new CoordinatorRouter(manifest, registry, matrix, { sendToConversation: () => false } as unknown as ManagedSessionIpcServer, async () => { launches += 1; });
+	router.start(); for (let attempt = 0; attempt < 100 && registry.snapshot().conversations[0]?.matrixCursor.status !== "established"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	await router.stop();
+	assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor, { status: "established", since: "safe-start" });
+	assert.equal(registry.pendingInputs(manifest.conversationId).length, 0); assert.equal(launches, 0);
+});
+
+test("limited offline timeline does not advance the durable cursor", async () => {
+	const { registry, manifest } = await fixture(); let diagnosed = false;
+	const matrix = new ManagedMatrixClient(config, async (input) => {
+		if (!new URL(String(input)).pathname.endsWith("/sync")) return Response.json({ membership: "join" });
+		return Response.json({ next_batch: "must-not-advance", rooms: { join: { [manifest.roomId]: { timeline: {
+			limited: true, prev_batch: "gap", events: [event("$offline", "retained")],
+		} } } } });
+	}, [manifest.roomId], { maxAttempts: 1 });
+	const router = new CoordinatorRouter(manifest, registry, matrix, { sendToConversation: () => false } as unknown as ManagedSessionIpcServer,
+		async () => undefined, async () => undefined, async () => undefined, () => { diagnosed = true; });
+	router.start(); for (let attempt = 0; attempt < 100 && !diagnosed; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	await router.stop();
+	assert.equal(diagnosed, true); assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor,
+		{ status: "established", since: "controls-fixture-cursor" });
+	assert.equal(registry.pendingInputs(manifest.conversationId).length, 0);
+});
+
+test("bootstrap limited timeline also does not establish a cursor", async () => {
+	const { registry, manifest } = await fixture(false); let diagnosed = false;
+	const matrix = new ManagedMatrixClient(config, async () => Response.json({ next_batch: "unsafe-bootstrap", rooms: { join: {
+		[manifest.roomId]: { timeline: { limited: true, prev_batch: "gap", events: [event("$old", "do not run")] } },
+	} } }), [manifest.roomId], { maxAttempts: 1 });
+	const router = new CoordinatorRouter(manifest, registry, matrix, { sendToConversation: () => false } as unknown as ManagedSessionIpcServer,
+		async () => undefined, async () => undefined, async () => undefined, () => { diagnosed = true; });
+	router.start(); for (let attempt = 0; attempt < 100 && !diagnosed; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	await router.stop(); assert.equal(diagnosed, true);
+	assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor, { status: "bootstrap" });
+});
+
+test("room membership, event age, and payload shape fail closed before routing", () => {
+	const now = Date.now(); const message = event("$member", "hello");
+	const response = (membership: string) => ({ rooms: { join: { "!room:example.com": {
+		state: { events: [{ type: "m.room.member", state_key: config.operatorUserId, content: { membership } }] }, timeline: { events: [message] },
+	} } } });
+	assert.equal(operatorTextEvents(response("leave"), "!room:example.com", config.operatorUserId, false, now).length, 0);
+	assert.equal(operatorTextEvents(response("join"), "!room:example.com", config.operatorUserId, false, now).length, 1);
+	const stale = response("join"); stale.rooms.join["!room:example.com"].timeline.events[0] = { ...message, origin_server_ts: now - 2 * 24 * 60 * 60 * 1_000 };
+	assert.equal(operatorTextEvents(stale, "!room:example.com", config.operatorUserId, false, now).length, 0);
+	assert.throws(() => operatorTextEvents({ rooms: { join: { "!room:example.com": { timeline: { events: Array(513).fill(message) } } } } },
+		"!room:example.com", config.operatorUserId, false, now), /gap recovery/);
+	assert.throws(() => operatorTextEvents({ rooms: { join: { "!room:example.com": { timeline: { limited: true, prev_batch: "gap", events: [message] } } } } },
+		"!room:example.com", config.operatorUserId, true, now), /gap recovery/);
+});
+
 test("dormant and starting controls are deterministic and never launch an aborted wake", async (t) => {
 	const { root, registry, manifest } = await fixture();
 	let launchCount = 0; const sent: Array<{ transaction: string; body: string }> = [];
@@ -67,6 +128,7 @@ test("dormant and starting controls are deterministic and never launch an aborte
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/sync")) return Response.json(responses.shift() ?? sync([]));
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/send/m.room.message/")) { sent.push({ transaction: path.split("/").at(-1)!, body: JSON.parse(String(init?.body)).body }); return Response.json({ event_id: "$notice" }); }
 		return Response.json({ sender: config.botUserId });
 	}, [manifest.roomId]);
@@ -97,6 +159,7 @@ test("abort arriving during an in-progress wake cancels queued work and is never
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/sync")) return Response.json(responses.shift() ?? sync([]));
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/send/m.room.message/")) { notices.push(JSON.parse(String(init?.body)).body); return Response.json({ event_id: "$notice" }); }
 		return Response.json({ event_id: "$ok" });
 	}, [manifest.roomId]);
@@ -125,11 +188,14 @@ test("active prompt, steer, abort, valid reply fallback, and fail-closed relatio
 	const socket = await attach(server, manifest); t.after(() => socket.destroy());
 	const relation = { "m.in_reply_to": { event_id: "$bot-answer" } };
 	const events = [event("$prompt", "plain"), event("$steer", "!steer redirect"), event("$reply", "> <@bot:example.com> answer\n\nreply body", relation),
-		event("$bad-reply", "> malformed\n\nignored", relation), event("$edit", "ignored", { rel_type: "m.replace", event_id: "$old" }), event("$abort", "!abort")];
+		event("$bad-reply", "> malformed\n\nignored", relation), event("$edit", "ignored", { rel_type: "m.replace", event_id: "$old" }),
+		{ event_id: "$missing-time", sender: config.operatorUserId, type: "m.room.message", content: { msgtype: "m.text", body: "ignored missing time" } },
+		event("$abort", "!abort")];
 	let synced = false;
 	const matrix = new ManagedMatrixClient(config, async (input) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/sync")) { if (synced) return Response.json(sync([])); synced = true; return Response.json(sync(events)); }
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/event/")) return Response.json({ sender: config.botUserId });
 		return Response.json({ event_id: "$ok" });
 	}, [manifest.roomId]);
@@ -171,7 +237,7 @@ test("checkpoint and notice projection retry stable Matrix transactions without 
 		const path = new URL(String(input)).pathname; if (!path.includes("/send/m.room.message/")) return Response.json({ event_id: "$ok" });
 		transactions.push(path.split("/").at(-1)!); if (failAfterAcceptance) { failAfterAcceptance = false; throw new Error("acceptance crash"); }
 		return Response.json({ event_id: "$sent" });
-	}, [manifest.roomId]);
+	}, [manifest.roomId], { maxAttempts: 1 });
 	const projector = new RelayEventProjector(registry, matrix);
 	const offer = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "checkpoint-offer", conversationId: manifest.conversationId,
 		role: "coordinator_adapter", type: "checkpoint.offer", payload: { checkpointId: `checkpoint-${"a".repeat(32)}`, originDeliveryId: deliveryId,

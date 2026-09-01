@@ -17,6 +17,7 @@ let
 
       mkdir -p "$out/share/pi-harness/agent"
       cp -R config/agent/. "$out/share/pi-harness/agent/"
+      rm -rf "$out/share/pi-harness/agent/extensions/remote-session"
 
       mkdir -p "$out/share/pi-harness/agent/extensions/node_modules"
       typebox_dir=""
@@ -51,7 +52,6 @@ let
         "${drv}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
         "${drv}/share/pi-harness/agent/extensions/worker-runner/index.ts"
         "${drv}/share/pi-harness/agent/extensions/review-agents/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/remote-session/index.ts"
         "${drv}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
         "${drv}/share/pi-harness/agent/extensions/codex-fast/index.ts"
         "${drv}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"

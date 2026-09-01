@@ -237,26 +237,14 @@ unfinished work, checkpoint/final projection, launch failure, explicit
 cancellation, and restart recovery all reuse stable identities so retries do
 not lose or duplicate operator turns.
 
-## Matrix Host Bot Runtime
+## Managed Matrix operations
 
-The optional `services.pi-harness.remoteSession` settings provide a
-SOPS-backed runtime boundary for one Matrix host bot. The secret environment
-file contains only `PI_MATRIX_ACCESS_TOKEN`; homeserver, expected bot/operator
-MXIDs, and host routing name remain non-secret Nix options. When configured,
-both `pi` and `pi-matrix-whoami` receive those values at runtime without copying
-the token into the package or Nix store.
-
-`pi-matrix-whoami` calls Matrix's authenticated identity endpoint and succeeds
-only when it returns the configured bot MXID. The packaged `remote-session`
-extension is inert until `/remote on <concept-name>` verifies that identity,
-creates a private room, and starts polling. `/remote status` reports non-secret
-binding state; `/remote off` disconnects without deleting the room or session
-binding. Bound conversations reconnect across restart, resume, compaction, and
-fork using synchronized shared binding metadata plus bot-specific progress
-files. See [`docs/matrix-bot-provisioning.md`](docs/matrix-bot-provisioning.md)
-for provisioning and the live round-trip smoke test, and
-[`docs/matrix-remote-session.md`](docs/matrix-remote-session.md) for durable
-state and interruption semantics.
+The legacy per-Pi `remote-session` bridge and `services.pi-harness.remoteSession`
+option are not loaded or exposed. Legacy rooms, bindings, and sidecar state are
+not imported. Enabled hosts use only the relay-owned managed-session path above.
+See [`docs/managed-matrix-sessions.md`](docs/managed-matrix-sessions.md) for the
+operator runbook, health checks, token rotation, restart recovery, controls,
+transcript policy, troubleshooting, and deferred scope.
 
 ## AgentGraph Mode
 

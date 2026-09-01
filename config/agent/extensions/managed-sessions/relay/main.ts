@@ -21,6 +21,7 @@ import { peerUidFromHelper } from "./peer-uid.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { hostRelayLockPath, HostRelayLock } from "./relay-lock.js";
 import { TranscriptProjector } from "./transcript-projector.js";
+import { redactManagedValue } from "./redaction.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -211,7 +212,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			}, async (sourceId, manifest) => {
 				await eventProjector.projectNotice(manifest.conversationId, `${sourceId}:launch-failed`,
 					"Managed conversation wake failed; queued input remains available for retry.");
-			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body));
+			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
+			(message) => process.stderr.write(`pi-managed-session-relay: Matrix sync unavailable: ${redactManagedValue(message, environment)}\n`));
 			coordinatorRouter.start();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
@@ -260,7 +262,7 @@ async function main(): Promise<void> {
 if (require.main === module) {
 	main().catch((error: unknown) => {
 		const message = error instanceof Error ? error.message : "Managed-session relay failed";
-		process.stderr.write(`pi-managed-session-relay: ${message}\n`);
+		process.stderr.write(`pi-managed-session-relay: ${redactManagedValue(message)}\n`);
 		process.exitCode = 1;
 	});
 }

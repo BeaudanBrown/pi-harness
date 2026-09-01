@@ -11,6 +11,7 @@ import {
 } from "../contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ConversationManifestStore } from "./manifest-store.js";
+import { redactManagedValue } from "./redaction.js";
 
 type RuntimeConversation = HostRuntimeState["conversations"][number];
 type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
@@ -80,6 +81,7 @@ export class RelayRegistry {
 				conversationId: manifest.conversationId,
 				state: "dormant" as const,
 				attachment: null,
+				matrixCursor: { status: "bootstrap" as const },
 				pendingInputs: [],
 				projection: [],
 				managedWindow: null,
@@ -88,7 +90,7 @@ export class RelayRegistry {
 		const bundle = parsePersistenceBundle(manifests, runtime);
 		this.manifests = new Map(bundle.manifests.map((manifest) => [manifest.conversationId, manifest]));
 		this.state = bundle.runtime;
-		if (!stored) await this.runtimeFile.write(this.state);
+		await this.runtimeFile.write(this.state);
 	}
 
 	beginRestartReconciliation(): void {
@@ -110,7 +112,7 @@ export class RelayRegistry {
 
 	async setMatrixCursor(conversationId: string, matrixSince: string): Promise<void> {
 		await this.mutate(async () => {
-			this.runtimeConversation(conversationId).matrixSince = matrixSince;
+			this.runtimeConversation(conversationId).matrixCursor = { status: "established", since: matrixSince };
 		});
 	}
 
@@ -262,6 +264,7 @@ export class RelayRegistry {
 					state: "dormant",
 					attachmentNonceHash: nonceHash(nonce),
 					attachment: null,
+					matrixCursor: { status: "bootstrap" },
 					pendingInputs: [],
 					projection: [],
 					managedWindow: null,
@@ -295,7 +298,7 @@ export class RelayRegistry {
 			this.manifests.set(manifest.conversationId, manifest);
 			this.state.conversations.push({
 				conversationId: manifest.conversationId, state: "dormant", attachment: null,
-				pendingInputs: [], projection: [], managedWindow: null,
+				matrixCursor: { status: "bootstrap" }, pendingInputs: [], projection: [], managedWindow: null,
 			});
 			return manifest;
 			});
@@ -351,7 +354,7 @@ export class RelayRegistry {
 		await this.mutate(async () => {
 			this.runtimeConversation(conversationId).lastLaunchError = {
 				code: code.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 128) || "launch_failed",
-				message: message.replace(/[\r\n]+/g, " ").slice(0, 500),
+				message: redactManagedValue(message),
 				at: new Date().toISOString(),
 			};
 		});

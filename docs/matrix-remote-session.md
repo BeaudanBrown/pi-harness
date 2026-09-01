@@ -1,4 +1,8 @@
-# Matrix remote sessions
+# Legacy Matrix remote sessions (removed)
+
+> The direct per-Pi bridge is no longer loaded or configurable. This document is
+> retained only as historical design context; legacy rooms and state are not
+> imported. Use [managed Matrix sessions](managed-matrix-sessions.md).
 
 The `remote-session` extension binds one private Matrix room to one persistent Pi
 conversation. The room represents the conversation concept, not one Pi process

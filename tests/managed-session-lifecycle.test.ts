@@ -69,14 +69,16 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		ownerHostId: hostId, creationKey: "coordinator", concept: "host coordinator", piSessionId: "coordinator-session",
 		roomId: "!coordinator:example.com", hostSpace: "!host:example.com", bindingBoundaryEntryId: `entry_${"1".repeat(32)}`, createdAt: new Date().toISOString() };
 	await registry.createCoordinatorConversation(coordinator);
+	await registry.setMatrixCursor(coordinatorId, "lifecycle-test-cursor");
 	const matrixCalls: string[] = [];
 	let roomIndex = 0; let syncIndex = 0;
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
 		const path = new URL(String(input)).pathname; matrixCalls.push(`${init?.method ?? "GET"} ${path}`);
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.endsWith("/sync")) {
 			syncIndex += 1;
 			return Response.json({ next_batch: `cursor-${syncIndex}`, rooms: { join: syncIndex === 1 ? {
-				"!room2:example.com": { timeline: { events: [{ event_id: "$first-task", sender: matrixConfig.operatorUserId,
+				"!room2:example.com": { timeline: { events: [{ event_id: "$first-task", origin_server_ts: Date.now(), sender: matrixConfig.operatorUserId,
 					type: "m.room.message", content: { msgtype: "m.text", body: "first real task" } }] } },
 			} : {} } });
 		}
@@ -200,6 +202,7 @@ export default function (pi: ExtensionAPI) {
 		ownerHostId: hostId, creationKey: "coordinator-real", concept: "host coordinator", piSessionId: "coordinator-real",
 		roomId: "!coordinator:example.com", hostSpace: "!host:example.com", bindingBoundaryEntryId: `entry_${"2".repeat(32)}`, createdAt: new Date().toISOString() };
 	await registry.createCoordinatorConversation(coordinator);
+	await registry.setMatrixCursor(coordinatorId, "packaged-lifecycle-cursor");
 	let roomIndex = 0; let resolveFinal!: () => void;
 	const finalProjected = new Promise<void>((resolve) => { resolveFinal = resolve; });
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {

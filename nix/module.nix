@@ -47,17 +47,13 @@ let
   ];
   runtimeFeaturesEnabled = cfg.lsp.enable || cfg.diagrams.enable || cfg.playwright.enable;
   sessionDirectoryEnabled = cfg.sessionDirectory != null;
-  remoteSessionEnabled = cfg.remoteSession.environmentFile != null;
   managedSessionsEnabled = cfg.managedSessions.enable;
   nonNullString = value: if value == null then "" else value;
   managedRelayPackage = if cfg.managedSessions.relayPackage == null then cfg.package else cfg.managedSessions.relayPackage;
   managedLauncherPackage = if cfg.managedSessions.launcherPackage == null then pkgs.runCommand "missing-managed-session-launcher" { } "mkdir -p $out" else cfg.managedSessions.launcherPackage;
   managedExtensions = cfg.package.managedSessionExtensions or { ordinary = "/missing-managed-ordinary"; coordinator = "/missing-managed-coordinator"; };
   managedRawPi = cfg.package.pi or cfg.package;
-  runtimeEnvironmentFiles = lib.filter (path: path != null) [
-    cfg.agentgraph.environmentFile
-    cfg.remoteSession.environmentFile
-  ];
+  runtimeEnvironmentFiles = lib.filter (path: path != null) [ cfg.agentgraph.environmentFile ];
   runtimeEnvironmentSetup = lib.optionalString (runtimeEnvironmentFiles != [ ]) ''
     set -a
     ${lib.concatMapStringsSep "\n" (path: ''
@@ -76,12 +72,6 @@ let
     fi
     export PI_MANAGED_SESSIONS_SOCKET="$XDG_RUNTIME_DIR/pi-managed-sessions/relay.sock"
   '';
-  remoteSessionEnvironment = lib.optionalString remoteSessionEnabled ''
-    export PI_MATRIX_HOMESERVER=${lib.escapeShellArg (nonNullString cfg.remoteSession.homeserver)}
-    export PI_MATRIX_BOT_USER_ID=${lib.escapeShellArg (nonNullString cfg.remoteSession.botUserId)}
-    export PI_MATRIX_OPERATOR_USER_ID=${lib.escapeShellArg (nonNullString cfg.remoteSession.operatorUserId)}
-    export PI_MATRIX_HOSTNAME=${lib.escapeShellArg (nonNullString cfg.remoteSession.hostName)}
-  '';
   lspExtensionArray =
     if cfg.lsp.enable then
       ''extension_args=(--extension "${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts")''
@@ -96,7 +86,6 @@ let
     ${runtimeEnvironmentSetup}
     ${sessionDirectoryEnvironment}
     ${managedSessionEnvironment}
-    ${remoteSessionEnvironment}
     export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspExtensionArray}
     ${managedOrdinaryExtension}
@@ -146,6 +135,16 @@ let
     exec ${pkgs.direnv}/bin/direnv "$@"
   '';
 
+  managedStatus = pkgs.writeShellScriptBin "pi-managed-session-status" ''
+    set -euo pipefail
+    runtime="''${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/pi-managed-sessions"
+    ${pkgs.systemd}/bin/systemctl --user is-active --quiet pi-managed-session-relay.service
+    test -S "$runtime/relay.sock"
+    registry="$runtime/registry.json"
+    test -f "$registry"
+    ${pkgs.jq}/bin/jq '{service:"active",socket:"ready",conversations:(.conversations|length),states:(.conversations|group_by(.state)|map({key:.[0].state,value:length})|from_entries),cursorConfigured:any(.conversations[]?;.matrixCursor.status == "established")}' "$registry"
+  '';
+
   managedRelayLaunch = pkgs.writeShellScript "pi-managed-session-relay-launch" ''
     set -euo pipefail
     credential_file=${lib.escapeShellArg (nonNullString cfg.managedSessions.environmentFile)}
@@ -168,7 +167,7 @@ let
       fi
       matrix_token="''${line#PI_MATRIX_ACCESS_TOKEN=}"
     done < "$credential_file"
-    if [[ -z "$matrix_token" || "$matrix_token" == *$'\r'* || "$matrix_token" == *$'\n'* ]]; then
+    if [[ -z "$matrix_token" || ''${#matrix_token} -gt 4096 ]] || printf '%s' "$matrix_token" | ${pkgs.gnugrep}/bin/grep -q '[[:cntrl:]]'; then
       echo "pi-managed-session-relay: PI_MATRIX_ACCESS_TOKEN is missing or malformed" >&2
       exit 1
     fi
@@ -183,12 +182,6 @@ let
     exec ${lib.getExe managedRelayPackage}
   '';
 
-  matrixWhoami = pkgs.writeShellScriptBin "pi-matrix-whoami" ''
-    set -euo pipefail
-    ${runtimeEnvironmentSetup}
-    ${remoteSessionEnvironment}
-    exec ${cfg.package}/bin/pi-matrix-whoami "$@"
-  '';
 in
 {
   options.services.pi-harness = {
@@ -223,47 +216,6 @@ in
         Use this for SOPS-managed LLM provider variables such as
         LITELLM_BASE_URL, LITELLM_API_KEY, and AG_LITELLM_DEFAULT_MODEL.
       '';
-    };
-
-    remoteSession = {
-      environmentFile = lib.mkOption {
-        type = lib.types.nullOr lib.types.nonEmptyStr;
-        default = null;
-        example = lib.literalExpression ''config.sops.secrets."pi/matrix-env".path'';
-        description = ''
-          Optional SOPS-managed environment file containing only
-          PI_MATRIX_ACCESS_TOKEN. When set, the pi command and
-          pi-matrix-whoami receive the Matrix remote-session configuration.
-        '';
-      };
-
-      homeserver = lib.mkOption {
-        type = lib.types.nullOr lib.types.nonEmptyStr;
-        default = null;
-        example = "https://matrix.example.com";
-        description = "Matrix homeserver base URL for the host bot.";
-      };
-
-      botUserId = lib.mkOption {
-        type = lib.types.nullOr lib.types.nonEmptyStr;
-        default = null;
-        example = "@pi-host:example.com";
-        description = "Expected Matrix user ID for the host bot.";
-      };
-
-      operatorUserId = lib.mkOption {
-        type = lib.types.nullOr lib.types.nonEmptyStr;
-        default = null;
-        example = "@operator:example.com";
-        description = "Only Matrix user ID authorized to send remote input.";
-      };
-
-      hostName = lib.mkOption {
-        type = lib.types.nullOr lib.types.nonEmptyStr;
-        default = null;
-        example = "workstation";
-        description = "Literal host routing name used by the remote-session extension.";
-      };
     };
 
     managedSessions = {
@@ -421,26 +373,8 @@ in
         message = "services.pi-harness managed-session bots must be non-admin.";
       }
       {
-        assertion = !managedSessionsEnabled || !remoteSessionEnabled;
-        message = "services.pi-harness managed sessions cannot expose the legacy per-Pi Matrix credential environment.";
-      }
-      {
         assertion = !managedSessionsEnabled || lib.all (name: builtins.match "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}" name != null) (builtins.attrNames cfg.managedSessions.workspaceRoots);
         message = "services.pi-harness.managedSessions.workspaceRoots keys must be stable identifiers.";
-      }
-      {
-        assertion =
-          !remoteSessionEnabled
-          || lib.all (value: value != null) [
-            cfg.remoteSession.homeserver
-            cfg.remoteSession.botUserId
-            cfg.remoteSession.operatorUserId
-            cfg.remoteSession.hostName
-          ];
-        message = ''
-          services.pi-harness.remoteSession.environmentFile requires homeserver,
-          botUserId, operatorUserId, and hostName.
-        '';
       }
     ];
 
@@ -478,6 +412,6 @@ in
         [ piWithRuntime ]
       else
         [ cfg.package ])
-      ++ lib.optional remoteSessionEnabled matrixWhoami;
+      ++ lib.optional managedSessionsEnabled managedStatus;
   };
 }
