@@ -311,6 +311,7 @@ export default function (pi) {
 	running = await startManagedSessionRelay({
 		...process.env,
 		PI_MANAGED_SESSIONS_RUNTIME_DIR: join(root, "runtime"),
+		PI_MANAGED_SESSIONS_SOCKET: join(root, "runtime", "relay.sock"),
 		PI_MANAGED_SESSIONS_MANIFEST_DIR: join(root, "manifests"),
 		PI_MANAGED_SESSIONS_HOST_ID: `tracer-${Date.now()}`,
 		PI_MANAGED_SESSIONS_RESTART_GRACE_MS: "100",

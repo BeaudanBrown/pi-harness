@@ -116,6 +116,7 @@ let
           --no-extensions \
           --extension "${managedExtensions.ordinary}" \
           --session "$PI_MANAGED_PROJECT_SESSION_FILE" \
+          --approve \
           "$@"
         ;;
       *)
