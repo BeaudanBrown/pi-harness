@@ -1,5 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
 import {
 	assessAloopRunBudget,
@@ -163,6 +167,31 @@ test("compact handoffs remain compatible and materially smaller than duplicated 
 	assert.match(formatted, /pi-aloop-handoff:v2:/);
 	assert.ok(formatted.length < legacyBytes);
 	assert.equal(parseAloopHandoffs([comment(1, formatted, value.timestamp)])[0]?.commit, value.commit);
+});
+
+test("commit-bound preflight catches files omitted by Git-backed verification", () => {
+	const repository = mkdtempSync(join(tmpdir(), "aloop-git-backed-"));
+	try {
+		const git = (...args: string[]) => execFileSync("git", args, { cwd: repository, encoding: "utf8" });
+		git("init", "-q");
+		git("config", "user.email", "aloop-test@example.invalid");
+		git("config", "user.name", "Aloop Test");
+		writeFileSync(join(repository, "tracked.txt"), "tracked\n");
+		git("add", "tracked.txt");
+		git("commit", "-qm", "base");
+
+		// A Git-backed Nix source sees only HEAD here, so this eventual source file
+		// can be absent from a falsely passing check until it is committed later.
+		writeFileSync(join(repository, "eventual-source.ts"), "export const omitted = true;\n");
+		assert.doesNotMatch(git("ls-tree", "-r", "--name-only", "HEAD"), /eventual-source\.ts/);
+		const preflight = git("status", "--porcelain=v1", "--untracked-files=all");
+		assert.match(preflight, /\?\? eventual-source\.ts/);
+		git("add", "eventual-source.ts");
+		git("commit", "-qm", "eventual source");
+		assert.match(git("ls-tree", "-r", "--name-only", "HEAD"), /eventual-source\.ts/);
+	} finally {
+		rmSync(repository, { recursive: true, force: true });
+	}
 });
 
 test("supervisor gate binds successful evidence to a clean exact commit", () => {

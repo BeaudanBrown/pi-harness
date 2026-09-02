@@ -59,6 +59,7 @@ const PrepareHandoffParams = Type.Object({
 	discovered_work: Type.Array(Type.String()),
 	next_action: Type.String({ minLength: 1 }),
 	artifact_directory: Type.String({ minLength: 1 }),
+	verification_receipt_id: Type.Optional(Type.String({ pattern: "^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}$", description: "Required for an accepted handoff; returned by aloop_supervisor_verify." })),
 });
 
 const PublishHandoffParams = Type.Object({
@@ -418,7 +419,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		parameters: PrepareHandoffParams,
 		async execute(_id, params: {
 			issue: number; attempt_type: string; commit?: string; successful: boolean; approach: string; materially_new_approach: boolean;
-			verification: string[]; acceptance_criteria_assessment: string[]; discovered_work: string[]; next_action: string; artifact_directory: string;
+			verification: string[]; acceptance_criteria_assessment: string[]; discovered_work: string[]; next_action: string; artifact_directory: string; verification_receipt_id?: string;
 		}, signal, _onUpdate, ctx) {
 			const context = await currentContext(ctx.cwd, signal);
 			refreshPending(context);
@@ -429,6 +430,21 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				&& candidate.artifactDirectory === params.artifact_directory,
 			);
 			if (!pending) throw new Error("No outstanding worker attempt matches this handoff.");
+			if (params.successful) {
+				if (!params.commit || !params.verification_receipt_id) throw new Error("Accepted handoffs require a commit and independent supervisor verification receipt ID.");
+				const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
+				const receiptStatus = await lstat(receiptPath);
+				if (receiptStatus.isSymbolicLink() || !receiptStatus.isFile() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
+				const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+				const head = await pi.exec("git", ["rev-parse", `${params.commit}^{commit}`], { timeout: 10_000, signal });
+				const currentHead = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
+				const worktree = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
+				if (head.code !== 0 || currentHead.code !== 0 || worktree.code !== 0) throw new Error("Could not validate the supervisor verification receipt against Git.");
+				const expected = head.stdout.trim();
+				if (receipt.commit !== expected || currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || worktree.stdout.trim()) {
+					throw new Error("Accepted handoff is not bound to a passing receipt at the current clean commit; rerun supervisor verification after all source changes.");
+				}
+			}
 			const comment = formatAloopHandoff({
 				issue: params.issue,
 				attemptType: params.attempt_type,

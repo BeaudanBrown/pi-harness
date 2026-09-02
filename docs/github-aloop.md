@@ -98,9 +98,15 @@ requires model copy/paste of the encoded marker. A handoff records:
 - discovered work and the next action; and
 - the local attempt artifact directory.
 
-Only a correctly encoded handoff on its matching issue counts. The supervisor
-closes a child only after that handoff is durable and its acceptance criteria
-pass independent review.
+Only a correctly encoded handoff on its matching issue counts. An accepted
+handoff must reference the receipt ID returned by `aloop_supervisor_verify`;
+preparation rechecks that the receipt passed at the returned commit and that
+HEAD and the complete worktree (including untracked files) are still identical.
+Commit all intended sources before verification: Git-backed Nix flakes omit
+untracked files, so a check run while eventual source files are untracked is
+invalid even if its command exits successfully. The supervisor closes a child
+only after that handoff is durable and its acceptance criteria pass independent
+review.
 
 Two consecutive unsuccessful attempts without a materially new approach stop
 the loop for an explicit user decision. Material product, architecture, or
