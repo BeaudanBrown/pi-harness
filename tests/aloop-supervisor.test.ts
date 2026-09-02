@@ -459,7 +459,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 		sourceIdentity: "tree:verified",
 		postVerificationHead: commitId,
 		postVerificationClean: true,
-		productionIntegration: "nix build .#pi-harness-resources",
+		productionIntegration: "nix build --no-link .#pi-harness-resources",
 		productionIntegrationExitStatus: 0,
 	};
 	const closureIds = new Set<string>();
