@@ -99,6 +99,18 @@ Derivations use SHA-256 with a distinct `pi-managed-sessions:<domain>:v1` prefix
 
 Creation keys are durable retry keys, not display names. Coordinator-created conversation keys are supplied by the trusted coordinator adapter. Manual ordinary `/remote on` creates its key once, persists it with the binding-boundary attempt before contacting the relay, and reuses that key on retry. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
 
+### V2 rich-interaction and generation amendment
+
+Protocol and durable state version `2.0.0` is a reviewed breaking boundary. A managed conversation now owns one Matrix room and an ordered, append-only list of **session generations**. Exactly the newest generation is Matrix-active; older Pi session files and Matrix history are preserved but cannot receive Matrix input. Context reset atomically appends a generation and switches the active generation identity. Stable activity, poll, blob, upload, and generation-transition identities use length-framed SHA-256 derivations with distinct `v2` domains. Activity edits carry monotonically increasing revisions, and finalization turns the card into a permanent balanced run/context snapshot before the final response is projected.
+
+V2 controls are typed operations, never prompt text. State-changing controls are accepted only while idle. Checkpoints with options create one single-select poll; the first valid operator vote or ordinary-text bypass resolves it and later resolutions are invalid. Tool activity may expose only a bounded tool name and state. Arguments, paths, commands, output, partial answers, and reasoning have no contract field.
+
+Media IPC never carries a filesystem path. Inbound images and explicit outbound artifacts use blob/upload identities and bounded begin/chunk operations whose encoded NDJSON frame remains at most 64 KiB. The private host spool permits at most 128 blobs, 25 MiB per blob, and 256 MiB total. A blob is committed only after declared length and SHA-256 verification; incomplete, expired, rejected, and consumed blobs are removed, with cleanup idempotent across restart. Workspace artifact handles are resolved and canonicalized by the host; adapters cannot nominate paths.
+
+V1 synchronized manifests migrate one-way and atomically to generation ordinal 1, preserving conversation, room, Pi session, binding boundary, and creation identities. Registry and complete manifest set must match before migration. A malformed source, partial destination, unknown version, or interrupted migration fails closed with an actionable diagnostic; there is no downgrade or best-effort repair.
+
+Only the fixed host launcher, after validating a configured root, immediate-child workspace, and relative cwd, may grant Pi's run-scoped project approval to a managed process. It neither answers trust for ordinary interactive Pi launches nor writes persistent user trust. Matrix credentials and blob content remain relay-private, and disabled hosts expose none of this surface.
+
 ## Consequences
 
 - Relay, ordinary adapter, coordinator adapter, and tests share one small interface while authority remains relay-enforced.
