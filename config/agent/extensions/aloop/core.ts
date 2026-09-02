@@ -355,7 +355,7 @@ ${budget ? `- Hard deadline: ${new Date(budget.deadlineMs).toISOString()}\n- Max
 
 Operating procedure:
 1. Reconstruct state from the recursive GitHub graph, recent issue comments, and Git history. GitHub and Git are authoritative; there is no loop database.
-2. Before worker launch, claim the selected issue for the authenticated GitHub user with github_issue_mutate (dry-run, review, then apply). Select one implementable open, unblocked descendant leaf and use aloop_launch_worker for one fresh sequential implementation or remediation attempt. Never run workers in parallel.
+2. Select one implementable open, unblocked descendant leaf and use aloop_launch_worker for one fresh sequential implementation or remediation attempt. Launch atomically self-claims an unassigned leaf, accepts an existing self-assignment, and stops if another user owns it. Never run workers in parallel.
 3. If an outstanding attempt is listed above, recover it from its result artifact and Git commit, prepare and publish its handoff before launching anything else. Assess worker evidence yourself against every selected-issue acceptance criterion. A worker's "implemented" claim is not closure evidence by itself.
 4. After every attempt, call aloop_prepare_handoff, then pass its short ID to aloop_publish_handoff with dry_run=true and finally dry_run=false. Never copy the encoded comment through the model. Include attempt type, commit, verification, acceptance assessment, discovered work, and next action.
 5. Close an accepted child only after the handoff is durable and your independent acceptance assessment passes. The supervisor alone mutates GitHub. Create only tightly necessary corrective issues and use native sub-issue/blocker relationships.

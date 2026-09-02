@@ -269,6 +269,12 @@ export async function currentGitHubLogin(cwd: string, requestedRepo?: string, co
 	return login;
 }
 
+/** Atomically self-assign an unclaimed aloop leaf and remove its ready lifecycle label. */
+export async function claimCurrentRepositoryIssue(cwd: string, number: number, commandOptions: GitHubCommandOptions = {}): Promise<unknown> {
+	const repo = await currentRepo(cwd, undefined, commandOptions);
+	return await mutate(cwd, repo, { op: "claim_issue", number: issueNumber(number) }, true, commandOptions);
+}
+
 export async function retrieveCurrentRepositoryEpicContext(
 	cwd: string,
 	epicNumber: number,

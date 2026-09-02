@@ -153,7 +153,7 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 	assert.match(kickoff, /recover it from its result artifact and Git commit/);
 	assert.match(kickoff, /Maximum fresh worker attempts: 3/);
 	assert.match(kickoff, /deliberately bounded/);
-	assert.match(kickoff, /claim the selected issue/);
+	assert.match(kickoff, /atomically self-claims an unassigned leaf/);
 	assert.match(kickoff, /GitHub and Git are authoritative/);
 	assert.match(kickoff, /After every attempt/);
 	assert.match(kickoff, /two unsuccessful attempts/);

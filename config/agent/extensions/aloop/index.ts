@@ -3,7 +3,7 @@ import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
-import { currentGitHubLogin, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
+import { claimCurrentRepositoryIssue, currentGitHubLogin, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
 	assessAloopRunBudget,
@@ -306,8 +306,15 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				if (pendingHandoffs.length > 0) {
 					throw new Error(`Outstanding attempts have no durable structured handoff comments: ${pendingHandoffs.map((pending) => `#${pending.issue} (${pending.artifactDirectory})`).join(", ")}. Record them before another worker.`);
 				}
-				const issue = selectAloopLeaf(context, params.issue);
-				const login = await currentGitHubLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget.deadlineMs });
+				let issue = selectAloopLeaf(context, params.issue);
+				const commandOptions = { signal, deadlineMs: runBudget.deadlineMs };
+				const login = await currentGitHubLogin(ctx.cwd, undefined, commandOptions);
+				if (issue.assignee === null) {
+					await claimCurrentRepositoryIssue(ctx.cwd, issue.number, commandOptions);
+					const claimedContext = await currentContext(ctx.cwd, signal);
+					refreshPending(claimedContext);
+					issue = selectAloopLeaf(claimedContext, params.issue);
+				}
 				requireAloopClaim(issue, login);
 				const handoffs = parseAloopHandoffs(issue.recentHandoffs).filter((handoff) => handoff.issue === issue.number);
 				const retry = evaluateRetryBoundary(handoffs, params.materially_new_approach === true);
@@ -350,7 +357,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 					`Summary: ${outcome.summary}`,
 					`Artifacts: ${outcome.artifacts.directory}`,
 					`Structured result: ${outcome.artifacts.result}`,
-					"Next required action: independently assess the issue acceptance criteria, call aloop_prepare_handoff, publish that exact comment with github_issue_mutate (dry-run then apply), and only then close/remediate/continue.",
+					"Next required action: independently assess the issue acceptance criteria, call aloop_prepare_handoff, publish its ID with aloop_publish_handoff (dry-run then apply), and only then close/remediate/continue.",
 				].join("\n");
 				return { content: [{ type: "text", text }], details: outcome };
 			} finally {
