@@ -49,7 +49,7 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 	await assert.rejects(() => client.sendText("!unmanaged:example.com", "pi_other", "no"), /not owned/);
 });
 
-test("Matrix rich primitives use bounded stable transactions and compatible poll content", async () => {
+test("Matrix rich primitives emit exact MSC3381 wire dialects and bounded edit fallback", async () => {
 	const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
 	const client = new ManagedMatrixClient(config, async (input, init) => {
 		calls.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
@@ -63,18 +63,44 @@ test("Matrix rich primitives use bounded stable transactions and compatible poll
 	await client.endPoll("!rich:example.com", "pi_poll_end", "$event-5");
 	await client.startPoll("!rich:example.com", "pi_poll_stable", "Stable?", [{ id: "yes", text: "Yes" }], undefined, "stable");
 	await client.endPoll("!rich:example.com", "pi_poll_end_stable", "$event-7", "Closed", undefined, "stable");
+	await client.replaceMessage("!rich:example.com", "pi_edit_max", "$event-3", "x".repeat(32_768));
+
 	assert.deepEqual(calls[0]?.body, { typing: true, timeout: 5_000 });
 	assert.deepEqual(calls[1]?.body, { typing: false });
-	assert.equal(calls[3]?.body["m.relates_to"] && (calls[3]?.body["m.relates_to"] as Record<string, unknown>).rel_type, "m.replace");
-	assert.equal(calls[3]?.body.body, "* done");
-	assert.equal(((calls[4]?.body["org.matrix.msc3381.poll.start"] as Record<string, unknown>).question as Record<string, unknown>)["org.matrix.msc1767.text"], "Continue?");
-	assert.ok(calls[5]?.body["org.matrix.msc3381.poll.end"]);
-	assert.equal(((calls[6]?.body["m.poll.start"] as Record<string, unknown>).question as Record<string, unknown>)["m.text"], "Stable?");
-	assert.ok(calls[7]?.body["m.poll.end"]);
-	assert.match(calls[4]?.path ?? "", /send\/org\.matrix\.msc3381\.poll\.start/);
-	assert.match(calls[5]?.path ?? "", /send\/org\.matrix\.msc3381\.poll\.end/);
-	assert.match(calls[6]?.path ?? "", /send\/m\.poll\.start/);
-	assert.ok(calls.slice(2).every((call) => call.path.includes("/send/")));
+	assert.deepEqual(calls[3], {
+		path: "/_matrix/client/v3/rooms/!rich%3Aexample.com/send/m.room.message/pi_edit",
+		body: { msgtype: "m.notice", body: "* done", "m.new_content": { msgtype: "m.notice", body: "done" },
+			"m.relates_to": { rel_type: "m.replace", event_id: "$event-3" } },
+	});
+	assert.deepEqual(calls[4], {
+		path: "/_matrix/client/v3/rooms/!rich%3Aexample.com/send/org.matrix.msc3381.poll.start/pi_poll",
+		body: {
+			"org.matrix.msc1767.text": "Continue?\n1. Yes\n2. No",
+			"org.matrix.msc3381.poll.start": {
+				kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
+				question: { "org.matrix.msc1767.text": "Continue?" },
+				answers: [{ id: "yes", "org.matrix.msc1767.text": "Yes" }, { id: "no", "org.matrix.msc1767.text": "No" }],
+			},
+		},
+	});
+	assert.deepEqual(calls[5], {
+		path: "/_matrix/client/v3/rooms/!rich%3Aexample.com/send/org.matrix.msc3381.poll.end/pi_poll_end",
+		body: { "m.relates_to": { rel_type: "m.reference", event_id: "$event-5" }, "org.matrix.msc1767.text": "Poll closed", "org.matrix.msc3381.poll.end": {} },
+	});
+	assert.deepEqual(calls[6], {
+		path: "/_matrix/client/v3/rooms/!rich%3Aexample.com/send/m.poll.start/pi_poll_stable",
+		body: {
+			"m.text": [{ mimetype: "text/plain", body: "Stable?\n1. Yes" }],
+			"m.poll": { kind: "m.disclosed", max_selections: 1, question: { "m.text": [{ body: "Stable?" }] },
+				answers: [{ "m.id": "yes", "m.text": [{ body: "Yes" }] }] },
+		},
+	});
+	assert.deepEqual(calls[7], {
+		path: "/_matrix/client/v3/rooms/!rich%3Aexample.com/send/m.poll.end/pi_poll_end_stable",
+		body: { "m.relates_to": { rel_type: "m.reference", event_id: "$event-7" }, "m.text": [{ mimetype: "text/plain", body: "Closed" }] },
+	});
+	assert.equal(String(calls[8]?.body.body).length, 32_768);
+	assert.equal((calls[8]?.body["m.new_content"] as { body: string }).body.length, 32_768);
 	await assert.rejects(() => client.startPoll("!rich:example.com", "pi_bad", "q", [], undefined), /out of bounds/);
 });
 

@@ -120,20 +120,26 @@ test("room membership, event age, and payload shape fail closed before routing",
 		"!room:example.com", config.operatorUserId, true, now), /gap recovery/);
 });
 
-test("authorized poll responses accept stable and unstable forms and reject malformed relations", () => {
+test("authorized poll responses accept exact stable and unstable forms and reject adversarial hybrids", () => {
 	const now = Date.now();
-	const poll = (id: string, type: string, key: string, sender = config.operatorUserId, relation: unknown = { rel_type: "m.reference", event_id: "$poll" }) => ({
-		event_id: id, origin_server_ts: now, sender, type, content: { [key]: { answers: ["yes"] }, "m.relates_to": relation },
+	const relation = { rel_type: "m.reference", event_id: "$poll" };
+	const poll = (id: string, type: "m.poll.response" | "org.matrix.msc3381.poll.response", content: Record<string, unknown>, sender = config.operatorUserId) => ({
+		event_id: id, origin_server_ts: now, sender, type, content: { ...content, "m.relates_to": relation },
 	});
+	const stable = (id: string, selections: unknown = ["yes"], sender?: string) => poll(id, "m.poll.response", { "m.selections": selections }, sender);
+	const unstable = (id: string, answers: unknown = ["yes"]) => poll(id, "org.matrix.msc3381.poll.response", { "org.matrix.msc3381.poll.response": { answers } });
 	const response = { rooms: { join: { "!room:example.com": { timeline: { events: [
-		poll("$stable", "m.poll.response", "m.poll.response"),
-		poll("$unstable", "org.matrix.msc3381.poll.response", "org.matrix.msc3381.poll.response"),
-		poll("$foreign", "m.poll.response", "m.poll.response", "@other:example.com"),
-		poll("$thread", "m.poll.response", "m.poll.response", config.operatorUserId, { rel_type: "m.thread", event_id: "$poll" }),
-		poll("$extra", "m.poll.response", "m.poll.response", config.operatorUserId, { rel_type: "m.reference", event_id: "$poll", extra: true }),
-		{ ...poll("$mismatch", "m.poll.response", "org.matrix.msc3381.poll.response"), content: {
-			"org.matrix.msc3381.poll.response": { answers: ["yes"] }, "m.relates_to": { rel_type: "m.reference", event_id: "$poll" },
-		} },
+		stable("$stable"), unstable("$unstable"), stable("$stable"),
+		stable("$foreign", ["yes"], "@other:example.com"),
+		{ ...stable("$thread"), content: { "m.selections": ["yes"], "m.relates_to": { rel_type: "m.thread", event_id: "$poll" } } },
+		{ ...stable("$relation-extra"), content: { "m.selections": ["yes"], "m.relates_to": { ...relation, extra: true } } },
+		poll("$old-stable-shape", "m.poll.response", { "m.poll.response": { answers: ["yes"] } }),
+		poll("$stable-hybrid", "m.poll.response", { "m.selections": ["yes"], "org.matrix.msc3381.poll.response": { answers: ["yes"] } }),
+		poll("$unstable-hybrid", "org.matrix.msc3381.poll.response", { "org.matrix.msc3381.poll.response": { answers: ["yes"] }, "m.selections": ["yes"] }),
+		unstable("$multiple", ["yes", "no"]), stable("$empty", []),
+		{ ...unstable("$response-extra"), content: { "org.matrix.msc3381.poll.response": { answers: ["yes"], extra: true }, "m.relates_to": relation } },
+		poll("$content-extra", "m.poll.response", { "m.selections": ["yes"], extra: true }),
+		{ event_id: "$reaction", origin_server_ts: now, sender: config.operatorUserId, type: "m.reaction", content: { "m.relates_to": relation } },
 	] } } } } };
 	assert.deepEqual(authorizedRoomEvents(response, "!room:example.com", config.operatorUserId, true, now), [
 		{ kind: "poll_response", eventId: "$stable", pollEventId: "$poll", answerId: "yes" },
