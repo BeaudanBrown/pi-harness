@@ -1,4 +1,5 @@
 import { deflateRawSync, inflateRawSync } from "node:zlib";
+import { createHash } from "node:crypto";
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../github-issues/github-context.js";
 
 const HANDOFF_PREFIX = "pi-aloop-handoff:v2:";
@@ -228,6 +229,35 @@ export function parseAloopHandoffs(comments: IssueHandoff[]): AloopAttemptHandof
 	return parsed
 		.sort((left, right) => left.commentCreatedAt.localeCompare(right.commentCreatedAt) || left.commentId - right.commentId)
 		.map(({ commentCreatedAt: _createdAt, commentId: _commentId, ...handoff }) => handoff);
+}
+
+export type AloopHandoffSpoolRecord = {
+	version: 1;
+	id: string;
+	issue: number;
+	sha256: string;
+	comment: string;
+};
+
+export function createAloopHandoffSpoolRecord(issue: number, comment: string): AloopHandoffSpoolRecord {
+	const bytes = Buffer.from(comment, "utf8");
+	return {
+		version: 1,
+		id: createHash("sha256").update(`${issue}\0`).update(bytes).digest("hex").slice(0, 24),
+		issue,
+		sha256: createHash("sha256").update(bytes).digest("hex"),
+		comment,
+	};
+}
+
+export function validateAloopHandoffSpoolRecord(value: unknown, expectedId: string): AloopHandoffSpoolRecord {
+	const record = value as Partial<AloopHandoffSpoolRecord> | null;
+	if (record?.version !== 1 || record.id !== expectedId || !Number.isInteger(record.issue) || typeof record.comment !== "string" || typeof record.sha256 !== "string") {
+		throw new Error("Prepared handoff spool entry is malformed.");
+	}
+	const expected = createAloopHandoffSpoolRecord(record.issue!, record.comment);
+	if (record.id !== expected.id || record.sha256 !== expected.sha256) throw new Error("Prepared handoff bytes failed integrity validation.");
+	return record as AloopHandoffSpoolRecord;
 }
 
 export function handoffCommentsForIssue(issue: EpicIssueContext): IssueHandoff[] {

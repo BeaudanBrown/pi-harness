@@ -8,6 +8,7 @@ import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
+	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
 	evaluateRetryBoundary,
 	findOutstandingAttempts,
@@ -17,6 +18,7 @@ import {
 	parseAloopRunRequest,
 	requireAloopClaim,
 	selectAloopLeaf,
+	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
 	type AloopAttemptRecord,
 	type AloopRunBudget,
@@ -483,11 +485,12 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				timestamp: new Date().toISOString(),
 			});
 			const bytes = Buffer.from(comment, "utf8");
-			const handoffId = createHash("sha256").update(`${params.issue}\0`).update(bytes).digest("hex").slice(0, 24);
+			const spoolRecord = createAloopHandoffSpoolRecord(params.issue, comment);
+			const handoffId = spoolRecord.id;
 			const spoolDirectory = path.resolve(ctx.cwd, ".pi/tmp/aloop/handoffs");
 			await mkdir(spoolDirectory, { recursive: true, mode: 0o700 });
 			const spoolPath = path.join(spoolDirectory, `${handoffId}.json`);
-			const record = `${JSON.stringify({ version: 1, id: handoffId, issue: params.issue, sha256: createHash("sha256").update(bytes).digest("hex"), comment })}\n`;
+			const record = `${JSON.stringify(spoolRecord)}\n`;
 			try {
 				await writeFile(spoolPath, record, { encoding: "utf8", mode: 0o600, flag: "wx" });
 			} catch (error) {
@@ -512,10 +515,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
 			const status = await lstat(spoolPath);
 			if (status.isSymbolicLink() || !status.isFile() || status.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
-			const record = JSON.parse(await readFile(spoolPath, "utf8"));
-			if (record?.version !== 1 || record.id !== params.handoff_id || !Number.isInteger(record.issue) || typeof record.comment !== "string") throw new Error("Prepared handoff spool entry is malformed.");
-			const digest = createHash("sha256").update(Buffer.from(record.comment, "utf8")).digest("hex");
-			if (digest !== record.sha256) throw new Error("Prepared handoff bytes failed integrity validation.");
+			const record = validateAloopHandoffSpoolRecord(JSON.parse(await readFile(spoolPath, "utf8")), params.handoff_id);
 			const result = await publishExactIssueComment(ctx.cwd, record.issue, record.comment, !params.dry_run, { signal, deadlineMs: runBudget.deadlineMs });
 			return {
 				content: [{ type: "text", text: `${params.dry_run ? "Dry run complete" : "Publication complete"} for handoff ${params.handoff_id} on #${record.issue}; ${Buffer.byteLength(record.comment)} exact bytes.` }],
@@ -540,11 +540,10 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
 			const spoolStatus = await lstat(spoolPath);
 			if (!spoolStatus.isFile() || spoolStatus.isSymbolicLink() || spoolStatus.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
-			const spool = JSON.parse(await readFile(spoolPath, "utf8"));
-			if (spool?.version !== 1 || spool.id !== params.handoff_id || spool.issue !== params.issue || typeof spool.comment !== "string") throw new Error("Prepared handoff does not identify this issue.");
-			const digest = createHash("sha256").update(Buffer.from(spool.comment, "utf8")).digest("hex");
-			if (digest !== spool.sha256 || !issue.recentHandoffs.some((comment) => comment.body === spool.comment)) throw new Error("The exact prepared handoff is not durably published on GitHub.");
-			const [handoff] = parseAloopHandoffs([spool.comment]);
+			const spool = validateAloopHandoffSpoolRecord(JSON.parse(await readFile(spoolPath, "utf8")), params.handoff_id);
+			if (spool.issue !== params.issue) throw new Error("Prepared handoff does not identify this issue.");
+			if (!issue.recentHandoffs.some((comment) => comment.body === spool.comment)) throw new Error("The exact prepared handoff is not durably published on GitHub.");
+			const [handoff] = parseAloopHandoffs([{ id: 0, author: "aloop", body: spool.comment, createdAt: "", url: "" }]);
 			if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
 
 			const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);

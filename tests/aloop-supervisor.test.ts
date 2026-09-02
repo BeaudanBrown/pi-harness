@@ -9,6 +9,7 @@ import {
 	assessAloopRunBudget,
 	buildEpicReport,
 	buildSupervisorKickoff,
+	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
 	evaluateRetryBoundary,
 	evaluateSupervisorAttempt,
@@ -19,6 +20,7 @@ import {
 	parseAloopRunRequest,
 	requireAloopClaim,
 	selectAloopLeaf,
+	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
 	type AloopAttemptHandoff,
 } from "../config/agent/extensions/aloop/core.js";
@@ -177,6 +179,18 @@ test("compact handoffs remain compatible and materially smaller than duplicated 
 	assert.match(formatted, /pi-aloop-handoff:v2:/);
 	assert.ok(formatted.length < legacyBytes);
 	assert.equal(parseAloopHandoffs([comment(1, formatted, value.timestamp)])[0]?.commit, value.commit);
+});
+
+test("handoff spool identity is deterministic, exact-byte preserving, and tamper evident", () => {
+	const commentBytes = "<!-- marker -->\n\nConcise handoff with unicode: ✓\n";
+	const first = createAloopHandoffSpoolRecord(69, commentBytes);
+	const retry = createAloopHandoffSpoolRecord(69, commentBytes);
+	assert.deepEqual(retry, first, "repeated preparation must produce the same publication ID and bytes");
+	assert.equal(validateAloopHandoffSpoolRecord(JSON.parse(JSON.stringify(first)), first.id).comment, commentBytes);
+	assert.notEqual(createAloopHandoffSpoolRecord(70, commentBytes).id, first.id, "IDs bind the target issue");
+	assert.notEqual(createAloopHandoffSpoolRecord(69, `${commentBytes}changed`).id, first.id, "IDs bind exact bytes");
+	assert.throws(() => validateAloopHandoffSpoolRecord({ ...first, comment: `${commentBytes}tampered` }, first.id), /integrity validation/);
+	assert.throws(() => validateAloopHandoffSpoolRecord(first, "0".repeat(24)), /malformed/);
 });
 
 test("commit-bound preflight catches files omitted by Git-backed verification", () => {
