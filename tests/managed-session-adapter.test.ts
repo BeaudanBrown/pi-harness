@@ -121,6 +121,8 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active" } }));
 		} else if (envelope.type === "input.acknowledge") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
+		} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
 		} else if (envelope.type === "checkpoint.offer") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
 		} else if (envelope.type === "transcript.offer") {

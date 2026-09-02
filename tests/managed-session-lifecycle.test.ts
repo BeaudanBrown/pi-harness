@@ -246,6 +246,10 @@ export default function (pi: ExtensionAPI) {
 				return { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `result-${Date.now()}`, conversationId: attachment.conversationId,
 					role: "relay", type: "input.result", inReplyTo: envelope.messageId, payload: { deliveryId: payload.deliveryId, status: payload.status } };
 			}
+			if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
+				return { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `activity-${Date.now()}`, conversationId: attachment.conversationId,
+					role: "relay", type: "activity.acknowledge", inReplyTo: envelope.messageId, payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } };
+			}
 			if (envelope.type === "transcript.offer") {
 				await projector.project(envelope);
 				return { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `projection-${Date.now()}`, conversationId: attachment.conversationId,

@@ -97,6 +97,17 @@ export class BoundAdapterClient {
 		}
 	}
 
+	async updateActivity(payload: Record<string, unknown>, finalize = false): Promise<void> {
+		if (this.options.role !== "ordinary_adapter") return;
+		const result = await this.request({
+			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: messageId("activity"), conversationId: this.options.binding.conversationId,
+			role: "ordinary_adapter", type: finalize ? "activity.finalize" : "activity.update", payload,
+		});
+		if (result.type !== "activity.acknowledge" || result.payload.activityId !== payload.activityId || result.payload.revision !== payload.revision ||
+			result.payload.status !== (finalize ? "finalized" : "updated")) throw new ManagedAdapterError("Relay did not confirm activity projection", "invalid_response");
+	}
+
 	async offerTranscript(entry: {
 		entryId: string;
 		piSessionId: string;

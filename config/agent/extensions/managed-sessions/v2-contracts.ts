@@ -17,9 +17,21 @@ const generationId = id("generation");
 const base = { protocolVersion: Type.Literal(MANAGED_SESSION_V2_VERSION), messageId: text(128), conversationId };
 const envelope = (role: string, type: string, payload: TSchema) => strict({ ...base, role: Type.Literal(role), type: Type.Literal(type), payload });
 
+const nonNegative = Type.Integer({ minimum: 0 });
+const toolState = strict({ name: text(128), state: Type.Union([Type.Literal("running"), Type.Literal("completed"), Type.Literal("error")]), count: Type.Integer({ minimum: 1 }) });
+const activityOutcome = Type.Union(["completed", "checkpoint", "cancelled", "interrupted", "failed"].map((value) => Type.Literal(value)));
+const activitySnapshot = strict({
+	activityId: id("activity"), revision: Type.Integer({ minimum: 1 }), outcome: activityOutcome,
+	durationMs: Type.Optional(nonNegative), model: Type.Optional(text(256)), thinking: Type.Optional(text(32)), generation: Type.Optional(Type.Integer({ minimum: 1 })),
+	context: Type.Optional(strict({ usedTokens: nonNegative, remainingTokens: nonNegative, limitTokens: Type.Integer({ minimum: 1 }), deltaTokens: Type.Integer() })),
+	run: Type.Optional(strict({ inputTokens: nonNegative, outputTokens: nonNegative, modelTurns: nonNegative })),
+	tools: Type.Optional(strict({ total: nonNegative, errors: nonNegative, counts: Type.Array(strict({ name: text(128), count: Type.Integer({ minimum: 1 }) }), { maxItems: 64 }) })),
+	compactions: Type.Optional(nonNegative), git: Type.Optional(strict({ changed: nonNegative, insertions: Type.Optional(nonNegative), deletions: Type.Optional(nonNegative) })),
+});
 const activity = Type.Union([
-	envelope("ordinary_adapter", "activity.update", strict({ activityId: id("activity"), revision: Type.Integer({ minimum: 0 }), state: Type.Union([Type.Literal("busy"), Type.Literal("tool")]), toolName: Type.Optional(text(128)) })),
-	envelope("ordinary_adapter", "activity.finalize", strict({ activityId: id("activity"), revision: Type.Integer({ minimum: 1 }), run: strict({ inputTokens: Type.Integer({ minimum: 0 }), outputTokens: Type.Integer({ minimum: 0 }) }), context: strict({ usedTokens: Type.Integer({ minimum: 0 }), limitTokens: Type.Integer({ minimum: 1 }) }) })),
+	envelope("ordinary_adapter", "activity.update", strict({ activityId: id("activity"), revision: nonNegative, state: Type.Union([Type.Literal("busy"), Type.Literal("tool"), Type.Literal("compaction")]), tools: Type.Optional(Type.Array(toolState, { maxItems: 64 })) })),
+	envelope("ordinary_adapter", "activity.finalize", activitySnapshot),
+	envelope("relay", "activity.acknowledge", strict({ activityId: id("activity"), revision: nonNegative, status: Type.Union([Type.Literal("updated"), Type.Literal("finalized")]) })),
 ]);
 const controlName = Type.Union(["help", "status", "model", "thinking", "compact", "new", "stop", "abort", "steer"].map((value) => Type.Literal(value)));
 const control = envelope("relay", "control.deliver", strict({ controlId: id("control"), name: controlName, argument: Type.Optional(text(16_000)) }));
@@ -44,11 +56,30 @@ const generationSchema = strict({ generationId, ordinal: Type.Integer({ minimum:
 export const ConversationManifestV2Schema = strict({ schemaVersion: Type.Literal(MANAGED_SESSION_V2_VERSION), kind: Type.Union([Type.Literal("project"), Type.Literal("coordinator")]), conversationId, ownerHostId: text(128), creationKey: text(128), concept: text(128), roomId: text(255), placement: Type.Optional(strict({ rootKey: text(128), workspace: text(128), relativeCwd: Type.String({ maxLength: 512 }) })), projectSpace: Type.Optional(text(255)), hostSpace: Type.Optional(text(255)), activeGenerationId: generationId, generations: Type.Array(generationSchema, { minItems: 1, maxItems: 256 }), createdAt: text(35) });
 
 function schemaError(schema: TSchema, value: unknown): never { const e = [...Errors(schema, value)][0]; throw new ManagedSessionContractError("malformed", `managed-session v2: ${e?.instancePath || "/"}: ${e?.message || "invalid value"}`); }
-export function parseManagedSessionV2Envelope(value: unknown) { if (!Check(ManagedSessionV2EnvelopeSchema, value)) schemaError(ManagedSessionV2EnvelopeSchema, value); const frame = `${JSON.stringify(value)}\n`; if (Buffer.byteLength(frame) > 64 * 1024) throw new ManagedSessionContractError("malformed", "managed-session v2 frame exceeds 65536 bytes"); return value; }
+export function parseManagedSessionV2Envelope(value: unknown) {
+	if (!Check(ManagedSessionV2EnvelopeSchema, value)) schemaError(ManagedSessionV2EnvelopeSchema, value);
+	const envelope = value as { type: string; payload: Record<string, unknown> };
+	if (envelope.type === "activity.update") {
+		const tools = envelope.payload.tools as Array<{ name: string }> | undefined;
+		if (envelope.payload.state !== "tool" && tools !== undefined) throw new ManagedSessionContractError("malformed", "busy activity updates must omit tools");
+		if (envelope.payload.state === "tool" && (!tools || tools.length === 0 || new Set(tools.map((tool) => tool.name)).size !== tools.length)) throw new ManagedSessionContractError("malformed", "tool activity updates require unique collapsed tool names");
+	}
+	if (envelope.type === "activity.finalize") {
+		const context = envelope.payload.context as { usedTokens: number; remainingTokens: number; limitTokens: number } | undefined;
+		const tools = envelope.payload.tools as { total: number; errors: number; counts: Array<{ count: number }> } | undefined;
+		if (context && context.usedTokens + context.remainingTokens !== context.limitTokens) throw new ManagedSessionContractError("malformed", "activity context must be balanced");
+		if (tools && (tools.errors > tools.total || tools.counts.reduce((sum, tool) => sum + tool.count, 0) !== tools.total)) throw new ManagedSessionContractError("malformed", "activity tool totals must be balanced");
+	}
+	const frame = `${JSON.stringify(value)}\n`;
+	if (Buffer.byteLength(frame) > 64 * 1024) throw new ManagedSessionContractError("malformed", "managed-session v2 frame exceeds 65536 bytes");
+	return value;
+}
 export function parseConversationManifestV2(value: unknown): ConversationManifestV2 { if (!Check(ConversationManifestV2Schema, value)) schemaError(ConversationManifestV2Schema, value); const v = value as ConversationManifestV2; if (v.generations.map(g => g.ordinal).some((n, i) => n !== i + 1) || new Set(v.generations.map(g => g.generationId)).size !== v.generations.length || v.generations.at(-1)?.generationId !== v.activeGenerationId) throw new ManagedSessionContractError("invalid_state", "generation ordinals must be contiguous and only the newest generation may be active"); if ((v.kind === "project") !== (v.placement !== undefined)) throw new ManagedSessionContractError("invalid_state", "project placement and conversation kind disagree"); return v; }
-function derive(domain: string, parts: readonly (string | number)[], prefix: string) { const h = createHash("sha256"); h.update(`pi-managed-sessions:${domain}:v2\0`); for (const p of parts) { const s = String(p); h.update(`${Buffer.byteLength(s)}:`); h.update(s); } return `${prefix}_${h.digest("hex").slice(0, 32)}`; }
+function digestParts(domain: string, parts: readonly (string | number)[]): string { const h = createHash("sha256"); h.update(`pi-managed-sessions:${domain}:v2\0`); for (const p of parts) { const s = String(p); h.update(`${Buffer.byteLength(s)}:`); h.update(s); } return h.digest("hex"); }
+function derive(domain: string, parts: readonly (string | number)[], prefix: string) { return `${prefix}_${digestParts(domain, parts).slice(0, 32)}`; }
 export const deriveGenerationId = (c: string, ordinal: number) => derive("generation", [c, ordinal], "generation");
 export const deriveActivityId = (g: string, span: string) => derive("activity", [g, span], "activity");
+export const deriveActivityTransactionId = (c: string, activityId: string, revision: number) => `pi_${digestParts("activity-transaction", [c, activityId, revision]).slice(0, 48)}`;
 export const derivePollId = (g: string, key: string) => derive("poll", [g, key], "poll");
 export const deriveBlobId = (c: string, sha256: string) => derive("blob", [c, sha256], "blob");
 export const deriveUploadId = (c: string, key: string) => derive("upload", [c, key], "upload");

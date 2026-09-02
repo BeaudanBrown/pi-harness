@@ -11,6 +11,15 @@ const old = { schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", con
 test("v1 manifest migrates deterministically to generation one", () => { const a = migrateV1Manifest(old); const b = migrateV1Manifest(old); assert.deepEqual(a, b); assert.equal(a.roomId, old.roomId); assert.equal(a.generations[0]?.piSessionId, old.piSessionId); assert.equal(a.activeGenerationId, deriveGenerationId(conversationId, 1)); });
 test("generation manifest rejects old fields and impossible active generations", () => { const value = migrateV1Manifest(old); assert.throws(() => parseConversationManifestV2({ ...value, piSessionId: "legacy" })); assert.throws(() => parseConversationManifestV2({ ...value, activeGenerationId: deriveGenerationId(conversationId, 2) }), /newest/); });
 test("v2 operations are role-strict and reject extra fields", () => { const value = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "m1", conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${"a".repeat(32)}`, name: "status" } }; assert.deepEqual(parseManagedSessionV2Envelope(value), value); assert.throws(() => parseManagedSessionV2Envelope({ ...value, role: "ordinary_adapter" })); assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, command: "pwd" } })); });
+test("activity snapshots require collapsed names and balanced measured totals", () => {
+	const base = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "activity", conversationId, role: "ordinary_adapter", type: "activity.finalize" };
+	const payload = { activityId: `activity_${"a".repeat(32)}`, revision: 2, outcome: "completed", context: { usedTokens: 60, remainingTokens: 40, limitTokens: 100, deltaTokens: 10 }, run: { inputTokens: 10, outputTokens: 5, modelTurns: 1 }, tools: { total: 2, errors: 1, counts: [{ name: "read", count: 2 }] } };
+	assert.deepEqual(parseManagedSessionV2Envelope({ ...base, payload }), { ...base, payload });
+	assert.throws(() => parseManagedSessionV2Envelope({ ...base, payload: { ...payload, context: { ...payload.context, remainingTokens: 41 } } }), /balanced/);
+	assert.throws(() => parseManagedSessionV2Envelope({ ...base, payload: { ...payload, tools: { ...payload.tools, total: 3 } } }), /balanced/);
+	const update = { ...base, type: "activity.update", payload: { activityId: payload.activityId, revision: 1, state: "tool", tools: [{ name: "bash", state: "running", count: 1 }, { name: "bash", state: "completed", count: 1 }] } };
+	assert.throws(() => parseManagedSessionV2Envelope(update), /unique collapsed/);
+});
 test("bundle migration fails closed when registry is partial", () => { const runtime = { schemaVersion: MANAGED_SESSION_STATE_VERSION, hostId: "host", conversations: [] }; assert.throws(() => migrateV1Bundle([old], runtime), /exact manifest\/registry match/); });
 
 test("store migration atomically commits deterministic v2 destinations and forbids downgrade", async () => {

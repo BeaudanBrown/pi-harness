@@ -148,6 +148,25 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		kind: Type.Union([Type.Literal("local_user"), Type.Literal("assistant_final")]),
 		body: boundedString(MAX_TRANSCRIPT_TEXT_LENGTH),
 	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "activity.update", {
+		activityId: stableId("activity"),
+		revision: Type.Integer({ minimum: 0 }),
+		state: Type.Union([Type.Literal("busy"), Type.Literal("tool"), Type.Literal("compaction")]),
+		tools: Type.Optional(Type.Array(strictObject({
+			name: boundedString(128),
+			state: Type.Union([Type.Literal("running"), Type.Literal("completed"), Type.Literal("error")]),
+			count: Type.Integer({ minimum: 1 }),
+		}), { maxItems: 64 })),
+	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "activity.finalize", {
+		activityId: stableId("activity"), revision: Type.Integer({ minimum: 1 }),
+		outcome: Type.Union([Type.Literal("completed"), Type.Literal("checkpoint"), Type.Literal("cancelled"), Type.Literal("interrupted"), Type.Literal("failed")]),
+		durationMs: Type.Optional(Type.Integer({ minimum: 0 })), model: Type.Optional(boundedString(256)), thinking: Type.Optional(boundedString(32)), generation: Type.Optional(Type.Integer({ minimum: 1 })),
+		context: Type.Optional(strictObject({ usedTokens: Type.Integer({ minimum: 0 }), remainingTokens: Type.Integer({ minimum: 0 }), limitTokens: Type.Integer({ minimum: 1 }), deltaTokens: Type.Integer() })),
+		run: Type.Optional(strictObject({ inputTokens: Type.Integer({ minimum: 0 }), outputTokens: Type.Integer({ minimum: 0 }), modelTurns: Type.Integer({ minimum: 0 }) })),
+		tools: Type.Optional(strictObject({ total: Type.Integer({ minimum: 0 }), errors: Type.Integer({ minimum: 0 }), counts: Type.Array(strictObject({ name: boundedString(128), count: Type.Integer({ minimum: 1 }) }), { maxItems: 64 }) })),
+		compactions: Type.Optional(Type.Integer({ minimum: 0 })),
+	}),
 	clientEnvelope(adapterRole, "checkpoint.offer", {
 		checkpointId: identifier,
 		originDeliveryId: DeliveryIdSchema,
@@ -192,6 +211,11 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	relayEnvelope("checkpoint.acknowledge", {
 		checkpointId: identifier,
 		status: Type.Union([Type.Literal("accepted"), Type.Literal("projected")]),
+	}),
+	relayEnvelope("activity.acknowledge", {
+		activityId: stableId("activity"),
+		revision: Type.Integer({ minimum: 0 }),
+		status: Type.Union([Type.Literal("updated"), Type.Literal("finalized")]),
 	}),
 	relayEnvelopeWithPayload("self.result", Type.Union([
 		strictObject({ operation: Type.Literal("self.bind"), status: Type.Literal("ok"), boundConversationId: ConversationIdSchema }),
@@ -462,6 +486,16 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		} else if (payload.status === "completed" && !payload.piEntryId) {
 			throw new ManagedSessionContractError("malformed", "ordinary completed input acknowledgement requires piEntryId");
 		}
+	}
+	if (envelope.type === "activity.update") {
+		const payload = envelope.payload as { state: string; tools?: Array<{ name: string }> };
+		if (payload.state !== "tool" && payload.tools !== undefined) throw new ManagedSessionContractError("malformed", "busy activity update must omit tools");
+		if (payload.state === "tool" && (!payload.tools?.length || new Set(payload.tools.map((tool) => tool.name)).size !== payload.tools.length)) throw new ManagedSessionContractError("malformed", "tool activity update requires unique collapsed names");
+	}
+	if (envelope.type === "activity.finalize") {
+		const payload = envelope.payload as { context?: { usedTokens: number; remainingTokens: number; limitTokens: number }; tools?: { total: number; errors: number; counts: Array<{ count: number }> } };
+		if (payload.context && payload.context.usedTokens + payload.context.remainingTokens !== payload.context.limitTokens) throw new ManagedSessionContractError("malformed", "activity context must be balanced");
+		if (payload.tools && (payload.tools.errors > payload.tools.total || payload.tools.counts.reduce((sum, item) => sum + item.count, 0) !== payload.tools.total)) throw new ManagedSessionContractError("malformed", "activity tool totals must be balanced");
 	}
 	if (envelope.type === "checkpoint.offer") {
 		const payload = envelope.payload as { checkpoint: { codeOrDiffRequested?: true; requestedCodeOrDiff?: string } };

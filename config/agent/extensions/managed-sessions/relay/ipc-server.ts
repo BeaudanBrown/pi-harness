@@ -16,6 +16,7 @@ export type PeerUidResolver = (socket: Socket) => number | undefined | Promise<n
 export type EnvelopeHandler = (envelope: ManagedSessionEnvelope, attachment: AcceptedAttachment) => Promise<ManagedSessionEnvelope | undefined>;
 export type UnboundEnvelopeHandler = (envelope: ManagedSessionEnvelope) => Promise<ManagedSessionEnvelope | undefined>;
 export type AttachmentHandler = (attachment: AcceptedAttachment) => Promise<void> | void;
+export type AttachmentDisconnectHandler = (attachment: AcceptedAttachment) => Promise<void> | void;
 
 interface ConnectionState {
 	id: string;
@@ -61,6 +62,7 @@ export class ManagedSessionIpcServer {
 			onEnvelope?: EnvelopeHandler;
 			onUnboundEnvelope?: UnboundEnvelopeHandler;
 			onAttachment?: AttachmentHandler;
+			onAttachmentDisconnect?: AttachmentDisconnectHandler;
 		},
 	) {
 		this.runtimeDirectory = resolve(options.runtimeDirectory);
@@ -71,6 +73,7 @@ export class ManagedSessionIpcServer {
 		this.onEnvelope = options.onEnvelope;
 		this.onUnboundEnvelope = options.onUnboundEnvelope;
 		this.onAttachment = options.onAttachment;
+		this.onAttachmentDisconnect = options.onAttachmentDisconnect;
 	}
 
 	private readonly expectedUid?: number;
@@ -78,6 +81,7 @@ export class ManagedSessionIpcServer {
 	private readonly onEnvelope?: EnvelopeHandler;
 	private readonly onUnboundEnvelope?: UnboundEnvelopeHandler;
 	private readonly onAttachment?: AttachmentHandler;
+	private readonly onAttachmentDisconnect?: AttachmentDisconnectHandler;
 
 	sendToConversation(envelope: ManagedSessionEnvelope): boolean {
 		if (envelope.role !== "relay" || !envelope.conversationId || envelope.inReplyTo) throw new Error("Server push must be an uncorrelated relay envelope");
@@ -151,7 +155,9 @@ export class ManagedSessionIpcServer {
 			if (state.attachment && this.attachedSockets.get(state.attachment.conversationId) === socket) {
 				this.attachedSockets.delete(state.attachment.conversationId);
 			}
-			if (state.attachment && !this.preserveAttachmentsOnClose) void this.registry.detach(state.id, state.attachment).catch(() => undefined);
+			if (state.attachment && !this.preserveAttachmentsOnClose) {
+				void this.registry.detach(state.id, state.attachment).then(() => this.onAttachmentDisconnect?.(state.attachment!)).catch(() => undefined);
+			}
 		});
 		socket.resume();
 	}

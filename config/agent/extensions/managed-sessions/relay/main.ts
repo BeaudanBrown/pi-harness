@@ -21,6 +21,7 @@ import { peerUidFromHelper } from "./peer-uid.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { hostRelayLockPath, HostRelayLock } from "./relay-lock.js";
 import { TranscriptProjector } from "./transcript-projector.js";
+import { ActivityProjector } from "./activity-projector.js";
 import { redactManagedValue } from "./redaction.js";
 import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
 
@@ -56,6 +57,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let server: ManagedSessionIpcServer | undefined;
 	let coordinatorRouter: CoordinatorRouter | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
+	let activityProjector: ActivityProjector | undefined;
 	try {
 		await registry.load();
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
@@ -78,9 +80,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			}, registry, matrix);
 		}
 		const transcriptProjector = new TranscriptProjector(registry, matrix);
+		activityProjector = new ActivityProjector(runtimeDirectory, registry, matrix);
+		await activityProjector.load();
 		const eventProjector = new RelayEventProjector(registry, matrix);
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -96,6 +100,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
 			onAttachment: async (attachment) => {
 				await coordinatorRouter?.attachmentReady(attachment.conversationId);
+			},
+			onAttachmentDisconnect: (attachment) => {
+				activityProjector?.attachmentDisconnected(attachment.conversationId);
 			},
 			onUnboundEnvelope: async (envelope) => {
 				if (envelope.type !== "self.bind" || envelope.role !== "ordinary_adapter") return undefined;
@@ -153,7 +160,14 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						deliveryId: payload.deliveryId, status: payload.status,
 					});
 				}
+				if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
+					const status = await activityProjector!.project(envelope);
+					return response(attachment.conversationId, envelope.messageId, "activity.acknowledge", {
+						activityId: envelope.payload.activityId, revision: envelope.payload.revision, status,
+					});
+				}
 				if (envelope.type === "transcript.offer") {
+					if (envelope.payload.kind === "assistant_final" && activityProjector!.hasUnfinalized(attachment.conversationId)) throw new RelayRegistryError("invalid_state", "Final activity snapshot must be persisted before the final answer");
 					await transcriptProjector.project(envelope);
 					return response(attachment.conversationId, envelope.messageId, "transcript.acknowledge", {
 						entryId: envelope.payload.entryId, status: "projected",
@@ -220,6 +234,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		}
 	} catch (error) {
 		await coordinatorRouter?.stop().catch(() => undefined);
+		await activityProjector?.close().catch(() => undefined);
 		await server?.close({ preserveAttachments: true }).catch(() => undefined);
 		await relayLock?.release();
 		throw error;
@@ -242,6 +257,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			stopped = true;
 			clearTimeout(reconciliationTimer);
 			await coordinatorRouter?.stop();
+			await activityProjector?.close();
 			await server.close({ preserveAttachments: true });
 			await relayLock?.release();
 		},

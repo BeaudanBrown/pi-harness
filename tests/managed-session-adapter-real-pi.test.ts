@@ -115,6 +115,8 @@ test("real Pi binds, expands once, persists provenance, leaves /new and /fork un
 							payload: { deliveryId: normalDeliveryId, matrixEventId: "$normal-event", kind: "prompt", body: "ordinary persisted prompt" },
 						})), 100);
 					}
+				} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
+					socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
 				} else if (envelope.type === "transcript.offer") {
 					if (!failedTranscriptProjection) {
 						failedTranscriptProjection = true;

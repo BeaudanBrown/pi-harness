@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { RemoteCheckpointSchema, renderRemoteCheckpoint, validateRemoteCheckpoint } from "../checkpoint.js";
+import { deriveActivityId, deriveGenerationId } from "../v2-contracts.js";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_PROJECTION_ENTRIES,
@@ -34,6 +35,13 @@ import {
 	restoreSessionBinding,
 	transcriptOfferWithinFrame,
 } from "./state.js";
+
+type ActivityOutcome = "completed" | "checkpoint" | "cancelled" | "interrupted" | "failed";
+interface BusyActivity {
+	activityId: string; revision: number; startedAt: number; startContext?: number; inputTokens: number; outputTokens: number;
+	modelTurns: number; toolTotal: number; toolErrors: number; compactions: number; requestedOutcome?: ActivityOutcome;
+	toolCounts: Map<string, number>; activeTools: Map<string, string>; failedTools: Set<string>; timer?: NodeJS.Timeout; work: Promise<void>;
+}
 
 interface AdapterEnvironment {
 	socketPath: string;
@@ -117,6 +125,44 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const inFlightDeliveries = new Set<string>();
 		const persistedRecoveryPending = new Set<string>();
 		const expandedRecoveryPending = new Set<string>();
+		let activity: BusyActivity | undefined;
+		const safeToolName = (value: string): string => /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : "tool";
+		const boundedToolName = (span: BusyActivity, value: string): string => { const safe = safeToolName(value); return span.toolCounts.has(safe) || span.toolCounts.size < 63 ? safe : "other"; };
+		const activityTools = (span: BusyActivity) => [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({
+			name, count, state: [...span.activeTools.values()].includes(name) ? "running" as const : span.failedTools.has(name) ? "error" as const : "completed" as const,
+		}));
+		const sendActivityUpdate = (span: BusyActivity, immediate = false, stateOverride?: "compaction"): void => {
+			if (activity !== span || role !== "ordinary_adapter") return;
+			const send = () => {
+				span.timer = undefined;
+				if (activity !== span || !client?.connected) return;
+				const revision = ++span.revision;
+				const tools = activityTools(span);
+				const payload = { activityId: span.activityId, revision, state: stateOverride ?? (tools.length ? "tool" as const : "busy" as const), ...(!stateOverride && tools.length ? { tools } : {}) };
+				span.work = span.work.then(() => client?.updateActivity(payload)).catch(() => undefined);
+			};
+			if (immediate) { if (span.timer) clearTimeout(span.timer); send(); return; }
+			if (!span.timer) { span.timer = setTimeout(send, 750); span.timer.unref(); }
+		};
+		const finalizeActivity = async (ctx: ExtensionContext, outcome?: ActivityOutcome): Promise<void> => {
+			const span = activity;
+			if (!span || role !== "ordinary_adapter") return;
+			if (span.timer) { clearTimeout(span.timer); span.timer = undefined; }
+			await span.work;
+			if (!client?.connected || activity !== span) { activity = undefined; return; }
+			const context = ctx.getContextUsage();
+			const used = context?.tokens;
+			const limit = ctx.model?.contextWindow;
+			const contextSnapshot = typeof used === "number" && limit && used <= limit ? { usedTokens: used, remainingTokens: limit - used, limitTokens: limit, deltaTokens: used - (span.startContext ?? used) } : undefined;
+			span.revision += 1;
+			await client.updateActivity({
+				activityId: span.activityId, revision: span.revision, outcome: outcome ?? span.requestedOutcome ?? "completed", durationMs: Math.max(0, Date.now() - span.startedAt),
+				...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}), ...(ctx.thinkingLevel ? { thinking: ctx.thinkingLevel } : {}), generation: 1,
+				...(contextSnapshot ? { context: contextSnapshot } : {}), run: { inputTokens: span.inputTokens, outputTokens: span.outputTokens, modelTurns: span.modelTurns },
+				tools: { total: span.toolTotal, errors: span.toolErrors, counts: [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({ name, count })) }, compactions: span.compactions,
+			}, true);
+			activity = undefined;
+		};
 
 		const lifecycle = async (request: Record<string, unknown>) => {
 			if (!binding || !client?.connected) throw new ManagedAdapterError("Coordinator relay connection is unavailable");
@@ -192,6 +238,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					if (!previous?.piEntryId) throw new ManagedAdapterError("Checkpoint origin was not durably persisted");
 					const completed = { ...previous, status: "completed" as const };
 					recordDelivery(ctx, completed); activeDeliveries.delete(originDeliveryId); acknowledge(completed);
+					if (activity) activity.requestedOutcome = "checkpoint";
 					return { content: [{ type: "text" as const, text: "Remote checkpoint projected. The run is stopped pending new Matrix input." }],
 						details: { checkpointId, kind: checkpoint.kind, waiting: true } };
 				} finally { ctx.abort(); }
@@ -240,7 +287,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			});
 		}
 
-		async function projectEligibleEntries(ctx: ExtensionContext): Promise<void> {
+		async function projectEligibleEntries(ctx: ExtensionContext, localUsersOnly = false): Promise<void> {
 			if (!binding || !client?.connected) return;
 			const projectionBinding = binding;
 			const projectionClient = client;
@@ -256,6 +303,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			for (const entry of plan.entries) {
+				if (localUsersOnly && entry.kind !== "local_user") continue;
 				if (!projectionClient.connected || binding !== projectionBinding || client !== projectionClient) return;
 				let marker = projections.get(entry.entryId);
 				if (!transcriptOfferWithinFrame(entry, projectionBinding)) {
@@ -355,6 +403,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				acknowledge(accepted);
 			}
 			if (payload.kind === "abort") {
+				if (activity) activity.requestedOutcome = "cancelled";
 				for (const deliveryId of new Set([...activeDeliveries.keys(), ...pendingUserPersistence.map((item) => item.deliveryId)])) {
 					const interrupted = deliveries.get(deliveryId);
 					if (!interrupted || interrupted.status === "completed" || interrupted.status === "cancelled") continue;
@@ -405,6 +454,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (envelope.type === "termination.request") {
 				const reason = String(envelope.payload.reason);
 				if (reason === "stop" || reason === "abort") {
+					if (activity) activity.requestedOutcome = "cancelled";
 					for (const deliveryId of new Set([...activeDeliveries.keys(), ...pendingUserPersistence.map((item) => item.deliveryId)])) {
 						const interrupted = deliveries.get(deliveryId);
 						if (!interrupted || interrupted.status === "completed" || interrupted.status === "cancelled") continue;
@@ -529,7 +579,40 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (binding) await connectBinding(ctx);
 		});
 
-		pi.on("agent_settled", (_event, ctx) => {
+		pi.on("agent_start", async (_event, ctx) => {
+			if (role !== "ordinary_adapter" || !binding || activity) return;
+			const source = ctx.sessionManager.getLeafId();
+			if (!source) return;
+			const span: BusyActivity = {
+				activityId: deriveActivityId(deriveGenerationId(binding.conversationId, 1), source), revision: -1, startedAt: Date.now(),
+				startContext: ctx.getContextUsage()?.tokens ?? undefined, inputTokens: 0, outputTokens: 0, modelTurns: 0, toolTotal: 0, toolErrors: 0, compactions: 0,
+				toolCounts: new Map(), activeTools: new Map(), failedTools: new Set(), work: Promise.resolve(),
+			};
+			activity = span;
+			sendActivityUpdate(span, true);
+			await span.work;
+		});
+		pi.on("turn_end", (event) => {
+			if (!activity || event.message.role !== "assistant") return;
+			activity.modelTurns += 1; activity.inputTokens += event.message.usage.input; activity.outputTokens += event.message.usage.output;
+			if (event.message.stopReason === "error") activity.requestedOutcome = "failed";
+			else if (event.message.stopReason === "aborted" && !activity.requestedOutcome) activity.requestedOutcome = "interrupted";
+		});
+		pi.on("tool_execution_start", (event) => {
+			if (!activity) return;
+			const name = boundedToolName(activity, event.toolName); activity.activeTools.set(event.toolCallId, name); activity.toolTotal += 1;
+			activity.toolCounts.set(name, (activity.toolCounts.get(name) ?? 0) + 1); sendActivityUpdate(activity);
+		});
+		pi.on("tool_execution_end", (event) => {
+			if (!activity) return;
+			const name = activity.activeTools.get(event.toolCallId) ?? boundedToolName(activity, event.toolName); activity.activeTools.delete(event.toolCallId);
+			if (event.isError) { activity.toolErrors += 1; activity.failedTools.add(name); } sendActivityUpdate(activity);
+		});
+		pi.on("session_before_compact", () => { if (activity) sendActivityUpdate(activity, true, "compaction"); });
+		pi.on("session_compact", () => { if (activity) { activity.compactions += 1; sendActivityUpdate(activity, true); } });
+		pi.on("session_compact_failed", (event) => { if (activity) { if (!event.aborted) activity.requestedOutcome = "failed"; sendActivityUpdate(activity, true); } });
+
+		pi.on("agent_settled", async (_event, ctx) => {
 			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
 				const marker = pendingUserPersistence[index]!;
 				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
@@ -545,11 +628,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				acknowledge(completed);
 			}
 			activeDeliveries.clear();
-			queueProjection(ctx);
+			if (projectionRun) await projectionRun;
+			await projectEligibleEntries(ctx, true);
+			try { await finalizeActivity(ctx); }
+			catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed activity finalization failed", "error"); return; }
+			await projectEligibleEntries(ctx);
 		});
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			stopped = true;
+			if (activity) await finalizeActivity(ctx, activity.requestedOutcome ?? "interrupted").catch(() => undefined);
 			if (reconnectTimer) clearTimeout(reconnectTimer);
 			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);
 			reconnectTimer = undefined;
