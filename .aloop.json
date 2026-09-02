@@ -1,4 +1,11 @@
 {
-  "canonicalCommand": "nix run .#verify",
-  "productionIntegrationCommand": "nix build --no-link .#pi-harness-resources"
+  "canonicalCommand": {
+    "argv": ["nix", "run", ".#verify"]
+  },
+  "productionIntegration": {
+    "frequency": "issue",
+    "command": {
+      "argv": ["nix", "build", "--no-link", ".#pi-harness-resources"]
+    }
+  }
 }

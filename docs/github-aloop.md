@@ -115,15 +115,20 @@ requires model copy/paste of the encoded marker. A handoff records:
 
 Only a correctly encoded handoff on its matching issue counts. An accepted
 handoff must reference the receipt ID returned by `aloop_supervisor_verify`.
-The repository commits a `.aloop.json` policy containing `canonicalCommand` and
-`productionIntegrationCommand`. The verification tool accepts only the worker
-commit, loads that policy itself, and executes both checks. Agents cannot replace
-the repository-owned gates with narrower or placeholder commands.
+The repository commits a `.aloop.json` policy containing a required
+`canonicalCommand`, an optional advisory `workerFeedbackCommand`, and optional
+phase-aware `productionIntegration`. Every command is an explicit argv array,
+not an implicit shell string, and has a configurable timeout that defaults to 30
+minutes. The supervisor snapshots the committed policy when `/aloop` starts;
+later worktree edits cannot replace the invocation's gates. It executes commands
+serially, preserves full logs and machine-readable results, and requests bounded
+read-only diagnosis on failure without letting that diagnosis determine pass or
+fail. Issue-frequency production integration runs with child acceptance;
+epic-frequency integration runs at the epic closure gate.
 Verification is permitted only after a matching pending worker attempt has
-returned its commit. Preparation accepts only the immutable receipt bytes issued
-for that exact issue, commit, and artifact directory in the current bounded
-invocation, rechecks that its commands exactly match `.aloop.json` and both exit
-statuses passed at the returned commit, and confirms that HEAD and the
+returned its commit. Preparation accepts only immutable receipt bytes bound to
+the exact issue, artifact, commit tree, and policy hash. A matching successful
+receipt can be reused after restart. Receipt validation confirms that HEAD and the
 complete worktree (including untracked files) are still identical.
 Commit all intended sources before verification: Git-backed Nix flakes omit
 untracked files, so a check run while eventual source files are untracked is
@@ -150,8 +155,10 @@ the epic closed or stopped at a human boundary.
 
 ## Project verification policy
 
-Each repository declares its canonical and production-integration commands in
-`.aloop.json`. It may also explicitly opt implementation workers into narrowly
+Each repository declares its required canonical command and any optional
+worker-feedback or production-integration phase in `.aloop.json`. See the
+packaged `aloop-policy` skill for the schema and review checklist. The harness
+never generates the policy automatically. A repository may also explicitly opt implementation workers into narrowly
 scoped project-owned resources with `workerResources.extensions` (repository-
 relative extension files that resolve inside the worktree) and
 `workerResources.tools` (the corresponding registered tool names). Those values
@@ -159,10 +166,11 @@ are validated, merged only into a profile whose project policy is
 `aloop-opt-in`, and never grant GitHub mutation or supervisor communication
 capabilities implicitly. Workers use repository guidance for focused iteration
 checks. For acceptance, the supervisor passes only the worker commit to
-`aloop_supervisor_verify`; the tool loads and executes the committed policy and
-records the outcomes. When the policy is missing, malformed, or required
-infrastructure is unavailable, the supervisor records the gap and stops rather
-than inventing a passing check.
+`aloop_supervisor_verify`; the tool uses the invocation's committed policy
+snapshot and records command status independently from diagnostic prose. A
+verification run must begin and end at the same clean HEAD. When the policy is
+missing, malformed, or required infrastructure is unavailable, the supervisor
+records the gap and stops rather than inventing a passing check.
 
 ## Resume and recovery
 

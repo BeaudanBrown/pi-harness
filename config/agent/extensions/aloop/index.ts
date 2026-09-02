@@ -5,6 +5,8 @@ import * as path from "node:path";
 import { Type } from "typebox";
 import { closeCurrentRepositoryIssue, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
+import { balancedLogExcerpt, runDurableCommand, writeDurableResult } from "../worker-runner/command-execution.js";
+import { snapshotAloopPolicy, type AloopCommandDefinition, type AloopPolicySnapshot } from "./policy.js";
 import {
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
@@ -32,46 +34,16 @@ const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
 
+function sameArgv(left: unknown, right: string[] | undefined): boolean {
+	return right !== undefined && Array.isArray(left) && left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
 type PendingHandoff = {
 	issue: number;
 	commit: string | null;
 	artifactDirectory: string;
 };
 
-type AloopVerificationPolicy = {
-	canonicalCommand: string;
-	productionIntegrationCommand: string;
-	workerResources: { extensions: string[]; tools: string[] };
-};
-
-async function loadVerificationPolicy(cwd: string): Promise<AloopVerificationPolicy> {
-	const policyPath = path.resolve(cwd, ".aloop.json");
-	const status = await lstat(policyPath);
-	if (!status.isFile() || status.isSymbolicLink() || status.size > 20_000) throw new Error(".aloop.json is unsafe or oversized.");
-	const value = JSON.parse(await readFile(policyPath, "utf8")) as Partial<AloopVerificationPolicy>;
-	if (!value.canonicalCommand?.trim() || !value.productionIntegrationCommand?.trim()) {
-		throw new Error(".aloop.json must declare canonicalCommand and productionIntegrationCommand.");
-	}
-	const workerResources = (value as Record<string, unknown>).workerResources;
-	if (workerResources !== undefined && (!workerResources || typeof workerResources !== "object" || Array.isArray(workerResources))) {
-		throw new Error(".aloop.json workerResources must be an object.");
-	}
-	const resourceObject = (workerResources ?? {}) as Record<string, unknown>;
-	for (const field of ["extensions", "tools"] as const) {
-		const fieldValue = resourceObject[field] ?? [];
-		if (!Array.isArray(fieldValue) || fieldValue.some((item) => typeof item !== "string" || !item.trim())) {
-			throw new Error(`.aloop.json workerResources.${field} must be an array of non-empty strings.`);
-		}
-	}
-	return {
-		canonicalCommand: value.canonicalCommand.trim(),
-		productionIntegrationCommand: value.productionIntegrationCommand.trim(),
-		workerResources: {
-			extensions: (resourceObject.extensions ?? []) as string[],
-			tools: (resourceObject.tools ?? []) as string[],
-		},
-	};
-}
 
 const LaunchWorkerParams = Type.Object({
 	issue: Type.Number({ minimum: 1, description: "Selected open, unblocked descendant leaf issue number." }),
@@ -184,6 +156,7 @@ export type AloopExtensionDependencies = {
 	publishComment: typeof publishExactIssueComment;
 	retrieveEpicContext: typeof retrieveCurrentRepositoryEpicContext;
 	runWorker: typeof runAloopWorker;
+	diagnoseCommand: (ctx: ExtensionContext, params: { name: string; command: string[]; task: string }, result: Awaited<ReturnType<typeof runDurableCommand>>, excerpt: string, signal?: AbortSignal) => Promise<{ summary: string; modelRef?: string; error?: string }>;
 };
 
 const defaultDependencies: AloopExtensionDependencies = {
@@ -191,6 +164,7 @@ const defaultDependencies: AloopExtensionDependencies = {
 	publishComment: publishExactIssueComment,
 	retrieveEpicContext: retrieveCurrentRepositoryEpicContext,
 	runWorker: runAloopWorker,
+	diagnoseCommand: async (...args) => (await import("../worker-runner/index.js")).diagnoseCommandResult(...args),
 };
 
 export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<AloopExtensionDependencies> = {}): void {
@@ -199,6 +173,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	let pendingHandoffs: PendingHandoff[] = [];
 	let workerRunning = false;
 	let runBudget: AloopRunBudget | null = null;
+	let policySnapshot: AloopPolicySnapshot | null = null;
 	const dryRunHandoffIds = new Set<string>();
 	const dryRunClosureIds = new Set<string>();
 	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
@@ -215,6 +190,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		pendingHandoffs = [];
 		workerRunning = false;
 		runBudget = null;
+		policySnapshot = null;
 		dryRunHandoffIds.clear();
 		dryRunClosureIds.clear();
 		issuedReceipts.clear();
@@ -250,6 +226,83 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			signal,
 			deadlineMs: runBudget.deadlineMs,
 		});
+	}
+
+	async function loadCommittedPolicy(cwd: string, signal?: AbortSignal): Promise<AloopPolicySnapshot> {
+		const head = await pi.exec("git", ["rev-parse", "HEAD"], { cwd, timeout: 30_000, signal });
+		if (head.code !== 0) throw new Error((head.stderr || "Could not resolve HEAD for the aloop policy snapshot.").trim());
+		const startCommit = head.stdout.trim();
+		const document = await pi.exec("git", ["show", `${startCommit}:.aloop.json`], { cwd, timeout: 30_000, signal });
+		if (document.code !== 0) throw new Error((document.stderr || `Commit ${startCommit} does not contain .aloop.json.`).trim());
+		if (Buffer.byteLength(document.stdout, "utf8") > 20_000) throw new Error("Committed .aloop.json is oversized.");
+		return snapshotAloopPolicy(document.stdout, startCommit);
+	}
+
+	function activePolicy(): AloopPolicySnapshot {
+		if (!policySnapshot) throw new Error("The active aloop invocation has no committed verification-policy snapshot.");
+		return policySnapshot;
+	}
+
+	async function executeVerificationCommand(
+		label: string,
+		definition: AloopCommandDefinition,
+		ctx: ExtensionContext,
+		signal?: AbortSignal,
+		onUpdate?: (value: any) => void,
+	) {
+		const assessment = runBudget ? assessAloopRunBudget(runBudget, Date.now()) : undefined;
+		if (assessment && !assessment.allowed) throw new Error(assessment.reason);
+		const remaining = assessment?.remainingMs ?? definition.timeoutMs;
+		const timeoutMs = Math.max(1, Math.min(definition.timeoutMs, remaining));
+		const root = path.resolve(ctx.cwd, ".pi/tmp/aloop/verification");
+		await mkdir(root, { recursive: true, mode: 0o700 });
+		let directory = "";
+		for (let attempt = 0; attempt < 5; attempt += 1) {
+			const id = `${Date.now()}-${label.replace(/[^a-z0-9-]+/gi, "-").toLowerCase()}-${randomBytes(6).toString("hex")}`;
+			const candidate = path.join(root, id);
+			try { await mkdir(candidate, { mode: 0o700 }); directory = candidate; break; } catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+			}
+		}
+		if (!directory) throw new Error("Could not allocate a unique verification artifact directory.");
+		const logPath = path.join(directory, "command.log");
+		const resultPath = path.join(directory, "result.json");
+		onUpdate?.({ content: [{ type: "text", text: `Running ${label}: ${definition.argv.join(" ")}` }], details: { argv: definition.argv, timeoutMs } });
+		const result = await runDurableCommand({ cwd: ctx.cwd, command: definition.argv, logPath, resultPath, timeoutMs, signal });
+		let diagnosis: Awaited<ReturnType<AloopExtensionDependencies["diagnoseCommand"]>> | undefined;
+		if (result.code !== 0 || result.timedOut || result.cancelled || result.spawnError) {
+			const log = await readFile(logPath, "utf8");
+			diagnosis = await dependencies.diagnoseCommand(ctx, {
+				name: label,
+				command: definition.argv,
+				task: "Diagnose the first actionable root cause while preserving the command result as authoritative.",
+			}, result, balancedLogExcerpt(log, 80_000), signal);
+			await writeDurableResult(resultPath, { ...result, diagnosis });
+		}
+		return { result, diagnosis, logPath: path.relative(ctx.cwd, logPath), resultPath: path.relative(ctx.cwd, resultPath) };
+	}
+
+	async function reusableReceipt(cwd: string, expected: string, sourceIdentity: string, pending: PendingHandoff, snapshot: AloopPolicySnapshot) {
+		const directory = path.resolve(cwd, ".pi/tmp/aloop/receipts");
+		let names: string[];
+		try { names = (await readdir(directory)).filter((name) => /^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}\.json$/.test(name)).sort().reverse(); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+		for (const name of names.slice(0, 200)) {
+			try {
+				const receiptPath = path.join(directory, name);
+				const status = await lstat(receiptPath);
+				if (!status.isFile() || status.isSymbolicLink() || status.size > 100_000) continue;
+				const document = await readFile(receiptPath, "utf8");
+				const receipt = JSON.parse(document);
+				if (receipt.commit !== expected || receipt.sourceIdentity !== sourceIdentity || receipt.policySha256 !== snapshot.sha256
+					|| receipt.issue !== pending.issue || receipt.artifactDirectory !== pending.artifactDirectory
+					|| receipt.exitStatus !== 0 || receipt.canonicalTimedOut === true || receipt.canonicalCancelled === true || receipt.canonicalSpawnError
+					|| receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true
+					|| (snapshot.policy.productionIntegration?.frequency === "issue" && (receipt.productionIntegrationExitStatus !== 0 || receipt.productionIntegrationTimedOut === true || receipt.productionIntegrationCancelled === true || receipt.productionIntegrationSpawnError))) continue;
+				return { receiptId: name.slice(0, -5), receiptPath: path.relative(cwd, receiptPath), receipt, document };
+			} catch { /* Malformed historical receipts are not reusable. */ }
+		}
+		return undefined;
 	}
 
 	pi.on("session_start", (_event, ctx) => {
@@ -294,7 +347,9 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				ctx.ui.notify("/aloop requires a clean worktree before supervision starts.", "error");
 				return;
 			}
+			const startupPolicy = await loadCommittedPolicy(ctx.cwd, ctx.signal);
 			const budget = activate(epic, ctx, [], request.maxMinutes, request.maxWorkerLaunches);
+			policySnapshot = startupPolicy;
 			let context;
 			try {
 				context = await dependencies.retrieveEpicContext(ctx.cwd, epic, undefined, {
@@ -402,7 +457,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				heartbeat.unref?.();
 				let outcome: Awaited<ReturnType<typeof runAloopWorker>>;
 				try {
-					const policy = await loadVerificationPolicy(ctx.cwd);
+					const policy = activePolicy().policy;
 					outcome = await dependencies.runWorker({
 						cwd: ctx.cwd,
 						attemptType: params.attempt_type,
@@ -411,6 +466,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						issue: { number: issue.number, title: issue.title, body: issue.body },
 						priorHandoffs: handoffs,
 						projectWorkerResources: policy.workerResources,
+						workerFeedbackCommand: policy.workerFeedbackCommand,
 						modelRef: activeModelRef(ctx),
 						timeoutMs: workerTimeoutMs,
 						deadlineMs: runBudget.deadlineMs,
@@ -452,7 +508,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (result.code !== 0) throw new Error((result.stderr || result.stdout || `git ${args[0]} failed`).trim());
 				return result.stdout.trim();
 			};
-			const policy = await loadVerificationPolicy(ctx.cwd);
+			const snapshot = activePolicy();
+			const policy = snapshot.policy;
 			const expected = await inspect(["rev-parse", `${params.commit}^{commit}`]);
 			const pendingAttempt = pendingHandoffs.find((pending) => pending.commit === expected);
 			if (!pendingAttempt) throw new Error(`Supervisor verification requires a pending worker attempt at ${expected}; launch and commit the worker attempt first.`);
@@ -461,26 +518,40 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (beforeHead !== expected) throw new Error(`Returned commit ${expected} differs from current HEAD ${beforeHead}.`);
 			if (beforeStatus) throw new Error("Supervisor verification requires a clean worktree, including no untracked files. Commit intended sources before verification.");
 			const sourceIdentity = `tree:${await inspect(["rev-parse", `${expected}^{tree}`])}`;
-			onUpdate?.({ content: [{ type: "text", text: `Running repository-owned supervisor verification at ${expected.slice(0, 12)}: ${policy.canonicalCommand}` }], details: { commit: expected, command: policy.canonicalCommand } });
-			const remaining = assessAloopRunBudget(runBudget, Date.now());
-			if (!remaining.allowed) throw new Error(remaining.reason);
-			const result = await pi.exec("bash", ["-lc", policy.canonicalCommand], { timeout: Math.max(1, remaining.remainingMs), signal });
-			const productionRemaining = assessAloopRunBudget(runBudget, Date.now());
-			if (!productionRemaining.allowed) throw new Error(productionRemaining.reason);
-			onUpdate?.({ content: [{ type: "text", text: `Running repository-owned production integration verification at ${expected.slice(0, 12)}: ${policy.productionIntegrationCommand}` }], details: { commit: expected, command: policy.productionIntegrationCommand } });
-			const productionResult = result.code === 0
-				? await pi.exec("bash", ["-lc", policy.productionIntegrationCommand], { timeout: Math.max(1, productionRemaining.remainingMs), signal })
-				: { code: 1, stdout: "", stderr: "Skipped because canonical verification failed." };
+			const reusable = await reusableReceipt(ctx.cwd, expected, sourceIdentity, pendingAttempt, snapshot);
+			if (reusable) {
+				issuedReceipts.set(reusable.receiptId, { document: reusable.document, issue: pendingAttempt.issue, commit: expected, artifactDirectory: pendingAttempt.artifactDirectory });
+				return { content: [{ type: "text", text: `Reused valid supervisor verification receipt ${reusable.receiptPath} at ${expected}.` }], details: { valid: true, reused: true, ...reusable } };
+			}
+			const canonical = await executeVerificationCommand("canonical verification", policy.canonicalCommand, ctx, signal, onUpdate);
+			const canonicalPassed = canonical.result.code === 0 && !canonical.result.timedOut && !canonical.result.cancelled && !canonical.result.spawnError;
+			const issueProduction = policy.productionIntegration?.frequency === "issue" && canonicalPassed
+				? await executeVerificationCommand("issue production integration", policy.productionIntegration.command, ctx, signal, onUpdate)
+				: undefined;
 			const afterHead = await inspect(["rev-parse", "HEAD"]);
 			const afterStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
 			const receipt = {
+				version: 2,
+				issue: pendingAttempt.issue,
+				artifactDirectory: pendingAttempt.artifactDirectory,
 				commit: expected,
-				command: policy.canonicalCommand,
-				exitStatus: result.code,
+				command: policy.canonicalCommand.argv,
+				exitStatus: canonical.result.code,
 				timestamp: new Date().toISOString(),
 				sourceIdentity,
-				productionIntegration: policy.productionIntegrationCommand,
-				productionIntegrationExitStatus: productionResult.code,
+				policySha256: snapshot.sha256,
+				policyStartCommit: snapshot.startCommit,
+				canonicalLog: canonical.logPath,
+				canonicalResult: canonical.resultPath,
+				canonicalTimedOut: canonical.result.timedOut,
+				canonicalCancelled: canonical.result.cancelled,
+				canonicalSpawnError: canonical.result.spawnError,
+				productionIntegration: issueProduction ? policy.productionIntegration!.command.argv : undefined,
+				productionIntegrationExitStatus: issueProduction?.result.code,
+				productionIntegrationLog: issueProduction?.logPath,
+				productionIntegrationTimedOut: issueProduction?.result.timedOut,
+				productionIntegrationCancelled: issueProduction?.result.cancelled,
+				productionIntegrationSpawnError: issueProduction?.result.spawnError,
 				postVerificationHead: afterHead,
 				postVerificationClean: afterStatus === "",
 			};
@@ -490,11 +561,13 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const receiptPath = path.join(receiptDirectory, `${receiptId}.json`);
 			const receiptDocument = `${JSON.stringify(receipt, null, 2)}\n`;
 			await writeFile(receiptPath, receiptDocument, { encoding: "utf8", mode: 0o600, flag: "wx" });
-			const valid = result.code === 0 && productionResult.code === 0 && afterHead === expected && afterStatus === "";
+			const productionPassed = policy.productionIntegration?.frequency !== "issue"
+				|| (issueProduction?.result.code === 0 && !issueProduction.result.timedOut && !issueProduction.result.cancelled && !issueProduction.result.spawnError);
+			const valid = canonicalPassed && productionPassed && afterHead === expected && afterStatus === "";
 			if (valid) issuedReceipts.set(receiptId, { document: receiptDocument, issue: pendingAttempt.issue, commit: expected, artifactDirectory: pendingAttempt.artifactDirectory });
 			return {
-				content: [{ type: "text", text: `${valid ? "Supervisor verification passed" : "Supervisor verification failed or was invalidated"} at ${expected}. Receipt: .pi/tmp/aloop/receipts/${receiptId}.json (canonical exit ${result.code}; production exit ${productionResult.code}; post-check clean=${afterStatus === ""}).` }],
-				details: { valid, receiptId, receiptPath: `.pi/tmp/aloop/receipts/${receiptId}.json`, receipt, stdout: result.stdout, stderr: result.stderr, productionStdout: productionResult.stdout, productionStderr: productionResult.stderr },
+				content: [{ type: "text", text: `${valid ? "Supervisor verification passed" : "Supervisor verification failed or was invalidated"} at ${expected}. Receipt: .pi/tmp/aloop/receipts/${receiptId}.json (canonical exit ${canonical.result.code}; production exit ${issueProduction?.result.code ?? "not-required-for-issue"}; post-check clean=${afterStatus === ""}).` }],
+				details: { valid, receiptId, receiptPath: `.pi/tmp/aloop/receipts/${receiptId}.json`, receipt, canonical, production: issueProduction },
 			};
 		},
 	});
@@ -531,7 +604,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (evidenceReasons.length > 0) throw new Error(`Accepted handoff lacks required evidence:\n- ${evidenceReasons.join("\n- ")}`);
 				const issuedReceipt = issuedReceipts.get(params.verification_receipt_id);
 				if (!issuedReceipt || issuedReceipt.issue !== params.issue || issuedReceipt.commit !== params.commit || issuedReceipt.artifactDirectory !== params.artifact_directory) throw new Error("Accepted handoffs require a receipt issued after the matching worker attempt in this invocation.");
-				const policy = await loadVerificationPolicy(ctx.cwd);
+				const snapshot = activePolicy();
+				const policy = snapshot.policy;
 				const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
 				const receiptStatus = await lstat(receiptPath);
 				if (receiptStatus.isSymbolicLink() || !receiptStatus.isFile() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
@@ -543,8 +617,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const worktree = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
 				if (head.code !== 0 || currentHead.code !== 0 || worktree.code !== 0) throw new Error("Could not validate the supervisor verification receipt against Git.");
 				const expected = head.stdout.trim();
-				if (receipt.commit !== expected || receipt.command !== policy.canonicalCommand || receipt.productionIntegration !== policy.productionIntegrationCommand || currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || receipt.productionIntegrationExitStatus !== 0 || worktree.stdout.trim()) {
-					throw new Error("Accepted handoff is not bound to a passing receipt with production-integration evidence at the current clean commit; rerun supervisor verification after all source changes.");
+				const issueProduction = policy.productionIntegration?.frequency === "issue" ? policy.productionIntegration.command.argv : undefined;
+				if (receipt.commit !== expected || receipt.policySha256 !== snapshot.sha256 || !sameArgv(receipt.command, policy.canonicalCommand.argv)
+					|| (issueProduction !== undefined && (!sameArgv(receipt.productionIntegration, issueProduction) || receipt.productionIntegrationExitStatus !== 0))
+					|| currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || worktree.stdout.trim()) {
+					throw new Error("Accepted handoff is not bound to a passing policy-matched receipt at the current clean commit; rerun supervisor verification after all source changes.");
 				}
 			}
 			const comment = formatAloopHandoff({
@@ -631,7 +708,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 
 			const issuedReceipt = issuedReceipts.get(params.verification_receipt_id);
 			if (!issuedReceipt || issuedReceipt.issue !== params.issue) throw new Error("Accepted issue closure requires the immutable receipt issued for this worker attempt.");
-			const policy = await loadVerificationPolicy(ctx.cwd);
+			const snapshot = activePolicy();
+			const policy = snapshot.policy;
 			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
 			const spoolStatus = await lstat(spoolPath);
 			if (!spoolStatus.isFile() || spoolStatus.isSymbolicLink() || spoolStatus.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
@@ -643,7 +721,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const receiptDocument = await readFile(receiptPath, "utf8");
 			if (receiptDocument !== issuedReceipt.document) throw new Error("Supervisor verification receipt changed after it was issued.");
 			const receipt = JSON.parse(receiptDocument);
-			if (receipt.command !== policy.canonicalCommand || receipt.productionIntegration !== policy.productionIntegrationCommand) throw new Error("The supervisor receipt does not match the repository-defined verification policy.");
+			const issueProduction = policy.productionIntegration?.frequency === "issue" ? policy.productionIntegration.command.argv : undefined;
+			if (receipt.policySha256 !== snapshot.sha256 || !sameArgv(receipt.command, policy.canonicalCommand.argv)
+				|| (issueProduction !== undefined && !sameArgv(receipt.productionIntegration, issueProduction))) {
+				throw new Error("The supervisor receipt does not match the invocation's committed verification-policy snapshot.");
+			}
 			const head = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
 			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
 			if (head.code !== 0 || status.code !== 0) throw new Error("Could not inspect Git before accepted issue closure.");
@@ -676,10 +758,25 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			verification: ClosureEvidence["verification"];
 			acceptance_criteria: ClosureEvidence["acceptanceCriteria"];
 			descendant_reviews: ClosureEvidence["descendantReviews"];
-		}, signal, _onUpdate, ctx) {
+		}, signal, onUpdate, ctx) {
 			const context = await currentContext(ctx.cwd, signal);
 			refreshPending(context);
 			const reasons: string[] = pendingHandoffs.map((pending) => `Attempt handoff for #${pending.issue} is not durable on GitHub (${pending.artifactDirectory}).`);
+			const epicProduction = activePolicy().policy.productionIntegration;
+			if (epicProduction?.frequency === "epic") {
+				const beforeHead = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal });
+				const beforeStatus = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: ctx.cwd, timeout: 30_000, signal });
+				if (beforeHead.code !== 0 || beforeStatus.code !== 0 || beforeStatus.stdout.trim()) {
+					reasons.push("Epic production integration requires a clean readable HEAD.");
+				} else {
+					const production = await executeVerificationCommand("epic production integration", epicProduction.command, ctx, signal, onUpdate);
+					const afterHead = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal });
+					const afterStatus = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: ctx.cwd, timeout: 30_000, signal });
+					if (afterHead.code !== 0 || afterStatus.code !== 0) reasons.push("Could not verify HEAD and worktree cleanliness after epic production integration.");
+					if (production.result.code !== 0 || production.result.timedOut || production.result.cancelled) reasons.push(`Epic production integration failed; log: ${production.logPath}.`);
+					if (afterHead.stdout.trim() !== beforeHead.stdout.trim() || afterStatus.stdout.trim()) reasons.push("Epic production integration changed HEAD or the worktree.");
+				}
+			}
 			const gate = evaluateEpicClosure(context, {
 				verification: params.verification,
 				acceptanceCriteria: params.acceptance_criteria,

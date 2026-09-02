@@ -5,6 +5,11 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+
+const verificationPolicyDocument = JSON.stringify({
+	canonicalCommand: { argv: [process.execPath, "-e", "process.exit(0)"] },
+	productionIntegration: { frequency: "issue", command: { argv: [process.execPath, "-e", "process.exit(0)"] } },
+});
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
 import { registerAloopExtension } from "../config/agent/extensions/aloop/index.js";
 import {
@@ -238,6 +243,7 @@ test("publication operation preserves exact bytes across dry-run, failure, and i
 test("aloop supervisor tools activate only for an active run and disappear after settlement", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-profile-"));
 	try {
+		writeFileSync(join(cwd, ".aloop.json"), verificationPolicyDocument);
 		const events = new Map<string, Array<(...args: any[]) => any>>();
 		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 		let activeTools = ["read"];
@@ -252,7 +258,11 @@ test("aloop supervisor tools activate only for an active run and disappear after
 			sendUserMessage: () => { kickoffCount += 1; },
 			exec: async (_command: string, args: string[]) => args[0] === "log"
 				? { code: 0, stdout: "history\n", stderr: "" }
-				: { code: 0, stdout: "", stderr: "" },
+				: args[0] === "show"
+					? { code: 0, stdout: verificationPolicyDocument, stderr: "" }
+					: args[0] === "rev-parse"
+						? { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" }
+						: { code: 0, stdout: "", stderr: "" },
 		} as unknown as ExtensionAPI;
 		registerAloopExtension(pi, { retrieveEpicContext: async () => context([issue({ number: 2, title: "Leaf" })]) });
 		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal,
@@ -276,8 +286,12 @@ test("aloop supervisor tools activate only for an active run and disappear after
 test("registered aloop tools load verification policy, preserve exact publication, and close idempotently", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-extension-"));
 	try {
-		const verificationPolicy = JSON.parse(readFileSync(".aloop.json", "utf8")) as { canonicalCommand: string; productionIntegrationCommand: string };
-		writeFileSync(join(cwd, ".aloop.json"), JSON.stringify(verificationPolicy));
+		const policyDocument = JSON.stringify({
+			canonicalCommand: { argv: [process.execPath, "-e", "if (!require('fs').existsSync('.verification-pass')) { console.error('expected failure'); process.exit(2); }"] },
+			productionIntegration: { frequency: "issue", command: { argv: [process.execPath, "-e", "process.exit(0)"] } },
+		});
+		const verificationPolicy = JSON.parse(policyDocument) as { canonicalCommand: { argv: string[] }; productionIntegration: { frequency: "issue"; command: { argv: string[] } } };
+		writeFileSync(join(cwd, ".aloop.json"), policyDocument);
 		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ details?: Record<string, unknown> }> }>();
 		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 		const priorFailure = formatAloopHandoff(handoff({ nextAction: "Use the exact remediation fixture." }));
@@ -287,7 +301,7 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		const workerPriorContexts: unknown[] = [];
 		let publicationApplyCalls = 0;
 		let closeCalls = 0;
-		const shellCommands: string[] = [];
+		let diagnosisCalls = 0;
 		let worktreeStatus = "";
 		let fakeHead = "a".repeat(40);
 		const pi = {
@@ -299,8 +313,8 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 			setSessionName: () => undefined,
 			sendUserMessage: () => undefined,
 			exec: async (_command: string, args: string[]) => {
-				if (_command === "bash") shellCommands.push(args[1]!);
 				if (args[0] === "log") return { code: 0, stdout: "history\n", stderr: "" };
+				if (args[0] === "show") return { code: 0, stdout: policyDocument, stderr: "" };
 				if (args[0] === "rev-parse") return { code: 0, stdout: `${fakeHead}\n`, stderr: "" };
 				if (args[0] === "status") return { code: 0, stdout: worktreeStatus, stderr: "" };
 				return { code: 0, stdout: "", stderr: "" };
@@ -308,6 +322,7 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		} as unknown as ExtensionAPI;
 		registerAloopExtension(pi, {
 			retrieveEpicContext: async () => graph,
+			diagnoseCommand: async (_ctx, _params, result) => { diagnosisCalls += 1; return { summary: `diagnosed exit ${result.code}` }; },
 			runWorker: async (input) => {
 				workerIssues.push(input.issue.number);
 				workerDirections.push(input.supervisorApproach);
@@ -341,9 +356,19 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		worktreeStatus = "?? eventual-source.ts\n";
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("untracked", { commit: fakeHead }, ctx.signal, undefined, ctx), /clean worktree/);
 		worktreeStatus = "";
+		const failedVerification = await tools.get("aloop_supervisor_verify")!.execute("verify-failure", { commit: fakeHead }, ctx.signal, undefined, ctx);
+		assert.equal(failedVerification.details?.valid, false);
+		assert.equal(diagnosisCalls, 1);
+		const failedCanonical = failedVerification.details?.canonical as any;
+		assert.match(readFileSync(join(cwd, failedCanonical.logPath), "utf8"), /expected failure/);
+		assert.equal(JSON.parse(readFileSync(join(cwd, failedCanonical.resultPath), "utf8")).diagnosis.summary, "diagnosed exit 2");
+		writeFileSync(join(cwd, ".verification-pass"), "pass\n");
 		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead }, ctx.signal, undefined, ctx);
-		assert.deepEqual(shellCommands, [verificationPolicy.canonicalCommand, verificationPolicy.productionIntegrationCommand]);
+		assert.deepEqual((verified.details?.receipt as { command: string[] }).command, verificationPolicy.canonicalCommand.argv);
+		assert.deepEqual((verified.details?.receipt as { productionIntegration: string[] }).productionIntegration, verificationPolicy.productionIntegration.command.argv);
 		assert.equal((verified.details?.receipt as { productionIntegrationExitStatus?: number }).productionIntegrationExitStatus, 0);
+		const reused = await tools.get("aloop_supervisor_verify")!.execute("verify-reuse", { commit: fakeHead }, ctx.signal, undefined, ctx);
+		assert.equal(reused.details?.reused, true);
 
 		const receiptId = verified.details?.receiptId as string;
 		assert.match(receiptId, /^verify-/);
@@ -414,7 +439,7 @@ test("commit-bound preflight catches files omitted by Git-backed verification", 
 });
 
 test("supervisor gate binds successful evidence to a clean exact commit", () => {
-	const receipt = { commit: "abcdef1", command: "nix run .#verify", exitStatus: 0, timestamp: "2026-09-01T00:00:00Z", sourceIdentity: "tree:123" };
+	const receipt = { commit: "abcdef1", command: ["nix", "run", ".#verify"], exitStatus: 0, timestamp: "2026-09-01T00:00:00Z", sourceIdentity: "tree:123" };
 	assert.deepEqual(evaluateSupervisorAttempt({ returnedCommit: "abcdef1", currentHead: "abcdef1", worktreeStatus: "", receipt, acceptanceCriteria: [{ satisfied: true, evidence: "test" }]}), { allowed: true, reasons: [] });
 	const changed = evaluateSupervisorAttempt({ returnedCommit: "abcdef1", currentHead: "abcdef2", worktreeStatus: " M source.ts", receipt, acceptanceCriteria: [{ satisfied: false, evidence: "" }], productionIntegrationRequired: true });
 	assert.equal(changed.allowed, false);
@@ -461,13 +486,13 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	const child = issue({ number: 2, title: "Child", body: "## Acceptance criteria\n\n- Done", assignee: "operator", recentHandoffs: [published] });
 	const receipt = {
 		commit: commitId,
-		command: "nix run .#verify",
+		command: ["nix", "run", ".#verify"],
 		exitStatus: 0,
 		timestamp: "2026-09-01T00:00:00Z",
 		sourceIdentity: "tree:verified",
 		postVerificationHead: commitId,
 		postVerificationClean: true,
-		productionIntegration: "nix build --no-link .#pi-harness-resources",
+		productionIntegration: ["nix", "build", "--no-link", ".#pi-harness-resources"],
 		productionIntegrationExitStatus: 0,
 	};
 	const closureIds = new Set<string>();
@@ -495,7 +520,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, exitStatus: 1 } }), /verification failed/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, commit: "b".repeat(40) } }), /different commit/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, timestamp: "invalid" } }), /incomplete/i);
-	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, productionIntegration: "" } }), /Production packaging/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, productionIntegration: [] } }), /Production packaging/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, productionIntegrationExitStatus: 1 } }), /Production packaging/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, currentHead: "b".repeat(40) }), /differs/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, worktreeStatus: " M source.ts" }), /changed after verification/i);

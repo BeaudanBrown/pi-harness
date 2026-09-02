@@ -1,5 +1,4 @@
-import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -26,12 +25,12 @@ import {
 	type WorkerModelSelection as WorkerSelection,
 } from "./core.js";
 import { selectWorkerModel } from "./model-selector.js";
+import { balancedLogExcerpt, deterministicCommandSummary, runDurableCommand, shellDisplay, writeDurableResult, type DurableCommandResult } from "./command-execution.js";
 
 const DEFAULT_TIMEOUT_MS = 20 * 60 * 1000;
 const DEFAULT_MAX_LOG_BYTES_FOR_WORKER = 80_000;
-const DEFAULT_MAX_OUTPUT_BYTES = 8_000;
-const MAX_CAPTURE_BYTES = 5 * 1024 * 1024;
 const WORKER_ROOT = ".pi/tmp/workers";
+const DIAGNOSIS_TIMEOUT_MS = 2 * 60_000;
 
 const RunWorkerParams = Type.Object({
 	name: Type.String({ description: "Short human-readable name for this delegated command/check." }),
@@ -56,14 +55,7 @@ type RunWorkerParamsType = {
 	max_log_bytes_for_worker?: number;
 };
 
-type CommandResult = {
-	code: number | null;
-	durationMs: number;
-	timedOut: boolean;
-	stdout: string;
-	stderr: string;
-	logPath: string;
-};
+type CommandResult = DurableCommandResult;
 
 function slugify(value: string): string {
 	return (
@@ -79,77 +71,6 @@ function repoRelative(fromCwd: string, absolutePath: string): string {
 	return path.relative(fromCwd, absolutePath) || ".";
 }
 
-function truncateBytes(value: string, maxBytes: number): string {
-	const bytes = Buffer.byteLength(value, "utf8");
-	if (bytes <= maxBytes) return value;
-	const buffer = Buffer.from(value, "utf8");
-	return `${buffer.subarray(Math.max(0, buffer.length - maxBytes)).toString("utf8")}\n\n[truncated ${bytes - maxBytes} earlier bytes]`;
-}
-
-function appendBounded(current: string, chunk: Buffer): string {
-	const next = current + chunk.toString();
-	return truncateBytes(next, MAX_CAPTURE_BYTES);
-}
-
-function shellDisplay(command: string[]): string {
-	return command.map((part) => (part.match(/^[A-Za-z0-9_./:=@+-]+$/) ? part : JSON.stringify(part))).join(" ");
-}
-
-async function runCommand(
-	cwd: string,
-	command: string[],
-	logPath: string,
-	options: { signal?: AbortSignal; timeoutMs: number },
-): Promise<CommandResult> {
-	await mkdir(path.dirname(logPath), { recursive: true });
-	const log = createWriteStream(logPath, { encoding: "utf8" });
-	const started = Date.now();
-	let stdout = "";
-	let stderr = "";
-	let timedOut = false;
-
-	log.write(`$ ${shellDisplay(command)}\n`);
-	log.write(`cwd: ${cwd}\nstarted: ${new Date(started).toISOString()}\n\n`);
-
-	return await new Promise((resolve, reject) => {
-		const child = spawn(command[0]!, command.slice(1), {
-			cwd,
-			env: process.env,
-			stdio: ["ignore", "pipe", "pipe"],
-			signal: options.signal,
-		});
-		let settled = false;
-
-		const timer = setTimeout(() => {
-			timedOut = true;
-			child.kill("SIGTERM");
-		}, options.timeoutMs);
-
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdout = appendBounded(stdout, chunk);
-			log.write(chunk);
-		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			stderr = appendBounded(stderr, chunk);
-			log.write(chunk);
-		});
-		child.on("error", (error) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			log.end(() => reject(error));
-		});
-		child.on("close", (code) => {
-			if (settled) return;
-			settled = true;
-			clearTimeout(timer);
-			const durationMs = Date.now() - started;
-			log.write(`\n\nfinished: ${new Date().toISOString()}\nexit_code: ${code ?? "null"}\nduration_ms: ${durationMs}\n`);
-			if (timedOut) log.write("timed_out: true\n");
-			log.end(() => resolve({ code, durationMs, timedOut, stdout, stderr, logPath }));
-		});
-	});
-}
 
 const STATUS_KEY = "worker-model";
 const SETTINGS_KEY = "pi-worker-runner";
@@ -259,6 +180,7 @@ async function askWorker(
 	params: RunWorkerParamsType,
 	result: CommandResult,
 	logExcerpt: string,
+	signal: AbortSignal | undefined = ctx.signal,
 ): Promise<{ summary: string; modelRef: string }> {
 	const selected = selectedWorkerModel(ctx, selection);
 	if (!("model" in selected)) throw new Error(selected.error);
@@ -281,21 +203,44 @@ async function askWorker(
 		}
 	});
 	const abortWorker = () => void session.abort();
-	ctx.signal?.addEventListener("abort", abortWorker, { once: true });
+	signal?.addEventListener("abort", abortWorker, { once: true });
+	let diagnosisTimer: ReturnType<typeof setTimeout> | undefined;
 	try {
-		await session.prompt(`Parent task:\n${params.task}\n\nCommand name:\n${params.name}\n\nCommand:\n${shellDisplay(params.command)}\n\nExit code: ${result.code ?? "null"}\nTimed out: ${result.timedOut ? "yes" : "no"}\nDuration: ${Math.round(result.durationMs / 1000)}s\nLog path: ${repoRelative(ctx.cwd, result.logPath)}\n\nLog excerpt:\n\`\`\`text\n${logExcerpt}\n\`\`\`\n\nReturn only the concise answer requested by the parent task. Do not mention the wrapper, worker, model, tool internals, or whether summarization occurred.`);
+		const prompt = session.prompt(`Parent task:\n${params.task}\n\nCommand name:\n${params.name}\n\nCommand:\n${shellDisplay(params.command)}\n\nExit code: ${result.code ?? "null"}\nTimed out: ${result.timedOut ? "yes" : "no"}\nDuration: ${Math.round(result.durationMs / 1000)}s\nLog path: ${repoRelative(ctx.cwd, result.logPath)}\n\nLog excerpt:\n\`\`\`text\n${logExcerpt}\n\`\`\`\n\nReturn only the concise answer requested by the parent task. Do not mention the wrapper, worker, model, tool internals, or whether summarization occurred.`);
+		const deadline = new Promise<never>((_resolve, reject) => {
+			diagnosisTimer = setTimeout(() => {
+				void session.abort();
+				reject(new Error(`Diagnostic summarization exceeded ${DIAGNOSIS_TIMEOUT_MS}ms.`));
+			}, DIAGNOSIS_TIMEOUT_MS);
+			diagnosisTimer.unref?.();
+		});
+		await Promise.race([prompt, deadline]);
 		return { summary: (streamed.trim() || extractAssistantText(session)).trim(), modelRef };
 	} finally {
-		ctx.signal?.removeEventListener("abort", abortWorker);
+		if (diagnosisTimer) clearTimeout(diagnosisTimer);
+		signal?.removeEventListener("abort", abortWorker);
 		unsubscribe();
 		session.dispose();
 	}
 }
 
+export async function diagnoseCommandResult(
+	ctx: ExtensionContext,
+	params: { name: string; command: string[]; task: string },
+	result: CommandResult,
+	logExcerpt: string,
+	signal?: AbortSignal,
+): Promise<{ summary: string; modelRef?: string; error?: string }> {
+	try {
+		const diagnosed = await askWorker(ctx, { kind: "preset", preset: "spark" }, params, result, logExcerpt, signal);
+		return diagnosed.summary ? diagnosed : { summary: fallbackSummary(params, result), modelRef: diagnosed.modelRef };
+	} catch (error) {
+		return { summary: fallbackSummary(params, result), error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 function fallbackSummary(params: RunWorkerParamsType, result: CommandResult): string {
-	const status = result.timedOut ? "timed out" : result.code === 0 ? "passed" : `failed with exit code ${result.code ?? "unknown"}`;
-	const combinedTail = truncateBytes([result.stdout, result.stderr].filter(Boolean).join("\n"), DEFAULT_MAX_OUTPUT_BYTES);
-	return [`${params.name}: ${status}.`, combinedTail ? `Relevant tail:\n${combinedTail}` : undefined].filter(Boolean).join("\n\n");
+	return deterministicCommandSummary(params.name, result);
 }
 
 export default function workerRunnerExtension(pi: ExtensionAPI): void {
@@ -437,22 +382,32 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 
 			const timeoutMs = Math.max(1, Math.min(params.timeout_ms ?? DEFAULT_TIMEOUT_MS, 4 * 60 * 60 * 1000));
 			const maxLogBytes = Math.max(1_000, Math.min(params.max_log_bytes_for_worker ?? DEFAULT_MAX_LOG_BYTES_FOR_WORKER, 500_000));
-			const id = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slugify(params.name)}`;
-			const runDir = path.resolve(ctx.cwd, WORKER_ROOT, id);
+			const workerRoot = path.resolve(ctx.cwd, WORKER_ROOT);
+			await mkdir(workerRoot, { recursive: true, mode: 0o700 });
+			let runDir = "";
+			for (let attempt = 0; attempt < 5; attempt += 1) {
+				const id = `${new Date().toISOString().replace(/[:.]/g, "-")}-${slugify(params.name)}-${randomBytes(6).toString("hex")}`;
+				const candidate = path.join(workerRoot, id);
+				try { await mkdir(candidate, { mode: 0o700 }); runDir = candidate; break; } catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+				}
+			}
+			if (!runDir) throw new Error("Could not allocate a unique worker artifact directory.");
 			const logPath = path.join(runDir, "command.log");
+			const resultPath = path.join(runDir, "result.json");
+			await writeFile(path.join(runDir, "task.txt"), `${params.task}\n`, { encoding: "utf8", mode: 0o600 });
 
 			onUpdate?.({ content: [{ type: "text", text: `Running worker command: ${params.name}` }], details: { command: params.command } });
-			const result = await runCommand(ctx.cwd, params.command, logPath, { signal, timeoutMs });
+			const result = await runDurableCommand({ cwd: ctx.cwd, command: params.command, logPath, resultPath, signal, timeoutMs });
 			const fullLog = await readFile(logPath, "utf8");
-			const logExcerpt = truncateBytes(fullLog, maxLogBytes);
-			await writeFile(path.join(runDir, "task.txt"), `${params.task}\n`, "utf8");
+			const logExcerpt = balancedLogExcerpt(fullLog, maxLogBytes);
 
 			let workerSummary: string;
 			let workerModel: string | undefined;
 			let workerError: string | undefined;
 			try {
 				onUpdate?.({ content: [{ type: "text", text: `Delegating log summary: ${params.name}` }], details: { log: repoRelative(ctx.cwd, logPath) } });
-				const worker = await askWorker(ctx, workerSelection, params, result, logExcerpt);
+				const worker = await askWorker(ctx, workerSelection, params, result, logExcerpt, signal);
 				workerSummary = worker.summary;
 				workerModel = worker.modelRef;
 				if (!workerSummary) workerSummary = fallbackSummary(params, result);
@@ -461,12 +416,18 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 				workerSummary = fallbackSummary(params, result);
 			}
 
-			const status = result.timedOut ? "timeout" : result.code === 0 ? "pass" : "fail";
+			const status = result.cancelled ? "cancelled" : result.timedOut ? "timeout" : result.code === 0 ? "pass" : "fail";
+			await writeDurableResult(resultPath, {
+				...result,
+				status,
+				diagnosis: { summary: workerSummary, model: workerModel, error: workerError },
+			});
 			const text = [
 				`status: ${status}`,
 				`exit_code: ${result.code ?? "null"}`,
 				`duration_ms: ${result.durationMs}`,
 				`log: ${repoRelative(ctx.cwd, logPath)}`,
+				`result: ${repoRelative(ctx.cwd, resultPath)}`,
 				workerModel ? `worker_model: ${workerModel}` : undefined,
 				workerError ? `worker_warning: ${workerError}` : undefined,
 				"",
@@ -483,6 +444,7 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 					exit_code: result.code,
 					duration_ms: result.durationMs,
 					log: repoRelative(ctx.cwd, logPath),
+					result: repoRelative(ctx.cwd, resultPath),
 					worker_model: workerModel,
 					worker_error: workerError,
 				},

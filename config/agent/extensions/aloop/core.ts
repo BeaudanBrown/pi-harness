@@ -48,12 +48,12 @@ export type AloopRunBudget = {
 
 export type VerificationReceipt = {
 	commit: string;
-	command: string;
+	command: string[];
 	exitStatus: number;
 	timestamp: string;
 	sourceIdentity: string;
 	derivationIdentity?: string;
-	productionIntegration?: string;
+	productionIntegration?: string[];
 	productionIntegrationExitStatus?: number;
 };
 
@@ -85,7 +85,7 @@ export function evaluateSupervisorAttempt(input: {
 	else {
 		if (input.receipt.commit !== input.returnedCommit || input.receipt.commit !== input.currentHead) reasons.push("The verification receipt is bound to a different commit.");
 		if (input.receipt.exitStatus !== 0) reasons.push(`Supervisor verification failed with exit status ${input.receipt.exitStatus}.`);
-		if (!input.receipt.command.trim() || !input.receipt.sourceIdentity.trim() || !Number.isFinite(Date.parse(input.receipt.timestamp))) reasons.push("The verification receipt is incomplete.");
+		if (input.receipt.command.length === 0 || !input.receipt.sourceIdentity.trim() || !Number.isFinite(Date.parse(input.receipt.timestamp))) reasons.push("The verification receipt is incomplete.");
 	}
 	if (input.acceptanceCriteria.some((criterion) => !criterion.satisfied || !criterion.evidence.trim())) reasons.push("At least one acceptance criterion lacks passing evidence.");
 	if (input.productionIntegrationRequired && !input.productionIntegrationEvidence?.trim()) reasons.push("Production packaging or entry-point reachability is unproven.");
@@ -444,8 +444,8 @@ export async function closeAcceptedAloopIssue<T>(input: {
 		worktreeStatus: input.worktreeStatus,
 		receipt: input.receipt,
 		acceptanceCriteria: [{ satisfied: true, evidence: "The published handoff records supervisor acceptance." }],
-		productionIntegrationRequired: true,
-		productionIntegrationEvidence: input.receipt.productionIntegrationExitStatus === 0 ? input.receipt.productionIntegration : undefined,
+		productionIntegrationRequired: input.receipt.productionIntegration !== undefined,
+		productionIntegrationEvidence: input.receipt.productionIntegrationExitStatus === 0 ? input.receipt.productionIntegration?.join(" ") : undefined,
 	});
 	if (!gate.allowed || input.receipt.postVerificationHead !== handoff.commit || input.receipt.postVerificationClean !== true) {
 		throw new Error(`Closure blocked: ${[...gate.reasons, "the published handoff, receipt, and current clean Git commit must match"].join("; ")}.`);

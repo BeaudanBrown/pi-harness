@@ -32,6 +32,9 @@ test("review model references preserve provider-qualified model IDs", () => {
 test("review requests allow one or two distinct axes", () => {
 	assert.doesNotThrow(() => validateReviewRequest("main", tasks));
 	assert.doesNotThrow(() => validateReviewRequest("main", [tasks[0]!]));
+	assert.doesNotThrow(() => validateReviewRequest(undefined, tasks, "audit"));
+	assert.throws(() => validateReviewRequest("main", tasks, "audit"), /does not accept/);
+	assert.throws(() => validateReviewRequest(undefined, tasks), /requires.*fixed point/);
 	assert.throws(() => validateReviewRequest("-invalid", tasks), /fixed point/);
 	assert.throws(() => validateReviewRequest("main", []), /one or two/);
 	assert.throws(() => validateReviewRequest("main", [tasks[0]!, tasks[0]!]), /only once/);
@@ -39,19 +42,33 @@ test("review requests allow one or two distinct axes", () => {
 
 test("review prompts share pinned git context while keeping axis instructions separate", () => {
 	const prompt = buildReviewPrompt(tasks[0]!, {
+		mode: "diff",
 		fixedPoint: "main",
 		resolvedFixedPoint: "abc123",
+		resolvedHead: "def456",
 		diffPath: ".pi/tmp/reviews/example/diff.patch",
 		commitsPath: ".pi/tmp/reviews/example/commits.txt",
 		changedFiles: ["src/example.ts"],
+		repositoryPath: ".pi/tmp/reviews/example/repository",
 	});
 
 	assert.match(prompt, /Review axis: standards/);
 	assert.match(prompt, /main/);
-	assert.match(prompt, /abc123/);
+	assert.match(prompt, /git diff abc123\.\.\.def456/);
+	assert.doesNotMatch(prompt, /git diff main\.\.\.HEAD/);
 	assert.match(prompt, /diff\.patch/);
 	assert.match(prompt, /src\/example\.ts/);
 	assert.match(prompt, /Check the repository standards/);
+
+	const audit = buildReviewPrompt(tasks[1]!, {
+		mode: "audit",
+		resolvedHead: "def456",
+		auditContextPath: ".pi/tmp/reviews/audit/audit-context.txt",
+		repositoryPath: ".pi/tmp/reviews/audit/repository",
+	});
+	assert.match(audit, /Review mode: audit/);
+	assert.match(audit, /intentionally no diff/);
+	assert.match(audit, /def456/);
 });
 
 test("review tasks start concurrently and preserve input order", async () => {

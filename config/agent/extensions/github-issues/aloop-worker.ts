@@ -37,6 +37,7 @@ export type AloopWorkerInput = {
 	issue: { number: number; title: string; body: string };
 	priorHandoffs?: AloopWorkerHandoffContext[];
 	projectWorkerResources?: { extensions: string[]; tools: string[] };
+	workerFeedbackCommand?: { argv: string[]; timeoutMs: number };
 	launcher?: string[];
 	modelRef?: string;
 	timeoutMs?: number;
@@ -161,7 +162,7 @@ Safety and ownership rules:
 - Do not push or fetch. Make changes only in this clean local worktree.
 - Read and follow the repository guidance, including AGENTS.md and relevant docs.
 - Finish with a clean worktree and exactly one new local commit. Do not amend or rewrite commits that existed before this attempt.
-- Run focused checks and the project-required verification appropriate to this issue.
+- ${input.workerFeedbackCommand ? `Use the optional advisory worker feedback command ${JSON.stringify(input.workerFeedbackCommand.argv)} with a ${input.workerFeedbackCommand.timeoutMs}ms timeout when useful. Do not run canonical acceptance or production integration.` : "Run focused checks appropriate to the issue. Canonical acceptance and production integration are supervisor-owned."}
 - Stay within the selected issue. Report newly discovered work instead of expanding scope.
 
 Epic #${input.epic.number}: ${input.epic.title}

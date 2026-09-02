@@ -824,6 +824,7 @@
                 "$test_build_dir/tests/agent-profiles.test.js" \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/aloop-worker.test.js" \
+                "$test_build_dir/tests/aloop-policy.test.js" \
                 "$test_build_dir/tests/aloop-supervisor.test.js" \
                 "$test_build_dir/tests/managed-session-contracts.test.js" \
                 "$test_build_dir/tests/managed-session-v2-contracts.test.js" \

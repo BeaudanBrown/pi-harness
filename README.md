@@ -29,6 +29,7 @@ layout remains external and uses regular tmux through fixed host-owned actions.
 - a `playwright-browser` skill and `pi-playwright` resolver for project-first browser automation with an optional Nix-pinned fallback
 - typed dry-run-first GitHub Issue tools under `config/agent/extensions/github-issues`
 - a GitHub-native `/aloop #<epic>` supervisor with fresh sequential implementation workers
+- an `aloop-policy` skill for creating and reviewing project-owned verification policy
 - an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
 - a curated, pinned distribution of Matt Pocock's engineering skills
 - a user-invoked `migrate-tk-to-github` migration inventory skill and dedicated migration launcher
@@ -399,7 +400,7 @@ Pi's normal settings files.
 
 The included `worker-runner` extension registers `run_worker`, a tool for noisy checks and commands. It runs a command in the current repository, writes the full log under `.pi/tmp/workers/`, and asks a bounded read-only Pi SDK worker to return a concise summary for the parent agent.
 
-Use it for tests, typechecks, builds, and integration checks where dumping raw output into the main context would be wasteful. The parent agent supplies the command and a plain-language task describing what the worker should extract or diagnose. The worker defaults to `openai-codex/gpt-5.3-codex-spark` and falls back to the current session model only when Spark is unavailable.
+Use it for tests, typechecks, builds, and integration checks where dumping raw output into the main context would be wasteful. The parent agent supplies an argv command and a plain-language task describing what the worker should extract or diagnose. The command runs in a dedicated process group so timeout or cancellation terminates descendants. Its full log and machine-readable `result.json` are durable before diagnostic summarization starts; balanced head/tail excerpts retain startup and failure context, and a deterministic fallback preserves authoritative status if the diagnostic model fails. The worker defaults to `openai-codex/gpt-5.3-codex-spark` and falls back to the current session model only when Spark is unavailable.
 
 Use `/worker-model` to keep the fast Spark/Luna toggle, or use `/worker-model spark`, `/worker-model luna`, and `/worker-model status`. `/worker-model select` opens a fuzzy selector over registered, authenticated Pi models; `/worker-model provider/model` provides the same capability for RPC, Matrix, or other non-interactive sessions. The selection persists in Pi's global settings under `pi-worker-runner`, so it applies to future Pi sessions. Legacy mode-only settings migrate automatically. Luna and explicitly selected custom models are never silently replaced with Spark or the parent model. `PI_HARNESS_WORKER_MODEL=provider/model` remains the highest-priority environment override and is shown as active by `/worker-model status`.
 
@@ -409,7 +410,7 @@ Do not use `run_worker` for subjective code review. The dedicated `review_agents
 
 ## Code Review Agents
 
-The `review-agents` extension registers `review_agents` for the curated two-axis `code-review` skill. It captures one merge-base diff and commit list, stores them under `.pi/tmp/reviews/`, and runs the Standards and Spec tasks concurrently in isolated read-only Pi SDK sessions.
+The `review-agents` extension registers `review_agents` for the curated two-axis `code-review` skill. Diff mode captures one merge-base diff and commit list. Audit mode pins the current HEAD and supports Standards or Spec inspection when there is intentionally no diff, such as already-satisfied work. Both modes store bounded reports under `.pi/tmp/reviews/` and run the requested axes concurrently in isolated read-only Pi SDK sessions.
 
 Review sessions use `openai-codex/gpt-5.6-terra` with low thinking. Set `PI_HARNESS_REVIEW_MODEL=provider/model` to override the model explicitly; unlike the diagnostic worker, review agents fail clearly when their configured model is unavailable or lacks authentication rather than silently falling back to a lower-quality model.
 
