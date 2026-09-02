@@ -109,8 +109,9 @@ The repository commits a `.aloop.json` policy containing `canonicalCommand` and
 `productionIntegrationCommand`. `aloop_supervisor_verify` rejects caller-supplied
 commands that do not exactly match that policy, then executes both checks. This
 prevents placeholder commands such as `true` from becoming production evidence.
-Preparation rechecks that both receipt exit statuses passed at the returned
-commit and confirms that HEAD and the
+Preparation accepts only a receipt issued by that tool in the current bounded
+invocation, rechecks that its commands exactly match `.aloop.json` and both exit
+statuses passed at the returned commit, and confirms that HEAD and the
 complete worktree (including untracked files) are still identical.
 Commit all intended sources before verification: Git-backed Nix flakes omit
 untracked files, so a check run while eventual source files are untracked is

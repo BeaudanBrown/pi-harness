@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -267,7 +267,8 @@ test("publication operation preserves exact bytes across dry-run, failure, and i
 test("registered aloop tools wire claim refresh, exact publication retry, and idempotent verified closure", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-extension-"));
 	try {
-		writeFileSync(join(cwd, ".aloop.json"), JSON.stringify({ canonicalCommand: "unit-check", productionIntegrationCommand: "package-check" }));
+		const verificationPolicy = JSON.parse(readFileSync(".aloop.json", "utf8")) as { canonicalCommand: string; productionIntegrationCommand: string };
+		writeFileSync(join(cwd, ".aloop.json"), JSON.stringify(verificationPolicy));
 		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ details?: Record<string, unknown> }> }>();
 		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 		let graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done" })]);
@@ -323,14 +324,15 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		const ctx = { cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined } as unknown as ExtensionContext;
 		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-attempts 2", ctx);
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("bypass", { commit: fakeHead, command: "true", production_integration_command: "true" }, ctx.signal, undefined, ctx), /must exactly match/);
-		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead, command: "unit-check", production_integration_command: "package-check" }, ctx.signal, undefined, ctx);
-		assert.deepEqual(shellCommands, ["unit-check", "package-check"]);
+		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx);
+		assert.deepEqual(shellCommands, [verificationPolicy.canonicalCommand, verificationPolicy.productionIntegrationCommand]);
 		assert.equal((verified.details?.receipt as { productionIntegrationExitStatus?: number }).productionIntegrationExitStatus, 0);
 		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "implementation", approach: "test wiring" }, ctx.signal, undefined, ctx);
 		assert.equal(claims, 1);
 		assert.deepEqual(workerIssues, [2]);
 
-		const receiptId = "verify-aaaaaaaaaaaa-1-12345678";
+		const receiptId = verified.details?.receiptId as string;
+		assert.match(receiptId, /^verify-/);
 		const successfulComment = formatAloopHandoff(handoff({ issue: 2, commit: fakeHead, verificationReceiptId: receiptId, successful: true, verification: ["canonical and production checks passed"], acceptanceCriteriaAssessment: ["PASS — Done — registered tool evidence"] }));
 		const spool = createAloopHandoffSpoolRecord(2, successfulComment);
 		mkdirSync(join(cwd, ".pi/tmp/aloop/handoffs"), { recursive: true });
@@ -339,18 +341,6 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		await assert.rejects(() => tools.get("aloop_publish_handoff")!.execute("publish-fail", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx), /network interruption/);
 		await tools.get("aloop_publish_handoff")!.execute("publish-retry", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx);
 		graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done", assignee: "operator", recentHandoffs: [comment(1, successfulComment, "2026-09-01T00:00:00Z")] })]);
-		mkdirSync(join(cwd, ".pi/tmp/aloop/receipts"), { recursive: true });
-		writeFileSync(join(cwd, `.pi/tmp/aloop/receipts/${receiptId}.json`), JSON.stringify({
-			commit: fakeHead,
-			command: "nix run .#verify",
-			exitStatus: 0,
-			timestamp: "2026-09-01T00:00:00Z",
-			sourceIdentity: "tree:verified",
-			postVerificationHead: fakeHead,
-			postVerificationClean: true,
-			productionIntegration: "nix build .#pi-harness-resources",
-			productionIntegrationExitStatus: 0,
-		}));
 		await tools.get("aloop_close_accepted_issue")!.execute("close-dry", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: true }, ctx.signal, undefined, ctx);
 		await tools.get("aloop_close_accepted_issue")!.execute("close", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: false }, ctx.signal, undefined, ctx);
 		assert.equal(closeCalls, 1);
