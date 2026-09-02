@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
 import { currentGitHubLogin, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
@@ -21,7 +22,7 @@ import {
 	type ClosureEvidence,
 } from "./core.js";
 
-const TOOL_NAMES = ["aloop_launch_worker", "aloop_prepare_handoff", "aloop_check_closure"];
+const TOOL_NAMES = ["aloop_launch_worker", "aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_check_closure"];
 const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
@@ -38,6 +39,12 @@ const LaunchWorkerParams = Type.Object({
 	approach: Type.String({ minLength: 1, description: "Concise description of this attempt's approach." }),
 	materially_new_approach: Type.Optional(Type.Boolean({ description: "True only when this differs materially from prior unsuccessful approaches." })),
 	timeout_ms: Type.Optional(Type.Number({ minimum: 1, maximum: 14_400_000 })),
+});
+
+const SupervisorVerifyParams = Type.Object({
+	commit: Type.String({ minLength: 7, description: "Exact full or abbreviated worker commit to verify." }),
+	command: Type.String({ minLength: 1, description: "Repository-defined canonical verification command." }),
+	production_integration: Type.Optional(Type.String({ description: "Packaging or production entry-point evidence when applicable." })),
 });
 
 const PrepareHandoffParams = Type.Object({
@@ -343,6 +350,57 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			} finally {
 				workerRunning = false;
 			}
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_supervisor_verify",
+		label: "Aloop Supervisor Verify",
+		description: "Independently run a repository-defined check against an exact committed, clean source tree and persist a commit-bound receipt.",
+		promptSnippet: "Verify the returned worker commit independently before accepting its handoff.",
+		promptGuidelines: ["Run after the worker's final commit. Any untracked or modified source blocks verification; any later change invalidates the receipt."],
+		parameters: SupervisorVerifyParams,
+		async execute(_id, params: { commit: string; command: string; production_integration?: string }, signal, onUpdate, ctx) {
+			if (!runBudget) throw new Error("Run /aloop #<epic> before supervisor verification.");
+			const inspect = async (args: string[]) => {
+				const remaining = assessAloopRunBudget(runBudget!, Date.now());
+				if (!remaining.allowed) throw new Error(remaining.reason);
+				const result = await pi.exec("git", args, { timeout: Math.max(1, Math.min(30_000, remaining.remainingMs)), signal });
+				if (result.code !== 0) throw new Error((result.stderr || result.stdout || `git ${args[0]} failed`).trim());
+				return result.stdout.trim();
+			};
+			const expected = await inspect(["rev-parse", `${params.commit}^{commit}`]);
+			const beforeHead = await inspect(["rev-parse", "HEAD"]);
+			const beforeStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
+			if (beforeHead !== expected) throw new Error(`Returned commit ${expected} differs from current HEAD ${beforeHead}.`);
+			if (beforeStatus) throw new Error("Supervisor verification requires a clean worktree, including no untracked files. Commit intended sources before verification.");
+			const sourceIdentity = `tree:${await inspect(["rev-parse", `${expected}^{tree}`])}`;
+			onUpdate?.({ content: [{ type: "text", text: `Running supervisor verification at ${expected.slice(0, 12)}: ${params.command}` }], details: { commit: expected, command: params.command } });
+			const remaining = assessAloopRunBudget(runBudget, Date.now());
+			if (!remaining.allowed) throw new Error(remaining.reason);
+			const result = await pi.exec("bash", ["-lc", params.command], { timeout: Math.max(1, remaining.remainingMs), signal });
+			const afterHead = await inspect(["rev-parse", "HEAD"]);
+			const afterStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
+			const receipt = {
+				commit: expected,
+				command: params.command,
+				exitStatus: result.code,
+				timestamp: new Date().toISOString(),
+				sourceIdentity,
+				productionIntegration: params.production_integration?.trim() || undefined,
+				postVerificationHead: afterHead,
+				postVerificationClean: afterStatus === "",
+			};
+			const receiptId = `verify-${expected.slice(0, 12)}-${Date.now()}-${randomBytes(4).toString("hex")}`;
+			const receiptDirectory = path.resolve(ctx.cwd, ".pi/tmp/aloop/receipts");
+			await mkdir(receiptDirectory, { recursive: true, mode: 0o700 });
+			const receiptPath = path.join(receiptDirectory, `${receiptId}.json`);
+			await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
+			const valid = result.code === 0 && afterHead === expected && afterStatus === "";
+			return {
+				content: [{ type: "text", text: `${valid ? "Supervisor verification passed" : "Supervisor verification failed or was invalidated"} at ${expected}. Receipt: .pi/tmp/aloop/receipts/${receiptId}.json (exit ${result.code}; post-check clean=${afterStatus === ""}).` }],
+				details: { valid, receiptId, receiptPath: `.pi/tmp/aloop/receipts/${receiptId}.json`, receipt, stdout: result.stdout, stderr: result.stderr },
+			};
 		},
 	});
 
