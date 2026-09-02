@@ -809,6 +809,7 @@
                 "$test_build_dir/tests/aloop-worker.test.js" \
                 "$test_build_dir/tests/aloop-supervisor.test.js" \
                 "$test_build_dir/tests/managed-session-contracts.test.js" \
+                "$test_build_dir/tests/managed-session-v2-contracts.test.js" \
                 "$test_build_dir/tests/managed-session-adapter.test.js" \
                 "$test_build_dir/tests/managed-session-adapter-real-pi.test.js" \
                 "$test_build_dir/tests/managed-session-coordinator.test.js" \
