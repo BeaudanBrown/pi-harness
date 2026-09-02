@@ -22,6 +22,7 @@ import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { hostRelayLockPath, HostRelayLock } from "./relay-lock.js";
 import { TranscriptProjector } from "./transcript-projector.js";
 import { redactManagedValue } from "./redaction.js";
+import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -248,6 +249,14 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 }
 
 async function main(): Promise<void> {
+	if (process.argv[2] === "--migrate-v1-to-v2") {
+		if (process.argv.length !== 3) throw new Error("--migrate-v1-to-v2 accepts no additional arguments");
+		const runtimeDirectory = resolve(required(process.env, "PI_MANAGED_SESSIONS_RUNTIME_DIR"));
+		const manifestDirectory = resolve(required(process.env, "PI_MANAGED_SESSIONS_MANIFEST_DIR"));
+		await migrateManagedSessionStoresV1ToV2(resolve(runtimeDirectory, "registry.json"), manifestDirectory);
+		return;
+	}
+	if (process.argv.length !== 2) throw new Error("Managed-session relay accepts only --migrate-v1-to-v2");
 	const relay = await startManagedSessionRelay();
 	let stopping = false;
 	const stop = () => {
