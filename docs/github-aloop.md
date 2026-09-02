@@ -109,7 +109,9 @@ The repository commits a `.aloop.json` policy containing `canonicalCommand` and
 `productionIntegrationCommand`. `aloop_supervisor_verify` rejects caller-supplied
 commands that do not exactly match that policy, then executes both checks. This
 prevents placeholder commands such as `true` from becoming production evidence.
-Preparation accepts only a receipt issued by that tool in the current bounded
+Verification is permitted only after a matching pending worker attempt has
+returned its commit. Preparation accepts only the immutable receipt bytes issued
+for that exact issue, commit, and artifact directory in the current bounded
 invocation, rechecks that its commands exactly match `.aloop.json` and both exit
 statuses passed at the returned commit, and confirms that HEAD and the
 complete worktree (including untracked files) are still identical.

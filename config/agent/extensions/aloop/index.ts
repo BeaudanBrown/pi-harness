@@ -188,7 +188,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	let runBudget: AloopRunBudget | null = null;
 	const dryRunHandoffIds = new Set<string>();
 	const dryRunClosureIds = new Set<string>();
-	const issuedReceiptIds = new Set<string>();
+	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearDeadlineTimer(): void {
@@ -204,7 +204,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		runBudget = null;
 		dryRunHandoffIds.clear();
 		dryRunClosureIds.clear();
-		issuedReceiptIds.clear();
+		issuedReceipts.clear();
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
 	}
 
@@ -249,7 +249,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		runBudget = null;
 		dryRunHandoffIds.clear();
 		dryRunClosureIds.clear();
-		issuedReceiptIds.clear();
+		issuedReceipts.clear();
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
@@ -449,6 +449,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				throw new Error("Verification commands must exactly match the repository-defined .aloop.json policy.");
 			}
 			const expected = await inspect(["rev-parse", `${params.commit}^{commit}`]);
+			const pendingAttempt = pendingHandoffs.find((pending) => pending.commit === expected);
+			if (!pendingAttempt) throw new Error(`Supervisor verification requires a pending worker attempt at ${expected}; launch and commit the worker attempt first.`);
 			const beforeHead = await inspect(["rev-parse", "HEAD"]);
 			const beforeStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
 			if (beforeHead !== expected) throw new Error(`Returned commit ${expected} differs from current HEAD ${beforeHead}.`);
@@ -481,9 +483,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const receiptDirectory = path.resolve(ctx.cwd, ".pi/tmp/aloop/receipts");
 			await mkdir(receiptDirectory, { recursive: true, mode: 0o700 });
 			const receiptPath = path.join(receiptDirectory, `${receiptId}.json`);
-			await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-			issuedReceiptIds.add(receiptId);
+			const receiptDocument = `${JSON.stringify(receipt, null, 2)}\n`;
+			await writeFile(receiptPath, receiptDocument, { encoding: "utf8", mode: 0o600, flag: "wx" });
 			const valid = result.code === 0 && productionResult.code === 0 && afterHead === expected && afterStatus === "";
+			if (valid) issuedReceipts.set(receiptId, { document: receiptDocument, issue: pendingAttempt.issue, commit: expected, artifactDirectory: pendingAttempt.artifactDirectory });
 			return {
 				content: [{ type: "text", text: `${valid ? "Supervisor verification passed" : "Supervisor verification failed or was invalidated"} at ${expected}. Receipt: .pi/tmp/aloop/receipts/${receiptId}.json (canonical exit ${result.code}; production exit ${productionResult.code}; post-check clean=${afterStatus === ""}).` }],
 				details: { valid, receiptId, receiptPath: `.pi/tmp/aloop/receipts/${receiptId}.json`, receipt, stdout: result.stdout, stderr: result.stderr, productionStdout: productionResult.stdout, productionStderr: productionResult.stderr },
@@ -521,12 +524,15 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					acceptanceCriteriaAssessment: params.acceptance_criteria_assessment,
 				});
 				if (evidenceReasons.length > 0) throw new Error(`Accepted handoff lacks required evidence:\n- ${evidenceReasons.join("\n- ")}`);
-				if (!issuedReceiptIds.has(params.verification_receipt_id)) throw new Error("Accepted handoffs require a receipt issued by aloop_supervisor_verify in this invocation.");
+				const issuedReceipt = issuedReceipts.get(params.verification_receipt_id);
+				if (!issuedReceipt || issuedReceipt.issue !== params.issue || issuedReceipt.commit !== params.commit || issuedReceipt.artifactDirectory !== params.artifact_directory) throw new Error("Accepted handoffs require a receipt issued after the matching worker attempt in this invocation.");
 				const policy = await loadVerificationPolicy(ctx.cwd);
 				const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
 				const receiptStatus = await lstat(receiptPath);
 				if (receiptStatus.isSymbolicLink() || !receiptStatus.isFile() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
-				const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+				const receiptDocument = await readFile(receiptPath, "utf8");
+				if (receiptDocument !== issuedReceipt.document) throw new Error("Supervisor verification receipt changed after it was issued.");
+				const receipt = JSON.parse(receiptDocument);
 				const head = await pi.exec("git", ["rev-parse", `${params.commit}^{commit}`], { timeout: 10_000, signal });
 				const currentHead = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
 				const worktree = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
@@ -620,7 +626,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				return { content: [{ type: "text", text: `Closure already applied for #${params.issue} at ${retry.commit}.` }], details: { issue: params.issue, commit: retry.commit, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, dryRun: params.dry_run, applied: false, alreadyClosed: true } };
 			}
 
-			if (!issuedReceiptIds.has(params.verification_receipt_id)) throw new Error("Accepted issue closure requires a receipt issued by aloop_supervisor_verify in this invocation.");
+			const issuedReceipt = issuedReceipts.get(params.verification_receipt_id);
+			if (!issuedReceipt || issuedReceipt.issue !== params.issue) throw new Error("Accepted issue closure requires the immutable receipt issued for this worker attempt.");
 			const policy = await loadVerificationPolicy(ctx.cwd);
 			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
 			const spoolStatus = await lstat(spoolPath);
@@ -630,7 +637,9 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
 			const receiptStatus = await lstat(receiptPath);
 			if (!receiptStatus.isFile() || receiptStatus.isSymbolicLink() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
-			const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+			const receiptDocument = await readFile(receiptPath, "utf8");
+			if (receiptDocument !== issuedReceipt.document) throw new Error("Supervisor verification receipt changed after it was issued.");
+			const receipt = JSON.parse(receiptDocument);
 			if (receipt.command !== policy.canonicalCommand || receipt.productionIntegration !== policy.productionIntegrationCommand) throw new Error("The supervisor receipt does not match the repository-defined verification policy.");
 			const head = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
 			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });

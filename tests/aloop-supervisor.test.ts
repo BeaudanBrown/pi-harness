@@ -277,6 +277,7 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		let publicationApplyCalls = 0;
 		let closeCalls = 0;
 		const shellCommands: string[] = [];
+		let worktreeStatus = "";
 		let fakeHead = "a".repeat(40);
 		const pi = {
 			registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<{ details?: Record<string, unknown> }> }) => tools.set(tool.name, tool),
@@ -290,6 +291,7 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 				if (_command === "bash") shellCommands.push(args[1]!);
 				if (args[0] === "log") return { code: 0, stdout: "history\n", stderr: "" };
 				if (args[0] === "rev-parse") return { code: 0, stdout: `${fakeHead}\n`, stderr: "" };
+				if (args[0] === "status") return { code: 0, stdout: worktreeStatus, stderr: "" };
 				return { code: 0, stdout: "", stderr: "" };
 			},
 		} as unknown as ExtensionAPI;
@@ -323,13 +325,17 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		});
 		const ctx = { cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined } as unknown as ExtensionContext;
 		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-attempts 2", ctx);
+		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("too-early", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx), /pending worker attempt/);
+		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "implementation", approach: "test wiring" }, ctx.signal, undefined, ctx);
+		assert.equal(claims, 1);
+		assert.deepEqual(workerIssues, [2]);
+		worktreeStatus = "?? eventual-source.ts\n";
+		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("untracked", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx), /clean worktree/);
+		worktreeStatus = "";
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("bypass", { commit: fakeHead, command: "true", production_integration_command: "true" }, ctx.signal, undefined, ctx), /must exactly match/);
 		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx);
 		assert.deepEqual(shellCommands, [verificationPolicy.canonicalCommand, verificationPolicy.productionIntegrationCommand]);
 		assert.equal((verified.details?.receipt as { productionIntegrationExitStatus?: number }).productionIntegrationExitStatus, 0);
-		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "implementation", approach: "test wiring" }, ctx.signal, undefined, ctx);
-		assert.equal(claims, 1);
-		assert.deepEqual(workerIssues, [2]);
 
 		const receiptId = verified.details?.receiptId as string;
 		assert.match(receiptId, /^verify-/);
@@ -341,6 +347,11 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		await assert.rejects(() => tools.get("aloop_publish_handoff")!.execute("publish-fail", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx), /network interruption/);
 		await tools.get("aloop_publish_handoff")!.execute("publish-retry", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx);
 		graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done", assignee: "operator", recentHandoffs: [comment(1, successfulComment, "2026-09-01T00:00:00Z")] })]);
+		const receiptPath = join(cwd, `.pi/tmp/aloop/receipts/${receiptId}.json`);
+		const originalReceipt = readFileSync(receiptPath, "utf8");
+		writeFileSync(receiptPath, originalReceipt.replace('"exitStatus": 0', '"exitStatus": 1'));
+		await assert.rejects(() => tools.get("aloop_close_accepted_issue")!.execute("close-tampered", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: true }, ctx.signal, undefined, ctx), /changed after it was issued/);
+		writeFileSync(receiptPath, originalReceipt);
 		await tools.get("aloop_close_accepted_issue")!.execute("close-dry", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: true }, ctx.signal, undefined, ctx);
 		await tools.get("aloop_close_accepted_issue")!.execute("close", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: false }, ctx.signal, undefined, ctx);
 		assert.equal(closeCalls, 1);
