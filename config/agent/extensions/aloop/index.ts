@@ -3,7 +3,7 @@ import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
-import { claimCurrentRepositoryIssue, currentGitHubLogin, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
+import { claimCurrentRepositoryIssue, closeCurrentRepositoryIssue, currentGitHubLogin, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
 	assessAloopRunBudget,
@@ -22,7 +22,7 @@ import {
 	type ClosureEvidence,
 } from "./core.js";
 
-const TOOL_NAMES = ["aloop_launch_worker", "aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_publish_handoff", "aloop_check_closure"];
+const TOOL_NAMES = ["aloop_launch_worker", "aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_publish_handoff", "aloop_close_accepted_issue", "aloop_check_closure"];
 const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
@@ -65,6 +65,12 @@ const PrepareHandoffParams = Type.Object({
 const PublishHandoffParams = Type.Object({
 	handoff_id: Type.String({ pattern: "^[a-f0-9]{24}$", description: "Short ID returned by aloop_prepare_handoff." }),
 	dry_run: Type.Boolean({ description: "Must be true before publication is applied." }),
+});
+
+const CloseAcceptedIssueParams = Type.Object({
+	issue: Type.Number({ minimum: 1 }),
+	handoff_id: Type.String({ pattern: "^[a-f0-9]{24}$", description: "Published successful handoff ID." }),
+	verification_receipt_id: Type.String({ pattern: "^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}$" }),
 });
 
 const ClosureCheckParams = Type.Object({
@@ -505,6 +511,43 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				content: [{ type: "text", text: `${params.dry_run ? "Dry run complete" : "Publication complete"} for handoff ${params.handoff_id} on #${record.issue}; ${Buffer.byteLength(record.comment)} exact bytes.` }],
 				details: { handoffId: params.handoff_id, issue: record.issue, dryRun: params.dry_run, byteLength: Buffer.byteLength(record.comment), result },
 			};
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_close_accepted_issue",
+		label: "Aloop Close Accepted Issue",
+		description: "Close a child only when its exact successful handoff is published and its supervisor receipt still matches the current clean commit.",
+		promptSnippet: "Close a verified child through the receipt-gated aloop operation.",
+		promptGuidelines: ["Use only after aloop_publish_handoff applies the exact prepared bytes; never use generic issue closure for accepted aloop attempts."],
+		parameters: CloseAcceptedIssueParams,
+		async execute(_id, params: { issue: number; handoff_id: string; verification_receipt_id: string }, signal, _onUpdate, ctx) {
+			const context = await currentContext(ctx.cwd, signal);
+			const issue = context.issues.find((candidate) => candidate.number === params.issue);
+			if (!issue || issue.number === context.epic.number) throw new Error("Receipt-gated closure applies only to a descendant of the active epic.");
+			if (issue.state !== "open") throw new Error(`Issue #${params.issue} is not open.`);
+
+			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
+			const spoolStatus = await lstat(spoolPath);
+			if (!spoolStatus.isFile() || spoolStatus.isSymbolicLink() || spoolStatus.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
+			const spool = JSON.parse(await readFile(spoolPath, "utf8"));
+			if (spool?.version !== 1 || spool.id !== params.handoff_id || spool.issue !== params.issue || typeof spool.comment !== "string") throw new Error("Prepared handoff does not identify this issue.");
+			const digest = createHash("sha256").update(Buffer.from(spool.comment, "utf8")).digest("hex");
+			if (digest !== spool.sha256 || !issue.recentHandoffs.some((comment) => comment.body === spool.comment)) throw new Error("The exact prepared handoff is not durably published on GitHub.");
+			const [handoff] = parseAloopHandoffs([spool.comment]);
+			if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
+
+			const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
+			const receiptStatus = await lstat(receiptPath);
+			if (!receiptStatus.isFile() || receiptStatus.isSymbolicLink() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
+			const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
+			const head = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
+			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
+			if (head.code !== 0 || status.code !== 0 || status.stdout.trim() || head.stdout.trim() !== handoff.commit || receipt.commit !== handoff.commit || receipt.exitStatus !== 0 || receipt.postVerificationHead !== handoff.commit || receipt.postVerificationClean !== true) {
+				throw new Error("Closure blocked: the published handoff, receipt, and current clean Git commit do not match.");
+			}
+			const result = await closeCurrentRepositoryIssue(ctx.cwd, params.issue, { signal, deadlineMs: runBudget!.deadlineMs });
+			return { content: [{ type: "text", text: `Closed verified issue #${params.issue} at ${handoff.commit}.` }], details: { issue: params.issue, commit: handoff.commit, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, result } };
 		},
 	});
 

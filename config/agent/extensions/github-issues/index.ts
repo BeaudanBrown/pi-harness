@@ -269,6 +269,12 @@ export async function currentGitHubLogin(cwd: string, requestedRepo?: string, co
 	return login;
 }
 
+/** Close an issue only in the repository belonging to the current checkout. */
+export async function closeCurrentRepositoryIssue(cwd: string, number: number, commandOptions: GitHubCommandOptions = {}): Promise<unknown> {
+	const repo = await currentRepo(cwd, undefined, commandOptions);
+	return await ghJsonWithInput(cwd, ["api", "--method", "PATCH", `repos/${repo}/issues/${issueNumber(number)}`], { state: "closed" }, commandOptions);
+}
+
 /** Atomically self-assign an unclaimed aloop leaf and remove its ready lifecycle label. */
 export async function claimCurrentRepositoryIssue(cwd: string, number: number, commandOptions: GitHubCommandOptions = {}): Promise<unknown> {
 	const repo = await currentRepo(cwd, undefined, commandOptions);
