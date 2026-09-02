@@ -273,6 +273,30 @@ export function evaluateRetryBoundary(
 	return { allowed: true, unsuccessfulAttempts };
 }
 
+export function validateSuccessfulHandoffEvidence(input: {
+	issueBody: string;
+	verification: string[];
+	acceptanceCriteriaAssessment: string[];
+}): string[] {
+	const reasons: string[] = [];
+	if (input.verification.length === 0 || input.verification.some((item) => !item.trim() || /^(?:fail|partial|blocked)\b/i.test(item.trim()))) {
+		reasons.push("Successful handoffs require non-empty passing verification evidence.");
+	}
+	const criteria = extractAcceptanceCriteria(input.issueBody);
+	if (criteria.length === 0) reasons.push("The selected issue has no parseable acceptance criteria.");
+	for (const criterion of criteria) {
+		const normalizedCriterion = normalizedText(criterion);
+		const assessment = input.acceptanceCriteriaAssessment.find((item) => normalizedText(item).includes(normalizedCriterion));
+		if (!assessment || !/^pass\b/i.test(assessment.trim()) || normalizedText(assessment) === `pass ${normalizedCriterion}`) {
+			reasons.push(`Acceptance criterion lacks explicit PASS evidence: ${criterion}`);
+		}
+	}
+	if (input.acceptanceCriteriaAssessment.some((item) => /^(?:fail|partial|blocked)\b/i.test(item.trim()))) {
+		reasons.push("Successful handoffs cannot contain failed, partial, or blocked criterion assessments.");
+	}
+	return reasons;
+}
+
 export function extractAcceptanceCriteria(body: string): string[] {
 	const lines = body.split("\n");
 	const start = lines.findIndex((line) => /^##+\s+acceptance criteria\s*$/i.test(line.trim()));

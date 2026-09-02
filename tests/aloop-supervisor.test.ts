@@ -19,6 +19,7 @@ import {
 	parseAloopRunRequest,
 	requireAloopClaim,
 	selectAloopLeaf,
+	validateSuccessfulHandoffEvidence,
 	type AloopAttemptHandoff,
 } from "../config/agent/extensions/aloop/core.js";
 
@@ -200,6 +201,31 @@ test("supervisor gate binds successful evidence to a clean exact commit", () => 
 	const changed = evaluateSupervisorAttempt({ returnedCommit: "abcdef1", currentHead: "abcdef2", worktreeStatus: " M source.ts", receipt, acceptanceCriteria: [{ satisfied: false, evidence: "" }], productionIntegrationRequired: true });
 	assert.equal(changed.allowed, false);
 	assert.match(changed.reasons.join(" "), /differs.*changed after verification.*acceptance criterion.*Production packaging/i);
+});
+
+test("successful handoffs require passing evidence for every selected-issue criterion", () => {
+	const issueBody = "## Acceptance criteria\n\n- Exact bytes are published\n- Retry is idempotent";
+	assert.deepEqual(validateSuccessfulHandoffEvidence({
+		issueBody,
+		verification: ["canonical verification passed"],
+		acceptanceCriteriaAssessment: [
+			"PASS — Exact bytes are published — byte equality assertion passed",
+			"PASS — Retry is idempotent — duplicate publication returned the existing comment",
+		],
+	}), []);
+	const reasons = validateSuccessfulHandoffEvidence({
+		issueBody,
+		verification: ["FAIL canonical build"],
+		acceptanceCriteriaAssessment: [
+			"PASS Exact bytes are published",
+			"PARTIAL — Retry is idempotent — dry-run only",
+		],
+	});
+	assert.match(reasons.join(" "), /passing verification evidence/i);
+	assert.match(reasons.join(" "), /Exact bytes are published/);
+	assert.match(reasons.join(" "), /Retry is idempotent/);
+	assert.match(reasons.join(" "), /cannot contain failed, partial, or blocked/i);
+	assert.match(validateSuccessfulHandoffEvidence({ issueBody: "No criteria", verification: ["passed"], acceptanceCriteriaAssessment: [] }).join(" "), /no parseable acceptance criteria/i);
 });
 
 test("closure gate requires closed descendants, review, verification, and every epic criterion", () => {

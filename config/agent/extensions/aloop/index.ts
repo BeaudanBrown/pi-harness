@@ -17,6 +17,7 @@ import {
 	parseAloopRunRequest,
 	requireAloopClaim,
 	selectAloopLeaf,
+	validateSuccessfulHandoffEvidence,
 	type AloopAttemptRecord,
 	type AloopRunBudget,
 	type ClosureEvidence,
@@ -445,6 +446,14 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			if (!pending) throw new Error("No outstanding worker attempt matches this handoff.");
 			if (params.successful) {
 				if (!params.commit || !params.verification_receipt_id) throw new Error("Accepted handoffs require a commit and independent supervisor verification receipt ID.");
+				const selectedIssue = context.issues.find((candidate) => candidate.number === params.issue);
+				if (!selectedIssue || selectedIssue.number === context.epic.number) throw new Error("Accepted handoffs apply only to descendants of the active epic.");
+				const evidenceReasons = validateSuccessfulHandoffEvidence({
+					issueBody: selectedIssue.body,
+					verification: params.verification,
+					acceptanceCriteriaAssessment: params.acceptance_criteria_assessment,
+				});
+				if (evidenceReasons.length > 0) throw new Error(`Accepted handoff lacks required evidence:\n- ${evidenceReasons.join("\n- ")}`);
 				const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
 				const receiptStatus = await lstat(receiptPath);
 				if (receiptStatus.isSymbolicLink() || !receiptStatus.isFile() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
