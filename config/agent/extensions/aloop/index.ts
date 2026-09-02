@@ -1,14 +1,15 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { createHash, randomBytes } from "node:crypto";
+import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
 import { claimCurrentRepositoryIssue, closeCurrentRepositoryIssue, currentGitHubLogin, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
 	assessAloopRunBudget,
-	authorizeHandoffPublication,
 	buildSupervisorKickoff,
+	claimAndRefreshAloopLeaf,
+	closeAcceptedAloopIssue,
 	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
 	evaluateRetryBoundary,
@@ -17,8 +18,7 @@ import {
 	handoffCommentsForIssue,
 	parseAloopHandoffs,
 	parseAloopRunRequest,
-	requireAloopClaim,
-	selectAloopLeaf,
+	publishPreparedAloopHandoff,
 	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
 	type AloopAttemptRecord,
@@ -75,6 +75,7 @@ const CloseAcceptedIssueParams = Type.Object({
 	issue: Type.Number({ minimum: 1 }),
 	handoff_id: Type.String({ pattern: "^[a-f0-9]{24}$", description: "Published successful handoff ID." }),
 	verification_receipt_id: Type.String({ pattern: "^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}$" }),
+	dry_run: Type.Boolean({ description: "Must be true before closure is applied." }),
 });
 
 const ClosureCheckParams = Type.Object({
@@ -150,6 +151,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 	let workerRunning = false;
 	let runBudget: AloopRunBudget | null = null;
 	const dryRunHandoffIds = new Set<string>();
+	const dryRunClosureIds = new Set<string>();
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearDeadlineTimer(): void {
@@ -163,6 +165,8 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		pendingHandoffs = [];
 		workerRunning = false;
 		runBudget = null;
+		dryRunHandoffIds.clear();
+		dryRunClosureIds.clear();
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
 	}
 
@@ -205,6 +209,8 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		pendingHandoffs = [];
 		workerRunning = false;
 		runBudget = null;
+		dryRunHandoffIds.clear();
+		dryRunClosureIds.clear();
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
@@ -312,21 +318,26 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				if (!runBudget) throw new Error("Run /aloop #<epic> before launching a worker.");
 				const budgetAssessment = assessAloopRunBudget(runBudget, Date.now());
 				if (!budgetAssessment.allowed) throw new Error(budgetAssessment.reason);
-				const context = await currentContext(ctx.cwd, signal);
+				let context = await currentContext(ctx.cwd, signal);
 				refreshPending(context);
 				if (pendingHandoffs.length > 0) {
 					throw new Error(`Outstanding attempts have no durable structured handoff comments: ${pendingHandoffs.map((pending) => `#${pending.issue} (${pending.artifactDirectory})`).join(", ")}. Record them before another worker.`);
 				}
-				let issue = selectAloopLeaf(context, params.issue);
 				const commandOptions = { signal, deadlineMs: runBudget.deadlineMs };
 				const login = await currentGitHubLogin(ctx.cwd, undefined, commandOptions);
-				if (issue.assignee === null) {
-					await claimCurrentRepositoryIssue(ctx.cwd, issue.number, commandOptions);
-					const claimedContext = await currentContext(ctx.cwd, signal);
-					refreshPending(claimedContext);
-					issue = selectAloopLeaf(claimedContext, params.issue);
-				}
-				requireAloopClaim(issue, login);
+				const claimed = await claimAndRefreshAloopLeaf({
+					context,
+					issueNumber: params.issue,
+					authenticatedLogin: login,
+					claim: async (issueNumber) => { await claimCurrentRepositoryIssue(ctx.cwd, issueNumber, commandOptions); },
+					refresh: async () => {
+						const refreshed = await currentContext(ctx.cwd, signal);
+						refreshPending(refreshed);
+						return refreshed;
+					},
+				});
+				context = claimed.context;
+				const issue = claimed.issue;
 				const handoffs = parseAloopHandoffs(issue.recentHandoffs).filter((handoff) => handoff.issue === issue.number);
 				const retry = evaluateRetryBoundary(handoffs, params.materially_new_approach === true);
 				if (!retry.allowed) throw new Error(retry.reason);
@@ -518,8 +529,13 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			const status = await lstat(spoolPath);
 			if (status.isSymbolicLink() || !status.isFile() || status.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
 			const record = validateAloopHandoffSpoolRecord(JSON.parse(await readFile(spoolPath, "utf8")), params.handoff_id);
-			authorizeHandoffPublication({ handoffId: params.handoff_id, dryRun: params.dry_run, dryRunHandoffIds });
-			const result = await publishExactIssueComment(ctx.cwd, record.issue, record.comment, !params.dry_run, { signal, deadlineMs: runBudget.deadlineMs });
+			const result = await publishPreparedAloopHandoff({
+				record,
+				handoffId: params.handoff_id,
+				dryRun: params.dry_run,
+				dryRunHandoffIds,
+				publish: async (issue, comment, apply) => await publishExactIssueComment(ctx.cwd, issue, comment, apply, { signal, deadlineMs: runBudget!.deadlineMs }),
+			});
 			return {
 				content: [{ type: "text", text: `${params.dry_run ? "Dry run complete" : "Publication complete"} for handoff ${params.handoff_id} on #${record.issue}; ${Buffer.byteLength(record.comment)} exact bytes.` }],
 				details: { handoffId: params.handoff_id, issue: record.issue, dryRun: params.dry_run, byteLength: Buffer.byteLength(record.comment), result },
@@ -532,22 +548,17 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		label: "Aloop Close Accepted Issue",
 		description: "Close a child only when its exact successful handoff is published and its supervisor receipt still matches the current clean commit.",
 		promptSnippet: "Close a verified child through the receipt-gated aloop operation.",
-		promptGuidelines: ["Use only after aloop_publish_handoff applies the exact prepared bytes; never use generic issue closure for accepted aloop attempts."],
+		promptGuidelines: ["Use only after aloop_publish_handoff applies the exact prepared bytes. Always dry-run before apply; never use generic issue closure for accepted aloop attempts."],
 		parameters: CloseAcceptedIssueParams,
-		async execute(_id, params: { issue: number; handoff_id: string; verification_receipt_id: string }, signal, _onUpdate, ctx) {
+		async execute(_id, params: { issue: number; handoff_id: string; verification_receipt_id: string; dry_run: boolean }, signal, _onUpdate, ctx) {
 			const context = await currentContext(ctx.cwd, signal);
 			const issue = context.issues.find((candidate) => candidate.number === params.issue);
-			if (!issue || issue.number === context.epic.number) throw new Error("Receipt-gated closure applies only to a descendant of the active epic.");
-			if (issue.state !== "open") throw new Error(`Issue #${params.issue} is not open.`);
+			if (!issue) throw new Error(`Issue #${params.issue} is absent from the active epic context.`);
 
 			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
 			const spoolStatus = await lstat(spoolPath);
 			if (!spoolStatus.isFile() || spoolStatus.isSymbolicLink() || spoolStatus.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
 			const spool = validateAloopHandoffSpoolRecord(JSON.parse(await readFile(spoolPath, "utf8")), params.handoff_id);
-			if (spool.issue !== params.issue) throw new Error("Prepared handoff does not identify this issue.");
-			if (!issue.recentHandoffs.some((comment) => comment.body === spool.comment)) throw new Error("The exact prepared handoff is not durably published on GitHub.");
-			const [handoff] = parseAloopHandoffs([{ id: 0, author: "aloop", body: spool.comment, createdAt: "", url: "" }]);
-			if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
 
 			const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
 			const receiptStatus = await lstat(receiptPath);
@@ -555,11 +566,24 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			const receipt = JSON.parse(await readFile(receiptPath, "utf8"));
 			const head = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
 			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
-			if (head.code !== 0 || status.code !== 0 || status.stdout.trim() || head.stdout.trim() !== handoff.commit || receipt.commit !== handoff.commit || receipt.exitStatus !== 0 || receipt.postVerificationHead !== handoff.commit || receipt.postVerificationClean !== true) {
-				throw new Error("Closure blocked: the published handoff, receipt, and current clean Git commit do not match.");
-			}
-			const result = await closeCurrentRepositoryIssue(ctx.cwd, params.issue, { signal, deadlineMs: runBudget!.deadlineMs });
-			return { content: [{ type: "text", text: `Closed verified issue #${params.issue} at ${handoff.commit}.` }], details: { issue: params.issue, commit: handoff.commit, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, result } };
+			if (head.code !== 0 || status.code !== 0) throw new Error("Could not inspect Git before accepted issue closure.");
+			const login = await currentGitHubLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget!.deadlineMs });
+			const closure = await closeAcceptedAloopIssue({
+				issue,
+				epicNumber: context.epic.number,
+				authenticatedLogin: login,
+				handoffId: params.handoff_id,
+				spool,
+				receiptId: params.verification_receipt_id,
+				receipt,
+				currentHead: head.stdout.trim(),
+				worktreeStatus: status.stdout,
+				dryRun: params.dry_run,
+				dryRunClosureIds,
+				close: async (issueNumber) => await closeCurrentRepositoryIssue(ctx.cwd, issueNumber, { signal, deadlineMs: runBudget!.deadlineMs }),
+			});
+			const action = params.dry_run ? "Closure dry run complete" : closure.alreadyClosed ? "Closure already applied" : "Closed verified issue";
+			return { content: [{ type: "text", text: `${action} for #${params.issue} at ${closure.commit}.` }], details: { issue: params.issue, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, dryRun: params.dry_run, ...closure } };
 		},
 	});
 

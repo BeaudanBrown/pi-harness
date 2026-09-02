@@ -10,6 +10,8 @@ import {
 	authorizeHandoffPublication,
 	buildEpicReport,
 	buildSupervisorKickoff,
+	claimAndRefreshAloopLeaf,
+	closeAcceptedAloopIssue,
 	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
 	evaluateRetryBoundary,
@@ -19,6 +21,7 @@ import {
 	handoffCommentsForIssue,
 	parseAloopHandoffs,
 	parseAloopRunRequest,
+	publishPreparedAloopHandoff,
 	requireAloopClaim,
 	selectAloopLeaf,
 	validateAloopHandoffSpoolRecord,
@@ -113,6 +116,42 @@ test("selection accepts only open unblocked descendant leaves", () => {
 	assert.throws(() => selectAloopLeaf(graph, 3), /not an open, unblocked/);
 });
 
+test("claim operation handles unassigned, self, and foreign owners with post-claim refresh", async () => {
+	const selfOwned = issue({ number: 2, title: "Leaf", assignee: "operator" });
+	let claimCalls = 0;
+	let refreshCalls = 0;
+	const claimed = await claimAndRefreshAloopLeaf({
+		context: context([issue({ number: 2, title: "Leaf" })]),
+		issueNumber: 2,
+		authenticatedLogin: "operator",
+		claim: async (number) => { assert.equal(number, 2); claimCalls += 1; },
+		refresh: async () => { refreshCalls += 1; return context([selfOwned]); },
+	});
+	assert.equal(claimed.issue.assignee, "operator");
+	assert.equal(claimCalls, 1);
+	assert.equal(refreshCalls, 1);
+
+	await claimAndRefreshAloopLeaf({
+		context: context([selfOwned]),
+		issueNumber: 2,
+		authenticatedLogin: "operator",
+		claim: async () => { claimCalls += 1; },
+		refresh: async () => { refreshCalls += 1; return context([selfOwned]); },
+	});
+	assert.equal(claimCalls, 1, "an existing self-assignment must not be claimed again");
+	assert.equal(refreshCalls, 1, "the input context is already the required pre-launch refresh");
+
+	await assert.rejects(() => claimAndRefreshAloopLeaf({
+		context: context([issue({ number: 2, title: "Leaf", assignee: "other" })]),
+		issueNumber: 2,
+		authenticatedLogin: "operator",
+		claim: async () => { claimCalls += 1; },
+		refresh: async () => { refreshCalls += 1; return context([selfOwned]); },
+	}), /must be claimed by operator/);
+	assert.equal(claimCalls, 1);
+	assert.equal(refreshCalls, 1);
+});
+
 test("retry boundary stops after two unchanged unsuccessful attempts", () => {
 	const failures = [handoff(), handoff({ attemptType: "remediation", approach: "Same approach" })];
 	assert.deepEqual(evaluateRetryBoundary(failures, false), {
@@ -184,7 +223,7 @@ test("compact handoffs remain compatible and materially smaller than duplicated 
 
 test("handoff publication requires dry-run first and permits idempotent retries", () => {
 	const dryRuns = new Set<string>();
-	const handoffId = "0123456789abcdef";
+	const handoffId = "0123456789abcdef01234567";
 	assert.throws(
 		() => authorizeHandoffPublication({ handoffId, dryRun: false, dryRunHandoffIds: dryRuns }),
 		/must complete a dry run/,
@@ -196,6 +235,30 @@ test("handoff publication requires dry-run first and permits idempotent retries"
 		() => authorizeHandoffPublication({ handoffId: "wrong", dryRun: true, dryRunHandoffIds: dryRuns }),
 		/ID is invalid/,
 	);
+});
+
+test("publication operation preserves exact bytes across dry-run, failure, and idempotent retry", async () => {
+	const exactComment = "<!-- exact -->\nUnicode ✓ and trailing newline\n";
+	const record = createAloopHandoffSpoolRecord(69, exactComment);
+	const dryRuns = new Set<string>();
+	const calls: Array<{ issue: number; comment: string; apply: boolean }> = [];
+	let failFirstApply = true;
+	const publish = async (issueNumber: number, body: string, apply: boolean) => {
+		calls.push({ issue: issueNumber, comment: body, apply });
+		if (apply && failFirstApply) {
+			failFirstApply = false;
+			throw new Error("injected interruption");
+		}
+		return apply ? { published: true, existing: calls.filter((call) => call.apply).length > 2 } : { published: false, existing: false };
+	};
+	await publishPreparedAloopHandoff({ record, handoffId: record.id, dryRun: true, dryRunHandoffIds: dryRuns, publish });
+	assert.deepEqual(calls, [{ issue: 69, comment: exactComment, apply: false }]);
+	await assert.rejects(() => publishPreparedAloopHandoff({ record, handoffId: record.id, dryRun: false, dryRunHandoffIds: dryRuns, publish }), /injected interruption/);
+	const retry = await publishPreparedAloopHandoff({ record, handoffId: record.id, dryRun: false, dryRunHandoffIds: dryRuns, publish });
+	const repeated = await publishPreparedAloopHandoff({ record, handoffId: record.id, dryRun: false, dryRunHandoffIds: dryRuns, publish });
+	assert.equal(retry.published, true);
+	assert.equal(repeated.existing, true);
+	assert.ok(calls.every((call) => call.comment === exactComment), "every attempt must use the exact prepared bytes");
 });
 
 test("handoff spool identity is deterministic, exact-byte preserving, and tamper evident", () => {
@@ -266,6 +329,68 @@ test("successful handoffs require passing evidence for every selected-issue crit
 	assert.match(reasons.join(" "), /Retry is idempotent/);
 	assert.match(reasons.join(" "), /cannot contain failed, partial, or blocked/i);
 	assert.match(validateSuccessfulHandoffEvidence({ issueBody: "No criteria", verification: ["passed"], acceptanceCriteriaAssessment: [] }).join(" "), /no parseable acceptance criteria/i);
+});
+
+test("accepted child closure rejects invalid evidence and is dry-run-first and idempotent", async () => {
+	const commitId = "a".repeat(40);
+	const handoffComment = formatAloopHandoff(handoff({
+		issue: 2,
+		commit: commitId,
+		successful: true,
+		verification: ["canonical verification passed"],
+		acceptanceCriteriaAssessment: ["PASS — all criteria — evidence"],
+	}));
+	const spool = createAloopHandoffSpoolRecord(2, handoffComment);
+	const published = comment(1, handoffComment, "2026-09-01T01:00:00Z");
+	const child = issue({ number: 2, title: "Child", assignee: "operator", recentHandoffs: [published] });
+	const receipt = {
+		commit: commitId,
+		command: "nix run .#verify",
+		exitStatus: 0,
+		timestamp: "2026-09-01T00:00:00Z",
+		sourceIdentity: "tree:verified",
+		postVerificationHead: commitId,
+		postVerificationClean: true,
+	};
+	const closureIds = new Set<string>();
+	let closes = 0;
+	const close = async () => { closes += 1; return { closed: true }; };
+	const base = {
+		issue: child,
+		epicNumber: 1,
+		authenticatedLogin: "operator",
+		handoffId: spool.id,
+		spool,
+		receiptId: "verify-aaaaaaaaaaaa-1-12345678",
+		receipt,
+		currentHead: commitId,
+		worktreeStatus: "",
+		dryRunClosureIds: closureIds,
+		close,
+	};
+
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: false }), /dry run before apply/);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, issue: { ...child, recentHandoffs: [] } }), /not durably published/);
+	const unsuccessfulComment = formatAloopHandoff(handoff({ issue: 2, commit: commitId, successful: false }));
+	const unsuccessfulSpool = createAloopHandoffSpoolRecord(2, unsuccessfulComment);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, issue: { ...child, recentHandoffs: [comment(2, unsuccessfulComment, "2026-09-01T01:00:00Z")] }, handoffId: unsuccessfulSpool.id, spool: unsuccessfulSpool }), /successful commit-bearing/);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, exitStatus: 1 } }), /verification failed/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, commit: "b".repeat(40) } }), /different commit/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, timestamp: "invalid" } }), /incomplete/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, currentHead: "b".repeat(40) }), /differs/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, worktreeStatus: " M source.ts" }), /changed after verification/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, issue: { ...child, assignee: "other" } }), /must be claimed/);
+	assert.equal(closes, 0);
+
+	const dryRun = await closeAcceptedAloopIssue({ ...base, dryRun: true });
+	assert.equal(dryRun.applied, false);
+	assert.equal(closes, 0);
+	const applied = await closeAcceptedAloopIssue({ ...base, dryRun: false });
+	assert.equal(applied.applied, true);
+	assert.equal(closes, 1);
+	const repeated = await closeAcceptedAloopIssue({ ...base, issue: { ...child, state: "closed" }, dryRun: false });
+	assert.equal(repeated.alreadyClosed, true);
+	assert.equal(closes, 1);
 });
 
 test("closure gate requires closed descendants, review, verification, and every epic criterion", () => {

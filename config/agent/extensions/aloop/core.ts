@@ -236,7 +236,7 @@ export function authorizeHandoffPublication(input: {
 	dryRun: boolean;
 	dryRunHandoffIds: Set<string>;
 }): void {
-	if (!/^[0-9a-f]{16}$/.test(input.handoffId)) throw new Error("Prepared handoff ID is invalid.");
+	if (!/^[0-9a-f]{24}$/.test(input.handoffId)) throw new Error("Prepared handoff ID is invalid.");
 	if (input.dryRun) {
 		input.dryRunHandoffIds.add(input.handoffId);
 		return;
@@ -244,6 +244,18 @@ export function authorizeHandoffPublication(input: {
 	if (!input.dryRunHandoffIds.has(input.handoffId)) {
 		throw new Error(`Handoff ${input.handoffId} must complete a dry run before publication.`);
 	}
+}
+
+export async function publishPreparedAloopHandoff<T>(input: {
+	record: AloopHandoffSpoolRecord;
+	handoffId: string;
+	dryRun: boolean;
+	dryRunHandoffIds: Set<string>;
+	publish: (issue: number, comment: string, apply: boolean) => Promise<T>;
+}): Promise<T> {
+	const record = validateAloopHandoffSpoolRecord(input.record, input.handoffId);
+	authorizeHandoffPublication(input);
+	return await input.publish(record.issue, record.comment, !input.dryRun);
 }
 
 export type AloopHandoffSpoolRecord = {
@@ -286,6 +298,24 @@ export function requireAloopClaim(issue: EpicIssueContext, authenticatedLogin: s
 	if (issue.assignee !== authenticatedLogin) {
 		throw new Error(`#${issue.number} must be claimed by ${authenticatedLogin} before launching a worker.`);
 	}
+}
+
+export async function claimAndRefreshAloopLeaf(input: {
+	context: GitHubEpicContext;
+	issueNumber: number;
+	authenticatedLogin: string;
+	claim: (issue: number) => Promise<void>;
+	refresh: () => Promise<GitHubEpicContext>;
+}): Promise<{ context: GitHubEpicContext; issue: EpicIssueContext }> {
+	let context = input.context;
+	let issue = selectAloopLeaf(context, input.issueNumber);
+	if (issue.assignee === null) {
+		await input.claim(issue.number);
+		context = await input.refresh();
+		issue = selectAloopLeaf(context, input.issueNumber);
+	}
+	requireAloopClaim(issue, input.authenticatedLogin);
+	return { context, issue };
 }
 
 export function selectAloopLeaf(context: GitHubEpicContext, issueNumber: number): EpicIssueContext {
@@ -363,6 +393,53 @@ export function extractAcceptanceCriteria(body: string): string[] {
 		if (match) criteria.push(match[1]!.trim());
 	}
 	return criteria;
+}
+
+export type AloopClosureReceipt = VerificationReceipt & {
+	postVerificationHead: string;
+	postVerificationClean: boolean;
+};
+
+export async function closeAcceptedAloopIssue<T>(input: {
+	issue: EpicIssueContext;
+	epicNumber: number;
+	authenticatedLogin: string;
+	handoffId: string;
+	spool: AloopHandoffSpoolRecord;
+	receiptId: string;
+	receipt: AloopClosureReceipt;
+	currentHead: string;
+	worktreeStatus: string;
+	dryRun: boolean;
+	dryRunClosureIds: Set<string>;
+	close: (issue: number) => Promise<T>;
+}): Promise<{ applied: boolean; alreadyClosed: boolean; result?: T; commit: string }> {
+	if (input.issue.number === input.epicNumber) throw new Error("Receipt-gated closure applies only to a descendant of the active epic.");
+	if (input.spool.issue !== input.issue.number) throw new Error("Prepared handoff does not identify this issue.");
+	const spool = validateAloopHandoffSpoolRecord(input.spool, input.handoffId);
+	if (!input.issue.recentHandoffs.some((comment) => comment.body === spool.comment)) throw new Error("The exact prepared handoff is not durably published on GitHub.");
+	const [handoff] = parseAloopHandoffs([{ id: 0, author: "aloop", body: spool.comment, createdAt: "", url: "" }]);
+	if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
+	requireAloopClaim(input.issue, input.authenticatedLogin);
+	const gate = evaluateSupervisorAttempt({
+		returnedCommit: handoff.commit,
+		currentHead: input.currentHead,
+		worktreeStatus: input.worktreeStatus,
+		receipt: input.receipt,
+		acceptanceCriteria: [{ satisfied: true, evidence: "The published handoff records supervisor acceptance." }],
+	});
+	if (!gate.allowed || input.receipt.postVerificationHead !== handoff.commit || input.receipt.postVerificationClean !== true) {
+		throw new Error(`Closure blocked: ${[...gate.reasons, "the published handoff, receipt, and current clean Git commit must match"].join("; ")}.`);
+	}
+	const closureId = `${input.issue.number}:${input.handoffId}:${input.receiptId}`;
+	if (input.dryRun) {
+		input.dryRunClosureIds.add(closureId);
+		return { applied: false, alreadyClosed: input.issue.state === "closed", commit: handoff.commit };
+	}
+	if (!input.dryRunClosureIds.has(closureId)) throw new Error("Accepted issue closure must complete a dry run before apply.");
+	if (input.issue.state === "closed") return { applied: false, alreadyClosed: true, commit: handoff.commit };
+	const result = await input.close(input.issue.number);
+	return { applied: true, alreadyClosed: false, result, commit: handoff.commit };
 }
 
 export function evaluateEpicClosure(context: GitHubEpicContext, evidence: ClosureEvidence): { allowed: boolean; reasons: string[] } {
