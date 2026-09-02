@@ -324,7 +324,10 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	const branch: any[] = [custom("binding", BINDING_ENTRY_TYPE, binding)];
 	const handlers = new Map<string, (...args: any[]) => any>();
 	let idle = false; let setModelCalls = 0; let thinking = "medium"; let contextTokens = 90; let compactFocus: string | undefined; let promptCalls = 0;
-	const models = Array.from({ length: 25 }, (_, index) => ({ provider: "scoped", id: `model-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 }));
+	const models = [
+		...Array.from({ length: 25 }, (_, index) => ({ provider: "scoped", id: `model-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 })),
+		...Array.from({ length: 5 }, (_, index) => ({ provider: "small", id: `choice-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 })),
+	];
 	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
 		registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined,
 		sendUserMessage: () => { promptCalls += 1; }, sendMessage: () => { promptCalls += 1; },
@@ -342,7 +345,11 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	await send(1, "model", "scoped/model-1");
 	assert.equal(setModelCalls, 0); assert.match(String(relay.frames.at(-1)?.payload.message), /busy/);
 	idle = true; await send(2, "model");
-	assert.equal(relay.frames.at(-1)?.payload.options, undefined, "a provider with more than 20 models is not offered as a non-terminating narrowing choice");
+	assert.deepEqual(relay.frames.at(-1)?.payload.options, ["!model small"], "only providers whose full authenticated scoped catalogue is bounded are offered");
+	await send(9, "model", "small");
+	assert.equal((relay.frames.at(-1)?.payload.options as string[]).length, 5, "an offered provider uses exact-provider selection and always yields at most 20 models");
+	await send(10, "model", "model-");
+	assert.equal(relay.frames.at(-1)?.payload.options, undefined, "a textual subset cannot make an overfull provider eligible when exact selection would expand it");
 	assert.match(String(relay.frames.at(-1)?.payload.message), /narrower textual filter/);
 	await send(3, "model", "model-1");
 	assert.equal((relay.frames.at(-1)?.payload.options as string[]).length, 11, "text filtering narrows the catalogue to a bounded selection follow-up");
@@ -356,6 +363,59 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	await send(7, "new"); assert.match(String(relay.frames.at(-1)?.payload.message), /generation transition/);
 	assert.equal(promptCalls, 0, "internal controls never enter model-visible message APIs");
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("durable control execution closes compaction and stop crash windows without repeating compaction", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch: any[] = [custom("binding", BINDING_ENTRY_TYPE, binding)];
+	let sequence = 0; let compactStarts = 0; let aborts = 0; let shutdowns = 0;
+	const boot = async () => {
+		const handlers = new Map<string, (...args: any[]) => any>();
+		let leaf = branch.at(-1)?.id ?? "binding";
+		const api = {
+			on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+			registerTool: () => undefined, getCommands: () => [],
+			appendEntry: (customType: string, data: unknown) => { leaf = `control-marker-${++sequence}`; branch.push(custom(leaf, customType, data)); },
+			setModel: async () => true, setThinkingLevel: () => undefined, getThinkingLevel: () => "off", sendUserMessage: () => undefined, sendMessage: () => undefined,
+		} as unknown as ExtensionAPI;
+		createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+		const ctx: any = { hasUI: false, isIdle: () => true, abort: () => { aborts += 1; }, shutdown: () => { shutdowns += 1; },
+			model: undefined, thinkingLevel: "off", scopedModels: [], modelRegistry: { getAvailable: () => [] }, getContextUsage: () => ({ tokens: 80 }),
+			compact: () => { compactStarts += 1; /* injected crash/disconnect window: native callback never arrives */ },
+			sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf, getSessionFile: () => "/tmp/session.jsonl" } };
+		await handlers.get("session_start")!({ reason: "resume" }, ctx);
+		return { handlers, ctx };
+	};
+	const compactId = `control_${"c".repeat(32)}`;
+	const first = await boot();
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "compact-crash", conversationId, role: "relay", type: "control.deliver",
+		payload: { controlId: compactId, name: "compact", argument: "durable focus" } });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(compactStarts, 1);
+	assert.ok(branch.some((entry) => entry.customType === "pi-managed-session-control-execution" && entry.data.controlId === compactId), "execution is durable before native compaction starts");
+	await first.handlers.get("session_shutdown")!({ reason: "quit" }, first.ctx);
+
+	const recovered = await boot();
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "compact-replay", conversationId, role: "relay", type: "control.deliver",
+		payload: { controlId: compactId, name: "compact", argument: "durable focus" } });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(compactStarts, 1, "uncertain compaction is never initiated twice after restart");
+	assert.match(String(relay.frames.at(-1)?.payload.message), /interrupted.*not repeated/i);
+	await recovered.handlers.get("session_shutdown")!({ reason: "quit" }, recovered.ctx);
+
+	const stopId = `control_${"d".repeat(32)}`;
+	branch.push(custom(`control-marker-${++sequence}`, "pi-managed-session-control-execution", { controlId: stopId, name: "stop", state: "started" }));
+	branch.push(custom(`control-marker-${++sequence}`, "pi-managed-session-control-result", { controlId: stopId, status: "ok", message: "Managed process stopping; Matrix and Pi history are preserved." }));
+	const stopRecovery = await boot();
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "stop-replay", conversationId, role: "relay", type: "control.deliver",
+		payload: { controlId: stopId, name: "stop" } });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(aborts, 1); assert.equal(shutdowns, 1, "a crash after the durable stop result resumes the committed stop effect");
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "stop-duplicate", conversationId, role: "relay", type: "control.deliver",
+		payload: { controlId: stopId, name: "stop" } });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(aborts, 1); assert.equal(shutdowns, 1, "same-process acknowledgement replay does not repeat the stop effect");
+	await stopRecovery.handlers.get("session_shutdown")!({ reason: "quit" }, stopRecovery.ctx);
 });
 
 test("activity lifecycle is one redacted busy span across parallel tools, retries, compaction, and follow-ups", async (t) => {
