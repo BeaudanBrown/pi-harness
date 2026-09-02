@@ -34,7 +34,11 @@ const activity = Type.Union([
 	envelope("relay", "activity.acknowledge", strict({ activityId: id("activity"), revision: nonNegative, status: Type.Union([Type.Literal("updated"), Type.Literal("finalized")]) })),
 ]);
 const controlName = Type.Union(["help", "status", "model", "thinking", "compact", "new", "stop", "abort", "steer"].map((value) => Type.Literal(value)));
-const control = envelope("relay", "control.deliver", strict({ controlId: id("control"), name: controlName, argument: Type.Optional(text(16_000)) }));
+const control = Type.Union([
+	envelope("relay", "control.deliver", strict({ controlId: id("control"), name: controlName, argument: Type.Optional(text(4_096)) })),
+	envelope("ordinary_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })) })),
+	envelope("coordinator_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })) })),
+]);
 const poll = Type.Union([
 	envelope("ordinary_adapter", "poll.open", strict({ pollId: id("poll"), question: text(1_200), options: Type.Array(text(300), { minItems: 2, maxItems: 8 }) })),
 	envelope("relay", "poll.resolve", strict({ pollId: id("poll"), resolution: Type.Union([strict({ kind: Type.Literal("vote"), optionIndex: Type.Integer({ minimum: 0, maximum: 7 }) }), strict({ kind: Type.Literal("text"), body: text(16_000) })]) })),
@@ -81,6 +85,7 @@ export const deriveGenerationId = (c: string, ordinal: number) => derive("genera
 export const deriveActivityId = (g: string, span: string) => derive("activity", [g, span], "activity");
 export const deriveActivityTransactionId = (c: string, activityId: string, revision: number) => `pi_${digestParts("activity-transaction", [c, activityId, revision]).slice(0, 48)}`;
 export const derivePollId = (g: string, key: string) => derive("poll", [g, key], "poll");
+export const deriveControlId = (c: string, eventId: string) => derive("control", [c, eventId], "control");
 export const deriveBlobId = (c: string, sha256: string) => derive("blob", [c, sha256], "blob");
 export const deriveUploadId = (c: string, key: string) => derive("upload", [c, key], "upload");
 export const deriveTransitionId = (c: string, from: number, to: number) => derive("transition", [c, from, to], "transition");

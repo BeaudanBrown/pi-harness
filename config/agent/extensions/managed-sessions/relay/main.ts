@@ -5,6 +5,7 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
+	deriveMatrixTransactionId,
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
@@ -148,6 +149,16 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				});
 			},
 			onEnvelope: async (envelope, attachment) => {
+				if (envelope.type === "control.result") {
+					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[] };
+					const manifest = registry.manifestByConversationId(attachment.conversationId);
+					if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation is unavailable");
+					if (payload.options?.length) {
+						await matrix.startPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, payload.controlId, 0), payload.message,
+							payload.options.map((option, index) => ({ id: `pi-control-${index}`, text: option })), undefined, "stable");
+					} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, payload.message);
+					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
+				}
 				if (envelope.type === "input.acknowledge") {
 					const payload = envelope.payload as { deliveryId: string; status: string; piEntryId?: string; completionKind?: string };
 					const input = registry.pendingInputs(attachment.conversationId).find((candidate) => candidate.deliveryId === payload.deliveryId);

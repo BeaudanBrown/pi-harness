@@ -118,6 +118,28 @@ export class ManagedMatrixClient {
 		this.assertManagedRoom(roomId); const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
 		return typeof response === "object" && response !== null && !Array.isArray(response) && typeof (response as JsonObject).sender === "string" ? String((response as JsonObject).sender) : undefined;
 	}
+	async controlPollAnswer(roomId: string, eventId: string, answerId: string, signal?: AbortSignal): Promise<string | undefined> {
+		this.assertManagedRoom(roomId);
+		const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
+		if (typeof response !== "object" || response === null || Array.isArray(response)) return undefined;
+		const event = response as JsonObject;
+		if (event.sender !== this.botUserId || event.type !== "m.poll.start" || typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) return undefined;
+		const poll = (event.content as JsonObject)["m.poll"];
+		if (typeof poll !== "object" || poll === null || Array.isArray(poll)) return undefined;
+		const value = poll as JsonObject;
+		if (value.kind !== "m.disclosed" || value.max_selections !== 1 || !Array.isArray(value.answers) || value.answers.length < 1 || value.answers.length > MAX_POLL_ANSWERS) return undefined;
+		let selected: string | undefined; const ids = new Set<string>();
+		for (let index = 0; index < value.answers.length; index += 1) {
+			const candidate = value.answers[index];
+			if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return undefined;
+			const answer = candidate as JsonObject; const id = answer["m.id"]; const text = answer["m.text"];
+			if (id !== `pi-control-${index}` || ids.has(id) || !Array.isArray(text) || text.length !== 1 || typeof text[0] !== "object" || text[0] === null || Array.isArray(text[0])) return undefined;
+			ids.add(id); const body = (text[0] as JsonObject).body;
+			if (typeof body !== "string" || body.length < 1 || body.length > 255) return undefined;
+			if (id === answerId) selected = body;
+		}
+		return selected;
+	}
 	async createPrivateSpace(name: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, true, signal); }
 	async createPrivateRoom(name: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, false, signal); }
 	private async createRoom(name: string, space: boolean, signal?: AbortSignal): Promise<string> {

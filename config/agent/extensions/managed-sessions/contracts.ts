@@ -167,6 +167,12 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		tools: Type.Optional(strictObject({ total: Type.Integer({ minimum: 0 }), errors: Type.Integer({ minimum: 0 }), counts: Type.Array(strictObject({ name: boundedString(128), count: Type.Integer({ minimum: 1 }) }), { maxItems: 64 }) })),
 		compactions: Type.Optional(Type.Integer({ minimum: 0 })),
 	}),
+	clientEnvelope(adapterRole, "control.result", {
+		controlId: stableId("control"),
+		status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]),
+		message: boundedString(4_096),
+		options: Type.Optional(Type.Array(boundedString(255), { minItems: 1, maxItems: 20 })),
+	}),
 	clientEnvelope(adapterRole, "checkpoint.offer", {
 		checkpointId: identifier,
 		originDeliveryId: DeliveryIdSchema,
@@ -188,6 +194,14 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	relayEnvelope("attachment.accepted", {
 		attachmentId: identifier,
 		state: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
+	}),
+	relayEnvelope("control.deliver", {
+		controlId: stableId("control"),
+		name: Type.Union([
+			Type.Literal("help"), Type.Literal("status"), Type.Literal("model"), Type.Literal("thinking"),
+			Type.Literal("compact"), Type.Literal("new"), Type.Literal("stop"),
+		]),
+		argument: Type.Optional(boundedString(4_096)),
 	}),
 	relayEnvelope("input.deliver", {
 		deliveryId: DeliveryIdSchema,
@@ -225,6 +239,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			conversationState: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 		}),
 		strictObject({ operation: Type.Literal("self.delete"), status: Type.Literal("ok") }),
+		strictObject({ operation: Type.Literal("control.result"), status: Type.Literal("ok") }),
 	])),
 	relayEnvelopeWithPayload("lifecycle.result", Type.Union([
 		strictObject({

@@ -10,7 +10,7 @@ import {
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { renderRemoteCheckpoint } from "../config/agent/extensions/managed-sessions/checkpoint.js";
 import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
-import { CoordinatorRouter, authorizedRoomEvents, operatorTextEvents } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
+import { CoordinatorRouter, authorizedRoomEvents, operatorTextEvents, parseTypedRemoteControl } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
@@ -59,6 +59,17 @@ async function readMany(socket: Socket, count: number): Promise<ManagedSessionEn
 		socket.once("error", reject);
 	});
 }
+
+test("typed control parsing is strict, bounded, and isolates malformed commands from prompts", () => {
+	assert.deepEqual(parseTypedRemoteControl(" !model scoped/model "), { name: "model", argument: "scoped/model" });
+	assert.deepEqual(parseTypedRemoteControl("!compact focus on API state"), { name: "compact", argument: "focus on API state" });
+	assert.deepEqual(parseTypedRemoteControl("!unknown secret prompt"), { name: "help" });
+	assert.deepEqual(parseTypedRemoteControl("!status extra"), { name: "help" });
+	assert.deepEqual(parseTypedRemoteControl(`!model ${"x".repeat(4_097)}`), { name: "help" });
+	assert.equal(parseTypedRemoteControl("ordinary task"), undefined);
+	assert.equal(parseTypedRemoteControl("!abort"), undefined);
+	assert.equal(parseTypedRemoteControl("!steer redirect"), undefined);
+});
 
 test("fresh relay bootstraps a cursor without replaying retained room commands", async () => {
 	const { registry, manifest } = await fixture(false); let syncCount = 0; let launches = 0;

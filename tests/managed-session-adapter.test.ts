@@ -121,6 +121,8 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active" } }));
 		} else if (envelope.type === "input.acknowledge") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
+		} else if (envelope.type === "control.result") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "control.result", status: "ok" } }));
 		} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
 		} else if (envelope.type === "checkpoint.offer") {
@@ -315,6 +317,41 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 		]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));
 	}
+});
+
+test("typed runtime controls reject busy mutation and use authenticated scoped native state without prompts", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch: any[] = [custom("binding", BINDING_ENTRY_TYPE, binding)];
+	const handlers = new Map<string, (...args: any[]) => any>();
+	let idle = false; let setModelCalls = 0; let thinking = "medium"; let contextTokens = 90; let compactFocus: string | undefined; let promptCalls = 0;
+	const models = Array.from({ length: 25 }, (_, index) => ({ provider: "scoped", id: `model-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 }));
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined,
+		sendUserMessage: () => { promptCalls += 1; }, sendMessage: () => { promptCalls += 1; },
+		setModel: async () => { setModelCalls += 1; return true; }, setThinkingLevel: (level: string) => { thinking = level; }, getThinkingLevel: () => thinking,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => idle, abort: () => undefined, shutdown: () => undefined,
+		model: models[0], thinkingLevel: thinking, scopedModels: models.map((model) => ({ model })),
+		modelRegistry: { getAvailable: () => [...models, { provider: "outside", id: "forbidden", reasoning: false }] },
+		getContextUsage: () => ({ tokens: contextTokens }), compact: ({ customInstructions, onComplete }: any) => { compactFocus = customInstructions; contextTokens = 40; onComplete({ estimatedTokensAfter: 40 }); },
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const send = async (id: number, name: string, argument?: string) => { relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+		messageId: `control-${id}`, conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${String(id).padStart(32, "a")}`, name, ...(argument ? { argument } : {}) } } as ManagedSessionEnvelope); await new Promise((resolve) => setTimeout(resolve, 30)); };
+	await send(1, "model", "scoped/model-1");
+	assert.equal(setModelCalls, 0); assert.match(String(relay.frames.at(-1)?.payload.message), /busy/);
+	idle = true; await send(2, "model");
+	assert.deepEqual(relay.frames.at(-1)?.payload.options, ["!model scoped"], "large scoped catalogues narrow by provider without refresh or leakage");
+	await send(3, "model", "outside/forbidden"); assert.equal(setModelCalls, 0);
+	await send(4, "model", "scoped/model-1"); assert.equal(setModelCalls, 1);
+	await send(4, "model", "scoped/model-1"); assert.equal(setModelCalls, 1, "replayed control IDs return the durable result without repeating mutation");
+	await send(5, "thinking", "off"); assert.equal(thinking, "off");
+	await send(6, "compact", "focus on controls"); assert.equal(compactFocus, "focus on controls");
+	assert.match(String(relay.frames.at(-1)?.payload.message), /90 -> 40/);
+	await send(7, "new"); assert.match(String(relay.frames.at(-1)?.payload.message), /generation transition/);
+	assert.equal(promptCalls, 0, "internal controls never enter model-visible message APIs");
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
 test("activity lifecycle is one redacted busy span across parallel tools, retries, compaction, and follow-ups", async (t) => {

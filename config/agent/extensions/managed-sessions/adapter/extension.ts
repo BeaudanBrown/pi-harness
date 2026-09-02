@@ -36,6 +36,8 @@ import {
 	transcriptOfferWithinFrame,
 } from "./state.js";
 
+const CONTROL_RESULT_ENTRY_TYPE = "pi-managed-session-control-result";
+type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[] };
 type ActivityOutcome = "completed" | "checkpoint" | "cancelled" | "interrupted" | "failed";
 interface BusyActivity {
 	activityId: string; revision: number; startedAt: number; startContext?: number; inputTokens: number; outputTokens: number;
@@ -126,6 +128,23 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const persistedRecoveryPending = new Set<string>();
 		const expandedRecoveryPending = new Set<string>();
 		let activity: BusyActivity | undefined;
+		const controlResults = new Map<string, ControlResult>();
+		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
+		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[]) => {
+			if (!client?.connected) return;
+			const result: ControlResult = { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}) };
+			if (!controlResults.has(controlId) && currentContext) {
+				appendMarker(pi, currentContext, CONTROL_RESULT_ENTRY_TYPE, result);
+				controlResults.set(controlId, result);
+			}
+			await client.controlResult(controlId, result.status, result.message, result.options);
+		};
+		const availableModels = (ctx: ExtensionContext) => {
+			const scoped = ctx.scopedModels.length ? new Set(ctx.scopedModels.map(({ model }) => `${model.provider}/${model.id}`)) : undefined;
+			return ctx.modelRegistry.getAvailable()
+				.filter((model) => !scoped || scoped.has(`${model.provider}/${model.id}`))
+				.sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id));
+		};
 		const safeToolName = (value: string): string => /^[A-Za-z0-9_.:-]{1,128}$/.test(value) ? value : "tool";
 		const boundedToolName = (span: BusyActivity, value: string): string => { const safe = safeToolName(value); return span.toolCounts.has(safe) || span.toolCounts.size < 63 ? safe : "other"; };
 		const activityTools = (span: BusyActivity) => [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({
@@ -449,9 +468,72 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 		}
 
+		async function handleControl(envelope: ManagedSessionEnvelope, ctx: ExtensionContext): Promise<void> {
+			const payload = envelope.payload as { controlId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };
+			const previous = controlResults.get(payload.controlId);
+			if (previous) return client?.controlResult(previous.controlId, previous.status, previous.message, previous.options);
+			if (["model", "thinking", "compact", "new"].includes(payload.name) && !ctx.isIdle()) {
+				return controlReply(payload.controlId, "rejected", `Cannot change ${payload.name} while Pi is busy; the active run was not altered.`);
+			}
+			if (payload.name === "help") return controlReply(payload.controlId, "ok", CONTROL_HELP);
+			if (payload.name === "status") {
+				const usage = ctx.getContextUsage();
+				return controlReply(payload.controlId, "ok", [
+					`State: ${ctx.isIdle() ? "idle" : "busy"}`,
+					`Model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unavailable"}`,
+					`Thinking: ${ctx.thinkingLevel ?? "off"}`,
+					...(usage && ctx.model?.contextWindow ? [`Context: ${usage.tokens}/${ctx.model.contextWindow} tokens`] : []),
+				].join("\n"));
+			}
+			if (payload.name === "model") {
+				const models = availableModels(ctx);
+				if (!models.length) return controlReply(payload.controlId, "rejected", "No authenticated models are permitted by this session's model scope.");
+				const argument = payload.argument?.trim();
+				if (argument?.includes("/")) {
+					const selected = models.find((model) => `${model.provider}/${model.id}` === argument);
+					if (!selected) return controlReply(payload.controlId, "rejected", "That exact model is not authenticated or is outside this session's scope.");
+					if (!await pi.setModel(selected)) return controlReply(payload.controlId, "rejected", "Pi could not authenticate the selected model.");
+					return controlReply(payload.controlId, "ok", `Model changed to ${argument}.`);
+				}
+				const filtered = argument ? models.filter((model) => model.provider === argument || `${model.provider}/${model.id}`.toLowerCase().includes(argument.toLowerCase())) : models;
+				if (!filtered.length) return controlReply(payload.controlId, "rejected", "No authenticated scoped models matched that provider/filter.");
+				if (filtered.length > 20) {
+					const providers = [...new Set(filtered.map((model) => model.provider))];
+					const options = providers.length <= 20 ? providers.map((provider) => `!model ${provider}`) : [];
+					return controlReply(payload.controlId, options.length ? "ok" : "rejected", options.length ? "More than 20 models matched. Choose a provider to narrow safely." : "More than 20 models matched across too many providers; provide a narrower textual filter.", options.length ? options : undefined);
+				}
+				return controlReply(payload.controlId, "ok", "Choose an authenticated, session-scoped model.", filtered.map((model) => `!model ${model.provider}/${model.id}`));
+			}
+			if (payload.name === "thinking") {
+				const candidates = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
+				const levelMap = ctx.model?.thinkingLevelMap as Partial<Record<typeof candidates[number], unknown>> | undefined;
+				const levels = ctx.model?.reasoning ? candidates.filter((level) => levelMap?.[level] !== null &&
+					(level !== "xhigh" && level !== "max" || levelMap?.[level] !== undefined)) : ["off"];
+				const argument = payload.argument?.trim();
+				if (!argument) return controlReply(payload.controlId, "ok", "Choose a thinking level supported by the active model.", levels.map((level) => `!thinking ${level}`));
+				if (!levels.includes(argument as typeof levels[number])) return controlReply(payload.controlId, "rejected", `Unsupported thinking level. Available: ${levels.join(", ")}.`);
+				pi.setThinkingLevel(argument as Parameters<typeof pi.setThinkingLevel>[0]);
+				return controlReply(payload.controlId, "ok", `Thinking changed to ${pi.getThinkingLevel()}.`);
+			}
+			if (payload.name === "compact") {
+				const before = ctx.getContextUsage()?.tokens;
+				ctx.compact({ customInstructions: payload.argument, onComplete: (result) => {
+					const after = ctx.getContextUsage()?.tokens ?? result.estimatedTokensAfter;
+					void controlReply(payload.controlId, "ok", `Compaction completed. Context: ${before ?? "unavailable"} -> ${after ?? "unavailable"} tokens.`);
+				}, onError: (error) => { void controlReply(payload.controlId, "rejected", `Compaction failed: ${error.message}`); } });
+				return;
+			}
+			if (payload.name === "new") return controlReply(payload.controlId, "rejected", "Context reset requires the generation transition implemented by managed-session generation control; no session was changed.");
+			if (payload.name === "stop") {
+				await controlReply(payload.controlId, "ok", "Managed process stopping; Matrix and Pi history are preserved.");
+				ctx.abort(); ctx.shutdown();
+			}
+		}
+
 		async function handleEnvelope(envelope: ManagedSessionEnvelope): Promise<void> {
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
+			if (envelope.type === "control.deliver") return handleControl(envelope, ctx);
 			if (envelope.type === "input.deliver") return handleDelivery(envelope, ctx);
 			if (envelope.type === "termination.request") {
 				const reason = String(envelope.payload.reason);
@@ -556,6 +638,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					(event.reason === "startup" ? bootstrapBinding(pi, ctx, role, config) : undefined);
 			}
 			deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
+			controlResults.clear();
+			for (const entry of ctx.sessionManager.getBranch()) {
+				if (entry.type !== "custom" || entry.customType !== CONTROL_RESULT_ENTRY_TYPE || typeof entry.data !== "object" || entry.data === null) continue;
+				const result = entry.data as ControlResult;
+				if (/^control_[a-f0-9]{32}$/.test(result.controlId) && (result.status === "ok" || result.status === "rejected") && typeof result.message === "string") controlResults.set(result.controlId, result);
+			}
 			projections = restoreProjections(ctx.sessionManager.getBranch());
 			checkpoints = restoreCheckpoints(ctx.sessionManager.getBranch());
 			activeDeliveries.clear();

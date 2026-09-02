@@ -104,6 +104,18 @@ test("Matrix rich primitives emit exact MSC3381 wire dialects and bounded edit f
 	await assert.rejects(() => client.startPoll("!rich:example.com", "pi_bad", "q", [], undefined), /out of bounds/);
 });
 
+test("control poll resolution revalidates durable bot-owned poll content after restart", async () => {
+	let event: unknown = { sender: config.botUserId, type: "m.poll.start", content: { "m.poll": { kind: "m.disclosed", max_selections: 1,
+		answers: [{ "m.id": "pi-control-0", "m.text": [{ body: "!model scoped/model" }] }] } } };
+	const client = new ManagedMatrixClient(config, async () => Response.json(event), ["!control:example.com"]);
+	assert.equal(await client.controlPollAnswer("!control:example.com", "$poll", "pi-control-0"), "!model scoped/model");
+	event = { ...(event as object), sender: "@other:example.com" };
+	assert.equal(await client.controlPollAnswer("!control:example.com", "$poll", "pi-control-0"), undefined);
+	event = { sender: config.botUserId, type: "m.poll.start", content: { "m.poll": { kind: "m.disclosed", max_selections: 1,
+		answers: [{ "m.id": "checkpoint-answer", "m.text": [{ body: "!model forbidden" }] }] } } };
+	assert.equal(await client.controlPollAnswer("!control:example.com", "$poll", "checkpoint-answer"), undefined, "non-control polls cannot be reinterpreted as controls");
+});
+
 test("Matrix host Space operations are fixed, managed-room scoped, and accessibility checked", async () => {
 	const calls: Array<{ method?: string; path: string; body?: string }> = [];
 	let creates = 0;

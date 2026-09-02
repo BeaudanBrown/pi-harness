@@ -227,9 +227,7 @@ Stop terminates only the exact managed window, while confirmed bridge deletion
 leaves the Pi session, process/window, workspace, and project files intact.
 
 Managed room controls retain Pi's established control semantics while using
-host-owned room routing: ordinary text is an idle prompt or busy follow-up, `!steer <text>` steers an active run, `!abort`
-durably cancels it, and valid replies to bot events use their unquoted fallback
-text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
+host-owned room routing: ordinary text is an idle prompt or busy follow-up; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new` fails safely until generation transition support is available. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
 queued during wake cancels that wake input. The `remote_checkpoint` tool emits
 one durable structured question, blocker, or issue-completion boundary, then
 hard-aborts the run until a new operator reply. Accepted input, persisted

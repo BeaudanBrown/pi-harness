@@ -3,9 +3,11 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MAX_INPUT_TEXT_LENGTH,
 	deriveDeliveryId,
+	deriveMatrixTransactionId,
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 } from "../contracts.js";
+import { deriveControlId } from "../v2-contracts.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry } from "./registry.js";
@@ -31,6 +33,21 @@ function stripReplyFallback(body: string): string | undefined {
 	const quoted = body.slice(0, boundary).split("\n");
 	if (!/^> <@[^>\n]+> /.test(quoted[0] ?? "") || quoted.some((line) => !line.startsWith("> "))) return undefined;
 	return body.slice(boundary + 2);
+}
+
+export type TypedRemoteControl = { name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };
+const CONTROL_NAMES = new Set(["help", "status", "model", "thinking", "compact", "new", "stop"]);
+export function parseTypedRemoteControl(body: string): TypedRemoteControl | undefined {
+	const text = body.trim();
+	if (!text.startsWith("!")) return undefined;
+	if (text === "!abort" || text.startsWith("!steer ")) return undefined;
+	const match = text.match(/^!([^\s]+)(?:\s+([\s\S]*))?$/);
+	if (!match || !CONTROL_NAMES.has(match[1]!)) return { name: "help" };
+	const name = match[1] as TypedRemoteControl["name"];
+	const argument = match[2]?.trim();
+	if (["help", "status", "new", "stop"].includes(name) && argument) return { name: "help" };
+	if (argument && (argument.length > 4_096 || /[\u0000-\u001f\u007f]/.test(argument))) return { name: "help" };
+	return { name, ...(argument ? { argument } : {}) };
 }
 
 function inputKind(body: string): { kind: "prompt" | "steer" | "abort"; body?: string } | undefined {
@@ -186,10 +203,12 @@ export class CoordinatorRouter {
 				const established = cursor.status === "established";
 				const sync = await this.matrix.sync(cursor.status === "established" ? cursor.since : undefined, signal);
 				for (const manifest of this.registry.listManifests()) {
-					const events = operatorTextEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
+					const events = authorizedRoomEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
+					const texts = operatorTextEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
 					if (established) {
-						if (events.length > 0 && await this.matrix.memberJoined(manifest.roomId, this.matrix.operatorUserId, signal)) {
-							for (const event of events) await this.accept(manifest, event);
+						if ((events.length > 0 || texts.length > 0) && await this.matrix.memberJoined(manifest.roomId, this.matrix.operatorUserId, signal)) {
+							for (const event of texts) await this.accept(manifest, event);
+							for (const event of events) if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
 						}
 					}
 					await this.ensureWake(manifest);
@@ -209,6 +228,43 @@ export class CoordinatorRouter {
 		}
 	}
 
+	private async acceptPoll(manifest: ConversationManifest, event: Extract<AuthorizedMatrixRoomEvent, { kind: "poll_response" }>, signal: AbortSignal): Promise<void> {
+		const selected = await this.matrix.controlPollAnswer(manifest.roomId, event.pollEventId, event.answerId, signal).catch(() => undefined);
+		if (!selected) return;
+		const control = parseTypedRemoteControl(selected);
+		if (!control || control.name === "help") return;
+		await this.matrix.endPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, event.pollEventId, 0), event.pollEventId, "Selection accepted", signal, "stable");
+		await this.dispatchControl(manifest, event.eventId, control);
+	}
+
+	private async dispatchControl(manifest: ConversationManifest, eventId: string, control: TypedRemoteControl): Promise<void> {
+		const state = this.registry.conversationState(manifest.conversationId);
+		if (state === "dormant" && (control.name === "help" || control.name === "status" || control.name === "stop")) {
+			const message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>."
+				: control.name === "status" ? "Managed conversation is dormant." : "Managed conversation is already dormant.";
+			await this.projectNotice(eventId, manifest, message); return;
+		}
+		const envelope: ManagedSessionEnvelope = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-control-${randomUUID()}`,
+			conversationId: manifest.conversationId, role: "relay", type: "control.deliver",
+			payload: { controlId: deriveControlId(manifest.conversationId, eventId), name: control.name, ...(control.argument ? { argument: control.argument } : {}) } };
+		if (this.server.sendToConversation(envelope)) return;
+		await this.wakeForControl(manifest);
+		if (!this.server.sendToConversation(envelope)) await this.projectNotice(eventId, manifest, "Managed control could not attach; no model turn was started.");
+	}
+
+	private async wakeForControl(manifest: ConversationManifest): Promise<void> {
+		if (!this.launching.has(manifest.conversationId)) {
+			const work = (async () => {
+				await this.registry.beginLaunch(manifest.conversationId);
+				try { await this.launch(manifest); }
+				catch (error) { await this.registry.failLaunch(manifest.conversationId); throw error; }
+				for (let attempt = 0; attempt < 100 && this.registry.conversationState(manifest.conversationId) !== "active"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+			})().finally(() => this.launching.delete(manifest.conversationId));
+			this.launching.set(manifest.conversationId, work);
+		}
+		await this.launching.get(manifest.conversationId)?.catch(() => undefined);
+	}
+
 	private async accept(manifest: ConversationManifest, event: MatrixTextEvent): Promise<void> {
 		let body = event.body;
 		if (event.replyToEventId) {
@@ -219,7 +275,9 @@ export class CoordinatorRouter {
 			body = stripped;
 		}
 		const input = inputKind(body);
-		if (!input) return;
+		const control = parseTypedRemoteControl(body);
+		if (control) return this.dispatchControl(manifest, event.eventId, control);
+		if (!input || body.trim().startsWith("!" ) && input.kind === "prompt") return this.dispatchControl(manifest, event.eventId, { name: "help" });
 		const state = this.registry.conversationState(manifest.conversationId);
 		if (state === "dormant" && (input.kind === "steer" || input.kind === "abort")) {
 			await this.projectNotice(event.eventId, manifest, input.kind === "steer"
