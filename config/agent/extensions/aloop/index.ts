@@ -15,7 +15,7 @@ import {
 	evaluateRetryBoundary,
 	findOutstandingAttempts,
 	formatAloopHandoff,
-	handoffCommentsForIssue,
+	nextIssueRetryNumber,
 	parseAloopHandoffs,
 	parseAloopRunRequest,
 	publishPreparedAloopHandoff,
@@ -208,11 +208,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
 	}
 
-	function activate(epic: number, ctx: ExtensionContext, recovered: PendingHandoff[], maxMinutes: number, maxAttempts: number): AloopRunBudget {
+	function activate(epic: number, ctx: ExtensionContext, recovered: PendingHandoff[], maxMinutes: number, maxWorkerLaunches: number): AloopRunBudget {
 		clearDeadlineTimer();
 		activeEpic = epic;
 		pendingHandoffs = recovered;
-		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxAttempts, attemptsStarted: 0, settled: false };
+		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
 		deadlineTimer = setTimeout(() => {
 			if (!runBudget || runBudget.settled) return;
 			ctx.abort();
@@ -223,7 +223,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		}, maxMinutes * 60_000);
 		deadlineTimer.unref?.();
 		pi.setActiveTools([...new Set([...pi.getActiveTools(), ...TOOL_NAMES])]);
-		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic} · ${maxMinutes}m · ${maxAttempts} attempts`);
+		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic} · ${maxMinutes}m · ${maxWorkerLaunches} worker launches`);
 		return runBudget;
 	}
 
@@ -285,7 +285,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				ctx.ui.notify("/aloop requires a clean worktree before supervision starts.", "error");
 				return;
 			}
-			const budget = activate(epic, ctx, [], request.maxMinutes, request.maxAttempts);
+			const budget = activate(epic, ctx, [], request.maxMinutes, request.maxWorkerLaunches);
 			let context;
 			try {
 				context = await dependencies.retrieveEpicContext(ctx.cwd, epic, undefined, {
@@ -303,6 +303,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				deactivate();
 				ctx.ui.notify(`Epic #${epic} is not open.`, "warning");
 				return;
+			}
+			if (ctx.hasUI) {
+				const descendants = context.issues.filter((issue) => issue.number !== context.epic.number);
+				const closed = descendants.filter((issue) => issue.state === "closed").length;
+				ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic} · children ${closed}/${descendants.length} · launches 0/${budget.maxWorkerLaunches}`);
 			}
 			const startupTimeout = () => {
 				const assessment = assessAloopRunBudget(budget, Date.now());
@@ -383,14 +388,19 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const epic = context.issues.find((candidate) => candidate.number === context.epic.number)!;
 				const launchBudget = assessAloopRunBudget(runBudget, Date.now());
 				if (!launchBudget.allowed) throw new Error(launchBudget.reason);
-				runBudget.attemptsStarted += 1;
-				const attemptNumber = runBudget.attemptsStarted;
+				runBudget.workerLaunchesStarted += 1;
+				const workerLaunchNumber = runBudget.workerLaunchesStarted;
+				const retryNumber = nextIssueRetryNumber(handoffs, params.attempt_type);
+				const descendants = context.issues.filter((candidate) => candidate.number !== context.epic.number);
+				const closedDescendants = descendants.filter((candidate) => candidate.state === "closed").length;
 				const startedAt = Date.now();
 				const workerTimeoutMs = Math.min(params.timeout_ms ?? 30 * 60_000, launchBudget.remainingMs);
-				const finalAttemptNotice = attemptNumber === runBudget.maxAttempts ? " This is the final permitted attempt for this invocation." : "";
+				const finalLaunchNotice = workerLaunchNumber === runBudget.maxWorkerLaunches ? " This is the final permitted worker launch for this invocation." : "";
+				const issueRunLabel = params.attempt_type === "remediation" ? `remediation retry ${retryNumber}` : "initial implementation";
+				if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic.number} · children ${closedDescendants}/${descendants.length} · launches ${workerLaunchNumber}/${runBudget.maxWorkerLaunches} · ${issueRunLabel}`);
 				const progress = () => onUpdate?.({
-					content: [{ type: "text", text: `Aloop attempt ${attemptNumber}/${runBudget!.maxAttempts} for #${issue.number} is running (${Math.floor((Date.now() - startedAt) / 1_000)}s elapsed; ${Math.ceil((runBudget!.deadlineMs - Date.now()) / 60_000)}m remaining; hard timeout ${Math.ceil(workerTimeoutMs / 60_000)}m).${finalAttemptNotice}` }],
-					details: { issue: issue.number, attemptNumber, maxAttempts: runBudget!.maxAttempts, finalPermittedAttempt: attemptNumber === runBudget!.maxAttempts, elapsedMs: Date.now() - startedAt, remainingMs: Math.max(0, runBudget!.deadlineMs - Date.now()), timeoutMs: workerTimeoutMs },
+					content: [{ type: "text", text: `Aloop worker launch ${workerLaunchNumber}/${runBudget!.maxWorkerLaunches} for #${issue.number} (${issueRunLabel}); epic children ${closedDescendants}/${descendants.length} closed (${Math.floor((Date.now() - startedAt) / 1_000)}s elapsed; ${Math.ceil((runBudget!.deadlineMs - Date.now()) / 60_000)}m remaining; hard timeout ${Math.ceil(workerTimeoutMs / 60_000)}m).${finalLaunchNotice}` }],
+					details: { issue: issue.number, attemptType: params.attempt_type, retryNumber, workerLaunchNumber, maxWorkerLaunches: runBudget!.maxWorkerLaunches, finalPermittedWorkerLaunch: workerLaunchNumber === runBudget!.maxWorkerLaunches, closedDescendants, totalDescendants: descendants.length, elapsedMs: Date.now() - startedAt, remainingMs: Math.max(0, runBudget!.deadlineMs - Date.now()), timeoutMs: workerTimeoutMs },
 				});
 				progress();
 				const heartbeat = setInterval(progress, 15_000);
@@ -400,9 +410,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					outcome = await dependencies.runWorker({
 						cwd: ctx.cwd,
 						attemptType: params.attempt_type,
+						supervisorApproach: params.approach,
 						epic: { number: epic.number, title: epic.title, body: epic.body },
 						issue: { number: issue.number, title: issue.title, body: issue.body },
-						priorHandoffs: handoffCommentsForIssue(issue),
+						priorHandoffs: handoffs,
 						modelRef: activeModelRef(ctx),
 						timeoutMs: workerTimeoutMs,
 						deadlineMs: runBudget.deadlineMs,

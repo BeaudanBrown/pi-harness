@@ -4,7 +4,6 @@ import { lstat, mkdir, open } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import * as path from "node:path";
-import type { IssueHandoff } from "./github-context.js";
 
 const ALOOP_ROOT = ".pi/tmp/aloop";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -17,12 +16,25 @@ const POSTFLIGHT_RESERVE_MS = 5_000;
 
 export type AloopAttemptType = "implementation" | "remediation";
 
+export type AloopWorkerHandoffContext = {
+	attemptType: AloopAttemptType;
+	commit: string | null;
+	successful: boolean;
+	approach: string;
+	verification: string[];
+	acceptanceCriteriaAssessment: string[];
+	discoveredWork: string[];
+	nextAction: string;
+	timestamp: string;
+};
+
 export type AloopWorkerInput = {
 	cwd: string;
 	attemptType: AloopAttemptType;
+	supervisorApproach: string;
 	epic: { number: number; title: string; body: string };
 	issue: { number: number; title: string; body: string };
-	priorHandoffs?: IssueHandoff[];
+	priorHandoffs?: AloopWorkerHandoffContext[];
 	launcher?: string[];
 	modelRef?: string;
 	timeoutMs?: number;
@@ -115,12 +127,31 @@ export async function prepareAloopArtifactDirectory(cwd: string, attemptId: stri
 	return directory;
 }
 
+function evidenceList(values: string[]): string {
+	return values.length > 0
+		? values.slice(0, 8).map((value) => `  - ${boundedText(value.trim(), 600)}`).join("\n")
+		: "  - None";
+}
+
+function formatWorkerHandoff(handoff: AloopWorkerHandoffContext, index: number): string {
+	return `### Prior attempt ${index + 1} (${handoff.attemptType}, ${handoff.successful ? "accepted" : "not accepted"})
+- Commit: ${handoff.commit ?? "none"}
+- Timestamp: ${handoff.timestamp}
+- Approach: ${boundedText(handoff.approach, 1_000)}
+- Verification:
+${evidenceList(handoff.verification)}
+- Supervisor acceptance assessment:
+${evidenceList(handoff.acceptanceCriteriaAssessment)}
+- Discovered work:
+${evidenceList(handoff.discoveredWork)}
+- Required next action: ${boundedText(handoff.nextAction, 1_200)}`;
+}
+
 export function buildAloopWorkerPrompt(input: Omit<AloopWorkerInput, "cwd" | "launcher" | "modelRef" | "timeoutMs" | "deadlineMs" | "signal" | "env">): string {
 	positiveIssueNumber(input.epic.number, "epic.number");
 	positiveIssueNumber(input.issue.number, "issue.number");
-	const handoffs = (input.priorHandoffs ?? []).slice(-5).map((handoff) =>
-		`- ${handoff.createdAt || "unknown time"} by ${handoff.author ?? "unknown"}: ${boundedText(handoff.body, 2_000)}`,
-	);
+	if (!input.supervisorApproach.trim()) throw new Error("Aloop workers require an explicit supervisor approach.");
+	const handoffs = (input.priorHandoffs ?? []).slice(-5).map(formatWorkerHandoff);
 	return `You are a fresh implementation worker for one GitHub issue. Work only in the current repository and complete one ${input.attemptType} attempt.
 
 Safety and ownership rules:
@@ -137,8 +168,15 @@ ${boundedText(input.epic.body, 4_000)}
 Selected issue #${input.issue.number}: ${input.issue.title}
 ${boundedText(input.issue.body, 12_000)}
 
-Recent supervisor handoffs:
-${handoffs.length > 0 ? handoffs.join("\n") : "- None"}
+## Current supervisor direction
+
+This is the authoritative approach for this attempt. Follow it directly and use prior attempts only as evidence explaining why this direction is required.
+
+${boundedText(input.supervisorApproach.trim(), 4_000)}
+
+## Structured prior attempt context
+
+${handoffs.length > 0 ? handoffs.join("\n\n") : "No prior attempts."}
 
 Your final assistant message must contain only one JSON object with this exact shape:
 {
@@ -170,7 +208,7 @@ export function buildAloopWorkerCommand(options: {
 		"--approve",
 		"--tools", "read,bash,edit,write,grep,find,ls",
 		...(options.modelRef ? ["--model", options.modelRef] : []),
-		"--thinking", "low",
+		"--thinking", "medium",
 		options.prompt,
 	];
 }

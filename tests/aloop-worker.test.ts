@@ -33,9 +33,20 @@ async function createRepository(): Promise<string> {
 
 const workerInput = {
 	attemptType: "implementation" as const,
+	supervisorApproach: "Use the exact protocol fixture and repair only the failing seam.",
 	epic: { number: 48, title: "Epic", body: "Coordinate implementation." },
 	issue: { number: 50, title: "Worker execution", body: "Implement the isolated worker." },
-	priorHandoffs: [{ id: 1, author: "supervisor", body: "Prior evidence", createdAt: "2026-09-01", url: null }],
+	priorHandoffs: [{
+		attemptType: "implementation" as const,
+		commit: "abcdef1",
+		successful: false,
+		approach: "Initial implementation",
+		verification: ["Unit tests passed but protocol review failed."],
+		acceptanceCriteriaAssessment: ["Stable payload was malformed."],
+		discoveredWork: ["Use the normative stable fixture."],
+		nextAction: "Replace the hybrid payload with the exact fixture.",
+		timestamp: "2026-09-01T00:00:00Z",
+	}],
 };
 
 test("worker prompt and command are compact, non-interactive, and deny supervisor-owned mutations", () => {
@@ -47,10 +58,16 @@ test("worker prompt and command are compact, non-interactive, and deny superviso
 	assert.equal(command.includes("--no-session"), true);
 	assert.equal(command.includes("--no-extensions"), true);
 	assert.equal(command.includes("--approve"), true);
+	assert.deepEqual(command.slice(command.indexOf("--thinking"), command.indexOf("--thinking") + 2), ["--thinking", "medium"]);
 	assert.equal(command.at(-1), prompt);
 	assert.match(prompt, /Do not use GitHub APIs/);
 	assert.match(prompt, /Do not push or fetch/);
 	assert.match(prompt, /exactly one new local commit/);
+	assert.match(prompt, /Current supervisor direction/);
+	assert.match(prompt, /Use the exact protocol fixture/);
+	assert.match(prompt, /Stable payload was malformed/);
+	assert.match(prompt, /Replace the hybrid payload/);
+	assert.doesNotMatch(prompt, /pi-aloop-handoff:v2:/);
 	assert.match(prompt, /final assistant message must contain only one JSON object/);
 });
 

@@ -21,6 +21,7 @@ import {
 	findOutstandingAttempts,
 	formatAloopHandoff,
 	handoffCommentsForIssue,
+	nextIssueRetryNumber,
 	parseAloopHandoffs,
 	parseAloopRunRequest,
 	publishPreparedAloopHandoff,
@@ -83,24 +84,25 @@ function comment(id: number, body: string, createdAt: string): IssueHandoff {
 	return { id, author: "supervisor", body, createdAt, url: `comment/${id}` };
 }
 
-test("aloop invocations have explicit bounded runtime and attempt budgets", () => {
-	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 30, maxAttempts: 3 });
-	assert.deepEqual(parseAloopRunRequest("48 --max-minutes=12 --max-attempts 2"), { epic: 48, maxMinutes: 12, maxAttempts: 2 });
+test("aloop invocations separate worker-launch resource bounds from issue retries", () => {
+	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 30, maxWorkerLaunches: 20 });
+	assert.deepEqual(parseAloopRunRequest("48 --max-minutes=12 --max-worker-launches 40"), { epic: 48, maxMinutes: 12, maxWorkerLaunches: 40 });
 	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 0"), /between 1 and 240/);
-	assert.throws(() => parseAloopRunRequest("#48 --max-attempts 21"), /between 1 and 20/);
+	assert.throws(() => parseAloopRunRequest("#48 --max-worker-launches 101"), /between 1 and 100/);
+	assert.throws(() => parseAloopRunRequest("#48 --max-attempts 3"), /Unknown/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 5 --max-minutes 6"), /Duplicate/);
-	assert.deepEqual(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 1, settled: false }, 1_000), {
+	assert.deepEqual(assessAloopRunBudget({ deadlineMs: 2_000, maxWorkerLaunches: 2, workerLaunchesStarted: 1, settled: false }, 1_000), {
 		allowed: true,
 		remainingMs: 1_000,
-		attemptsRemaining: 1,
-		finalPermittedAttempt: true,
+		workerLaunchesRemaining: 1,
+		finalPermittedWorkerLaunch: true,
 	});
-	const exhausted = assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 2, settled: false }, 1_000);
-	assert.equal(exhausted.attemptsRemaining, 0);
-	assert.equal(exhausted.finalPermittedAttempt, false);
-	assert.match(exhausted.reason ?? "", /attempt limit/);
-	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 0, settled: false }, 2_000).reason ?? "", /time limit/);
-	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 0, settled: true }, 1_000).reason ?? "", /settled/);
+	const exhausted = assessAloopRunBudget({ deadlineMs: 2_000, maxWorkerLaunches: 2, workerLaunchesStarted: 2, settled: false }, 1_000);
+	assert.equal(exhausted.workerLaunchesRemaining, 0);
+	assert.equal(exhausted.finalPermittedWorkerLaunch, false);
+	assert.match(exhausted.reason ?? "", /worker-launch limit/);
+	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxWorkerLaunches: 2, workerLaunchesStarted: 0, settled: false }, 2_000).reason ?? "", /time limit/);
+	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxWorkerLaunches: 2, workerLaunchesStarted: 0, settled: true }, 1_000).reason ?? "", /settled/);
 });
 
 test("selection accepts only open unblocked descendant leaves", () => {
@@ -154,8 +156,12 @@ test("claim operation handles unassigned, self, and foreign owners with post-cla
 	assert.equal(refreshCalls, 1);
 });
 
-test("retry boundary stops after two unchanged unsuccessful attempts", () => {
+test("retry accounting is per issue and only remediation launches receive retry numbers", () => {
 	const failures = [handoff(), handoff({ attemptType: "remediation", approach: "Same approach" })];
+	assert.equal(nextIssueRetryNumber([], "implementation"), 0);
+	assert.equal(nextIssueRetryNumber(failures.slice(0, 1), "remediation"), 1);
+	assert.equal(nextIssueRetryNumber(failures, "remediation"), 2);
+	assert.equal(nextIssueRetryNumber([...failures, handoff({ successful: true })], "remediation"), 1);
 	assert.deepEqual(evaluateRetryBoundary(failures, false), {
 		allowed: false,
 		unsuccessfulAttempts: 2,
@@ -201,12 +207,14 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 		{ issue: 99, commit: "abcdef4", artifactDirectory: ".pi/tmp/aloop/other-epic", status: "completed" },
 	]);
 	assert.deepEqual(outstanding.map((attempt) => attempt.commit), ["abcdef3"]);
-	const kickoff = buildSupervisorKickoff(graph, "abcdef2 accepted remediation", outstanding, { deadlineMs: Date.parse("2026-09-01T04:00:00Z"), maxAttempts: 3 });
+	const kickoff = buildSupervisorKickoff(graph, "abcdef2 accepted remediation", outstanding, { deadlineMs: Date.parse("2026-09-01T04:00:00Z"), maxWorkerLaunches: 20 });
 	assert.match(kickoff, /#2 remediation abcdef2: accepted=true/);
 	assert.match(kickoff, /#2 abcdef3 completed: \.pi\/tmp\/aloop\/unrecorded/);
 	assert.doesNotMatch(kickoff, /#2 implementation abcdef3/);
 	assert.match(kickoff, /recover it from its result artifact and Git commit/);
-	assert.match(kickoff, /Maximum fresh worker attempts: 3/);
+	assert.match(kickoff, /Epic child progress: 0\/1 closed; 1 open/);
+	assert.match(kickoff, /Maximum worker launches: 20/);
+	assert.match(kickoff, /A worker launch on a new issue is not a retry/);
 	assert.match(kickoff, /deliberately bounded/);
 	assert.match(kickoff, /atomically self-claims an unassigned leaf/);
 	assert.match(kickoff, /GitHub and Git are authoritative/);
@@ -271,9 +279,12 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		writeFileSync(join(cwd, ".aloop.json"), JSON.stringify(verificationPolicy));
 		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ details?: Record<string, unknown> }> }>();
 		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
-		let graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done" })]);
+		const priorFailure = formatAloopHandoff(handoff({ nextAction: "Use the exact remediation fixture." }));
+		let graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done", recentHandoffs: [comment(1, priorFailure, "2026-09-01T00:00:00Z")] })]);
 		let claims = 0;
 		let workerIssues: number[] = [];
+		const workerDirections: string[] = [];
+		const workerPriorContexts: unknown[] = [];
 		let publicationApplyCalls = 0;
 		let closeCalls = 0;
 		const shellCommands: string[] = [];
@@ -300,10 +311,12 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 			currentLogin: async () => "operator",
 			claimIssue: async (_cwd, number) => {
 				claims += 1;
-				graph = context([issue({ number, title: "Leaf", body: "## Acceptance criteria\n\n- Done", assignee: "operator" })]);
+				graph = context([issue({ number, title: "Leaf", body: "## Acceptance criteria\n\n- Done", assignee: "operator", recentHandoffs: [comment(1, priorFailure, "2026-09-01T00:00:00Z")] })]);
 			},
 			runWorker: async (input) => {
 				workerIssues.push(input.issue.number);
+				workerDirections.push(input.supervisorApproach);
+				workerPriorContexts.push(input.priorHandoffs);
 				return {
 					status: "completed",
 					summary: "attempt",
@@ -324,11 +337,13 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 			closeIssue: async () => { closeCalls += 1; return { closed: true }; },
 		});
 		const ctx = { cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined } as unknown as ExtensionContext;
-		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-attempts 2", ctx);
+		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-worker-launches 2", ctx);
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("too-early", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx), /pending worker attempt/);
-		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "implementation", approach: "test wiring" }, ctx.signal, undefined, ctx);
+		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "remediation", approach: "test wiring", materially_new_approach: true }, ctx.signal, undefined, ctx);
 		assert.equal(claims, 1);
 		assert.deepEqual(workerIssues, [2]);
+		assert.deepEqual(workerDirections, ["test wiring"]);
+		assert.deepEqual(workerPriorContexts, [[parseAloopHandoffs([comment(1, priorFailure, "2026-09-01T00:00:00Z")])[0]]]);
 		worktreeStatus = "?? eventual-source.ts\n";
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("untracked", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx), /clean worktree/);
 		worktreeStatus = "";

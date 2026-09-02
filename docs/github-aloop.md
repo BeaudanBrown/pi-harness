@@ -33,10 +33,16 @@ loop database, queue file, or session state to restore.
    /aloop #<epic-number>
    ```
 
-   Each invocation defaults to a 30-minute hard deadline and at most three
-   fresh workers. Use `--max-minutes <1-240>` and `--max-attempts <1-20>` to
-   choose smaller or larger explicit bounds for that invocation, for example
-   `/aloop #123 --max-minutes 15 --max-attempts 1`.
+   Each invocation defaults to a 30-minute hard deadline and at most 20 fresh
+   worker launches. Use `--max-minutes <1-240>` and
+   `--max-worker-launches <1-100>` to choose explicit resource bounds for that
+   invocation, for example
+   `/aloop #123 --max-minutes 120 --max-worker-launches 40`.
+
+   Worker launches are not retry counts. Epic progress is reported as closed
+   descendants out of total descendants. A new issue starts with no retry;
+   only a remediation launched after an unsuccessful handoff receives that
+   issue's next retry number.
 
 The command retrieves the complete descendant graph, recent structured
 handoffs, and recent Git history. An executable issue is an open, unblocked
@@ -58,8 +64,13 @@ The current Pi session is the **supervisor**. It:
 - decides whether to accept, remediate, or stop for a human decision.
 
 A **worker** is a fresh, bounded Pi JSON-mode process with repository editing
-and shell tools but no harness extensions or skills. It must not mutate GitHub,
-push, or fetch. Every attempt starts from a clean worktree and must finish with
+and shell tools but no harness extensions or skills. It inherits the
+supervisor's active model and runs at medium thinking. Its prompt receives the
+current supervisor approach as an authoritative, dedicated section. Prior
+attempts are decoded into bounded structured fields—approach, verification,
+acceptance assessment, discovered work, and required next action—rather than
+copying encoded GitHub handoff markers. It must not mutate GitHub, push, or
+fetch. Every attempt starts from a clean worktree and must finish with
 a clean worktree and exactly one new local commit without rewriting earlier
 history. The worker returns structured verification, acceptance-criteria,
 discovered-work, and next-action evidence. Outcomes are explicitly
@@ -75,8 +86,9 @@ worker is active, the tool emits elapsed-time heartbeats and caps the worker at
 the smaller of its requested timeout and the invocation's remaining time.
 
 The whole supervisor turn is also bounded. Reaching either the hard deadline or
-the worker-attempt cap stops that invocation; it never waits indefinitely or
-silently starts unlimited workers. GitHub CLI subprocesses have their own
+the worker-launch cap stops that invocation; it never waits indefinitely or
+silently starts unlimited workers. This launch cap is a resource guard and does
+not represent retries or epic size. GitHub CLI subprocesses have their own
 30-second timeout and honor turn cancellation, including during initial graph
 retrieval. Their timeout cleanup terminates the complete POSIX process group;
 GitHub issue tooling is therefore explicitly unsupported on Windows rather than
