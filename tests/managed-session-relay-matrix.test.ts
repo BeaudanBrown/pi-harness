@@ -64,7 +64,8 @@ test("Matrix rich primitives use bounded stable transactions and compatible poll
 	assert.deepEqual(calls[0]?.body, { typing: true, timeout: 5_000 });
 	assert.deepEqual(calls[1]?.body, { typing: false });
 	assert.equal(calls[3]?.body["m.relates_to"] && (calls[3]?.body["m.relates_to"] as Record<string, unknown>).rel_type, "m.replace");
-	assert.ok(calls[4]?.body["m.poll.start"]); assert.ok(calls[4]?.body["org.matrix.msc3381.poll.start"]);
+	assert.equal(((calls[4]?.body["m.poll.start"] as Record<string, unknown>).question as Record<string, unknown>)["m.text"], "Continue?");
+	assert.equal(((calls[4]?.body["org.matrix.msc3381.poll.start"] as Record<string, unknown>).question as Record<string, unknown>)["org.matrix.msc1767.text"], "Continue?");
 	assert.ok(calls[5]?.body["m.poll.end"]); assert.ok(calls[5]?.body["org.matrix.msc3381.poll.end"]);
 	assert.ok(calls.slice(2).every((call) => call.path.includes("/send/")));
 	await assert.rejects(() => client.startPoll("!rich:example.com", "pi_bad", "q", [], undefined), /out of bounds/);

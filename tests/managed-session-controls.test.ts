@@ -10,7 +10,7 @@ import {
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { renderRemoteCheckpoint } from "../config/agent/extensions/managed-sessions/checkpoint.js";
 import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
-import { CoordinatorRouter, operatorTextEvents } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
+import { CoordinatorRouter, authorizedRoomEvents, operatorTextEvents } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
@@ -118,6 +118,24 @@ test("room membership, event age, and payload shape fail closed before routing",
 		"!room:example.com", config.operatorUserId, false, now), /gap recovery/);
 	assert.throws(() => operatorTextEvents({ rooms: { join: { "!room:example.com": { timeline: { limited: true, prev_batch: "gap", events: [message] } } } } },
 		"!room:example.com", config.operatorUserId, true, now), /gap recovery/);
+});
+
+test("authorized poll responses accept stable and unstable forms and reject malformed relations", () => {
+	const now = Date.now();
+	const poll = (id: string, type: string, key: string, sender = config.operatorUserId, relation: unknown = { rel_type: "m.reference", event_id: "$poll" }) => ({
+		event_id: id, origin_server_ts: now, sender, type, content: { [key]: { answers: ["yes"] }, "m.relates_to": relation },
+	});
+	const response = { rooms: { join: { "!room:example.com": { timeline: { events: [
+		poll("$stable", "m.poll.response", "m.poll.response"),
+		poll("$unstable", "org.matrix.msc3381.poll.response", "org.matrix.msc3381.poll.response"),
+		poll("$foreign", "m.poll.response", "m.poll.response", "@other:example.com"),
+		poll("$thread", "m.poll.response", "m.poll.response", config.operatorUserId, { rel_type: "m.thread", event_id: "$poll" }),
+		poll("$extra", "m.poll.response", "m.poll.response", config.operatorUserId, { rel_type: "m.reference", event_id: "$poll", extra: true }),
+	] } } } } };
+	assert.deepEqual(authorizedRoomEvents(response, "!room:example.com", config.operatorUserId, true, now), [
+		{ kind: "poll_response", eventId: "$stable", pollEventId: "$poll", answerId: "yes" },
+		{ kind: "poll_response", eventId: "$unstable", pollEventId: "$poll", answerId: "yes" },
+	]);
 });
 
 test("dormant and starting controls are deterministic and never launch an aborted wake", async (t) => {

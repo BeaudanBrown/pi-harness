@@ -70,8 +70,10 @@ export function authorizedRoomEvents(response: unknown, roomId: string, operator
 		if (event.type === "m.poll.response" || event.type === "org.matrix.msc3381.poll.response") {
 			const responseContent = (content["m.poll.response"] ?? content["org.matrix.msc3381.poll.response"]) as { answers?: unknown } | undefined;
 			const relation = content["m.relates_to"] as { rel_type?: unknown; event_id?: unknown } | undefined;
-			if (!responseContent || !Array.isArray(responseContent.answers) || responseContent.answers.length !== 1 || typeof responseContent.answers[0] !== "string" || responseContent.answers[0].length > 255 ||
-				!relation || relation.rel_type !== "m.reference" || typeof relation.event_id !== "string" || relation.event_id.length > 255) continue;
+			if (!responseContent || Object.keys(responseContent).length !== 1 || !Array.isArray(responseContent.answers) || responseContent.answers.length !== 1 ||
+				typeof responseContent.answers[0] !== "string" || responseContent.answers[0].length < 1 || responseContent.answers[0].length > 255 ||
+				!relation || Object.keys(relation).length !== 2 || relation.rel_type !== "m.reference" || typeof relation.event_id !== "string" ||
+				relation.event_id.length < 1 || relation.event_id.length > 255) continue;
 			seen.add(event.event_id); result.push({ kind: "poll_response", eventId: event.event_id, pollEventId: relation.event_id, answerId: responseContent.answers[0] });
 		} else if (event.type === "m.room.message" && content.msgtype === "m.text" && typeof content.body === "string" && content.body.length > 0 && content.body.length <= MAX_INPUT_TEXT_LENGTH) {
 			const relation = content["m.relates_to"];

@@ -157,10 +157,14 @@ export class ManagedMatrixClient {
 	}
 	async startPoll(roomId: string, transactionId: string, question: string, answers: readonly MatrixPollAnswer[], signal?: AbortSignal): Promise<string> {
 		if (answers.length < 1 || answers.length > MAX_POLL_ANSWERS || new Set(answers.map((answer) => answer.id)).size !== answers.length) throw new Error("Poll answers are malformed or out of bounds");
-		const stableAnswers = answers.map((answer) => ({ id: boundedText(answer.id, "poll answer ID", 255), "m.text": boundedText(answer.text, "poll answer", 1_024) }));
-		const poll = { question: { "m.text": boundedText(question, "poll question", 4_096) }, kind: "m.poll.disclosed", max_selections: 1, answers: stableAnswers };
-		return this.sendEvent(roomId, "m.poll.start", transactionId, { "m.poll.start": poll, "org.matrix.msc3381.poll.start": poll,
-			"m.text": question, "org.matrix.msc1767.text": question }, signal);
+		const text = boundedText(question, "poll question", 4_096);
+		const normalized = answers.map((answer) => ({ id: boundedText(answer.id, "poll answer ID", 255), text: boundedText(answer.text, "poll answer", 1_024) }));
+		const stablePoll = { question: { "m.text": text }, kind: "m.poll.disclosed", max_selections: 1,
+			answers: normalized.map((answer) => ({ id: answer.id, "m.text": answer.text })) };
+		const unstablePoll = { question: { "org.matrix.msc1767.text": text }, kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
+			answers: normalized.map((answer) => ({ id: answer.id, "org.matrix.msc1767.text": answer.text })) };
+		return this.sendEvent(roomId, "m.poll.start", transactionId, { "m.poll.start": stablePoll, "org.matrix.msc3381.poll.start": unstablePoll,
+			"m.text": text, "org.matrix.msc1767.text": text }, signal);
 	}
 	async endPoll(roomId: string, transactionId: string, pollEventId: string, fallback = "Poll closed", signal?: AbortSignal): Promise<string> {
 		boundedText(pollEventId, "poll event ID", 255); const text = boundedText(fallback, "poll end fallback", 1_024);
