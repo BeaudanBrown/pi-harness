@@ -153,7 +153,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const context = ctx.getContextUsage();
 			const used = context?.tokens;
 			const limit = ctx.model?.contextWindow;
-			const contextSnapshot = typeof used === "number" && limit && used <= limit ? { usedTokens: used, remainingTokens: limit - used, limitTokens: limit, deltaTokens: used - (span.startContext ?? used) } : undefined;
+			const contextSnapshot = typeof used === "number" && typeof span.startContext === "number" && typeof limit === "number" &&
+				Number.isFinite(limit) && limit > 0 && used >= 0 && used <= limit
+				? { usedTokens: used, remainingTokens: limit - used, limitTokens: limit, deltaTokens: used - span.startContext } : undefined;
 			span.revision += 1;
 			await client.updateActivity({
 				activityId: span.activityId, revision: span.revision, outcome: outcome ?? span.requestedOutcome ?? "completed", durationMs: Math.max(0, Date.now() - span.startedAt),

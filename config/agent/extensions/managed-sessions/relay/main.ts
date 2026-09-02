@@ -99,6 +99,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			expectedUid,
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
 			onAttachment: async (attachment) => {
+				await activityProjector?.attachmentConnected(attachment.conversationId);
 				await coordinatorRouter?.attachmentReady(attachment.conversationId);
 			},
 			onAttachmentDisconnect: (attachment) => {

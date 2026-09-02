@@ -317,6 +317,65 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 	}
 });
 
+test("activity lifecycle is one redacted busy span across parallel tools, retries, compaction, and follow-ups", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch: any[] = [
+		custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }),
+		custom("binding", BINDING_ENTRY_TYPE, binding),
+		{ type: "message", id: "terminal-user", parentId: "binding", message: { role: "user", content: "terminal task /private/path" } },
+	];
+	let leaf = "terminal-user"; let sequence = 0; let contextTokens: number | undefined;
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const api = {
+		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [],
+		appendEntry: (customType: string, data: unknown) => { const id = `activity-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id; },
+		sendUserMessage: () => undefined, sendMessage: () => undefined,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => true, abort: () => undefined, shutdown: () => undefined,
+		model: { provider: "provider", id: "measured-model", contextWindow: 100 }, thinkingLevel: "low",
+		getContextUsage: () => contextTokens === undefined ? undefined : { tokens: contextTokens },
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
+			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	await handlers.get("agent_start")!({}, ctx);
+	handlers.get("tool_execution_start")!({ toolCallId: "parallel-1", toolName: "read", args: { path: "/secret/one" } });
+	handlers.get("tool_execution_start")!({ toolCallId: "parallel-2", toolName: "read", args: { path: "/secret/two" } });
+	handlers.get("tool_execution_end")!({ toolCallId: "parallel-1", toolName: "read", isError: true, result: "private output" });
+	handlers.get("tool_execution_end")!({ toolCallId: "parallel-2", toolName: "read", isError: false, result: "private output" });
+	handlers.get("tool_execution_start")!({ toolCallId: "retry", toolName: "read", args: { path: "/secret/retry" } });
+	handlers.get("tool_execution_end")!({ toolCallId: "retry", toolName: "read", isError: false });
+	handlers.get("session_before_compact")!({}); handlers.get("session_compact")!({});
+	handlers.get("turn_end")!({ message: { role: "assistant", usage: { input: 12, output: 3 }, stopReason: "toolUse" } });
+	await handlers.get("agent_start")!({}, ctx); // A busy follow-up must not create another card.
+	handlers.get("turn_end")!({ message: { role: "assistant", usage: { input: 7, output: 5 }, stopReason: "stop" } });
+	branch.push({ type: "message", id: "final-answer", parentId: leaf, message: { role: "assistant", content: "persisted final", stopReason: "stop" } }); leaf = "final-answer";
+	contextTokens = 40;
+	await handlers.get("agent_settled")!({}, ctx);
+	const activityFrames = relay.frames.filter((frame) => frame.type.startsWith("activity."));
+	const finalFrame = activityFrames.find((frame) => frame.type === "activity.finalize")!;
+	const transcriptFrames = relay.frames.filter((frame) => frame.type === "transcript.offer");
+	assert.equal(new Set(activityFrames.map((frame) => frame.payload.activityId)).size, 1);
+	assert.deepEqual(finalFrame.payload.run, { inputTokens: 19, outputTokens: 8, modelTurns: 2 });
+	assert.deepEqual(finalFrame.payload.tools, { total: 3, errors: 1, counts: [{ name: "read", count: 3 }] });
+	assert.equal(finalFrame.payload.compactions, 1);
+	assert.equal(finalFrame.payload.context, undefined, "delta is omitted when starting context was unavailable");
+	assert.equal(finalFrame.payload.generation, 1, "the current single-generation binding reports its deterministic ordinal");
+	assert.ok(relay.frames.indexOf(finalFrame) < relay.frames.indexOf(transcriptFrames.find((frame) => frame.payload.kind === "assistant_final")!));
+	assert.doesNotMatch(JSON.stringify(activityFrames), /secret|private|path|args|result/);
+
+	branch.push({ type: "message", id: "follow-up-user", parentId: leaf, message: { role: "user", content: "follow up" } }); leaf = "follow-up-user";
+	contextTokens = 40; await handlers.get("agent_start")!({}, ctx); contextTokens = 55;
+	handlers.get("turn_end")!({ message: { role: "assistant", usage: { input: 2, output: 1 }, stopReason: "error" } });
+	branch.push({ type: "message", id: "failed-final", parentId: leaf, message: { role: "assistant", content: "failed", stopReason: "error" } }); leaf = "failed-final";
+	await handlers.get("agent_settled")!({}, ctx);
+	const secondFinal = relay.frames.filter((frame) => frame.type === "activity.finalize").at(-1)!;
+	assert.equal(secondFinal.payload.outcome, "failed");
+	assert.deepEqual(secondFinal.payload.context, { usedTokens: 55, remainingTokens: 45, limitTokens: 100, deltaTokens: 15 });
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
 test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoint boundaries", async (t) => {
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];

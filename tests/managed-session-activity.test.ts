@@ -69,12 +69,51 @@ test("activity creation retries the same stable Matrix transaction after an unce
 
 test("unfinished durable activity is finalized as interrupted after attachment loss", async () => {
 	const root = await mkdtemp(join(tmpdir(), "managed-activity-recovery-"));
-	const fetcher = async (input: string | URL | Request) => new Response(JSON.stringify(String(input).includes("/send/") ? { event_id: "$stable" } : {}), { status: 200 });
+	const typing: boolean[] = [];
+	const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+		const path = String(input);
+		if (path.includes("/typing/")) typing.push(Boolean(JSON.parse(String(init?.body)).typing));
+		return new Response(JSON.stringify(path.includes("/send/") ? { event_id: "$stable" } : {}), { status: 200 });
+	};
 	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" }, fetcher as typeof fetch, [roomId]);
 	const registry = { manifestByConversationId: () => ({ conversationId, roomId }) } as unknown as RelayRegistry;
 	const first = new ActivityProjector(root, registry, matrix); await first.load(); await first.project(envelope("activity.update", { activityId, revision: 0, state: "busy" })); await first.close();
-	const recovered = new ActivityProjector(root, registry, matrix); await recovered.load(); await recovered.interrupt(conversationId); await recovered.close();
-	const durable = JSON.parse(await readFile(join(root, "activities.json"), "utf8"));
+	const recovered = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 10, typingRefreshMs: 5 });
+	await recovered.load();
+	await recovered.attachmentConnected(conversationId);
+	await new Promise((resolve) => setTimeout(resolve, 25));
+	let durable = JSON.parse(await readFile(join(root, "activities.json"), "utf8"));
+	assert.equal(durable.activities[0].finalized, false, "an adapter reconnect cancels restart interruption");
+	assert.ok(typing.includes(true), "typing resumes with the surviving busy span");
+	recovered.attachmentDisconnected(conversationId);
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	durable = JSON.parse(await readFile(join(root, "activities.json"), "utf8"));
 	assert.equal(durable.activities[0].finalized, true); assert.equal(durable.activities[0].payload.outcome, "interrupted");
-	await rm(root, { recursive: true, force: true });
+	assert.equal(typing.at(-1), false);
+	await recovered.close(); await rm(root, { recursive: true, force: true });
+});
+
+test("all terminal outcomes render as distinct immutable unpinned snapshots", async () => {
+	const root = await mkdtemp(join(tmpdir(), "managed-activity-outcomes-"));
+	const bodies: Array<Record<string, unknown>> = [];
+	const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+		const path = String(input); const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+		if (path.includes("/send/")) bodies.push(body);
+		return new Response(JSON.stringify(path.includes("/send/") ? { event_id: `$${bodies.length}` } : {}), { status: 200 });
+	};
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" }, fetcher as typeof fetch, [roomId]);
+	const registry = { manifestByConversationId: () => ({ conversationId, roomId }) } as unknown as RelayRegistry;
+	const projector = new ActivityProjector(root, registry, matrix); await projector.load();
+	const expected = { completed: "Completed", checkpoint: "Waiting at checkpoint", cancelled: "Cancelled", interrupted: "Interrupted", failed: "Failed" } as const;
+	for (const [index, outcome] of Object.keys(expected).entries()) {
+		const id = deriveActivityId(deriveGenerationId(conversationId, 1), `outcome-${outcome}`);
+		await projector.project(envelope("activity.update", { activityId: id, revision: 0, state: "busy" }));
+		await projector.project(envelope("activity.finalize", { activityId: id, revision: 1, outcome }));
+		const final = String((bodies.at(-1)?.["m.new_content"] as { body?: string })?.body);
+		assert.match(final, new RegExp(expected[outcome as keyof typeof expected]));
+		assert.equal("m.relates_to" in (bodies.at(-1) ?? {}), true);
+		assert.equal(Object.keys(bodies.at(-1) ?? {}).some((key) => /pin/i.test(key)), false);
+		assert.equal(index + 1, bodies.filter((body) => (body["m.relates_to"] as { rel_type?: string } | undefined)?.rel_type === "m.replace").length);
+	}
+	await projector.close(); await rm(root, { recursive: true, force: true });
 });

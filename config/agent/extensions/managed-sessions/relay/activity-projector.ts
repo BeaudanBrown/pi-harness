@@ -62,7 +62,14 @@ export class ActivityProjector {
 	private operation: Promise<void> = Promise.resolve();
 	private readonly typing = new Map<string, NodeJS.Timeout>();
 	private readonly interruptions = new Map<string, NodeJS.Timeout>();
-	constructor(runtimeRoot: string, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient) { this.file = new AtomicJsonFile(join(resolve(runtimeRoot), "activities.json"), parseState); }
+	private readonly typingRefreshMs: number;
+	private readonly interruptionGraceMs: number;
+	constructor(runtimeRoot: string, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient,
+		options: { typingRefreshMs?: number; interruptionGraceMs?: number } = {}) {
+		this.file = new AtomicJsonFile(join(resolve(runtimeRoot), "activities.json"), parseState);
+		this.typingRefreshMs = options.typingRefreshMs ?? TYPING_REFRESH_MS;
+		this.interruptionGraceMs = options.interruptionGraceMs ?? INTERRUPTION_GRACE_MS;
+	}
 	async load(): Promise<void> { this.state = await this.file.read() ?? this.state; for (const item of this.state.activities) if (!item.finalized) this.attachmentDisconnected(item.conversationId); }
 	async project(envelope: ManagedSessionEnvelope): Promise<"updated" | "finalized"> {
 		return this.serialize(async () => {
@@ -96,9 +103,17 @@ export class ActivityProjector {
 		});
 	}
 	hasUnfinalized(conversationId: string): boolean { return this.state.activities.some((item) => item.conversationId === conversationId && !item.finalized); }
+	async attachmentConnected(conversationId: string): Promise<void> {
+		const interruption = this.interruptions.get(conversationId);
+		if (interruption) clearTimeout(interruption);
+		this.interruptions.delete(conversationId);
+		if (!this.hasUnfinalized(conversationId)) return;
+		const manifest = this.registry.manifestByConversationId(conversationId);
+		if (manifest) await this.startTyping(conversationId, manifest.roomId);
+	}
 	attachmentDisconnected(conversationId: string): void {
 		if (this.interruptions.has(conversationId)) return;
-		const timer = setTimeout(() => { this.interruptions.delete(conversationId); void this.interrupt(conversationId).catch(() => undefined); }, INTERRUPTION_GRACE_MS);
+		const timer = setTimeout(() => { this.interruptions.delete(conversationId); void this.interrupt(conversationId).catch(() => undefined); }, this.interruptionGraceMs);
 		timer.unref(); this.interruptions.set(conversationId, timer);
 	}
 	async interrupt(conversationId: string): Promise<void> {
@@ -110,7 +125,7 @@ export class ActivityProjector {
 	private async startTyping(conversationId: string, roomId: string): Promise<void> {
 		await this.matrix.setTyping(roomId, true);
 		if (this.typing.has(conversationId)) return;
-		const timer = setInterval(() => void this.matrix.setTyping(roomId, true).catch(() => undefined), TYPING_REFRESH_MS); timer.unref(); this.typing.set(conversationId, timer);
+		const timer = setInterval(() => void this.matrix.setTyping(roomId, true).catch(() => undefined), this.typingRefreshMs); timer.unref(); this.typing.set(conversationId, timer);
 	}
 	private async stopTyping(conversationId: string, roomId: string): Promise<void> { const timer = this.typing.get(conversationId); if (timer) clearInterval(timer); this.typing.delete(conversationId); await this.matrix.setTyping(roomId, false); }
 	private serialize<T>(work: () => Promise<T>): Promise<T> { const result = this.operation.then(work, work); this.operation = result.then(() => undefined, () => undefined); return result; }
