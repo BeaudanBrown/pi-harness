@@ -145,7 +145,26 @@ function handoffWasRecorded(context: Awaited<ReturnType<typeof retrieveCurrentRe
 	);
 }
 
-export default function aloopExtension(pi: ExtensionAPI): void {
+export type AloopExtensionDependencies = {
+	claimIssue: typeof claimCurrentRepositoryIssue;
+	closeIssue: typeof closeCurrentRepositoryIssue;
+	currentLogin: typeof currentGitHubLogin;
+	publishComment: typeof publishExactIssueComment;
+	retrieveEpicContext: typeof retrieveCurrentRepositoryEpicContext;
+	runWorker: typeof runAloopWorker;
+};
+
+const defaultDependencies: AloopExtensionDependencies = {
+	claimIssue: claimCurrentRepositoryIssue,
+	closeIssue: closeCurrentRepositoryIssue,
+	currentLogin: currentGitHubLogin,
+	publishComment: publishExactIssueComment,
+	retrieveEpicContext: retrieveCurrentRepositoryEpicContext,
+	runWorker: runAloopWorker,
+};
+
+export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<AloopExtensionDependencies> = {}): void {
+	const dependencies = { ...defaultDependencies, ...overrides };
 	let activeEpic: number | null = null;
 	let pendingHandoffs: PendingHandoff[] = [];
 	let workerRunning = false;
@@ -191,7 +210,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 
 	async function currentContext(cwd: string, signal?: AbortSignal) {
 		if (activeEpic === null || !runBudget) throw new Error("Run /aloop #<epic> before using aloop supervisor tools.");
-		return await retrieveCurrentRepositoryEpicContext(cwd, activeEpic, undefined, {
+		return await dependencies.retrieveEpicContext(cwd, activeEpic, undefined, {
 			commentLimit: MAX_COMMENT_LIMIT,
 			commentBodyLimit: MAX_COMMENT_BODY,
 			signal,
@@ -249,7 +268,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			const budget = activate(epic, ctx, [], request.maxMinutes, request.maxAttempts);
 			let context;
 			try {
-				context = await retrieveCurrentRepositoryEpicContext(ctx.cwd, epic, undefined, {
+				context = await dependencies.retrieveEpicContext(ctx.cwd, epic, undefined, {
 					commentLimit: MAX_COMMENT_LIMIT,
 					commentBodyLimit: MAX_COMMENT_BODY,
 					signal: ctx.signal,
@@ -324,12 +343,12 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 					throw new Error(`Outstanding attempts have no durable structured handoff comments: ${pendingHandoffs.map((pending) => `#${pending.issue} (${pending.artifactDirectory})`).join(", ")}. Record them before another worker.`);
 				}
 				const commandOptions = { signal, deadlineMs: runBudget.deadlineMs };
-				const login = await currentGitHubLogin(ctx.cwd, undefined, commandOptions);
+				const login = await dependencies.currentLogin(ctx.cwd, undefined, commandOptions);
 				const claimed = await claimAndRefreshAloopLeaf({
 					context,
 					issueNumber: params.issue,
 					authenticatedLogin: login,
-					claim: async (issueNumber) => { await claimCurrentRepositoryIssue(ctx.cwd, issueNumber, commandOptions); },
+					claim: async (issueNumber) => { await dependencies.claimIssue(ctx.cwd, issueNumber, commandOptions); },
 					refresh: async () => {
 						const refreshed = await currentContext(ctx.cwd, signal);
 						refreshPending(refreshed);
@@ -358,7 +377,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				heartbeat.unref?.();
 				let outcome: Awaited<ReturnType<typeof runAloopWorker>>;
 				try {
-					outcome = await runAloopWorker({
+					outcome = await dependencies.runWorker({
 						cwd: ctx.cwd,
 						attemptType: params.attempt_type,
 						epic: { number: epic.number, title: epic.title, body: epic.body },
@@ -445,7 +464,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		label: "Aloop Prepare Handoff",
 		description: "Format a bounded durable aloop attempt handoff comment after the supervisor assesses worker evidence.",
 		promptSnippet: "Prepare the exact structured GitHub comment required after every aloop worker attempt.",
-		promptGuidelines: ["Use aloop_prepare_handoff after every aloop_launch_worker result, then publish its exact output with github_issue_mutate using dry-run first."],
+		promptGuidelines: ["Use aloop_prepare_handoff after every aloop_launch_worker result, then publish its returned ID with aloop_publish_handoff using dry-run first and apply second. Never copy the encoded comment through the model or use generic issue mutation."],
 		parameters: PrepareHandoffParams,
 		async execute(_id, params: {
 			issue: number; attempt_type: string; commit?: string; successful: boolean; approach: string; materially_new_approach: boolean;
@@ -534,7 +553,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				handoffId: params.handoff_id,
 				dryRun: params.dry_run,
 				dryRunHandoffIds,
-				publish: async (issue, comment, apply) => await publishExactIssueComment(ctx.cwd, issue, comment, apply, { signal, deadlineMs: runBudget!.deadlineMs }),
+				publish: async (issue, comment, apply) => await dependencies.publishComment(ctx.cwd, issue, comment, apply, { signal, deadlineMs: runBudget!.deadlineMs }),
 			});
 			return {
 				content: [{ type: "text", text: `${params.dry_run ? "Dry run complete" : "Publication complete"} for handoff ${params.handoff_id} on #${record.issue}; ${Buffer.byteLength(record.comment)} exact bytes.` }],
@@ -567,7 +586,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			const head = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
 			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
 			if (head.code !== 0 || status.code !== 0) throw new Error("Could not inspect Git before accepted issue closure.");
-			const login = await currentGitHubLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget!.deadlineMs });
+			const login = await dependencies.currentLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget!.deadlineMs });
 			const closure = await closeAcceptedAloopIssue({
 				issue,
 				epicNumber: context.epic.number,
@@ -580,7 +599,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				worktreeStatus: status.stdout,
 				dryRun: params.dry_run,
 				dryRunClosureIds,
-				close: async (issueNumber) => await closeCurrentRepositoryIssue(ctx.cwd, issueNumber, { signal, deadlineMs: runBudget!.deadlineMs }),
+				close: async (issueNumber) => await dependencies.closeIssue(ctx.cwd, issueNumber, { signal, deadlineMs: runBudget!.deadlineMs }),
 			});
 			const action = params.dry_run ? "Closure dry run complete" : closure.alreadyClosed ? "Closure already applied" : "Closed verified issue";
 			return { content: [{ type: "text", text: `${action} for #${params.issue} at ${closure.commit}.` }], details: { issue: params.issue, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, dryRun: params.dry_run, ...closure } };
@@ -616,3 +635,5 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 		},
 	});
 }
+
+export default registerAloopExtension;

@@ -421,6 +421,13 @@ export async function closeAcceptedAloopIssue<T>(input: {
 	const [handoff] = parseAloopHandoffs([{ id: 0, author: "aloop", body: spool.comment, createdAt: "", url: "" }]);
 	if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
 	requireAloopClaim(input.issue, input.authenticatedLogin);
+	const closureId = `${input.issue.number}:${input.handoffId}:${input.receiptId}`;
+	if (input.dryRun) input.dryRunClosureIds.add(closureId);
+	else if (!input.dryRunClosureIds.has(closureId)) throw new Error("Accepted issue closure must complete a dry run before apply.");
+	// Once GitHub records the issue as closed, an exact published handoff is the
+	// durable idempotency key. A later commit must not turn a successful retry
+	// into an error or invoke closure a second time.
+	if (input.issue.state === "closed") return { applied: false, alreadyClosed: true, commit: handoff.commit };
 	const gate = evaluateSupervisorAttempt({
 		returnedCommit: handoff.commit,
 		currentHead: input.currentHead,
@@ -431,13 +438,7 @@ export async function closeAcceptedAloopIssue<T>(input: {
 	if (!gate.allowed || input.receipt.postVerificationHead !== handoff.commit || input.receipt.postVerificationClean !== true) {
 		throw new Error(`Closure blocked: ${[...gate.reasons, "the published handoff, receipt, and current clean Git commit must match"].join("; ")}.`);
 	}
-	const closureId = `${input.issue.number}:${input.handoffId}:${input.receiptId}`;
-	if (input.dryRun) {
-		input.dryRunClosureIds.add(closureId);
-		return { applied: false, alreadyClosed: input.issue.state === "closed", commit: handoff.commit };
-	}
-	if (!input.dryRunClosureIds.has(closureId)) throw new Error("Accepted issue closure must complete a dry run before apply.");
-	if (input.issue.state === "closed") return { applied: false, alreadyClosed: true, commit: handoff.commit };
+	if (input.dryRun) return { applied: false, alreadyClosed: false, commit: handoff.commit };
 	const result = await input.close(input.issue.number);
 	return { applied: true, alreadyClosed: false, result, commit: handoff.commit };
 }
