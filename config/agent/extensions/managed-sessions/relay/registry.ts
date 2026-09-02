@@ -87,6 +87,7 @@ export class RelayRegistry {
 				pendingInputs: [],
 				pendingControls: [],
 				completedControlIds: [],
+				activeControlPoll: null,
 				projection: [],
 				managedWindow: null,
 			})),
@@ -137,16 +138,44 @@ export class RelayRegistry {
 	async recordPendingControl(conversationId: string, control: RuntimeConversation["pendingControls"][number]): Promise<void> {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
-			if (conversation.completedControlIds.includes(control.controlId)) return;
-			const existing = conversation.pendingControls.find((candidate) =>
-				candidate.controlId === control.controlId || candidate.matrixEventId === control.matrixEventId);
-			if (existing) {
-				if (JSON.stringify(existing) !== JSON.stringify(control)) throw new RelayRegistryError("invalid_state", "Conflicting pending control identity");
+			const inserted = this.addPendingControl(conversation, control);
+			if (inserted && conversation.activeControlPoll?.scope === control.name) conversation.activeControlPoll = null;
+			parseHostRuntimeState(this.state);
+		});
+	}
+
+	async registerActiveControlPoll(conversationId: string, poll: NonNullable<RuntimeConversation["activeControlPoll"]>): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const source = conversation.pendingControls.find((control) => control.controlId === poll.sourceControlId);
+			if (!source || source.name !== poll.scope) throw new RelayRegistryError("invalid_state", "Published control poll does not match its pending control scope");
+			const existing = conversation.activeControlPoll;
+			if (existing?.sourceControlId === poll.sourceControlId) {
+				if (JSON.stringify(existing) !== JSON.stringify(poll)) throw new RelayRegistryError("invalid_state", "Conflicting published control poll identity");
 				return;
 			}
-			if (conversation.pendingControls.length >= MAX_PENDING_CONTROLS) throw new RelayRegistryError("capacity_reached", "Pending control capacity was reached");
-			conversation.pendingControls.push(control);
+			conversation.activeControlPoll = structuredClone(poll);
 			parseHostRuntimeState(this.state);
+		});
+	}
+
+	activeControlPollOption(conversationId: string, pollEventId: string, answerId: string): string | undefined {
+		const poll = this.runtimeConversation(conversationId).activeControlPoll;
+		if (!poll || poll.pollEventId !== pollEventId) return undefined;
+		return poll.options.find((option) => option.answerId === answerId)?.command;
+	}
+
+	async acceptActiveControlPollResponse(conversationId: string, pollEventId: string, answerId: string, command: string,
+		control: RuntimeConversation["pendingControls"][number]): Promise<boolean> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const poll = conversation.activeControlPoll;
+			const option = poll?.pollEventId === pollEventId ? poll.options.find((candidate) => candidate.answerId === answerId) : undefined;
+			if (!poll || !option || option.command !== command || control.name !== poll.scope) return false;
+			if (!this.addPendingControl(conversation, control)) return false;
+			conversation.activeControlPoll = null;
+			parseHostRuntimeState(this.state);
+			return true;
 		});
 	}
 
@@ -310,6 +339,7 @@ export class RelayRegistry {
 					pendingInputs: [],
 					pendingControls: [],
 					completedControlIds: [],
+					activeControlPoll: null,
 					projection: [],
 					managedWindow: null,
 				});
@@ -342,7 +372,7 @@ export class RelayRegistry {
 			this.manifests.set(manifest.conversationId, manifest);
 			this.state.conversations.push({
 				conversationId: manifest.conversationId, state: "dormant", attachment: null,
-				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], projection: [], managedWindow: null,
+				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], activeControlPoll: null, projection: [], managedWindow: null,
 			});
 			return manifest;
 			});
@@ -565,6 +595,19 @@ export class RelayRegistry {
 	managedRoomIds(): string[] {
 		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace]
 			.filter((roomId): roomId is string => roomId !== undefined)))];
+	}
+
+	private addPendingControl(conversation: RuntimeConversation, control: RuntimeConversation["pendingControls"][number]): boolean {
+		if (conversation.completedControlIds.includes(control.controlId)) return false;
+		const existing = conversation.pendingControls.find((candidate) =>
+			candidate.controlId === control.controlId || candidate.matrixEventId === control.matrixEventId);
+		if (existing) {
+			if (JSON.stringify(existing) !== JSON.stringify(control)) throw new RelayRegistryError("invalid_state", "Conflicting pending control identity");
+			return false;
+		}
+		if (conversation.pendingControls.length >= MAX_PENDING_CONTROLS) throw new RelayRegistryError("capacity_reached", "Pending control capacity was reached");
+		conversation.pendingControls.push(control);
+		return true;
 	}
 
 	private runtimeConversation(conversationId: string): RuntimeConversation {

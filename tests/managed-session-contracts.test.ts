@@ -238,6 +238,23 @@ test("legacy optional matrixSince runtime is migrated to explicit safe cursor st
 	assert.deepEqual(parseHostRuntimeState(fresh).conversations[0]?.matrixCursor, { status: "bootstrap" });
 });
 
+test("runtime parser strictly bounds active control poll authorization state", () => {
+	const source = { controlId: `control_${"a".repeat(32)}`, matrixEventId: "$source", name: "model" };
+	const poll = { pollEventId: "$poll", sourceControlId: source.controlId, scope: "model",
+		options: [{ answerId: "pi-control-0", command: "!model scoped/model" }] };
+	const state = (activeControlPoll: unknown) => runtime({ pendingControls: [source], activeControlPoll });
+	assert.deepEqual(parseHostRuntimeState(state(poll)).conversations[0]?.activeControlPoll, poll);
+	assert.throws(() => parseHostRuntimeState(state({ ...poll, extra: true })), /activeControlPoll/);
+	assert.throws(() => parseHostRuntimeState(state({ ...poll, options: Array.from({ length: 21 }, (_, index) =>
+		({ answerId: `pi-control-${index}`, command: `!model scoped/model-${index}` })) })), /activeControlPoll/);
+	assert.throws(() => parseHostRuntimeState(state({ ...poll, options: [
+		{ answerId: "same", command: "!model scoped/one" }, { answerId: "same", command: "!model scoped/two" },
+	] })), /invalid active control poll/);
+	assert.throws(() => parseHostRuntimeState(state({ ...poll, options: [
+		{ answerId: "pi-control-0", command: "!thinking high" },
+	] })), /invalid active control poll/);
+});
+
 test("runtime parser rejects malformed lifecycle state and duplicate durable identities", () => {
 	assert.equal(parseHostRuntimeState(runtime()).conversations[0]?.state, "dormant");
 	assert.throws(() => parseHostRuntimeState(runtime({ state: "active" })), /has no attachment/);

@@ -163,8 +163,16 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						const manifest = registry.manifestByConversationId(attachment.conversationId);
 						if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation is unavailable");
 						if (payload.options?.length) {
-							await matrix.startPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, payload.controlId, 0), payload.message,
-								payload.options.map((option, index) => ({ id: `pi-control-${index}`, text: option })), undefined, "stable");
+							const source = registry.pendingControls(attachment.conversationId).find((control) => control.controlId === payload.controlId);
+							if (!source || (source.name !== "model" && source.name !== "thinking")) {
+								throw new RelayRegistryError("invalid_state", "Managed control options require a model or thinking scope");
+							}
+							const options = payload.options.map((option, index) => ({ answerId: `pi-control-${index}`, command: option }));
+							const pollEventId = await matrix.startPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, payload.controlId, 0), payload.message,
+								options.map((option) => ({ id: option.answerId, text: option.command })), undefined, "stable");
+							await registry.registerActiveControlPoll(manifest.conversationId, {
+								pollEventId, sourceControlId: payload.controlId, scope: source.name, options,
+							});
 						} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, payload.message);
 						await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
 					}

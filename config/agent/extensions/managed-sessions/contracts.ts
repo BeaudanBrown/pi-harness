@@ -10,6 +10,7 @@ export const MAX_TRANSCRIPT_TEXT_LENGTH = 64_000;
 export const MAX_PENDING_INPUTS = 2_048;
 export const MAX_PENDING_CONTROLS = 2_048;
 export const MAX_COMPLETED_CONTROLS = 4_096;
+export const MAX_CONTROL_POLL_OPTIONS = 20;
 export const MAX_PROJECTION_ENTRIES = 4_096;
 
 const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
@@ -349,6 +350,12 @@ const pendingControl = strictObject({
 	]),
 	argument: Type.Optional(boundedString(4_096)),
 });
+const activeControlPoll = strictObject({
+	pollEventId: boundedString(255),
+	sourceControlId: stableId("control"),
+	scope: Type.Union([Type.Literal("model"), Type.Literal("thinking")]),
+	options: Type.Array(strictObject({ answerId: boundedString(255), command: boundedString(255) }), { minItems: 1, maxItems: MAX_CONTROL_POLL_OPTIONS }),
+});
 const projectionEntry = strictObject({
 	entryId: TranscriptEntryIdSchema,
 	kind: Type.Union([
@@ -385,6 +392,7 @@ const runtimeConversation = strictObject({
 	pendingInputs: Type.Array(pendingInput, { maxItems: MAX_PENDING_INPUTS }),
 	pendingControls: Type.Array(pendingControl, { maxItems: MAX_PENDING_CONTROLS }),
 	completedControlIds: Type.Array(stableId("control"), { maxItems: MAX_COMPLETED_CONTROLS }),
+	activeControlPoll: nullable(activeControlPoll),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	managedWindow: nullable(
 		strictObject({
@@ -433,6 +441,7 @@ export interface HostRuntimeState {
 		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string }>;
 		pendingControls: Array<{ controlId: string; matrixEventId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string }>;
 		completedControlIds: string[];
+		activeControlPoll: null | { pollEventId: string; sourceControlId: string; scope: "model" | "thinking"; options: Array<{ answerId: string; command: string }> };
 		projection: Array<{
 			entryId: string;
 			kind: string;
@@ -622,6 +631,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			}
 			if (!("pendingControls" in conversation)) { conversation.pendingControls = []; changed = true; }
 			if (!("completedControlIds" in conversation)) { conversation.completedControlIds = []; changed = true; }
+			if (!("activeControlPoll" in conversation)) { conversation.activeControlPoll = null; changed = true; }
 		}
 		if (changed) candidate = migrated;
 	}
@@ -660,6 +670,14 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		const completedControls = new Set(conversation.completedControlIds);
 		if (completedControls.size !== conversation.completedControlIds.length || conversation.completedControlIds.some((id) => controls.has(id))) {
 			throw new ManagedSessionContractError("conflict", `conflicting completed control in ${conversation.conversationId}`);
+		}
+		if (conversation.activeControlPoll) {
+			const answerIds = new Set(conversation.activeControlPoll.options.map((option) => option.answerId));
+			const commands = new Set(conversation.activeControlPoll.options.map((option) => option.command));
+			if (answerIds.size !== conversation.activeControlPoll.options.length || commands.size !== conversation.activeControlPoll.options.length ||
+				conversation.activeControlPoll.options.some((option) => !option.command.startsWith(`!${conversation.activeControlPoll!.scope} `))) {
+				throw new ManagedSessionContractError("conflict", `invalid active control poll in ${conversation.conversationId}`);
+			}
 		}
 		if (conversation.attachment) assertTimestamp(conversation.attachment.connectedAt, "attachment.connectedAt");
 		if (conversation.lastLaunchError) assertTimestamp(conversation.lastLaunchError.at, "lastLaunchError.at");

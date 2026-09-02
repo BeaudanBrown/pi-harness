@@ -230,12 +230,18 @@ export class CoordinatorRouter {
 	}
 
 	private async acceptPoll(manifest: ConversationManifest, event: Extract<AuthorizedMatrixRoomEvent, { kind: "poll_response" }>, signal: AbortSignal): Promise<void> {
+		const offered = this.registry.activeControlPollOption(manifest.conversationId, event.pollEventId, event.answerId);
+		if (!offered) return;
 		const selected = await this.matrix.controlPollAnswer(manifest.roomId, event.pollEventId, event.answerId, signal).catch(() => undefined);
-		if (!selected) return;
-		const control = parseTypedRemoteControl(selected);
+		if (selected !== offered) return;
+		const control = parseTypedRemoteControl(offered);
 		if (!control || control.name === "help") return;
-		await this.matrix.endPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, event.pollEventId, 0), event.pollEventId, "Selection accepted", signal, "stable");
-		await this.dispatchControl(manifest, event.eventId, control);
+		const pending = { controlId: deriveControlId(manifest.conversationId, event.eventId), matrixEventId: event.eventId,
+			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
+		if (!await this.registry.acceptActiveControlPollResponse(manifest.conversationId, event.pollEventId, event.answerId, offered, pending)) return;
+		await this.matrix.endPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, event.pollEventId, 0), event.pollEventId,
+			"Selection accepted", signal, "stable").catch((error) => this.diagnostic(error instanceof Error ? error.message : "Matrix control poll closure failed"));
+		await this.deliverRecordedControl(manifest, event.eventId, pending);
 	}
 
 	private async dispatchControl(manifest: ConversationManifest, eventId: string, control: TypedRemoteControl): Promise<void> {
@@ -248,6 +254,11 @@ export class CoordinatorRouter {
 		const pending = { controlId: deriveControlId(manifest.conversationId, eventId), matrixEventId: eventId,
 			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
 		await this.registry.recordPendingControl(manifest.conversationId, pending);
+		await this.deliverRecordedControl(manifest, eventId, pending);
+	}
+
+	private async deliverRecordedControl(manifest: ConversationManifest, eventId: string,
+		pending: ReturnType<RelayRegistry["pendingControls"]>[number]): Promise<void> {
 		const envelope = this.controlEnvelope(manifest.conversationId, pending);
 		if (this.server.sendToConversation(envelope)) return;
 		await this.wakeForControl(manifest);

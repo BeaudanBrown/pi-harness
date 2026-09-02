@@ -15,6 +15,7 @@ import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sess
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 
 const config = { homeserver: "https://matrix.example.com", accessToken: "secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
 
@@ -95,6 +96,58 @@ test("relay persists controls before delivery and replays stable identities afte
 	await restartedRegistry.acknowledgeControlResult(manifest.conversationId, control.controlId);
 	assert.equal(restartedRegistry.pendingControls(manifest.conversationId).length, 0, "only explicit result acknowledgement clears the pending queue");
 	assert.equal(restartedRegistry.controlResultState(manifest.conversationId, control.controlId), "completed", "lost acknowledgements remain idempotent");
+});
+
+test("active control polls survive publication restart and atomically queue one response before dispatch", async () => {
+	const { root, registry, manifest } = await fixture();
+	const source = { controlId: deriveControlId(manifest.conversationId, "$model-request"), matrixEventId: "$model-request",
+		name: "model" as const };
+	await registry.recordPendingControl(manifest.conversationId, source);
+	await registry.registerActiveControlPoll(manifest.conversationId, { pollEventId: "$published-poll", sourceControlId: source.controlId,
+		scope: "model", options: [
+			{ answerId: "pi-control-0", command: "!model scoped/one" },
+			{ answerId: "pi-control-1", command: "!model scoped/two" },
+		] });
+	await registry.acknowledgeControlResult(manifest.conversationId, source.controlId);
+
+	const restarted = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
+	await restarted.load();
+	assert.equal(restarted.activeControlPollOption(manifest.conversationId, "$published-poll", "pi-control-1"), "!model scoped/two");
+	assert.equal(restarted.activeControlPollOption(manifest.conversationId, "$published-poll", "not-offered"), undefined);
+	const response = { controlId: deriveControlId(manifest.conversationId, "$vote"), matrixEventId: "$vote",
+		name: "model" as const, argument: "scoped/two" };
+	assert.equal(await restarted.acceptActiveControlPollResponse(manifest.conversationId, "$published-poll", "pi-control-1", "!model scoped/two", response), true);
+
+	const crashedBeforeDispatch = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
+	await crashedBeforeDispatch.load();
+	assert.equal(crashedBeforeDispatch.snapshot().conversations[0]?.activeControlPoll, null, "poll retirement is durable before socket dispatch");
+	assert.deepEqual(crashedBeforeDispatch.pendingControls(manifest.conversationId), [response], "accepted response is atomically durable for restart replay");
+	assert.equal(await crashedBeforeDispatch.acceptActiveControlPollResponse(manifest.conversationId, "$published-poll", "pi-control-1", "!model scoped/two", response), false,
+		"replayed response cannot dispatch twice");
+});
+
+test("delayed, superseded, and mismatched control poll responses fail closed without retiring the active poll", async () => {
+	const { registry, manifest } = await fixture();
+	const firstId = deriveControlId(manifest.conversationId, "$first-source");
+	const secondId = deriveControlId(manifest.conversationId, "$second-source");
+	await registry.recordPendingControl(manifest.conversationId, { controlId: firstId, matrixEventId: "$first-source", name: "model" });
+	await registry.registerActiveControlPoll(manifest.conversationId, { pollEventId: "$old-poll", sourceControlId: firstId,
+		scope: "model", options: [{ answerId: "pi-control-0", command: "!model scoped/old" }] });
+	await registry.acknowledgeControlResult(manifest.conversationId, firstId);
+	await registry.recordPendingControl(manifest.conversationId, { controlId: secondId, matrixEventId: "$second-source", name: "model" });
+	await registry.registerActiveControlPoll(manifest.conversationId, { pollEventId: "$new-poll", sourceControlId: secondId,
+		scope: "model", options: [{ answerId: "pi-control-0", command: "!model scoped/new" }] });
+	const delayed = { controlId: deriveControlId(manifest.conversationId, "$delayed"), matrixEventId: "$delayed", name: "model" as const, argument: "scoped/old" };
+	assert.equal(await registry.acceptActiveControlPollResponse(manifest.conversationId, "$old-poll", "pi-control-0", "!model scoped/old", delayed), false);
+	assert.equal(await registry.acceptActiveControlPollResponse(manifest.conversationId, "$new-poll", "wrong-answer", "!model scoped/new", delayed), false);
+	assert.equal(registry.activeControlPollOption(manifest.conversationId, "$new-poll", "pi-control-0"), "!model scoped/new",
+		"stale and malformed responses do not close the current poll");
+
+	const textual = { controlId: deriveControlId(manifest.conversationId, "$text-selection"), matrixEventId: "$text-selection",
+		name: "model" as const, argument: "scoped/exact" };
+	await registry.recordPendingControl(manifest.conversationId, textual);
+	assert.equal(registry.snapshot().conversations[0]?.activeControlPoll, null, "exact textual selection closes the same control scope");
+	assert.equal(await registry.acceptActiveControlPollResponse(manifest.conversationId, "$new-poll", "pi-control-0", "!model scoped/new", delayed), false);
 });
 
 test("typed control parsing is strict, bounded, and isolates malformed commands from prompts", () => {
