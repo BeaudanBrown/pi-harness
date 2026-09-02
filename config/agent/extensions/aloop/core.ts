@@ -54,6 +54,7 @@ export type VerificationReceipt = {
 	sourceIdentity: string;
 	derivationIdentity?: string;
 	productionIntegration?: string;
+	productionIntegrationExitStatus?: number;
 };
 
 export type SupervisorAttemptGate = {
@@ -441,7 +442,7 @@ export async function closeAcceptedAloopIssue<T>(input: {
 		receipt: input.receipt,
 		acceptanceCriteria: [{ satisfied: true, evidence: "The published handoff records supervisor acceptance." }],
 		productionIntegrationRequired: true,
-		productionIntegrationEvidence: input.receipt.productionIntegration,
+		productionIntegrationEvidence: input.receipt.productionIntegrationExitStatus === 0 ? input.receipt.productionIntegration : undefined,
 	});
 	if (!gate.allowed || input.receipt.postVerificationHead !== handoff.commit || input.receipt.postVerificationClean !== true) {
 		throw new Error(`Closure blocked: ${[...gate.reasons, "the published handoff, receipt, and current clean Git commit must match"].join("; ")}.`);

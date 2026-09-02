@@ -105,8 +105,10 @@ requires model copy/paste of the encoded marker. A handoff records:
 
 Only a correctly encoded handoff on its matching issue counts. An accepted
 handoff must reference the receipt ID returned by `aloop_supervisor_verify`;
-preparation rechecks that the receipt passed at the returned commit, records
-production packaging or entry-point evidence, and confirms that HEAD and the
+`aloop_supervisor_verify` executes both the repository-defined canonical check
+and a separately supplied production packaging or registered-entry-point check.
+Preparation rechecks that both receipt exit statuses passed at the returned
+commit and confirms that HEAD and the
 complete worktree (including untracked files) are still identical.
 Commit all intended sources before verification: Git-backed Nix flakes omit
 untracked files, so a check run while eventual source files are untracked is

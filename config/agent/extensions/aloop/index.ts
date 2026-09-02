@@ -48,7 +48,7 @@ const LaunchWorkerParams = Type.Object({
 const SupervisorVerifyParams = Type.Object({
 	commit: Type.String({ minLength: 7, description: "Exact full or abbreviated worker commit to verify." }),
 	command: Type.String({ minLength: 1, description: "Repository-defined canonical verification command." }),
-	production_integration: Type.String({ minLength: 1, description: "Evidence that the verified command exercised production packaging or entry-point reachability." }),
+	production_integration_command: Type.String({ minLength: 1, description: "Executable check proving production packaging or registered entry-point reachability." }),
 });
 
 const PrepareHandoffParams = Type.Object({
@@ -415,7 +415,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		promptSnippet: "Verify the returned worker commit independently before accepting its handoff.",
 		promptGuidelines: ["Run after the worker's final commit. Any untracked or modified source blocks verification; any later change invalidates the receipt."],
 		parameters: SupervisorVerifyParams,
-		async execute(_id, params: { commit: string; command: string; production_integration: string }, signal, onUpdate, ctx) {
+		async execute(_id, params: { commit: string; command: string; production_integration_command: string }, signal, onUpdate, ctx) {
 			if (!runBudget) throw new Error("Run /aloop #<epic> before supervisor verification.");
 			const inspect = async (args: string[]) => {
 				const remaining = assessAloopRunBudget(runBudget!, Date.now());
@@ -434,6 +434,12 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const remaining = assessAloopRunBudget(runBudget, Date.now());
 			if (!remaining.allowed) throw new Error(remaining.reason);
 			const result = await pi.exec("bash", ["-lc", params.command], { timeout: Math.max(1, remaining.remainingMs), signal });
+			const productionRemaining = assessAloopRunBudget(runBudget, Date.now());
+			if (!productionRemaining.allowed) throw new Error(productionRemaining.reason);
+			onUpdate?.({ content: [{ type: "text", text: `Running production integration verification at ${expected.slice(0, 12)}: ${params.production_integration_command}` }], details: { commit: expected, command: params.production_integration_command } });
+			const productionResult = result.code === 0
+				? await pi.exec("bash", ["-lc", params.production_integration_command], { timeout: Math.max(1, productionRemaining.remainingMs), signal })
+				: { code: 1, stdout: "", stderr: "Skipped because canonical verification failed." };
 			const afterHead = await inspect(["rev-parse", "HEAD"]);
 			const afterStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
 			const receipt = {
@@ -442,7 +448,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				exitStatus: result.code,
 				timestamp: new Date().toISOString(),
 				sourceIdentity,
-				productionIntegration: params.production_integration.trim(),
+				productionIntegration: params.production_integration_command.trim(),
+				productionIntegrationExitStatus: productionResult.code,
 				postVerificationHead: afterHead,
 				postVerificationClean: afterStatus === "",
 			};
@@ -451,10 +458,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			await mkdir(receiptDirectory, { recursive: true, mode: 0o700 });
 			const receiptPath = path.join(receiptDirectory, `${receiptId}.json`);
 			await writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
-			const valid = result.code === 0 && afterHead === expected && afterStatus === "";
+			const valid = result.code === 0 && productionResult.code === 0 && afterHead === expected && afterStatus === "";
 			return {
-				content: [{ type: "text", text: `${valid ? "Supervisor verification passed" : "Supervisor verification failed or was invalidated"} at ${expected}. Receipt: .pi/tmp/aloop/receipts/${receiptId}.json (exit ${result.code}; post-check clean=${afterStatus === ""}).` }],
-				details: { valid, receiptId, receiptPath: `.pi/tmp/aloop/receipts/${receiptId}.json`, receipt, stdout: result.stdout, stderr: result.stderr },
+				content: [{ type: "text", text: `${valid ? "Supervisor verification passed" : "Supervisor verification failed or was invalidated"} at ${expected}. Receipt: .pi/tmp/aloop/receipts/${receiptId}.json (canonical exit ${result.code}; production exit ${productionResult.code}; post-check clean=${afterStatus === ""}).` }],
+				details: { valid, receiptId, receiptPath: `.pi/tmp/aloop/receipts/${receiptId}.json`, receipt, stdout: result.stdout, stderr: result.stderr, productionStdout: productionResult.stdout, productionStderr: productionResult.stderr },
 			};
 		},
 	});
@@ -498,7 +505,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const worktree = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
 				if (head.code !== 0 || currentHead.code !== 0 || worktree.code !== 0) throw new Error("Could not validate the supervisor verification receipt against Git.");
 				const expected = head.stdout.trim();
-				if (receipt.commit !== expected || currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || !receipt.productionIntegration?.trim() || worktree.stdout.trim()) {
+				if (receipt.commit !== expected || currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || !receipt.productionIntegration?.trim() || receipt.productionIntegrationExitStatus !== 0 || worktree.stdout.trim()) {
 					throw new Error("Accepted handoff is not bound to a passing receipt with production-integration evidence at the current clean commit; rerun supervisor verification after all source changes.");
 				}
 			}

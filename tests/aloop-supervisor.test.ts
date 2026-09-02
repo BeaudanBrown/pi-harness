@@ -274,6 +274,7 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		let workerIssues: number[] = [];
 		let publicationApplyCalls = 0;
 		let closeCalls = 0;
+		const shellCommands: string[] = [];
 		let fakeHead = "a".repeat(40);
 		const pi = {
 			registerTool: (tool: { name: string; execute: (...args: unknown[]) => Promise<{ details?: Record<string, unknown> }> }) => tools.set(tool.name, tool),
@@ -284,6 +285,7 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 			setSessionName: () => undefined,
 			sendUserMessage: () => undefined,
 			exec: async (_command: string, args: string[]) => {
+				if (_command === "bash") shellCommands.push(args[1]!);
 				if (args[0] === "log") return { code: 0, stdout: "history\n", stderr: "" };
 				if (args[0] === "rev-parse") return { code: 0, stdout: `${fakeHead}\n`, stderr: "" };
 				return { code: 0, stdout: "", stderr: "" };
@@ -319,6 +321,9 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		});
 		const ctx = { cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined } as unknown as ExtensionContext;
 		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-attempts 2", ctx);
+		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead, command: "unit-check", production_integration_command: "package-check" }, ctx.signal, undefined, ctx);
+		assert.deepEqual(shellCommands, ["unit-check", "package-check"]);
+		assert.equal((verified.details?.receipt as { productionIntegrationExitStatus?: number }).productionIntegrationExitStatus, 0);
 		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "implementation", approach: "test wiring" }, ctx.signal, undefined, ctx);
 		assert.equal(claims, 1);
 		assert.deepEqual(workerIssues, [2]);
@@ -341,7 +346,8 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 			sourceIdentity: "tree:verified",
 			postVerificationHead: fakeHead,
 			postVerificationClean: true,
-			productionIntegration: "canonical verification packages the production extension",
+			productionIntegration: "nix build .#pi-harness-resources",
+			productionIntegrationExitStatus: 0,
 		}));
 		await tools.get("aloop_close_accepted_issue")!.execute("close-dry", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: true }, ctx.signal, undefined, ctx);
 		await tools.get("aloop_close_accepted_issue")!.execute("close", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: false }, ctx.signal, undefined, ctx);
@@ -360,6 +366,8 @@ test("handoff spool identity is deterministic, exact-byte preserving, and tamper
 	const first = createAloopHandoffSpoolRecord(69, commentBytes);
 	const retry = createAloopHandoffSpoolRecord(69, commentBytes);
 	assert.deepEqual(retry, first, "repeated preparation must produce the same publication ID and bytes");
+	assert.equal(first.id.length, 24, "spool creation and the public tool schema have always used 24-character IDs");
+	assert.throws(() => authorizeHandoffPublication({ handoffId: first.id.slice(0, 16), dryRun: true, dryRunHandoffIds: new Set() }), /ID is invalid/);
 	assert.equal(validateAloopHandoffSpoolRecord(JSON.parse(JSON.stringify(first)), first.id).comment, commentBytes);
 	assert.notEqual(createAloopHandoffSpoolRecord(70, commentBytes).id, first.id, "IDs bind the target issue");
 	assert.notEqual(createAloopHandoffSpoolRecord(69, `${commentBytes}changed`).id, first.id, "IDs bind exact bytes");
@@ -446,7 +454,8 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 		sourceIdentity: "tree:verified",
 		postVerificationHead: commitId,
 		postVerificationClean: true,
-		productionIntegration: "canonical verification packages the production extension",
+		productionIntegration: "nix build .#pi-harness-resources",
+		productionIntegrationExitStatus: 0,
 	};
 	const closureIds = new Set<string>();
 	let closes = 0;
@@ -475,6 +484,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, commit: "b".repeat(40) } }), /different commit/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, timestamp: "invalid" } }), /incomplete/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, productionIntegration: "" } }), /Production packaging/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, productionIntegrationExitStatus: 1 } }), /Production packaging/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, currentHead: "b".repeat(40) }), /differs/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, worktreeStatus: " M source.ts" }), /changed after verification/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, issue: { ...child, assignee: "other" } }), /must be claimed/);
