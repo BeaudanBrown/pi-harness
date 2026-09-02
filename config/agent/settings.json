@@ -10,7 +10,8 @@
     "./extensions/nix-runtime/index.ts",
     "./extensions/codex-fast/index.ts",
     "./extensions/tmux-cursor-focus/index.ts",
-    "./extensions/sesh/index.ts"
+    "./extensions/sesh/index.ts",
+    "./extensions/agent-profiles/index.ts"
   ],
   "skills": [
     "./skills"

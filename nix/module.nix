@@ -52,6 +52,30 @@ let
   managedRelayPackage = if cfg.managedSessions.relayPackage == null then cfg.package else cfg.managedSessions.relayPackage;
   managedLauncherPackage = if cfg.managedSessions.launcherPackage == null then pkgs.runCommand "missing-managed-session-launcher" { } "mkdir -p $out" else cfg.managedSessions.launcherPackage;
   managedExtensions = cfg.package.managedSessionExtensions or { ordinary = "/missing-managed-ordinary"; coordinator = "/missing-managed-coordinator"; };
+  profileDocument = cfg.package.agentProfiles or { profiles = { }; variants = { }; };
+  engineeringProfile = profileDocument.profiles."engineering-full" or { extensions = [ ]; skills = [ ]; prompts = [ ]; themes = [ ]; };
+  managedVariant = profileDocument.variants."managed-project" or { excludeExtensions = [ ]; excludeSkills = [ ]; excludePrompts = [ ]; };
+  managedProfileExtensions = builtins.filter
+    (name: !(builtins.elem name (managedVariant.excludeExtensions or [ ])) && name != "pi-r" && name != "agentgraph")
+    engineeringProfile.extensions;
+  managedProfileExtensionArgs = lib.concatMapStringsSep "\n"
+    (name: ''--extension "${cfg.package.harnessResources}/share/pi-harness/agent/extensions/${name}/index.ts"'')
+    managedProfileExtensions;
+  managedProfileSkillArgs = lib.concatMapStringsSep "\n" (name:
+    if builtins.elem name (managedVariant.excludeSkills or [ ]) then ""
+    else if name == "harness" then ''--skill "${cfg.package.harnessResources}/share/pi-harness/agent/skills"''
+    else if name == "matt-pocock" then ''--skill "${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills"''
+    else ""
+  ) engineeringProfile.skills;
+  managedProfilePromptArgs = lib.concatMapStringsSep "\n" (name:
+    if builtins.elem name (managedVariant.excludePrompts or [ ]) then ""
+    else if name == "harness" then ''--prompt-template "${cfg.package.harnessResources}/share/pi-harness/agent/prompts"'' else ""
+  ) engineeringProfile.prompts;
+  managedProfileThemeArgs = lib.concatMapStringsSep "\n" (name:
+    if name == "harness" then ''--theme "${cfg.package.harnessResources}/share/pi-harness/agent/themes"'' else ""
+  ) engineeringProfile.themes;
+  coordinatorProfile = profileDocument.profiles."managed-coordinator" or { tools = [ ]; };
+  coordinatorTools = lib.concatStringsSep "," coordinatorProfile.tools;
   managedRawPi = cfg.package.pi or cfg.package;
   runtimeEnvironmentFiles = lib.filter (path: path != null) [ cfg.agentgraph.environmentFile ];
   runtimeEnvironmentSetup = lib.optionalString (runtimeEnvironmentFiles != [ ]) ''
@@ -96,10 +120,18 @@ let
     set -euo pipefail
     : "''${PI_MANAGED_COORDINATOR_CWD:?PI_MANAGED_COORDINATOR_CWD is required}"
     : "''${PI_MANAGED_COORDINATOR_SESSION_FILE:?PI_MANAGED_COORDINATOR_SESSION_FILE is required}"
+    export PI_HARNESS_AGENT_PROFILE="managed-coordinator"
     cd "$PI_MANAGED_COORDINATOR_CWD"
     exec ${managedRawPi}/bin/pi \
       --no-extensions \
+      --no-skills \
+      --no-prompt-templates \
+      --no-themes \
+      --no-context-files \
+      --no-builtin-tools \
       --extension "${managedExtensions.coordinator}" \
+      --extension "${cfg.package.agentProfileExtension}" \
+      --tools "${coordinatorTools}" \
       --session "$PI_MANAGED_COORDINATOR_SESSION_FILE" \
       "$@"
   '';
@@ -112,9 +144,25 @@ let
         ;;
       project)
         : "''${PI_MANAGED_PROJECT_SESSION_FILE:?PI_MANAGED_PROJECT_SESSION_FILE is required}"
+        export PI_HARNESS_AGENT_PROFILE="managed-project"
+        export PI_HARNESS_RESOURCES_ROOT="${cfg.package.harnessResources}/share/pi-harness/agent"
+        export PI_HARNESS_MATT_SKILLS_ROOT="${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills"
+        ${lib.optionalString (cfg.lsp.extension != null) ''export PI_HARNESS_LSP_EXTENSION="${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts"''}
+        profile_args=(
+          ${managedProfileExtensionArgs}
+          ${managedProfileSkillArgs}
+          ${managedProfilePromptArgs}
+          ${managedProfileThemeArgs}
+          --extension "${managedExtensions.ordinary}"
+        )
+        ${lspExtensionArray}
         exec ${managedRawPi}/bin/pi \
           --no-extensions \
-          --extension "${managedExtensions.ordinary}" \
+          --no-skills \
+          --no-prompt-templates \
+          --no-themes \
+          "''${profile_args[@]}" \
+          "''${extension_args[@]}" \
           --session "$PI_MANAGED_PROJECT_SESSION_FILE" \
           --approve \
           "$@"

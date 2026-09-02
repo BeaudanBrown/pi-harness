@@ -25,6 +25,27 @@
 }:
 
 let
+  profileDocument = piHarnessResources.agentProfiles;
+  engineeringProfile = profileDocument.profiles."engineering-full";
+  localHarnessExtensionIds = builtins.filter
+    (name: name != "pi-r" && name != "agentgraph")
+    engineeringProfile.extensions;
+  engineeringExtensionArgs = lib.concatMapStringsSep "\n"
+    (name: ''--extension "${piHarnessResources}/share/pi-harness/agent/extensions/${name}/index.ts"'')
+    localHarnessExtensionIds;
+  engineeringSkillArgs = lib.concatMapStringsSep "\n" (name:
+    if name == "harness" then ''--skill "${piHarnessResources}/share/pi-harness/agent/skills"''
+    else if name == "matt-pocock" then ''--skill "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"''
+    else ""
+  ) engineeringProfile.skills;
+  engineeringPromptArgs = lib.concatMapStringsSep "\n" (name:
+    if name == "harness" then ''--prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"'' else ""
+  ) engineeringProfile.prompts;
+  engineeringThemeArgs = lib.concatMapStringsSep "\n" (name:
+    if name == "harness" then ''--theme "${piHarnessResources}/share/pi-harness/agent/themes"'' else ""
+  ) engineeringProfile.themes;
+  localProfile = profileDocument.profiles."pi-local";
+  localInitialTools = lib.concatStringsSep "," localProfile.tools;
   evalLauncherIdentity = builtins.toJSON {
     schemaVersion = "1.0.0";
     launcher = {
@@ -69,6 +90,9 @@ stdenvNoCC.mkDerivation {
 #!/usr/bin/env bash
 set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
+export PI_HARNESS_RESOURCES_ROOT="${piHarnessResources}/share/pi-harness/agent"
+export PI_HARNESS_MATT_SKILLS_ROOT="${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"
+${lib.optionalString (piLspExtension != null) ''export PI_HARNESS_LSP_EXTENSION="${piLspExtension}/share/pi-lsp-extension/src/index.ts"''}
 export PI_R_RESOURCE_ROOT="${piRPackage.resourcePaths.root}"
 export PI_R_TREE_SITTER="${piRPackage.resourcePaths.parser}"
 export PI_R_TREE_SITTER_R="${piRPackage.resourcePaths.parserGrammar}"
@@ -89,6 +113,7 @@ export PI_R_NIXPKGS_PATH="${piRPackage.resourcePaths.nixpkgs}"
 export PI_R_NIXPKGS_PIN_PATH="${piRPackage.resourcePaths.nixpkgsPin}"
 export PI_R_SCOUT_PI="${lib.getExe piPackage}"
 export PI_R_SCOUT_EXTENSION="${piRPackage.resourcePaths.scoutExtension}"
+export PI_HARNESS_AGENT_PROFILE="\''${PI_HARNESS_AGENT_PROFILE:-engineering-full}"
 unset PI_R_TEST_TREE_SITTER PI_R_TEST_TREE_SITTER_R PI_R_TEST_TREE_SITTER_QUERY PI_R_TEST_BASE_RSCRIPT PI_R_TEST_RESOURCE_ROOT
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
@@ -109,20 +134,10 @@ esac
 
 resource_args=(
   --extension "${piRPackage.resourcePaths.extension}"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/aloop/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
-  --extension "${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts"
-  --skill "${piHarnessResources}/share/pi-harness/agent/skills"
-  --skill "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"
-  --prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"
-  --theme "${piHarnessResources}/share/pi-harness/agent/themes"
+  ${engineeringExtensionArgs}
+  ${engineeringSkillArgs}
+  ${engineeringPromptArgs}
+  ${engineeringThemeArgs}
 )
 ${lib.optionalString (agentgraphPiResources != null) ''agentgraph_root="\''${PI_HARNESS_AGENTGRAPH_ROOT:-\''${AGENTGRAPH_PI_RESOURCES:-${agentgraphPiResources}/share/agentgraph-pi}}"
 agentgraph_extensions_dir="\''${PI_HARNESS_AGENTGRAPH_EXTENSIONS_DIR:-\$agentgraph_root/extensions}"
@@ -176,6 +191,7 @@ export PI_R_NIXPKGS_PATH="${piRPackage.resourcePaths.nixpkgs}"
 export PI_R_NIXPKGS_PIN_PATH="${piRPackage.resourcePaths.nixpkgsPin}"
 export PI_R_SCOUT_PI="${lib.getExe piPackage}"
 export PI_R_SCOUT_EXTENSION="${piRPackage.resourcePaths.scoutExtension}"
+export PI_HARNESS_AGENT_PROFILE="pi-local"
 unset PI_R_TEST_TREE_SITTER PI_R_TEST_TREE_SITTER_R PI_R_TEST_TREE_SITTER_QUERY PI_R_TEST_BASE_RSCRIPT PI_R_TEST_RESOURCE_ROOT
 if [[ -n "\''${PI_EVAL_ATTESTATION_PATH:-}" ]]; then
   umask 077
@@ -183,12 +199,15 @@ if [[ -n "\''${PI_EVAL_ATTESTATION_PATH:-}" ]]; then
     "\$PI_R_RESOURCE_ROOT" "${piRPackage.resourcePaths.extension}" "${piRPackage.resourcePaths.skill}" \
     > "\$PI_EVAL_ATTESTATION_PATH"
 fi
-export PI_R_INITIAL_TOOLS="\''${PI_R_INITIAL_TOOLS:-read,bash,edit,write,grep,find,ls}"
+export PI_R_INITIAL_TOOLS="${localInitialTools}"
 exec "${lib.getExe piPackage}" \
   --no-extensions \
   --no-skills \
+  --no-prompt-templates \
+  --no-themes \
   --no-context-files \
   --extension "${piRPackage.resourcePaths.extension}" \
+  --extension "${piHarnessResources.agentProfileExtension}" \
   --skill "${piRPackage.resourcePaths.skill}" \
   "\$@"
 EOF
@@ -221,6 +240,8 @@ EOF
     piR = piRPackage;
     piResources = piHarnessResources.piResources;
     harnessResources = piHarnessResources;
+    agentProfiles = profileDocument;
+    agentProfileExtension = piHarnessResources.agentProfileExtension;
     managedSessionExtensions = piHarnessResources.managedSessionExtensions;
     inherit managedSessionRelay;
     mattpocockSkills = mattPocockSkillsResources;

@@ -11,6 +11,7 @@ import {
 	type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import { resolveAgentProfile } from "../agent-profiles/core.js";
 import {
 	buildReviewPrompt,
 	DEFAULT_REVIEW_MODEL,
@@ -55,19 +56,14 @@ type ReviewResult = {
 };
 
 function createReviewResourceLoader(): ResourceLoader {
+	const profile = resolveAgentProfile("review-worker");
 	return {
 		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
 		getSkills: () => ({ skills: [], diagnostics: [] }),
 		getPrompts: () => ({ prompts: [], diagnostics: [] }),
 		getThemes: () => ({ themes: [], diagnostics: [] }),
 		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => `You are a senior code-review agent working for a parent coding agent.
-
-Review only the pinned change and the axis-specific brief supplied by the parent.
-Use read-only inspection tools to verify claims against the diff, changed files, standards, and specification sources.
-Do not edit files. Do not run commands. Do not broaden the requested scope.
-Every finding must be concrete, actionable, and supported by a file path, hunk, or quoted requirement.
-Distinguish verified defects from judgement calls. If there are no findings, say so directly and briefly.`,
+		getSystemPrompt: () => profile.systemPrompt,
 		getSystemPromptSource: () => undefined,
 		getAppendSystemPrompt: () => [],
 		getAppendSystemPromptSources: () => [],
@@ -160,7 +156,7 @@ async function askReviewer(
 		cwd: ctx.cwd,
 		model,
 		thinkingLevel: REVIEW_THINKING_LEVEL,
-		tools: ["read", "grep", "find", "ls"],
+		tools: resolveAgentProfile("review-worker").tools,
 		sessionManager: SessionManager.inMemory(ctx.cwd),
 		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
 		resourceLoader: createReviewResourceLoader(),

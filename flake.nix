@@ -105,6 +105,13 @@
           xdgUtils = pkgs.xdg-utils;
           jq = pkgs.jq;
         };
+        developmentProfile = piHarnessResources.agentProfiles.profiles."engineering-full";
+        developmentHarnessExtensionIds = builtins.filter
+          (name: name != "pi-r" && name != "agentgraph")
+          developmentProfile.extensions;
+        developmentExtensionArgs = lib.concatMapStringsSep " \\\n"
+          (name: ''--extension "$PWD/config/agent/extensions/${name}/index.ts"'')
+          developmentHarnessExtensionIds;
         managedSessionLauncher = pkgs.writeShellApplication {
           name = "tmux_project";
           runtimeInputs = [ pkgs.coreutils pkgs.direnv pkgs.findutils pkgs.gawk pkgs.jq pkgs.tmux ];
@@ -281,16 +288,13 @@
                 exec ${lib.getExe piPackage} "$@"
                 ;;
               *)
+                export PI_HARNESS_AGENT_PROFILE="engineering-full"
+                export PI_HARNESS_RESOURCES_ROOT="$PWD/config/agent"
+                export PI_HARNESS_MATT_SKILLS_ROOT="${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"
+                export PI_HARNESS_LSP_EXTENSION="${piLspExtension}/share/pi-lsp-extension/src/index.ts"
                 exec ${lib.getExe piPackage} \
-                  --extension "$PWD/config/agent/extensions/web-search/index.ts" \
-                  --extension "$PWD/config/agent/extensions/github-issues/index.ts" \
-                  --extension "$PWD/config/agent/extensions/diagram-tools/index.ts" \
-                  --extension "$PWD/config/agent/extensions/worker-runner/index.ts" \
-                  --extension "$PWD/config/agent/extensions/review-agents/index.ts" \
-                  --extension "$PWD/config/agent/extensions/nix-runtime/index.ts" \
-                  --extension "$PWD/config/agent/extensions/codex-fast/index.ts" \
-                  --extension "$PWD/config/agent/extensions/tmux-cursor-focus/index.ts" \
-                  --extension "$PWD/config/agent/extensions/sesh/index.ts" \
+                  --extension "${piRPackage.resourcePaths.extension}" \
+                  ${developmentExtensionArgs} \
                   --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
                   --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
                   --skill "$PWD/config/agent/skills" \
@@ -699,6 +703,11 @@
             fi
             grep -F '${piHarnessResources.managedSessionExtensions.ordinary}' ${managedSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'PI_MANAGED_SESSIONS_SOCKET' ${managedSessionPiWrapper}/bin/pi >/dev/null
+            grep -F 'PI_HARNESS_AGENT_PROFILE="managed-project"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+            grep -F -- '--no-extensions' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+            grep -F -- '--no-skills' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+            grep -F -- '--no-prompt-templates' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+            grep -F -- '--no-themes' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
             if grep -F '/run/secrets/pi-managed-session.env' ${managedSessionPiWrapper}/bin/pi >/dev/null; then
               echo "managed-session Matrix credential file leaked into the interactive Pi wrapper" >&2
               exit 1
@@ -774,13 +783,20 @@
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
             jq -e '.extensions | index("./extensions/sesh/index.ts")' \
               ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.extensions | index("./extensions/agent-profiles/index.ts")' \
+              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
+            jq -e '.profiles | keys | length == 7' \
+              ${piHarnessResources}/share/pi-harness/agent/profiles.json >/dev/null
 
             grep -F -- '--no-extensions' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F -- '--no-skills' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F -- '--no-context-files' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F -- '--no-prompt-templates' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F -- '--no-themes' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F -- '--extension "${piRPackage.resourcePaths.extension}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F -- '--extension "${piHarnessResources.agentProfileExtension}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F -- '--skill "${piRPackage.resourcePaths.skill}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            if grep -F "${piHarnessResources}/share/pi-harness/agent/extensions/" ${piHarnessPackage}/bin/pi-r-local >/dev/null; then
+            if grep -F "${piHarnessResources}/share/pi-harness/agent/extensions/" ${piHarnessPackage}/bin/pi-r-local | grep -v 'agent-profiles/index.ts' >/dev/null; then
               echo "pi-local must not load general harness extensions" >&2
               exit 1
             fi
@@ -805,6 +821,7 @@
               PI_MANAGED_TEST_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
               PI_MANAGED_TEST_DIRENV=${pkgs.direnv}/bin/direnv \
               node --test \
+                "$test_build_dir/tests/agent-profiles.test.js" \
                 "$test_build_dir/tests/github-issues.test.js" \
                 "$test_build_dir/tests/aloop-worker.test.js" \
                 "$test_build_dir/tests/aloop-supervisor.test.js" \

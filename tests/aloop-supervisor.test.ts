@@ -235,6 +235,44 @@ test("publication operation preserves exact bytes across dry-run, failure, and i
 	assert.ok(calls.every((call) => call.comment === exactComment), "every attempt must use the exact prepared bytes");
 });
 
+test("aloop supervisor tools activate only for an active run and disappear after settlement", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "aloop-profile-"));
+	try {
+		const events = new Map<string, Array<(...args: any[]) => any>>();
+		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
+		let activeTools = ["read"];
+		let kickoffCount = 0;
+		const pi = {
+			registerTool: (tool: { name: string }) => { activeTools.push(tool.name); },
+			registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => commands.set(name, command),
+			on: (event: string, handler: (...args: any[]) => any) => events.set(event, [...(events.get(event) ?? []), handler]),
+			getActiveTools: () => activeTools,
+			setActiveTools: (tools: string[]) => { activeTools = tools; },
+			setSessionName: () => undefined,
+			sendUserMessage: () => { kickoffCount += 1; },
+			exec: async (_command: string, args: string[]) => args[0] === "log"
+				? { code: 0, stdout: "history\n", stderr: "" }
+				: { code: 0, stdout: "", stderr: "" },
+		} as unknown as ExtensionAPI;
+		registerAloopExtension(pi, { retrieveEpicContext: async () => context([issue({ number: 2, title: "Leaf" })]) });
+		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal,
+			abort: () => undefined, ui: { notify: () => undefined, setStatus: () => undefined } } as unknown as ExtensionContext;
+		for (const handler of events.get("session_start") ?? []) handler({ reason: "startup" }, ctx);
+		assert.deepEqual(activeTools, ["read"]);
+		await commands.get("aloop")!.handler("#1", ctx);
+		assert.equal(kickoffCount, 1);
+		assert.ok(activeTools.includes("aloop_launch_worker"));
+		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
+		assert.deepEqual(activeTools, ["read"]);
+		await commands.get("aloop")!.handler("#1", ctx);
+		assert.ok(activeTools.includes("aloop_launch_worker"));
+		for (const handler of events.get("session_shutdown") ?? []) handler({ reason: "reload" }, ctx);
+		assert.deepEqual(activeTools, ["read"]);
+	} finally {
+		rmSync(cwd, { recursive: true, force: true });
+	}
+});
+
 test("registered aloop tools load verification policy, preserve exact publication, and close idempotently", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-extension-"));
 	try {

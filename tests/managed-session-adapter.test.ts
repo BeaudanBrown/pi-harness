@@ -63,13 +63,13 @@ class FakeRelay {
 	private server?: Server;
 	private counter = 0;
 
-	private constructor(root: string, private readonly lifecycleDelayMs = 0) {
+	private constructor(root: string, private readonly lifecycleDelayMs = 0, private readonly attachmentDelayMs = 0) {
 		this.root = root;
 		this.socketPath = join(root, "relay.sock");
 	}
 
-	static async start(lifecycleDelayMs = 0): Promise<FakeRelay> {
-		const relay = new FakeRelay(await mkdtemp(join(tmpdir(), "pi-adapter-relay-")), lifecycleDelayMs);
+	static async start(lifecycleDelayMs = 0, attachmentDelayMs = 0): Promise<FakeRelay> {
+		const relay = new FakeRelay(await mkdtemp(join(tmpdir(), "pi-adapter-relay-")), lifecycleDelayMs, attachmentDelayMs);
 		relay.server = createServer((socket) => relay.accept(socket));
 		await new Promise<void>((resolve, reject) => {
 			relay.server!.once("error", reject);
@@ -82,6 +82,10 @@ class FakeRelay {
 		for (const socket of this.sockets) socket.destroy();
 		if (this.server) await new Promise<void>((resolve) => this.server!.close(() => resolve()));
 		await rm(this.root, { recursive: true, force: true });
+	}
+
+	disconnect(): void {
+		for (const socket of this.sockets) socket.destroy();
 	}
 
 	send(envelope: ManagedSessionEnvelope): void {
@@ -118,7 +122,9 @@ class FakeRelay {
 		if (envelope.type === "self.bind") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId } }));
 		} else if (envelope.type === "attachment.attach") {
-			socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active" } }));
+			setTimeout(() => {
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active" } }));
+			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
 		} else if (envelope.type === "control.result") {
@@ -313,10 +319,29 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 		assert.equal(commands.has("remote-off"), false);
 		assert.deepEqual(tools, role === "ordinary_adapter" ? ["remote_checkpoint"] : [
 			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_session_start",
-			"remote_session_resume", "remote_session_stop", "remote_session_delete", "remote_checkpoint",
+			"remote_session_resume", "remote_session_stop", "remote_session_delete",
 		]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));
 	}
+});
+
+test("a shutdown racing attachment startup cannot reactivate remote_checkpoint", async (t) => {
+	const relay = await FakeRelay.start(0, 100); t.after(() => relay.close());
+	const handlers = new Map<string, (...args: any[]) => any>();
+	let activeTools = ["read", "remote_checkpoint"];
+	const api = {
+		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
+		registerCommand: () => undefined, registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined,
+		getActiveTools: () => activeTools, setActiveTools: (tools: string[]) => { activeTools = tools; },
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const branch = [custom("binding", BINDING_ENTRY_TYPE, binding)];
+	const ctx: any = { hasUI: false, sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding" } };
+	const startup = handlers.get("session_start")!({ reason: "resume" }, ctx);
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+	await startup;
+	assert.deepEqual(activeTools, ["read"]);
 });
 
 test("typed runtime controls reject busy mutation and use authenticated scoped native state without prompts", async (t) => {
@@ -324,6 +349,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	const branch: any[] = [custom("binding", BINDING_ENTRY_TYPE, binding)];
 	const handlers = new Map<string, (...args: any[]) => any>();
 	let idle = false; let setModelCalls = 0; let thinking = "medium"; let contextTokens = 90; let compactFocus: string | undefined; let promptCalls = 0;
+	let activeTools = ["read", "remote_checkpoint"];
 	const models = [
 		...Array.from({ length: 25 }, (_, index) => ({ provider: "scoped", id: `model-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 })),
 		...Array.from({ length: 5 }, (_, index) => ({ provider: "small", id: `choice-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 })),
@@ -332,6 +358,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 		registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined,
 		sendUserMessage: () => { promptCalls += 1; }, sendMessage: () => { promptCalls += 1; },
 		setModel: async () => { setModelCalls += 1; return true; }, setThinkingLevel: (level: string) => { thinking = level; }, getThinkingLevel: () => thinking,
+		getActiveTools: () => activeTools, setActiveTools: (tools: string[]) => { activeTools = tools; },
 	} as unknown as ExtensionAPI;
 	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
 	const ctx: any = { hasUI: false, isIdle: () => idle, abort: () => undefined, shutdown: () => undefined,
@@ -340,6 +367,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 		getContextUsage: () => ({ tokens: contextTokens }), compact: ({ customInstructions, onComplete }: any) => { compactFocus = customInstructions; contextTokens = 40; onComplete({ estimatedTokensAfter: 40 }); },
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	assert.deepEqual(activeTools, ["read", "remote_checkpoint"], "checkpoint activates only for the live managed binding");
 	const send = async (id: number, name: string, argument?: string) => { relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: `control-${id}`, conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${String(id).padStart(32, "a")}`, name, ...(argument ? { argument } : {}) } } as ManagedSessionEnvelope); await new Promise((resolve) => setTimeout(resolve, 30)); };
 	await send(1, "model", "scoped/model-1");
@@ -362,7 +390,11 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	assert.match(String(relay.frames.at(-1)?.payload.message), /90 -> 40/);
 	await send(7, "new"); assert.match(String(relay.frames.at(-1)?.payload.message), /generation transition/);
 	assert.equal(promptCalls, 0, "internal controls never enter model-visible message APIs");
+	relay.disconnect();
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.deepEqual(activeTools, ["read"], "checkpoint deactivates immediately when the managed binding disconnects");
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+	assert.deepEqual(activeTools, ["read"], "checkpoint remains inactive when the managed binding shuts down");
 });
 
 test("durable control marker restoration rejects extra, malformed, and unbounded data", async () => {

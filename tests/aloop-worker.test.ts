@@ -12,9 +12,11 @@ import {
 	parseAloopWorkerResult,
 	prepareAloopArtifactDirectory,
 	resolveAloopArtifactPath,
+	resolveProjectWorkerResources,
 	runAloopWorker,
 	runIsolatedAloopProcess,
 } from "../config/agent/extensions/github-issues/aloop-worker.js";
+import { resolveAgentProfile, withProjectWorkerOptIn } from "../config/agent/extensions/agent-profiles/core.js";
 
 const exec = promisify(execFile);
 const fakeWorker = path.resolve("tests/fixtures/aloop-worker/fake-worker.mjs");
@@ -69,6 +71,29 @@ test("worker prompt and command are compact, non-interactive, and deny superviso
 	assert.match(prompt, /Replace the hybrid payload/);
 	assert.doesNotMatch(prompt, /pi-aloop-handoff:v2:/);
 	assert.match(prompt, /final assistant message must contain only one JSON object/);
+});
+
+test("implementation worker command resolves declared resources and explicit project opt-ins", async () => {
+	const cwd = await mkdtemp(path.join(tmpdir(), "aloop-profile-resources-"));
+	try {
+		await mkdir(path.join(cwd, ".pi"), { recursive: true });
+		await writeFile(path.join(cwd, ".pi", "worker.ts"), "export default () => {};\n");
+		const project = await resolveProjectWorkerResources(cwd, { extensions: [".pi/worker.ts"], tools: ["project_lookup"] });
+		const profile = withProjectWorkerOptIn(resolveAgentProfile("aloop-implementation"), { tools: project.tools });
+		const command = buildAloopWorkerCommand({
+			launcher: ["node", "pi.js"], prompt: "work", profile, projectExtensions: project.extensions,
+			resourceRoots: { harness: "/nix/harness", mattSkills: "/nix/matt", lspExtension: "/nix/lsp/index.ts" },
+		});
+		assert.ok(command.includes("/nix/harness/extensions/review-agents/index.ts"));
+		assert.ok(command.includes("/nix/lsp/index.ts"));
+		assert.equal(command.filter((argument) => argument === path.join(cwd, ".pi", "worker.ts")).length, 1);
+		assert.equal(command.some((argument) => argument.includes("extensions/repo/") || argument.endsWith("worker.ts/index.ts")), false);
+		assert.match(command[command.indexOf("--tools") + 1]!, /project_lookup/);
+		assert.doesNotMatch(command[command.indexOf("--tools") + 1]!, /github_issue_mutate/);
+		await assert.rejects(resolveProjectWorkerResources(cwd, { extensions: ["../escape.ts"], tools: [] }), /escapes/);
+	} finally {
+		await rm(cwd, { recursive: true, force: true });
+	}
 });
 
 test("structured worker results are parsed from the final assistant JSON event", () => {

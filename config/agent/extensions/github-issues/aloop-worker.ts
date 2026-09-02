@@ -1,9 +1,10 @@
 import { spawn } from "node:child_process";
 import { constants, createWriteStream } from "node:fs";
-import { lstat, mkdir, open } from "node:fs/promises";
+import { lstat, mkdir, open, realpath } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import * as path from "node:path";
+import { resolveAgentProfile, withProjectWorkerOptIn, type AgentProfile } from "../agent-profiles/core.js";
 
 const ALOOP_ROOT = ".pi/tmp/aloop";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -35,6 +36,7 @@ export type AloopWorkerInput = {
 	epic: { number: number; title: string; body: string };
 	issue: { number: number; title: string; body: string };
 	priorHandoffs?: AloopWorkerHandoffContext[];
+	projectWorkerResources?: { extensions: string[]; tools: string[] };
 	launcher?: string[];
 	modelRef?: string;
 	timeoutMs?: number;
@@ -195,8 +197,24 @@ export function buildAloopWorkerCommand(options: {
 	launcher: string[];
 	prompt: string;
 	modelRef?: string;
+	profile?: AgentProfile;
+	resourceRoots?: { harness?: string; mattSkills?: string; lspExtension?: string };
+	projectExtensions?: string[];
 }): string[] {
 	if (options.launcher.length === 0 || options.launcher.some((part) => !part)) throw new Error("Aloop worker launcher must be a non-empty argv array.");
+	const profile = options.profile ?? resolveAgentProfile("aloop-implementation");
+	const roots = options.resourceRoots ?? {};
+	const extensionPaths = profile.extensions.flatMap((name) => {
+		if (name === "lsp") return roots.lspExtension ? [roots.lspExtension] : [];
+		if (name === "pi-r" || name === "agentgraph") return [];
+		return roots.harness ? [path.join(roots.harness, "extensions", name, "index.ts")] : [];
+	});
+	const skillPaths = profile.skills.flatMap((name) => {
+		if (name === "harness") return roots.harness ? [path.join(roots.harness, "skills")] : [];
+		if (name === "matt-pocock") return roots.mattSkills ? [roots.mattSkills] : [];
+		return [];
+	});
+	const promptPaths = profile.prompts.flatMap((name) => name === "harness" && roots.harness ? [path.join(roots.harness, "prompts")] : []);
 	return [
 		...options.launcher,
 		"--mode", "json",
@@ -205,8 +223,12 @@ export function buildAloopWorkerCommand(options: {
 		"--no-skills",
 		"--no-prompt-templates",
 		"--no-themes",
+		...extensionPaths.flatMap((extension) => ["--extension", extension]),
+		...(options.projectExtensions ?? []).flatMap((extension) => ["--extension", extension]),
+		...skillPaths.flatMap((skill) => ["--skill", skill]),
+		...promptPaths.flatMap((prompt) => ["--prompt-template", prompt]),
 		"--approve",
-		"--tools", "read,bash,edit,write,grep,find,ls",
+		"--tools", profile.tools.join(","),
 		...(options.modelRef ? ["--model", options.modelRef] : []),
 		"--thinking", "medium",
 		options.prompt,
@@ -444,6 +466,28 @@ async function isAncestor(cwd: string, ancestor: string, descendant: string, opt
 	throw new Error(result.stderr || "git merge-base --is-ancestor failed.");
 }
 
+export async function resolveProjectWorkerResources(
+	cwd: string,
+	resources: AloopWorkerInput["projectWorkerResources"],
+): Promise<{ extensions: string[]; tools: string[] }> {
+	if (!resources) return { extensions: [], tools: [] };
+	const tools = [...new Set(resources.tools)];
+	if (tools.some((tool) => !/^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(tool))) throw new Error(".aloop.json contains an invalid project worker tool name.");
+	const repository = await realpath(cwd);
+	const extensions: string[] = [];
+	for (const configured of [...new Set(resources.extensions)]) {
+		if (path.isAbsolute(configured) || !configured.trim()) throw new Error("Project worker extension paths must be non-empty and repository-relative.");
+		const lexical = path.resolve(cwd, configured);
+		if (!lexical.startsWith(`${path.resolve(cwd)}${path.sep}`)) throw new Error("Project worker extension path escapes the repository.");
+		const resolved = await realpath(lexical);
+		if (!resolved.startsWith(`${repository}${path.sep}`)) throw new Error("Project worker extension resolves outside the repository.");
+		const status = await lstat(resolved);
+		if (!status.isFile()) throw new Error(`Project worker extension is not a file: ${configured}`);
+		extensions.push(resolved);
+	}
+	return { extensions, tools };
+}
+
 function defaultLauncher(): string[] {
 	const script = process.argv[1];
 	if (!script) throw new Error("Cannot locate the running Pi CLI script; provide an explicit aloop launcher.");
@@ -455,6 +499,8 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	const initialStatus = await worktreeStatus(input.cwd, gitOptions);
 	if (initialStatus) throw new Error("Aloop worker refused to start because the worktree is dirty.");
 	const beforeHead = await git(input.cwd, ["rev-parse", "HEAD"], gitOptions);
+	const projectResources = await resolveProjectWorkerResources(input.cwd, input.projectWorkerResources);
+	const profile = withProjectWorkerOptIn(resolveAgentProfile("aloop-implementation"), { tools: projectResources.tools });
 	const prompt = buildAloopWorkerPrompt(input);
 	const attemptId = `issue-${input.issue.number}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 	const directory = await prepareAloopArtifactDirectory(input.cwd, attemptId);
@@ -471,7 +517,18 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	}
 	const resultFile = await open(resultPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
 	try {
-	const command = buildAloopWorkerCommand({ launcher: input.launcher ?? defaultLauncher(), prompt, modelRef: input.modelRef });
+	const workerEnvironment = { ...input.env, PI_HARNESS_AGENT_PROFILE: "aloop-implementation",
+		PI_HARNESS_PROJECT_WORKER_TOOLS: JSON.stringify(projectResources.tools) };
+	const effectiveEnvironment: NodeJS.ProcessEnv = { ...process.env, ...workerEnvironment };
+	const command = buildAloopWorkerCommand({
+		launcher: input.launcher ?? defaultLauncher(), prompt, modelRef: input.modelRef, profile,
+		resourceRoots: {
+			harness: effectiveEnvironment.PI_HARNESS_RESOURCES_ROOT,
+			mattSkills: effectiveEnvironment.PI_HARNESS_MATT_SKILLS_ROOT,
+			lspExtension: effectiveEnvironment.PI_HARNESS_LSP_EXTENSION,
+		},
+		projectExtensions: projectResources.extensions,
+	});
 	const remainingBeforeSpawn = input.deadlineMs === undefined ? MAX_TIMEOUT_MS : input.deadlineMs - Date.now() - POSTFLIGHT_RESERVE_MS;
 	if (remainingBeforeSpawn <= 0) throw new Error("Aloop worker deadline expired during preflight; worker was not spawned.");
 	const timeoutMs = Math.max(1, Math.min(input.timeoutMs ?? DEFAULT_TIMEOUT_MS, MAX_TIMEOUT_MS, remainingBeforeSpawn));
@@ -487,7 +544,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			timeoutMs,
 			deadlineMs: input.deadlineMs === undefined ? undefined : input.deadlineMs - POSTFLIGHT_RESERVE_MS,
 			signal: input.signal,
-			env: input.env,
+			env: workerEnvironment,
 		});
 	} catch (error) {
 		launchError = error instanceof Error ? error.message : String(error);

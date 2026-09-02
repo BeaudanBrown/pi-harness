@@ -41,6 +41,7 @@ type PendingHandoff = {
 type AloopVerificationPolicy = {
 	canonicalCommand: string;
 	productionIntegrationCommand: string;
+	workerResources: { extensions: string[]; tools: string[] };
 };
 
 async function loadVerificationPolicy(cwd: string): Promise<AloopVerificationPolicy> {
@@ -51,7 +52,25 @@ async function loadVerificationPolicy(cwd: string): Promise<AloopVerificationPol
 	if (!value.canonicalCommand?.trim() || !value.productionIntegrationCommand?.trim()) {
 		throw new Error(".aloop.json must declare canonicalCommand and productionIntegrationCommand.");
 	}
-	return { canonicalCommand: value.canonicalCommand.trim(), productionIntegrationCommand: value.productionIntegrationCommand.trim() };
+	const workerResources = (value as Record<string, unknown>).workerResources;
+	if (workerResources !== undefined && (!workerResources || typeof workerResources !== "object" || Array.isArray(workerResources))) {
+		throw new Error(".aloop.json workerResources must be an object.");
+	}
+	const resourceObject = (workerResources ?? {}) as Record<string, unknown>;
+	for (const field of ["extensions", "tools"] as const) {
+		const fieldValue = resourceObject[field] ?? [];
+		if (!Array.isArray(fieldValue) || fieldValue.some((item) => typeof item !== "string" || !item.trim())) {
+			throw new Error(`.aloop.json workerResources.${field} must be an array of non-empty strings.`);
+		}
+	}
+	return {
+		canonicalCommand: value.canonicalCommand.trim(),
+		productionIntegrationCommand: value.productionIntegrationCommand.trim(),
+		workerResources: {
+			extensions: (resourceObject.extensions ?? []) as string[],
+			tools: (resourceObject.tools ?? []) as string[],
+		},
+	};
 }
 
 const LaunchWorkerParams = Type.Object({
@@ -209,6 +228,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
 		deadlineTimer = setTimeout(() => {
 			if (!runBudget || runBudget.settled) return;
+			runBudget.settled = true;
+			pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
 			ctx.abort();
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Aloop #${epic} reached its ${maxMinutes}-minute limit. Run /aloop again to resume.`, "warning");
@@ -236,20 +257,14 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
-		clearDeadlineTimer();
-		activeEpic = null;
-		pendingHandoffs = [];
-		workerRunning = false;
-		runBudget = null;
-		dryRunHandoffIds.clear();
-		dryRunClosureIds.clear();
-		issuedReceipts.clear();
+		deactivate();
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
 		if (!runBudget || runBudget.settled) return;
 		runBudget.settled = true;
 		clearDeadlineTimer();
+		pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
 		if (ctx.hasUI && activeEpic !== null) ctx.ui.setStatus(STATUS_KEY, `aloop: #${activeEpic} settled · rerun to continue`);
 	});
 
@@ -387,6 +402,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				heartbeat.unref?.();
 				let outcome: Awaited<ReturnType<typeof runAloopWorker>>;
 				try {
+					const policy = await loadVerificationPolicy(ctx.cwd);
 					outcome = await dependencies.runWorker({
 						cwd: ctx.cwd,
 						attemptType: params.attempt_type,
@@ -394,6 +410,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						epic: { number: epic.number, title: epic.title, body: epic.body },
 						issue: { number: issue.number, title: issue.title, body: issue.body },
 						priorHandoffs: handoffs,
+						projectWorkerResources: policy.workerResources,
 						modelRef: activeModelRef(ctx),
 						timeoutMs: workerTimeoutMs,
 						deadlineMs: runBudget.deadlineMs,

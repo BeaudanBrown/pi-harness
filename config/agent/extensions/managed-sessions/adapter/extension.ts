@@ -178,6 +178,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const controlResults = new Map<string, ControlResult>();
 		const controlExecutions = new Map<string, ControlExecution>();
 		const recoveredControlExecutions = new Set<string>();
+		const setCheckpointActive = (active: boolean): void => {
+			if (role !== "ordinary_adapter" || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
+			const names = pi.getActiveTools().filter((name) => name !== "remote_checkpoint");
+			pi.setActiveTools(active ? [...names, "remote_checkpoint"] : names);
+		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
 		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[]) => {
 			let result = controlResults.get(controlId);
@@ -283,7 +288,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				execute: async (_id, params) => lifecycle({ operation: "conversation.delete", targetConversationId: params.conversationId, confirmed: params.confirm }) });
 		}
 
-		pi.registerTool({
+		if (role === "ordinary_adapter") pi.registerTool({
 			name: "remote_checkpoint",
 			label: "Remote Checkpoint",
 			description: "Send one durable question, blocker, or issue-completion boundary to this managed Matrix conversation and hard-stop the current run pending a new reply.",
@@ -639,7 +644,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (reason === "bridge_delete") {
 					appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId: binding.sessionId, reason: "bridge_delete" });
 					const detached = client;
-					binding = undefined; client = undefined; setStatus(ctx);
+					binding = undefined; client = undefined; setCheckpointActive(false); setStatus(ctx);
 					await detached?.close("bridge_delete");
 				}
 				return;
@@ -668,11 +673,20 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding,
 				onEnvelope: handleEnvelope,
-				onDisconnect: () => { setStatus(ctx); scheduleReconnect(ctx); },
+				onDisconnect: () => {
+					if (client === next) setCheckpointActive(false);
+					setStatus(ctx);
+					scheduleReconnect(ctx);
+				},
 			});
 			client = next;
 			try {
 				await next.connect();
+				if (stopped || client !== next || !binding || !next.connected) {
+					await next.close("shutdown").catch(() => undefined);
+					return;
+				}
+				setCheckpointActive(true);
 				reconnectAttempt = 0;
 				replayAcknowledgements();
 				for (const marker of checkpoints.values()) {
@@ -707,6 +721,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			} catch (error) {
 				await next.close("shutdown").catch(() => undefined);
 				if (client === next) client = undefined;
+				setCheckpointActive(false);
 				notify(ctx, error instanceof Error ? error.message : "Managed-session relay connection failed", "warning");
 				scheduleReconnect(ctx);
 			}
@@ -715,6 +730,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		pi.on("session_start", async (event, ctx) => {
 			stopped = false;
+			setCheckpointActive(false);
 			currentContext = ctx;
 			const sessionId = ctx.sessionManager.getSessionId();
 			if (event.reason === "new" || event.reason === "fork") {
@@ -834,6 +850,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const reason = event.reason === "quit" || event.reason === "reload" ? "shutdown" : "session_change";
 			await client?.close(reason);
 			client = undefined;
+			setCheckpointActive(false);
 			currentContext = undefined;
 			setStatus(ctx);
 		});
@@ -859,7 +876,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 						if (result.type !== "self.result" || result.payload.operation !== "self.delete" || result.payload.status !== "ok") throw new ManagedAdapterError("Relay did not confirm bridge deletion");
 						appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId: binding.sessionId, reason: "bridge_delete" });
 						await client.close("bridge_delete");
-						binding = undefined; client = undefined; setStatus(ctx);
+						binding = undefined; client = undefined; setCheckpointActive(false); setStatus(ctx);
 						notify(ctx, "Managed bridge deleted; Pi session and process were preserved");
 					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Bridge deletion failed", "error"); }
 					return;

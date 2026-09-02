@@ -57,6 +57,30 @@ The harness defaults do not overwrite pre-set `AGENTGRAPH_CLI` or
 keep web search, prompts/themes, models, and LSP from the global harness while
 shadowing only the packaged AgentGraph runtime and resources for that process.
 
+## Agent capability profiles
+
+`config/agent/profiles.json` is the declarative source of truth for the seven
+agent personas: `engineering-full`, `aloop-implementation`, `aloop-patch`,
+`review-worker`, `diagnostic-worker`, `managed-coordinator`, and `pi-local`.
+It declares extensions, skills, prompt and theme resources, context-file and
+builtin-tool access, and either an exact tool allowlist or the ordinary
+extension-default surface. The `managed-project` launch variant derives from
+`engineering-full` and removes only local interaction, pi-r, and AgentGraph
+capabilities.
+
+Nix launchers consume the packaged registry rather than maintaining independent
+extension lists. SDK review and diagnostic sessions resolve their prompts and
+tool surfaces from the same registry. Narrow personas use explicit allowlists;
+the ordinary engineering persona retains project-provided engineering resources.
+Implementation and patch profiles admit project-owned worker extensions and tools
+only through the registry's `aloop-opt-in` policy; `.aloop.json` supplies that
+explicit opt-in when the worker launcher consumes the policy.
+
+Capabilities tied to live state are not ambient. `remote_checkpoint` is active
+only while an ordinary adapter has a live managed Matrix binding, and aloop's
+supervisor tools are active only from `/aloop` startup until that supervisor
+turn settles. The managed coordinator exposes only its typed lifecycle tools.
+
 ## Lean local Pi with pi-r
 
 The package also installs `pi-r-local`, a deliberately narrow wrapper around raw

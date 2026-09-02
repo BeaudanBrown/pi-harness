@@ -151,8 +151,14 @@ the epic closed or stopped at a human boundary.
 ## Project verification policy
 
 Each repository declares its canonical and production-integration commands in
-`.aloop.json`. Workers use repository guidance for focused iteration checks.
-For acceptance, the supervisor passes only the worker commit to
+`.aloop.json`. It may also explicitly opt implementation workers into narrowly
+scoped project-owned resources with `workerResources.extensions` (repository-
+relative extension files that resolve inside the worktree) and
+`workerResources.tools` (the corresponding registered tool names). Those values
+are validated, merged only into a profile whose project policy is
+`aloop-opt-in`, and never grant GitHub mutation or supervisor communication
+capabilities implicitly. Workers use repository guidance for focused iteration
+checks. For acceptance, the supervisor passes only the worker commit to
 `aloop_supervisor_verify`; the tool loads and executes the committed policy and
 records the outcomes. When the policy is missing, malformed, or required
 infrastructure is unavailable, the supervisor records the gap and stops rather

@@ -5,6 +5,7 @@
 }:
 
 let
+  profileDocument = builtins.fromJSON (builtins.readFile ../config/agent/profiles.json);
   drv = stdenvNoCC.mkDerivation {
     pname = "pi-harness-resources";
     version = "0.1.0";
@@ -39,27 +40,24 @@ let
       runHook postInstall
     '';
 
+    passthru.agentProfiles = profileDocument;
+
+    passthru.agentProfileExtension = "${drv}/share/pi-harness/agent/extensions/agent-profiles/index.ts";
+
     passthru.managedSessionExtensions = {
       ordinary = "${drv}/share/pi-harness/agent/extensions/managed-sessions/adapter/ordinary.ts";
       coordinator = "${drv}/share/pi-harness/agent/extensions/managed-sessions/adapter/coordinator.ts";
     };
 
     passthru.piResources = {
-      extensions = [
-        "${drv}/share/pi-harness/agent/extensions/web-search/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/github-issues/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/aloop/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/diagram-tools/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/worker-runner/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/review-agents/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/nix-runtime/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/codex-fast/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts"
-        "${drv}/share/pi-harness/agent/extensions/sesh/index.ts"
-      ];
-      skills = [ "${drv}/share/pi-harness/agent/skills" ];
-      prompts = [ "${drv}/share/pi-harness/agent/prompts" ];
-      themes = [ "${drv}/share/pi-harness/agent/themes" ];
+      extensions = map
+        (name: "${drv}/share/pi-harness/agent/extensions/${name}/index.ts")
+        (builtins.filter
+          (name: name != "pi-r" && name != "agentgraph")
+          profileDocument.profiles."engineering-full".extensions);
+      skills = lib.optional (builtins.elem "harness" profileDocument.profiles."engineering-full".skills) "${drv}/share/pi-harness/agent/skills";
+      prompts = lib.optional (builtins.elem "harness" profileDocument.profiles."engineering-full".prompts) "${drv}/share/pi-harness/agent/prompts";
+      themes = lib.optional (builtins.elem "harness" profileDocument.profiles."engineering-full".themes) "${drv}/share/pi-harness/agent/themes";
       runtimePackages = [ ];
     };
 
