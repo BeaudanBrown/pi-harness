@@ -8,6 +8,8 @@ export const MAX_NDJSON_FRAME_BYTES = 64 * 1024;
 export const MAX_INPUT_TEXT_LENGTH = 16_000;
 export const MAX_TRANSCRIPT_TEXT_LENGTH = 64_000;
 export const MAX_PENDING_INPUTS = 2_048;
+export const MAX_PENDING_CONTROLS = 2_048;
+export const MAX_COMPLETED_CONTROLS = 4_096;
 export const MAX_PROJECTION_ENTRIES = 4_096;
 
 const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
@@ -338,6 +340,15 @@ const pendingInput = strictObject({
 		Type.Literal("cancelled"),
 	]),
 });
+const pendingControl = strictObject({
+	controlId: stableId("control"),
+	matrixEventId: boundedString(255),
+	name: Type.Union([
+		Type.Literal("help"), Type.Literal("status"), Type.Literal("model"), Type.Literal("thinking"),
+		Type.Literal("compact"), Type.Literal("new"), Type.Literal("stop"),
+	]),
+	argument: Type.Optional(boundedString(4_096)),
+});
 const projectionEntry = strictObject({
 	entryId: TranscriptEntryIdSchema,
 	kind: Type.Union([
@@ -372,6 +383,8 @@ const runtimeConversation = strictObject({
 		strictObject({ status: Type.Literal("established"), since: boundedString(2_048) }),
 	]),
 	pendingInputs: Type.Array(pendingInput, { maxItems: MAX_PENDING_INPUTS }),
+	pendingControls: Type.Array(pendingControl, { maxItems: MAX_PENDING_CONTROLS }),
+	completedControlIds: Type.Array(stableId("control"), { maxItems: MAX_COMPLETED_CONTROLS }),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	managedWindow: nullable(
 		strictObject({
@@ -418,6 +431,8 @@ export interface HostRuntimeState {
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string };
 		matrixCursor: { status: "bootstrap" } | { status: "established"; since: string };
 		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string }>;
+		pendingControls: Array<{ controlId: string; matrixEventId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string }>;
+		completedControlIds: string[];
 		projection: Array<{
 			entryId: string;
 			kind: string;
@@ -605,6 +620,8 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 					? { status: "established", since: conversation.matrixSince } : { status: "bootstrap" };
 				delete conversation.matrixSince; changed = true;
 			}
+			if (!("pendingControls" in conversation)) { conversation.pendingControls = []; changed = true; }
+			if (!("completedControlIds" in conversation)) { conversation.completedControlIds = []; changed = true; }
 		}
 		if (changed) candidate = migrated;
 	}
@@ -631,6 +648,18 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			deliveries.add(input.deliveryId);
 			matrixEvents.add(input.matrixEventId);
 			assertInputBody(input.kind, input.body);
+		}
+		const controls = new Set<string>();
+		for (const control of conversation.pendingControls) {
+			if (controls.has(control.controlId) || matrixEvents.has(control.matrixEventId)) {
+				throw new ManagedSessionContractError("conflict", `conflicting pending control in ${conversation.conversationId}`);
+			}
+			controls.add(control.controlId);
+			matrixEvents.add(control.matrixEventId);
+		}
+		const completedControls = new Set(conversation.completedControlIds);
+		if (completedControls.size !== conversation.completedControlIds.length || conversation.completedControlIds.some((id) => controls.has(id))) {
+			throw new ManagedSessionContractError("conflict", `conflicting completed control in ${conversation.conversationId}`);
 		}
 		if (conversation.attachment) assertTimestamp(conversation.attachment.connectedAt, "attachment.connectedAt");
 		if (conversation.lastLaunchError) assertTimestamp(conversation.lastLaunchError.at, "lastLaunchError.at");

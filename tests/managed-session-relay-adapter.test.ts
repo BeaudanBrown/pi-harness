@@ -7,6 +7,7 @@ import test from "node:test";
 import { requestSelfBind, BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveMatrixTransactionId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
+import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 import type { SessionBinding } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 
 const nonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
@@ -85,8 +86,33 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	assert.equal((await client.offerTranscript(transcript)).payload.status, "projected");
 	assert.equal(running.registry.snapshot().conversations[0]?.projection[0]?.status, "projected");
 	assert.equal((await client.selfStatus()).payload.conversationState, "active");
+	await client.close("shutdown");
+	const controlId = deriveControlId(conversationId, "$control-crash-window");
+	await running.registry.recordPendingControl(conversationId, {
+		controlId, matrixEventId: "$control-crash-window", name: "status",
+	});
+	let replayClient!: BoundAdapterClient;
+	let resolveControl!: () => void;
+	const controlHandled = new Promise<void>((resolve) => { resolveControl = resolve; });
+	replayClient = new BoundAdapterClient({
+		socketPath: running.server.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		onEnvelope: async (envelope) => {
+			assert.equal(envelope.type, "control.deliver");
+			assert.equal(envelope.payload.controlId, controlId);
+			await replayClient.controlResult(controlId, "ok", "Durable control handled.");
+			resolveControl();
+		},
+	});
+	await replayClient.connect();
+	await controlHandled;
+	assert.equal(running.registry.pendingControls(conversationId).length, 0);
+	assert.equal(running.registry.controlResultState(conversationId, controlId), "completed");
+	await replayClient.controlResult(controlId, "ok", "Durable control handled.");
+	const controlNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${controlId}`);
+	assert.equal(requests.filter((request) => request.path.includes(`/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`)).length, 1,
+		"lost control.result acknowledgements retry without duplicate Matrix projection");
 	failLeave = true;
-	await assert.rejects(() => client.selfDelete(), /Relay operation failed/);
+	await assert.rejects(() => replayClient.selfDelete(), /Relay operation failed/);
 	assert.equal(running.registry.snapshot().conversations.length, 1, "failed Matrix leave must restore relay persistence and attachment");
 	failLeave = false;
 	await new Promise((resolve) => setTimeout(resolve, 25));
@@ -101,6 +127,7 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		"/_matrix/client/v3/account/whoami",
 		"/_matrix/client/v3/createRoom",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, transcript.entryId, 0)}`,
+		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 	]);

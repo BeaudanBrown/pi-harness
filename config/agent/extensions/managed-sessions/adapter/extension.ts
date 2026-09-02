@@ -498,9 +498,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				const filtered = argument ? models.filter((model) => model.provider === argument || `${model.provider}/${model.id}`.toLowerCase().includes(argument.toLowerCase())) : models;
 				if (!filtered.length) return controlReply(payload.controlId, "rejected", "No authenticated scoped models matched that provider/filter.");
 				if (filtered.length > 20) {
-					const providers = [...new Set(filtered.map((model) => model.provider))];
-					const options = providers.length <= 20 ? providers.map((provider) => `!model ${provider}`) : [];
-					return controlReply(payload.controlId, options.length ? "ok" : "rejected", options.length ? "More than 20 models matched. Choose a provider to narrow safely." : "More than 20 models matched across too many providers; provide a narrower textual filter.", options.length ? options : undefined);
+					const providerCounts = new Map<string, number>();
+					for (const model of filtered) providerCounts.set(model.provider, (providerCounts.get(model.provider) ?? 0) + 1);
+					const options = [...providerCounts].filter(([, count]) => count <= 20)
+						.map(([provider]) => `!model ${provider}`).slice(0, 20);
+					return controlReply(payload.controlId, options.length ? "ok" : "rejected",
+						options.length ? "More than 20 models matched. Choose a provider with at most 20 models, or provide a narrower textual filter."
+							: "More than 20 models matched and no provider narrows the catalogue to 20 or fewer; provide a narrower textual filter.",
+						options.length ? options : undefined);
 				}
 				return controlReply(payload.controlId, "ok", "Choose an authenticated, session-scoped model.", filtered.map((model) => `!model ${model.provider}/${model.id}`));
 			}

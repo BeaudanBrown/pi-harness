@@ -101,7 +101,13 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
 			onAttachment: async (attachment) => {
 				await activityProjector?.attachmentConnected(attachment.conversationId);
-				await coordinatorRouter?.attachmentReady(attachment.conversationId);
+				if (coordinatorRouter) await coordinatorRouter.attachmentReady(attachment.conversationId);
+				else for (const control of registry.pendingControls(attachment.conversationId)) {
+					server!.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-control-${randomUUID()}`,
+						conversationId: attachment.conversationId, role: "relay", type: "control.deliver", payload: {
+							controlId: control.controlId, name: control.name, ...(control.argument ? { argument: control.argument } : {}),
+						} });
+				}
 			},
 			onAttachmentDisconnect: (attachment) => {
 				activityProjector?.attachmentDisconnected(attachment.conversationId);
@@ -151,12 +157,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			onEnvelope: async (envelope, attachment) => {
 				if (envelope.type === "control.result") {
 					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[] };
-					const manifest = registry.manifestByConversationId(attachment.conversationId);
-					if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation is unavailable");
-					if (payload.options?.length) {
-						await matrix.startPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, payload.controlId, 0), payload.message,
-							payload.options.map((option, index) => ({ id: `pi-control-${index}`, text: option })), undefined, "stable");
-					} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, payload.message);
+					const resultState = registry.controlResultState(attachment.conversationId, payload.controlId);
+					if (resultState === "unknown") throw new RelayRegistryError("not_found", "Pending managed control was not found");
+					if (resultState === "pending") {
+						const manifest = registry.manifestByConversationId(attachment.conversationId);
+						if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation is unavailable");
+						if (payload.options?.length) {
+							await matrix.startPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, payload.controlId, 0), payload.message,
+								payload.options.map((option, index) => ({ id: `pi-control-${index}`, text: option })), undefined, "stable");
+						} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, payload.message);
+						await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
+					}
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
 				}
 				if (envelope.type === "input.acknowledge") {

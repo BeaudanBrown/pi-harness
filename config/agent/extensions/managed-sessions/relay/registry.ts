@@ -2,6 +2,8 @@ import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { join, resolve } from "node:path";
 import {
 	MANAGED_SESSION_STATE_VERSION,
+	MAX_COMPLETED_CONTROLS,
+	MAX_PENDING_CONTROLS,
 	MAX_PROJECTION_ENTRIES,
 	type ConversationManifest,
 	type HostRuntimeState,
@@ -83,6 +85,8 @@ export class RelayRegistry {
 				attachment: null,
 				matrixCursor: { status: "bootstrap" as const },
 				pendingInputs: [],
+				pendingControls: [],
+				completedControlIds: [],
 				projection: [],
 				managedWindow: null,
 			})),
@@ -127,6 +131,44 @@ export class RelayRegistry {
 			}
 			conversation.pendingInputs.push(input);
 			parseHostRuntimeState(this.state);
+		});
+	}
+
+	async recordPendingControl(conversationId: string, control: RuntimeConversation["pendingControls"][number]): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (conversation.completedControlIds.includes(control.controlId)) return;
+			const existing = conversation.pendingControls.find((candidate) =>
+				candidate.controlId === control.controlId || candidate.matrixEventId === control.matrixEventId);
+			if (existing) {
+				if (JSON.stringify(existing) !== JSON.stringify(control)) throw new RelayRegistryError("invalid_state", "Conflicting pending control identity");
+				return;
+			}
+			if (conversation.pendingControls.length >= MAX_PENDING_CONTROLS) throw new RelayRegistryError("capacity_reached", "Pending control capacity was reached");
+			conversation.pendingControls.push(control);
+			parseHostRuntimeState(this.state);
+		});
+	}
+
+	pendingControls(conversationId: string): RuntimeConversation["pendingControls"] {
+		return structuredClone(this.runtimeConversation(conversationId).pendingControls);
+	}
+
+	controlResultState(conversationId: string, controlId: string): "pending" | "completed" | "unknown" {
+		const conversation = this.runtimeConversation(conversationId);
+		if (conversation.pendingControls.some((control) => control.controlId === controlId)) return "pending";
+		return conversation.completedControlIds.includes(controlId) ? "completed" : "unknown";
+	}
+
+	async acknowledgeControlResult(conversationId: string, controlId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (conversation.completedControlIds.includes(controlId)) return;
+			const index = conversation.pendingControls.findIndex((control) => control.controlId === controlId);
+			if (index === -1) throw new RelayRegistryError("not_found", "Pending managed control was not found");
+			conversation.pendingControls.splice(index, 1);
+			if (conversation.completedControlIds.length >= MAX_COMPLETED_CONTROLS) conversation.completedControlIds.shift();
+			conversation.completedControlIds.push(controlId);
 		});
 	}
 
@@ -266,6 +308,8 @@ export class RelayRegistry {
 					attachment: null,
 					matrixCursor: { status: "bootstrap" },
 					pendingInputs: [],
+					pendingControls: [],
+					completedControlIds: [],
 					projection: [],
 					managedWindow: null,
 				});
@@ -298,7 +342,7 @@ export class RelayRegistry {
 			this.manifests.set(manifest.conversationId, manifest);
 			this.state.conversations.push({
 				conversationId: manifest.conversationId, state: "dormant", attachment: null,
-				matrixCursor: { status: "bootstrap" }, pendingInputs: [], projection: [], managedWindow: null,
+				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], projection: [], managedWindow: null,
 			});
 			return manifest;
 			});

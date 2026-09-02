@@ -187,6 +187,7 @@ export class CoordinatorRouter {
 	}
 
 	async attachmentReady(conversationId = this.manifest.conversationId): Promise<void> {
+		for (const control of this.registry.pendingControls(conversationId)) this.server.sendToConversation(this.controlEnvelope(conversationId, control));
 		for (const input of this.registry.pendingInputs(conversationId)) {
 			if (input.status !== "accepted" && input.status !== "delivered") continue;
 			if (this.server.sendToConversation(this.deliveryEnvelope(conversationId, input))) await this.registry.markInputDelivered(conversationId, input.deliveryId);
@@ -244,12 +245,20 @@ export class CoordinatorRouter {
 				: control.name === "status" ? "Managed conversation is dormant." : "Managed conversation is already dormant.";
 			await this.projectNotice(eventId, manifest, message); return;
 		}
-		const envelope: ManagedSessionEnvelope = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-control-${randomUUID()}`,
-			conversationId: manifest.conversationId, role: "relay", type: "control.deliver",
-			payload: { controlId: deriveControlId(manifest.conversationId, eventId), name: control.name, ...(control.argument ? { argument: control.argument } : {}) } };
+		const pending = { controlId: deriveControlId(manifest.conversationId, eventId), matrixEventId: eventId,
+			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
+		await this.registry.recordPendingControl(manifest.conversationId, pending);
+		const envelope = this.controlEnvelope(manifest.conversationId, pending);
 		if (this.server.sendToConversation(envelope)) return;
 		await this.wakeForControl(manifest);
-		if (!this.server.sendToConversation(envelope)) await this.projectNotice(eventId, manifest, "Managed control could not attach; no model turn was started.");
+		if (!this.server.sendToConversation(envelope)) await this.projectNotice(eventId, manifest, "Managed control is queued until the adapter attaches; no model turn was started.");
+	}
+
+	private controlEnvelope(conversationId: string, control: ReturnType<RelayRegistry["pendingControls"]>[number]): ManagedSessionEnvelope {
+		return { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-control-${randomUUID()}`,
+			conversationId, role: "relay", type: "control.deliver", payload: {
+				controlId: control.controlId, name: control.name, ...(control.argument ? { argument: control.argument } : {}),
+			} };
 	}
 
 	private async wakeForControl(manifest: ConversationManifest): Promise<void> {

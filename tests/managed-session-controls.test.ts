@@ -60,6 +60,43 @@ async function readMany(socket: Socket, count: number): Promise<ManagedSessionEn
 	});
 }
 
+test("relay persists controls before delivery and replays stable identities after an attachment crash and restart", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const control = { controlId: `control_${"a".repeat(32)}`, matrixEventId: "$durable-control", name: "model" as const, argument: "scoped/model" };
+	await registry.recordPendingControl(manifest.conversationId, control);
+	await registry.recordPendingControl(manifest.conversationId, control);
+	assert.equal(registry.pendingControls(manifest.conversationId).length, 1, "Matrix cursor replay is idempotent");
+
+	const matrix = new ManagedMatrixClient(config, async () => Response.json({ event_id: "$ok" }), [manifest.roomId]);
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc-first") });
+	await server.start();
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
+	const first = await attach(server, manifest);
+	const firstReplay = readMany(first, 1);
+	await router.attachmentReady(manifest.conversationId);
+	const [firstDelivery] = await firstReplay;
+	assert.deepEqual(firstDelivery.payload, { controlId: control.controlId, name: "model", argument: "scoped/model" });
+	first.destroy();
+	await server.close({ preserveAttachments: true });
+
+	const restartedRegistry = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
+	await restartedRegistry.load();
+	restartedRegistry.beginRestartReconciliation();
+	const restartedServer = new ManagedSessionIpcServer(restartedRegistry, { runtimeDirectory: join(root, "ipc-restarted") });
+	await restartedServer.start(); t.after(() => restartedServer.close());
+	const restartedRouter = new CoordinatorRouter(manifest, restartedRegistry, matrix, restartedServer, async () => undefined);
+	const second = await attach(restartedServer, manifest); t.after(() => second.destroy());
+	const restartReplay = readMany(second, 1);
+	await restartedRouter.attachmentReady(manifest.conversationId);
+	const [replayed] = await restartReplay;
+	assert.equal(replayed.payload.controlId, control.controlId, "restart replay preserves the stable control identity");
+	assert.equal(restartedRegistry.controlResultState(manifest.conversationId, control.controlId), "pending");
+	await restartedRegistry.acknowledgeControlResult(manifest.conversationId, control.controlId);
+	await restartedRegistry.acknowledgeControlResult(manifest.conversationId, control.controlId);
+	assert.equal(restartedRegistry.pendingControls(manifest.conversationId).length, 0, "only explicit result acknowledgement clears the pending queue");
+	assert.equal(restartedRegistry.controlResultState(manifest.conversationId, control.controlId), "completed", "lost acknowledgements remain idempotent");
+});
+
 test("typed control parsing is strict, bounded, and isolates malformed commands from prompts", () => {
 	assert.deepEqual(parseTypedRemoteControl(" !model scoped/model "), { name: "model", argument: "scoped/model" });
 	assert.deepEqual(parseTypedRemoteControl("!compact focus on API state"), { name: "compact", argument: "focus on API state" });

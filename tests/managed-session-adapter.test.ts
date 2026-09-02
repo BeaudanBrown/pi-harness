@@ -342,8 +342,12 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	await send(1, "model", "scoped/model-1");
 	assert.equal(setModelCalls, 0); assert.match(String(relay.frames.at(-1)?.payload.message), /busy/);
 	idle = true; await send(2, "model");
-	assert.deepEqual(relay.frames.at(-1)?.payload.options, ["!model scoped"], "large scoped catalogues narrow by provider without refresh or leakage");
-	await send(3, "model", "outside/forbidden"); assert.equal(setModelCalls, 0);
+	assert.equal(relay.frames.at(-1)?.payload.options, undefined, "a provider with more than 20 models is not offered as a non-terminating narrowing choice");
+	assert.match(String(relay.frames.at(-1)?.payload.message), /narrower textual filter/);
+	await send(3, "model", "model-1");
+	assert.equal((relay.frames.at(-1)?.payload.options as string[]).length, 11, "text filtering narrows the catalogue to a bounded selection follow-up");
+	assert.ok((relay.frames.at(-1)?.payload.options as string[]).includes("!model scoped/model-1"));
+	await send(8, "model", "outside/forbidden"); assert.equal(setModelCalls, 0);
 	await send(4, "model", "scoped/model-1"); assert.equal(setModelCalls, 1);
 	await send(4, "model", "scoped/model-1"); assert.equal(setModelCalls, 1, "replayed control IDs return the durable result without repeating mutation");
 	await send(5, "thinking", "off"); assert.equal(thinking, "off");
