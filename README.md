@@ -505,8 +505,8 @@ new `/login` or model override.
 
 GitHub Issues is the durable source of truth for planned work. Use the GitHub UI
 for the queue, parent/sub-issue hierarchy, native blockers, labels, comments,
-and handoffs. Claim an issue before changing code; record verification and a
-concise handoff before closing it.
+and handoffs. Treat labels and assignments as advisory metadata; record
+verification and a concise handoff before closing an issue.
 
 For multi-issue epics, the packaged `/aloop #<epic>` command supervises fresh,
 sequential implementation workers from a clean worktree while keeping GitHub
@@ -535,7 +535,8 @@ Run setup once per repository to write `docs/agents/issue-tracker.md`, domain
 layout guidance, and triage-label mapping. Configure GitHub there and do not
 create new `tk` tickets. `to-spec` creates a parent specification issue and
 `to-tickets` creates dependency-aware, vertical-slice child issues. Work one
-ready, unassigned, unblocked issue in a fresh context when practical.
+open, unblocked leaf in a fresh context when practical; `ready-for-agent` is an
+optional prioritization hint.
 
 Use `/skill:tdd` for bounded test-first work, `/skill:diagnosing-bugs` for hard
 bugs, `/skill:triage` for incoming requests, `/skill:wayfinder` for uncertain

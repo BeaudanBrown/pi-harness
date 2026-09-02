@@ -6,8 +6,8 @@ GitHub Issues are the sole durable task source of truth for this repository. Use
 
 - Create, inspect, comment on, and close issues in `BeaudanBrown/pi-harness` only.
 - Use native GitHub sub-issues for parent/child work and native issue dependencies for blockers.
-- Apply `ready-for-agent` only to fully specified, unassigned work with no open blockers.
-- Claim active work by assigning it before changing code.
+- Apply `ready-for-agent` only to fully specified work with no open blockers; it is a prioritization hint, not an execution lock.
+- Assignments are advisory ownership metadata. Agent eligibility comes from open leaf and blocker state, while each supervisor serializes its own worker launches.
 - Add verification and a concise handoff comment before closing an issue.
 - Generated migration issues use a hidden `pi-harness-plan:<plan>/<key>` provenance marker for idempotency.
 

@@ -27,15 +27,15 @@ Aloop does not replace grilling, specification, ticket decomposition, interactiv
 
 ### Source of truth and frontier
 
-GitHub Issues is the loop's only task source of truth. It reconstructs work from the open parent/sub-issue graph, native blocker relationships, assignments, issue state, lifecycle labels, structured handoff comments, and Git history. It has no tk dependency, queue database, or dual-write state.
+GitHub Issues is the loop's only task source of truth. It reconstructs work from the open parent/sub-issue graph, native blocker relationships, issue state, structured handoff comments, and Git history. Labels and assignments are advisory metadata, not execution locks. It has no tk dependency, queue database, or dual-write state.
 
-An executable frontier item is an open, unblocked descendant leaf. The supervisor processes one item at a time. It must not select an issue assigned to someone else; an unassigned selection is claimed for the authenticated user before work starts, and its `ready-for-agent` label is removed. Labels aid human triage but never override graph, blocker, state, or assignment checks.
+An executable frontier item is an open, unblocked descendant leaf. The supervisor processes one item at a time. Labels and assignments may aid queue visibility but never override graph, blocker, or issue state. Aloop does not use assignment as a lock because agents share one GitHub identity; sequential supervisor execution provides the local concurrency boundary.
 
 ### Ownership, handoff, and verification
 
 The supervisor owns every GitHub mutation. Workers cannot use GitHub mutation APIs, push, or fetch. Each worker starts fresh in the clean epic worktree, remains scoped to one selected issue, and must leave exactly one new local commit and a clean worktree.
 
-After an attempt, the supervisor independently inspects the commit and checks every acceptance criterion. It discovers verification from repository guidance, runs focused checks and the applicable project gate, and records exact outcomes. A worker's `implemented` result is evidence, not acceptance.
+After an attempt, the supervisor independently inspects the commit and checks every acceptance criterion. Workers use repository guidance for focused checks. The supervisor verification tool accepts only the commit, loads canonical and production-integration commands from `.aloop.json`, runs them, and records exact outcomes. A worker's `implemented` result is evidence, not acceptance. Mechanical integrity is hard-gated; semantic acceptance and evidence quality remain supervisor judgment.
 
 Before another worker starts, the supervisor publishes a structured handoff comment on the selected issue. The handoff records attempt type, commit (or contract failure), acceptance assessment, verification, criterion evidence, discovered work, next action, and local artifact location. Interrupted runs are recovered from GitHub comments and Git history; local artifacts are diagnostic only.
 
@@ -43,7 +43,7 @@ Before another worker starts, the supervisor publishes a structured handoff comm
 
 The supervisor closes a child only after its matching handoff is durable and independent review confirms all acceptance criteria. It closes an epic only when every descendant is closed and review, project verification, and epic-level acceptance evidence all pass.
 
-A dirty worktree, another user's assignment, unresolved blocker, missing required verification, product or scope ambiguity, or two consecutive unsuccessful attempts without a materially new approach stops automation for a human decision. Every invocation also has an explicit wall-clock deadline and worker-launch cap. The launch cap is a resource bound, not a retry counter: epic progress comes from descendant issue state, while remediation retries are counted only for the affected issue after unsuccessful handoffs. Reaching either invocation bound stops the turn and requires an explicit `/aloop` rerun, which reconstructs progress from durable state instead of waiting indefinitely. Each fresh worker receives the supervisor's current direction directly plus decoded, bounded prior-handoff evidence; opaque durable comment markers are never used as worker prompt context. The loop does not invent corrective scope. Newly discovered work is reported; only the supervisor may create a narrowly necessary follow-up issue.
+A dirty worktree, unresolved blocker, missing required verification, product or scope ambiguity, or two consecutive unsuccessful attempts without a materially new approach stops automation for a human decision. Every invocation also has an explicit wall-clock deadline and worker-launch cap. The launch cap is a resource bound, not a retry counter: epic progress comes from descendant issue state, while remediation retries are counted only for the affected issue after unsuccessful handoffs. Reaching either invocation bound stops the turn and requires an explicit `/aloop` rerun, which reconstructs progress from durable state instead of waiting indefinitely. Each fresh worker receives the supervisor's current direction directly plus decoded, bounded prior-handoff evidence; opaque durable comment markers are never used as worker prompt context. The loop does not invent corrective scope. Newly discovered work is reported; only the supervisor may create a narrowly necessary follow-up issue.
 
 The operational contract, recovery procedure, and artifact format are specified in [`docs/github-aloop.md`](../../github-aloop.md).
 
@@ -51,6 +51,6 @@ The operational contract, recovery procedure, and artifact format are specified 
 
 - The skills-based interactive workflow remains the advertised default and the place where work is understood and decomposed.
 - Multi-issue epics may use fresh sequential workers without restoring tk or introducing another durable queue.
-- GitHub assignment, blocker, handoff, verification, and close semantics are explicit and supervisor-owned.
+- GitHub blocker, handoff, verification, and close semantics are explicit and supervisor-owned; labels and assignments remain advisory.
 - Aloop remains intentionally conservative: ambiguous or repeatedly failing work returns to a person, and every invocation has finite time and worker-count bounds.
 - If practical use no longer demonstrates value, the extension can be removed without migrating state because GitHub and Git already contain all durable progress.

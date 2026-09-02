@@ -65,13 +65,14 @@ test("migration fixtures produce an idempotent plan and omit approved stale reco
 	assert.equal(issueMarker(plan.key, plan.issues[0]!.key), "<!-- pi-harness-plan:fixture-migration/tk-epic -->");
 });
 
-test("frontier selection requires an open, ready, unassigned issue without blockers", () => {
+test("frontier includes open unblocked work and only prioritizes the advisory ready label", () => {
 	assert.deepEqual(frontierIssueNumbers([
+		{ number: 6, state: "open", labels: [], assignee: null, issue_dependencies_summary: { blocked_by: 0 } },
 		{ number: 2, state: "open", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 0 } },
 		{ number: 3, state: "open", labels: [{ name: "ready-for-agent" }], assignee: { login: "other" }, issue_dependencies_summary: { blocked_by: 0 } },
 		{ number: 4, state: "open", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 1 } },
 		{ number: 5, state: "closed", labels: [{ name: "ready-for-agent" }], assignee: null, issue_dependencies_summary: { blocked_by: 0 } },
-	]), [2]);
+	]), [2, 3, 6]);
 });
 
 test("recursive epic context normalizes nested issues and selects executable leaves", async () => {

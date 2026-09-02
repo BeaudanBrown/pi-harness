@@ -12,7 +12,6 @@ import {
 	authorizeHandoffPublication,
 	buildEpicReport,
 	buildSupervisorKickoff,
-	claimAndRefreshAloopLeaf,
 	closeAcceptedAloopIssue,
 	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
@@ -25,7 +24,6 @@ import {
 	parseAloopHandoffs,
 	parseAloopRunRequest,
 	publishPreparedAloopHandoff,
-	requireAloopClaim,
 	selectAloopLeaf,
 	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
@@ -113,47 +111,9 @@ test("selection accepts only open unblocked descendant leaves", () => {
 
 	const selected = selectAloopLeaf(graph, 4);
 	assert.equal(selected.title, "Ready");
-	assert.doesNotThrow(() => requireAloopClaim(selected, "someone"));
-	assert.throws(() => requireAloopClaim(issue({ number: 5, title: "Unassigned" }), "someone"), /must be claimed/);
-	assert.throws(() => requireAloopClaim(selected, "different-user"), /must be claimed/);
+	assert.equal(selected.assignee, "someone", "assignment does not affect executable dependency state");
 	assert.throws(() => selectAloopLeaf(graph, 2), /not an open, unblocked/);
 	assert.throws(() => selectAloopLeaf(graph, 3), /not an open, unblocked/);
-});
-
-test("claim operation handles unassigned, self, and foreign owners with post-claim refresh", async () => {
-	const selfOwned = issue({ number: 2, title: "Leaf", assignee: "operator" });
-	let claimCalls = 0;
-	let refreshCalls = 0;
-	const claimed = await claimAndRefreshAloopLeaf({
-		context: context([issue({ number: 2, title: "Leaf" })]),
-		issueNumber: 2,
-		authenticatedLogin: "operator",
-		claim: async (number) => { assert.equal(number, 2); claimCalls += 1; },
-		refresh: async () => { refreshCalls += 1; return context([selfOwned]); },
-	});
-	assert.equal(claimed.issue.assignee, "operator");
-	assert.equal(claimCalls, 1);
-	assert.equal(refreshCalls, 1);
-
-	await claimAndRefreshAloopLeaf({
-		context: context([selfOwned]),
-		issueNumber: 2,
-		authenticatedLogin: "operator",
-		claim: async () => { claimCalls += 1; },
-		refresh: async () => { refreshCalls += 1; return context([selfOwned]); },
-	});
-	assert.equal(claimCalls, 1, "an existing self-assignment must not be claimed again");
-	assert.equal(refreshCalls, 1, "the input context is already the required pre-launch refresh");
-
-	await assert.rejects(() => claimAndRefreshAloopLeaf({
-		context: context([issue({ number: 2, title: "Leaf", assignee: "other" })]),
-		issueNumber: 2,
-		authenticatedLogin: "operator",
-		claim: async () => { claimCalls += 1; },
-		refresh: async () => { refreshCalls += 1; return context([selfOwned]); },
-	}), /must be claimed by operator/);
-	assert.equal(claimCalls, 1);
-	assert.equal(refreshCalls, 1);
 });
 
 test("retry accounting is per issue and only remediation launches receive retry numbers", () => {
@@ -216,7 +176,7 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 	assert.match(kickoff, /Maximum worker launches: 20/);
 	assert.match(kickoff, /A worker launch on a new issue is not a retry/);
 	assert.match(kickoff, /deliberately bounded/);
-	assert.match(kickoff, /atomically self-claims an unassigned leaf/);
+	assert.match(kickoff, /Labels and assignments are advisory/);
 	assert.match(kickoff, /GitHub and Git are authoritative/);
 	assert.match(kickoff, /After every attempt/);
 	assert.match(kickoff, /two unsuccessful attempts/);
@@ -226,10 +186,13 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 test("compact handoffs remain compatible and materially smaller than duplicated JSON", () => {
 	const value = handoff({ verification: ["canonical verification passed with extensive evidence ".repeat(20)] });
 	const formatted = formatAloopHandoff(value);
-	const legacyBytes = Buffer.from(JSON.stringify(value), "utf8").toString("base64url").length + JSON.stringify(value).length;
+	const legacyPayload = Buffer.from(JSON.stringify(value), "utf8").toString("base64url");
+	const legacy = `<!-- pi-aloop-handoff:v1:${legacyPayload} -->`;
+	const legacyBytes = legacyPayload.length + JSON.stringify(value).length;
 	assert.match(formatted, /pi-aloop-handoff:v2:/);
 	assert.ok(formatted.length < legacyBytes);
 	assert.equal(parseAloopHandoffs([comment(1, formatted, value.timestamp)])[0]?.commit, value.commit);
+	assert.equal(parseAloopHandoffs([comment(2, legacy, value.timestamp)])[0]?.commit, value.commit, "existing v1 handoffs remain recoverable");
 });
 
 test("handoff publication requires dry-run first and permits idempotent retries", () => {
@@ -272,7 +235,7 @@ test("publication operation preserves exact bytes across dry-run, failure, and i
 	assert.ok(calls.every((call) => call.comment === exactComment), "every attempt must use the exact prepared bytes");
 });
 
-test("registered aloop tools wire claim refresh, exact publication retry, and idempotent verified closure", async () => {
+test("registered aloop tools load verification policy, preserve exact publication, and close idempotently", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-extension-"));
 	try {
 		const verificationPolicy = JSON.parse(readFileSync(".aloop.json", "utf8")) as { canonicalCommand: string; productionIntegrationCommand: string };
@@ -281,7 +244,6 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 		const priorFailure = formatAloopHandoff(handoff({ nextAction: "Use the exact remediation fixture." }));
 		let graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done", recentHandoffs: [comment(1, priorFailure, "2026-09-01T00:00:00Z")] })]);
-		let claims = 0;
 		let workerIssues: number[] = [];
 		const workerDirections: string[] = [];
 		const workerPriorContexts: unknown[] = [];
@@ -308,11 +270,6 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		} as unknown as ExtensionAPI;
 		registerAloopExtension(pi, {
 			retrieveEpicContext: async () => graph,
-			currentLogin: async () => "operator",
-			claimIssue: async (_cwd, number) => {
-				claims += 1;
-				graph = context([issue({ number, title: "Leaf", body: "## Acceptance criteria\n\n- Done", assignee: "operator", recentHandoffs: [comment(1, priorFailure, "2026-09-01T00:00:00Z")] })]);
-			},
 			runWorker: async (input) => {
 				workerIssues.push(input.issue.number);
 				workerDirections.push(input.supervisorApproach);
@@ -338,17 +295,15 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		});
 		const ctx = { cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined } as unknown as ExtensionContext;
 		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-worker-launches 2", ctx);
-		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("too-early", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx), /pending worker attempt/);
+		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("too-early", { commit: fakeHead }, ctx.signal, undefined, ctx), /pending worker attempt/);
 		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "remediation", approach: "test wiring", materially_new_approach: true }, ctx.signal, undefined, ctx);
-		assert.equal(claims, 1);
 		assert.deepEqual(workerIssues, [2]);
 		assert.deepEqual(workerDirections, ["test wiring"]);
 		assert.deepEqual(workerPriorContexts, [[parseAloopHandoffs([comment(1, priorFailure, "2026-09-01T00:00:00Z")])[0]]]);
 		worktreeStatus = "?? eventual-source.ts\n";
-		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("untracked", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx), /clean worktree/);
+		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("untracked", { commit: fakeHead }, ctx.signal, undefined, ctx), /clean worktree/);
 		worktreeStatus = "";
-		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("bypass", { commit: fakeHead, command: "true", production_integration_command: "true" }, ctx.signal, undefined, ctx), /must exactly match/);
-		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead, command: verificationPolicy.canonicalCommand, production_integration_command: verificationPolicy.productionIntegrationCommand }, ctx.signal, undefined, ctx);
+		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead }, ctx.signal, undefined, ctx);
 		assert.deepEqual(shellCommands, [verificationPolicy.canonicalCommand, verificationPolicy.productionIntegrationCommand]);
 		assert.equal((verified.details?.receipt as { productionIntegrationExitStatus?: number }).productionIntegrationExitStatus, 0);
 
@@ -428,7 +383,7 @@ test("supervisor gate binds successful evidence to a clean exact commit", () => 
 	assert.match(changed.reasons.join(" "), /differs.*changed after verification.*acceptance criterion.*Production packaging/i);
 });
 
-test("successful handoffs require passing evidence for every selected-issue criterion", () => {
+test("successful handoffs require passing verification and a non-brittle supervisor assessment", () => {
 	const issueBody = "## Acceptance criteria\n\n- Exact bytes are published\n- Retry is idempotent";
 	assert.deepEqual(validateSuccessfulHandoffEvidence({
 		issueBody,
@@ -438,19 +393,19 @@ test("successful handoffs require passing evidence for every selected-issue crit
 			"PASS — Retry is idempotent — duplicate publication returned the existing comment",
 		],
 	}), []);
-	const reasons = validateSuccessfulHandoffEvidence({
+	assert.deepEqual(validateSuccessfulHandoffEvidence({
 		issueBody,
-		verification: ["FAIL canonical build"],
-		acceptanceCriteriaAssessment: [
-			"PASS Exact bytes are published",
-			"PARTIAL — Retry is idempotent — dry-run only",
-		],
-	});
-	assert.match(reasons.join(" "), /passing verification evidence/i);
-	assert.match(reasons.join(" "), /Exact bytes are published/);
-	assert.match(reasons.join(" "), /Retry is idempotent/);
-	assert.match(reasons.join(" "), /cannot contain failed, partial, or blocked/i);
-	assert.match(validateSuccessfulHandoffEvidence({ issueBody: "No criteria", verification: ["passed"], acceptanceCriteriaAssessment: [] }).join(" "), /no parseable acceptance criteria/i);
+		verification: ["canonical verification passed"],
+		acceptanceCriteriaAssessment: ["Supervisor reviewed both criteria with specific test and commit evidence"],
+	}), [], "assessment wording is supervisor judgment, not a formatting protocol");
+	assert.deepEqual(validateSuccessfulHandoffEvidence({
+		issueBody,
+		verification: ["The first check failed; remediation and the bound receipt establish the final result"],
+		acceptanceCriteriaAssessment: ["Partial wording may be discussed; the supervisor's explicit successful decision is authoritative"],
+	}), [], "free-form evidence is not interpreted as a status protocol");
+	assert.match(validateSuccessfulHandoffEvidence({ issueBody, verification: [""], acceptanceCriteriaAssessment: ["reviewed"] }).join(" "), /bound receipt determines mechanical pass\/fail/i);
+	assert.match(validateSuccessfulHandoffEvidence({ issueBody, verification: ["passed"], acceptanceCriteriaAssessment: [] }).join(" "), /supervisor's acceptance assessment/i);
+	assert.deepEqual(validateSuccessfulHandoffEvidence({ issueBody: "No criteria", verification: ["passed"], acceptanceCriteriaAssessment: [] }), []);
 });
 
 test("accepted child closure rejects invalid evidence and is dry-run-first and idempotent", async () => {
@@ -483,7 +438,6 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	const base = {
 		issue: child,
 		epicNumber: 1,
-		authenticatedLogin: "operator",
 		handoffId: spool.id,
 		spool,
 		receiptId: "verify-aaaaaaaaaaaa-1-12345678",
@@ -507,7 +461,6 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, productionIntegrationExitStatus: 1 } }), /Production packaging/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, currentHead: "b".repeat(40) }), /differs/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, worktreeStatus: " M source.ts" }), /changed after verification/i);
-	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, issue: { ...child, assignee: "other" } }), /must be claimed/);
 	assert.equal(closes, 0);
 
 	const dryRun = await closeAcceptedAloopIssue({ ...base, dryRun: true });

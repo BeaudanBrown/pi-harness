@@ -3,12 +3,11 @@ import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
-import { claimCurrentRepositoryIssue, closeCurrentRepositoryIssue, currentGitHubLogin, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
+import { closeCurrentRepositoryIssue, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
-	claimAndRefreshAloopLeaf,
 	closeAcceptedAloopIssue,
 	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
@@ -20,6 +19,7 @@ import {
 	parseAloopRunRequest,
 	publishPreparedAloopHandoff,
 	recognizeClosedAloopRetry,
+	selectAloopLeaf,
 	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
 	type AloopAttemptRecord,
@@ -63,9 +63,7 @@ const LaunchWorkerParams = Type.Object({
 });
 
 const SupervisorVerifyParams = Type.Object({
-	commit: Type.String({ minLength: 7, description: "Exact full or abbreviated worker commit to verify." }),
-	command: Type.String({ minLength: 1, description: "Repository-defined canonical verification command." }),
-	production_integration_command: Type.String({ minLength: 1, description: "Executable check proving production packaging or registered entry-point reachability." }),
+	commit: Type.String({ minLength: 7, description: "Exact full or abbreviated worker commit to verify with the repository-owned .aloop.json policy." }),
 });
 
 const PrepareHandoffParams = Type.Object({
@@ -163,18 +161,14 @@ function handoffWasRecorded(context: Awaited<ReturnType<typeof retrieveCurrentRe
 }
 
 export type AloopExtensionDependencies = {
-	claimIssue: typeof claimCurrentRepositoryIssue;
 	closeIssue: typeof closeCurrentRepositoryIssue;
-	currentLogin: typeof currentGitHubLogin;
 	publishComment: typeof publishExactIssueComment;
 	retrieveEpicContext: typeof retrieveCurrentRepositoryEpicContext;
 	runWorker: typeof runAloopWorker;
 };
 
 const defaultDependencies: AloopExtensionDependencies = {
-	claimIssue: claimCurrentRepositoryIssue,
 	closeIssue: closeCurrentRepositoryIssue,
-	currentLogin: currentGitHubLogin,
 	publishComment: publishExactIssueComment,
 	retrieveEpicContext: retrieveCurrentRepositoryEpicContext,
 	runWorker: runAloopWorker,
@@ -367,21 +361,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (pendingHandoffs.length > 0) {
 					throw new Error(`Outstanding attempts have no durable structured handoff comments: ${pendingHandoffs.map((pending) => `#${pending.issue} (${pending.artifactDirectory})`).join(", ")}. Record them before another worker.`);
 				}
-				const commandOptions = { signal, deadlineMs: runBudget.deadlineMs };
-				const login = await dependencies.currentLogin(ctx.cwd, undefined, commandOptions);
-				const claimed = await claimAndRefreshAloopLeaf({
-					context,
-					issueNumber: params.issue,
-					authenticatedLogin: login,
-					claim: async (issueNumber) => { await dependencies.claimIssue(ctx.cwd, issueNumber, commandOptions); },
-					refresh: async () => {
-						const refreshed = await currentContext(ctx.cwd, signal);
-						refreshPending(refreshed);
-						return refreshed;
-					},
-				});
-				context = claimed.context;
-				const issue = claimed.issue;
+				const issue = selectAloopLeaf(context, params.issue);
 				const handoffs = parseAloopHandoffs(issue.recentHandoffs).filter((handoff) => handoff.issue === issue.number);
 				const retry = evaluateRetryBoundary(handoffs, params.materially_new_approach === true);
 				if (!retry.allowed) throw new Error(retry.reason);
@@ -444,9 +424,9 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		label: "Aloop Supervisor Verify",
 		description: "Independently run a repository-defined check against an exact committed, clean source tree and persist a commit-bound receipt.",
 		promptSnippet: "Verify the returned worker commit independently before accepting its handoff.",
-		promptGuidelines: ["Run after the worker's final commit. Any untracked or modified source blocks verification; any later change invalidates the receipt."],
+		promptGuidelines: ["Pass only the worker commit. The tool loads and executes the repository-owned .aloop.json policy. Any untracked or modified source blocks verification; any later change invalidates the receipt."],
 		parameters: SupervisorVerifyParams,
-		async execute(_id, params: { commit: string; command: string; production_integration_command: string }, signal, onUpdate, ctx) {
+		async execute(_id, params: { commit: string }, signal, onUpdate, ctx) {
 			if (!runBudget) throw new Error("Run /aloop #<epic> before supervisor verification.");
 			const inspect = async (args: string[]) => {
 				const remaining = assessAloopRunBudget(runBudget!, Date.now());
@@ -456,9 +436,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				return result.stdout.trim();
 			};
 			const policy = await loadVerificationPolicy(ctx.cwd);
-			if (params.command !== policy.canonicalCommand || params.production_integration_command !== policy.productionIntegrationCommand) {
-				throw new Error("Verification commands must exactly match the repository-defined .aloop.json policy.");
-			}
 			const expected = await inspect(["rev-parse", `${params.commit}^{commit}`]);
 			const pendingAttempt = pendingHandoffs.find((pending) => pending.commit === expected);
 			if (!pendingAttempt) throw new Error(`Supervisor verification requires a pending worker attempt at ${expected}; launch and commit the worker attempt first.`);
@@ -467,25 +444,25 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (beforeHead !== expected) throw new Error(`Returned commit ${expected} differs from current HEAD ${beforeHead}.`);
 			if (beforeStatus) throw new Error("Supervisor verification requires a clean worktree, including no untracked files. Commit intended sources before verification.");
 			const sourceIdentity = `tree:${await inspect(["rev-parse", `${expected}^{tree}`])}`;
-			onUpdate?.({ content: [{ type: "text", text: `Running supervisor verification at ${expected.slice(0, 12)}: ${params.command}` }], details: { commit: expected, command: params.command } });
+			onUpdate?.({ content: [{ type: "text", text: `Running repository-owned supervisor verification at ${expected.slice(0, 12)}: ${policy.canonicalCommand}` }], details: { commit: expected, command: policy.canonicalCommand } });
 			const remaining = assessAloopRunBudget(runBudget, Date.now());
 			if (!remaining.allowed) throw new Error(remaining.reason);
-			const result = await pi.exec("bash", ["-lc", params.command], { timeout: Math.max(1, remaining.remainingMs), signal });
+			const result = await pi.exec("bash", ["-lc", policy.canonicalCommand], { timeout: Math.max(1, remaining.remainingMs), signal });
 			const productionRemaining = assessAloopRunBudget(runBudget, Date.now());
 			if (!productionRemaining.allowed) throw new Error(productionRemaining.reason);
-			onUpdate?.({ content: [{ type: "text", text: `Running production integration verification at ${expected.slice(0, 12)}: ${params.production_integration_command}` }], details: { commit: expected, command: params.production_integration_command } });
+			onUpdate?.({ content: [{ type: "text", text: `Running repository-owned production integration verification at ${expected.slice(0, 12)}: ${policy.productionIntegrationCommand}` }], details: { commit: expected, command: policy.productionIntegrationCommand } });
 			const productionResult = result.code === 0
-				? await pi.exec("bash", ["-lc", params.production_integration_command], { timeout: Math.max(1, productionRemaining.remainingMs), signal })
+				? await pi.exec("bash", ["-lc", policy.productionIntegrationCommand], { timeout: Math.max(1, productionRemaining.remainingMs), signal })
 				: { code: 1, stdout: "", stderr: "Skipped because canonical verification failed." };
 			const afterHead = await inspect(["rev-parse", "HEAD"]);
 			const afterStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
 			const receipt = {
 				commit: expected,
-				command: params.command,
+				command: policy.canonicalCommand,
 				exitStatus: result.code,
 				timestamp: new Date().toISOString(),
 				sourceIdentity,
-				productionIntegration: params.production_integration_command.trim(),
+				productionIntegration: policy.productionIntegrationCommand,
 				productionIntegrationExitStatus: productionResult.code,
 				postVerificationHead: afterHead,
 				postVerificationClean: afterStatus === "",
@@ -625,12 +602,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const context = await currentContext(ctx.cwd, signal);
 			const issue = context.issues.find((candidate) => candidate.number === params.issue);
 			if (!issue) throw new Error(`Issue #${params.issue} is absent from the active epic context.`);
-			const login = await dependencies.currentLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget!.deadlineMs });
 			if (issue.state === "closed") {
 				const retry = recognizeClosedAloopRetry({
 					issue,
 					epicNumber: context.epic.number,
-					authenticatedLogin: login,
 					handoffId: params.handoff_id,
 					receiptId: params.verification_receipt_id,
 				});
@@ -658,7 +633,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const closure = await closeAcceptedAloopIssue({
 				issue,
 				epicNumber: context.epic.number,
-				authenticatedLogin: login,
 				handoffId: params.handoff_id,
 				spool,
 				receiptId: params.verification_receipt_id,

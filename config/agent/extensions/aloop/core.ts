@@ -300,30 +300,6 @@ export function handoffCommentsForIssue(issue: EpicIssueContext): IssueHandoff[]
 	});
 }
 
-export function requireAloopClaim(issue: EpicIssueContext, authenticatedLogin: string): void {
-	if (issue.assignee !== authenticatedLogin) {
-		throw new Error(`#${issue.number} must be claimed by ${authenticatedLogin} before launching a worker.`);
-	}
-}
-
-export async function claimAndRefreshAloopLeaf(input: {
-	context: GitHubEpicContext;
-	issueNumber: number;
-	authenticatedLogin: string;
-	claim: (issue: number) => Promise<void>;
-	refresh: () => Promise<GitHubEpicContext>;
-}): Promise<{ context: GitHubEpicContext; issue: EpicIssueContext }> {
-	let context = input.context;
-	let issue = selectAloopLeaf(context, input.issueNumber);
-	if (issue.assignee === null) {
-		await input.claim(issue.number);
-		context = await input.refresh();
-		issue = selectAloopLeaf(context, input.issueNumber);
-	}
-	requireAloopClaim(issue, input.authenticatedLogin);
-	return { context, issue };
-}
-
 export function selectAloopLeaf(context: GitHubEpicContext, issueNumber: number): EpicIssueContext {
 	if (!context.executableLeaves.includes(issueNumber)) {
 		throw new Error(`#${issueNumber} is not an open, unblocked descendant leaf of epic #${context.epic.number}.`);
@@ -380,20 +356,15 @@ export function validateSuccessfulHandoffEvidence(input: {
 	acceptanceCriteriaAssessment: string[];
 }): string[] {
 	const reasons: string[] = [];
-	if (input.verification.length === 0 || input.verification.some((item) => !item.trim() || /^(?:fail|partial|blocked)\b/i.test(item.trim()))) {
-		reasons.push("Successful handoffs require non-empty passing verification evidence.");
+	if (input.verification.length === 0 || input.verification.some((item) => !item.trim())) {
+		reasons.push("Successful handoffs require non-empty verification evidence; the bound receipt determines mechanical pass/fail.");
 	}
 	const criteria = extractAcceptanceCriteria(input.issueBody);
-	if (criteria.length === 0) reasons.push("The selected issue has no parseable acceptance criteria.");
-	for (const criterion of criteria) {
-		const normalizedCriterion = normalizedText(criterion);
-		const assessment = input.acceptanceCriteriaAssessment.find((item) => normalizedText(item).includes(normalizedCriterion));
-		if (!assessment || !/^pass\b/i.test(assessment.trim()) || normalizedText(assessment) === `pass ${normalizedCriterion}`) {
-			reasons.push(`Acceptance criterion lacks explicit PASS evidence: ${criterion}`);
-		}
+	if (criteria.length > 0 && input.acceptanceCriteriaAssessment.length === 0) {
+		reasons.push("Successful handoffs require the supervisor's acceptance assessment.");
 	}
-	if (input.acceptanceCriteriaAssessment.some((item) => /^(?:fail|partial|blocked)\b/i.test(item.trim()))) {
-		reasons.push("Successful handoffs cannot contain failed, partial, or blocked criterion assessments.");
+	if (input.acceptanceCriteriaAssessment.some((item) => !item.trim())) {
+		reasons.push("Successful handoffs cannot contain empty acceptance assessments.");
 	}
 	return reasons;
 }
@@ -414,12 +385,10 @@ export function extractAcceptanceCriteria(body: string): string[] {
 export function recognizeClosedAloopRetry(input: {
 	issue: EpicIssueContext;
 	epicNumber: number;
-	authenticatedLogin: string;
 	handoffId: string;
 	receiptId: string;
 }): { commit: string } {
 	if (input.issue.number === input.epicNumber || input.issue.state !== "closed") throw new Error("Durable closure retry applies only to a closed descendant.");
-	requireAloopClaim(input.issue, input.authenticatedLogin);
 	for (const comment of input.issue.recentHandoffs) {
 		const spool = createAloopHandoffSpoolRecord(input.issue.number, comment.body);
 		if (spool.id !== input.handoffId) continue;
@@ -439,7 +408,6 @@ export type AloopClosureReceipt = VerificationReceipt & {
 export async function closeAcceptedAloopIssue<T>(input: {
 	issue: EpicIssueContext;
 	epicNumber: number;
-	authenticatedLogin: string;
 	handoffId: string;
 	spool: AloopHandoffSpoolRecord;
 	receiptId: string;
@@ -457,7 +425,6 @@ export async function closeAcceptedAloopIssue<T>(input: {
 	const [handoff] = parseAloopHandoffs([{ id: 0, author: "aloop", body: spool.comment, createdAt: "", url: "" }]);
 	if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
 	if (handoff.verificationReceiptId !== input.receiptId) throw new Error("The published handoff is bound to a different supervisor verification receipt.");
-	requireAloopClaim(input.issue, input.authenticatedLogin);
 	const closureId = `${input.issue.number}:${input.handoffId}:${input.receiptId}`;
 	// Once GitHub records the issue as closed, an exact published handoff is the
 	// durable idempotency key. A later commit must not turn a successful retry
@@ -544,7 +511,7 @@ Epic child progress: ${closedDescendants}/${descendants.length} closed; ${descen
 Recursive issue state:
 ${context.issues.map(issueLine).join("\n")}
 
-Currently executable leaves (ready-for-agent is advisory):
+Currently executable leaves (labels and assignments are advisory):
 ${context.executableLeaves.map((number) => `#${number}`).join(", ") || "none"}
 
 Recent structured attempt handoffs:
@@ -566,12 +533,12 @@ Retry accounting:
 
 Operating procedure:
 1. Reconstruct state from the recursive GitHub graph, recent issue comments, and Git history. GitHub and Git are authoritative; there is no loop database.
-2. Select one implementable open, unblocked descendant leaf and use aloop_launch_worker for one fresh sequential implementation or remediation attempt. Launch atomically self-claims an unassigned leaf, accepts an existing self-assignment, and stops if another user owns it. Never run workers in parallel.
+2. Select one implementable open, unblocked descendant leaf and use aloop_launch_worker for one fresh sequential implementation or remediation attempt. Labels and assignments are advisory; dependency state determines eligibility, and this supervisor serializes worker launches. Never run workers in parallel.
 3. If an outstanding attempt is listed above, recover it from its result artifact and Git commit, prepare and publish its handoff before launching anything else. Assess worker evidence yourself against every selected-issue acceptance criterion. A worker's "implemented" claim is not closure evidence by itself.
 4. After every attempt, call aloop_prepare_handoff, then pass its short ID to aloop_publish_handoff with dry_run=true and finally dry_run=false. Never copy the encoded comment through the model. Include attempt type, commit, verification, acceptance assessment, discovered work, and next action.
 5. Close an accepted child only after the handoff is durable and your independent acceptance assessment passes. The supervisor alone mutates GitHub. Create only tightly necessary corrective issues and use native sub-issue/blocker relationships.
 6. A remediation attempt may target the same issue. After two unsuccessful attempts without a materially new approach, or on material product/scope ambiguity, stop and ask the user for one explicit decision. Do not guess.
-7. Continue sequentially until no descendants remain open. Discover project verification requirements from repository guidance, run the applicable verification, review every descendant, and call aloop_check_closure. Close the epic only when that gate returns allowed.
+7. Continue sequentially until no descendants remain open. Use aloop_supervisor_verify, which loads the repository-owned verification policy without accepting caller-supplied commands, review every descendant, and call aloop_check_closure. Close the epic only when that gate returns allowed.
 8. This invocation is deliberately bounded. When its deadline or worker-launch cap is reached, stop cleanly and tell the user to rerun /aloop; durable GitHub/Git state makes that continuation safe. Do not describe ordinary launches on new issues as retries.
 9. End with a concise epic report stating completed children, commits, verification, discovered/deferred work, and whether the epic was closed or stopped at a human-decision boundary.
 

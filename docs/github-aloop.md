@@ -2,8 +2,8 @@
 
 `/aloop #<epic>` supervises a GitHub epic from one clean worktree. GitHub
 Issues are the sole durable task source: the parent/sub-issue graph, native
-blockers, assignments, issue state, and structured handoff comments describe
-what remains. Git history describes what was implemented. There is no separate
+blockers, issue state, and structured handoff comments describe what remains.
+Labels and assignments are advisory metadata. Git history describes what was implemented. There is no separate
 loop database, queue file, or session state to restore.
 
 ## Prepare and start
@@ -11,8 +11,8 @@ loop database, queue file, or session state to restore.
 1. Grill the proposed outcome with the repository's planning workflow until its
    scope and acceptance criteria are explicit.
 2. Create an open GitHub epic, then create fully specified child issues with
-   native sub-issue and blocker relationships. Mark only unassigned, unblocked
-   work as `ready-for-agent`.
+   native sub-issue and blocker relationships. Use `ready-for-agent` only as an
+   optional prioritization hint for fully specified, unblocked work.
 3. Create or enter a dedicated worktree and branch for the epic. For example,
    using names appropriate to the repository:
 
@@ -46,21 +46,19 @@ loop database, queue file, or session state to restore.
 
 The command retrieves the complete descendant graph, recent structured
 handoffs, and recent Git history. An executable issue is an open, unblocked
-descendant leaf. The `ready-for-agent` label helps the human queue, but the live
-GitHub graph determines aloop selection.
+descendant leaf. Labels and assignments may help queue visibility, but the live
+GitHub dependency graph determines aloop selection.
 
 ## Supervisor and worker responsibilities
 
 The current Pi session is the **supervisor**. It:
 
-- selects one executable leaf at a time;
-- claims an unassigned issue for the authenticated GitHub user and removes its
-  `ready-for-agent` lifecycle label;
+- selects one executable leaf at a time, regardless of advisory labels or assignments;
 - launches fresh implementation or remediation workers sequentially;
 - independently checks worker evidence against every selected-issue acceptance
   criterion;
-- owns all GitHub assignments, comments, relationships, state changes, and any
-  narrowly necessary corrective issues; and
+- owns all GitHub comments, relationships, state changes, and any narrowly
+  necessary corrective issues; and
 - decides whether to accept, remediate, or stop for a human decision.
 
 A **worker** is a fresh, bounded Pi JSON-mode process with repository editing
@@ -116,11 +114,11 @@ requires model copy/paste of the encoded marker. A handoff records:
 - the local attempt artifact directory.
 
 Only a correctly encoded handoff on its matching issue counts. An accepted
-handoff must reference the receipt ID returned by `aloop_supervisor_verify`;
+handoff must reference the receipt ID returned by `aloop_supervisor_verify`.
 The repository commits a `.aloop.json` policy containing `canonicalCommand` and
-`productionIntegrationCommand`. `aloop_supervisor_verify` rejects caller-supplied
-commands that do not exactly match that policy, then executes both checks. This
-prevents placeholder commands such as `true` from becoming production evidence.
+`productionIntegrationCommand`. The verification tool accepts only the worker
+commit, loads that policy itself, and executes both checks. Agents cannot replace
+the repository-owned gates with narrower or placeholder commands.
 Verification is permitted only after a matching pending worker attempt has
 returned its commit. Preparation accepts only the immutable receipt bytes issued
 for that exact issue, commit, and artifact directory in the current bounded
@@ -129,9 +127,11 @@ statuses passed at the returned commit, and confirms that HEAD and the
 complete worktree (including untracked files) are still identical.
 Commit all intended sources before verification: Git-backed Nix flakes omit
 untracked files, so a check run while eventual source files are untracked is
-invalid even if its command exits successfully. The supervisor closes a child
-only after that handoff is durable and its acceptance criteria pass independent
-review. `aloop_close_accepted_issue` is also dry-run-first. Once GitHub reports
+invalid even if its command exits successfully. The supervisor closes a child only after that handoff is durable and its
+acceptance criteria pass independent review. Hard gates enforce commit,
+verification, receipt, publication, blocker, and closure integrity; acceptance
+wording and evidence quality remain the supervisor's semantic judgment rather
+than a punctuation-sensitive protocol. `aloop_close_accepted_issue` is also dry-run-first. Once GitHub reports
 the issue closed, the exact published handoff and bound receipt ID provide a
 durable idempotency key, so an interrupted closure can be retried after a
 session restart without closing twice.
@@ -148,15 +148,15 @@ and evidence for every epic acceptance criterion. It then reports completed
 children and commits, verification, discovered or deferred work, and whether
 the epic closed or stopped at a human boundary.
 
-## Project verification discovery
+## Project verification policy
 
-Aloop does not assume one verification command for every repository. The
-supervisor and workers first read repository guidance such as `AGENTS.md`,
-domain documentation, dependency manifests, task runners, and CI configuration.
-They run focused checks while iterating and the applicable project-defined gate
-before acceptance, then record the exact commands and outcomes in the handoff.
-When guidance is ambiguous or required infrastructure is unavailable, the
-supervisor records the gap and stops rather than inventing a passing check.
+Each repository declares its canonical and production-integration commands in
+`.aloop.json`. Workers use repository guidance for focused iteration checks.
+For acceptance, the supervisor passes only the worker commit to
+`aloop_supervisor_verify`; the tool loads and executes the committed policy and
+records the outcomes. When the policy is missing, malformed, or required
+infrastructure is unavailable, the supervisor records the gap and stops rather
+than inventing a passing check.
 
 ## Resume and recovery
 
@@ -183,8 +183,6 @@ Common recovery cases:
 - **Commit/worktree contract violation:** treat the attempt as unsuccessful.
   Inspect Git and the worktree, restore the clean one-commit boundary
   deliberately, and record what happened.
-- **Issue assigned to another user:** do not launch a worker. Coordinate through
-  GitHub rather than taking over the assignment.
 - **Missing local artifacts:** GitHub and Git remain authoritative. Use their
   evidence to decide whether a fresh remediation is justified or human input is
   required; never infer acceptance from absent logs.

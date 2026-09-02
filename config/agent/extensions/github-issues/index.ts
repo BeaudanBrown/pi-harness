@@ -156,7 +156,7 @@ const MigrationParamsSchema = Type.Object({
 const GraphParamsSchema = Type.Object({
 	repo: Type.Optional(Type.String({ description: "GitHub owner/repository. Defaults to the current checkout remote; any different repository is rejected." })),
 	parent: Type.Number({ minimum: 1, description: "Parent issue whose direct sub-issues are inspected." }),
-	ready_label: Type.Optional(Type.String({ description: "Label required for a frontier issue. Defaults to ready-for-agent." })),
+	ready_label: Type.Optional(Type.String({ description: "Label prioritized first in the open, unblocked frontier. Defaults to ready-for-agent." })),
 });
 
 function compactJson(value: unknown): string {
@@ -273,12 +273,6 @@ export async function currentGitHubLogin(cwd: string, requestedRepo?: string, co
 export async function closeCurrentRepositoryIssue(cwd: string, number: number, commandOptions: GitHubCommandOptions = {}): Promise<unknown> {
 	const repo = await currentRepo(cwd, undefined, commandOptions);
 	return await ghJsonWithInput(cwd, ["api", "--method", "PATCH", `repos/${repo}/issues/${issueNumber(number)}`], { state: "closed" }, commandOptions);
-}
-
-/** Atomically self-assign an unclaimed aloop leaf and remove its ready lifecycle label. */
-export async function claimCurrentRepositoryIssue(cwd: string, number: number, commandOptions: GitHubCommandOptions = {}): Promise<unknown> {
-	const repo = await currentRepo(cwd, undefined, commandOptions);
-	return await mutate(cwd, repo, { op: "claim_issue", number: issueNumber(number) }, true, commandOptions);
 }
 
 export async function retrieveCurrentRepositoryEpicContext(
@@ -723,10 +717,10 @@ async function publishRelationship(cwd: string, repo: string, params: { op: "add
 export function frontierIssueNumbers(issues: Array<{ number: number; state: string; labels?: Array<{ name?: string }>; assignee?: unknown; issue_dependencies_summary?: { blocked_by?: number } }>, readyLabel = "ready-for-agent"): number[] {
 	return issues
 		.filter((issue) => issue.state === "open")
-		.filter((issue) => (issue.labels ?? []).some((label) => label.name === readyLabel))
-		.filter((issue) => !issue.assignee)
 		.filter((issue) => (issue.issue_dependencies_summary?.blocked_by ?? 0) === 0)
-		.map((issue) => issue.number);
+		.map((issue, index) => ({ issue, index, ready: (issue.labels ?? []).some((label) => label.name === readyLabel) }))
+		.sort((left, right) => Number(right.ready) - Number(left.ready) || left.index - right.index)
+		.map(({ issue }) => issue.number);
 }
 
 export async function inspectGraph(cwd: string, repo: string, parent: number, readyLabel: string, commandOptions: GitHubCommandOptions = {}): Promise<unknown> {
@@ -843,8 +837,8 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "github_issue_graph",
 		label: "GitHub Issue Graph",
-		description: "Inspect a parent issue's direct sub-issues and return the ready, unassigned, unblocked frontier.",
-		promptSnippet: "Inspect a GitHub issue subtree and select ready-for-agent, unassigned issues with no open blockers.",
+		description: "Inspect a parent issue's direct sub-issues and return the open, unblocked frontier with the configured ready label prioritized; labels and assignments are advisory.",
+		promptSnippet: "Inspect a GitHub issue subtree and report open, unblocked work, prioritizing ready-labelled issues without treating labels or assignments as locks.",
 		promptGuidelines: ["Use github_issue_graph to choose manual implementation work from the GitHub frontier."],
 		parameters: GraphParamsSchema,
 		async execute(_id, params: { repo?: string; parent: number; ready_label?: string }, signal, _update, ctx: ExtensionContext) {
