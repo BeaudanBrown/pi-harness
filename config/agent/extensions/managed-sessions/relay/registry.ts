@@ -87,6 +87,7 @@ export class RelayRegistry {
 				pendingInputs: [],
 				pendingControls: [],
 				completedControlIds: [],
+				publishingControlPoll: null,
 				activeControlPoll: null,
 				projection: [],
 				managedWindow: null,
@@ -139,7 +140,65 @@ export class RelayRegistry {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
 			const inserted = this.addPendingControl(conversation, control);
+			if (inserted && conversation.publishingControlPoll?.scope === control.name) {
+				const supersededId = conversation.publishingControlPoll.sourceControl.controlId;
+				const sourceIndex = conversation.pendingControls.findIndex((candidate) => candidate.controlId === supersededId);
+				if (sourceIndex === -1) throw new RelayRegistryError("invalid_state", "Publishing control poll source is unavailable");
+				conversation.pendingControls.splice(sourceIndex, 1);
+				if (conversation.completedControlIds.length >= MAX_COMPLETED_CONTROLS) conversation.completedControlIds.shift();
+				conversation.completedControlIds.push(supersededId);
+				conversation.publishingControlPoll = null;
+			}
 			if (inserted && conversation.activeControlPoll?.scope === control.name) conversation.activeControlPoll = null;
+			parseHostRuntimeState(this.state);
+		});
+	}
+
+	async beginControlPollPublication(conversationId: string, intent: NonNullable<RuntimeConversation["publishingControlPoll"]>): Promise<"publishing" | "active"> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const source = conversation.pendingControls.find((control) => control.controlId === intent.sourceControl.controlId);
+			if (!source || JSON.stringify(source) !== JSON.stringify(intent.sourceControl) || source.name !== intent.scope) {
+				throw new RelayRegistryError("invalid_state", "Control poll publication intent does not match its pending source control");
+			}
+			const active = conversation.activeControlPoll;
+			if (active?.sourceControlId === source.controlId) {
+				if (active.scope !== intent.scope || JSON.stringify(active.options) !== JSON.stringify(intent.options)) {
+					throw new RelayRegistryError("invalid_state", "Conflicting active control poll identity");
+				}
+				return "active";
+			}
+			const existing = conversation.publishingControlPoll;
+			if (existing && JSON.stringify(existing) !== JSON.stringify(intent)) {
+				throw new RelayRegistryError("invalid_state", "Conflicting control poll publication intent");
+			}
+			conversation.publishingControlPoll = structuredClone(intent);
+			parseHostRuntimeState(this.state);
+			return "publishing";
+		});
+	}
+
+	publishingControlPolls(): Array<{ conversationId: string; intent: NonNullable<RuntimeConversation["publishingControlPoll"]> }> {
+		return this.state.conversations.flatMap((conversation) => conversation.publishingControlPoll
+			? [{ conversationId: conversation.conversationId, intent: structuredClone(conversation.publishingControlPoll) }] : []);
+	}
+
+	async completeControlPollPublication(conversationId: string, sourceControlId: string, pollEventId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const intent = conversation.publishingControlPoll;
+			if (!intent || intent.sourceControl.controlId !== sourceControlId) {
+				const active = conversation.activeControlPoll;
+				if (active?.sourceControlId === sourceControlId && active.pollEventId === pollEventId) return;
+				throw new RelayRegistryError("invalid_state", "Control poll publication intent is unavailable");
+			}
+			const index = conversation.pendingControls.findIndex((control) => control.controlId === sourceControlId);
+			if (index === -1) throw new RelayRegistryError("invalid_state", "Control poll source is no longer pending");
+			conversation.activeControlPoll = { pollEventId, sourceControlId, scope: intent.scope, options: structuredClone(intent.options) };
+			conversation.publishingControlPoll = null;
+			conversation.pendingControls.splice(index, 1);
+			if (conversation.completedControlIds.length >= MAX_COMPLETED_CONTROLS) conversation.completedControlIds.shift();
+			conversation.completedControlIds.push(sourceControlId);
 			parseHostRuntimeState(this.state);
 		});
 	}
@@ -339,6 +398,7 @@ export class RelayRegistry {
 					pendingInputs: [],
 					pendingControls: [],
 					completedControlIds: [],
+					publishingControlPoll: null,
 					activeControlPoll: null,
 					projection: [],
 					managedWindow: null,
@@ -372,7 +432,7 @@ export class RelayRegistry {
 			this.manifests.set(manifest.conversationId, manifest);
 			this.state.conversations.push({
 				conversationId: manifest.conversationId, state: "dormant", attachment: null,
-				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], activeControlPoll: null, projection: [], managedWindow: null,
+				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], publishingControlPoll: null, activeControlPoll: null, projection: [], managedWindow: null,
 			});
 			return manifest;
 			});

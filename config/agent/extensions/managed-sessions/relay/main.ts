@@ -5,7 +5,6 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
-	deriveMatrixTransactionId,
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
@@ -23,6 +22,7 @@ import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { hostRelayLockPath, HostRelayLock } from "./relay-lock.js";
 import { TranscriptProjector } from "./transcript-projector.js";
 import { ActivityProjector } from "./activity-projector.js";
+import { ControlPollPublisher } from "./control-poll-publisher.js";
 import { redactManagedValue } from "./redaction.js";
 import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
 
@@ -64,6 +64,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
 		const authenticatedUserId = await matrix.whoami();
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
+		const controlPollPublisher = new ControlPollPublisher(registry, matrix);
+		await controlPollPublisher.reconcile();
 		const coordinatorValues = [
 			environment.PI_MANAGED_COORDINATOR_WORKSPACE_DIR,
 			environment.PI_MANAGED_COORDINATOR_SESSION_FILE,
@@ -168,11 +170,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 								throw new RelayRegistryError("invalid_state", "Managed control options require a model or thinking scope");
 							}
 							const options = payload.options.map((option, index) => ({ answerId: `pi-control-${index}`, command: option }));
-							const pollEventId = await matrix.startPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, payload.controlId, 0), payload.message,
-								options.map((option) => ({ id: option.answerId, text: option.command })), undefined, "stable");
-							await registry.registerActiveControlPoll(manifest.conversationId, {
-								pollEventId, sourceControlId: payload.controlId, scope: source.name, options,
-							});
+							await controlPollPublisher.publish({ conversationId: manifest.conversationId, roomId: manifest.roomId,
+								sourceControl: source, scope: source.name, prompt: payload.message, options });
 						} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, payload.message);
 						await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
 					}
@@ -259,7 +258,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				await eventProjector.projectNotice(manifest.conversationId, `${sourceId}:launch-failed`,
 					"Managed conversation wake failed; queued input remains available for retry.");
 			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
-			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`));
+			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
+			() => controlPollPublisher.reconcile());
 			coordinatorRouter.start();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}

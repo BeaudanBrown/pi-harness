@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import {
-	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, deriveTranscriptEntryId,
+	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, deriveMatrixTransactionId, deriveTranscriptEntryId,
 	encodeNdjsonEnvelope, parseNdjsonEnvelope, type ConversationManifest, type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { renderRemoteCheckpoint } from "../config/agent/extensions/managed-sessions/checkpoint.js";
@@ -14,6 +14,7 @@ import { CoordinatorRouter, authorizedRoomEvents, operatorTextEvents, parseTyped
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
+import { ControlPollPublisher } from "../config/agent/extensions/managed-sessions/relay/control-poll-publisher.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 
@@ -96,6 +97,49 @@ test("relay persists controls before delivery and replays stable identities afte
 	await restartedRegistry.acknowledgeControlResult(manifest.conversationId, control.controlId);
 	assert.equal(restartedRegistry.pendingControls(manifest.conversationId).length, 0, "only explicit result acknowledgement clears the pending queue");
 	assert.equal(restartedRegistry.controlResultState(manifest.conversationId, control.controlId), "completed", "lost acknowledgements remain idempotent");
+});
+
+test("control poll intent recovers an accepted PUT and a vote arriving before event-ID persistence", async () => {
+	const { root, registry, manifest } = await fixture();
+	const source = { controlId: deriveControlId(manifest.conversationId, "$uncertain-model"), matrixEventId: "$uncertain-model", name: "model" as const };
+	await registry.recordPendingControl(manifest.conversationId, source);
+	const transactionId = deriveMatrixTransactionId(manifest.conversationId, source.controlId, 0);
+	const putPaths: string[] = [];
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const url = String(input); const method = init?.method ?? "GET";
+		if (method === "PUT" && url.includes("/m.poll.start/")) { putPaths.push(new URL(url).pathname); return Response.json({ event_id: "$accepted-poll" }); }
+		if (method === "GET" && url.includes("/event/")) return Response.json({ sender: config.botUserId, type: "m.poll.start", content: {
+			"m.poll": { kind: "m.disclosed", max_selections: 1, question: { "m.text": [{ body: "Choose" }] },
+				answers: [{ "m.id": "pi-control-0", "m.text": [{ body: "!model scoped/model" }] }] },
+		} });
+		throw new Error(`unexpected Matrix request ${method} ${url}`);
+	}, [manifest.roomId]);
+	const crashing = new ControlPollPublisher(registry, matrix, () => { throw new Error("injected crash after Matrix acceptance"); });
+	await assert.rejects(crashing.publish({ conversationId: manifest.conversationId, roomId: manifest.roomId, sourceControl: source,
+		scope: "model", prompt: "Choose", options: [{ answerId: "pi-control-0", command: "!model scoped/model" }] }), /injected crash/);
+	const uncertain = registry.snapshot().conversations[0];
+	assert.equal(uncertain?.activeControlPoll, null);
+	assert.equal(uncertain?.publishingControlPoll?.transactionId, transactionId, "complete bounded intent is durable before PUT");
+
+	// The homeserver can expose this vote in the next sync while the relay still lacks the poll event ID.
+	const vote = { event_id: "$window-vote", origin_server_ts: Date.now(), sender: config.operatorUserId, type: "m.poll.response",
+		content: { "m.selections": ["pi-control-0"], "m.relates_to": { rel_type: "m.reference", event_id: "$accepted-poll" } } };
+	const restarted = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
+	await restarted.load();
+	await new ControlPollPublisher(restarted, matrix).reconcile();
+	assert.equal(putPaths.length, 2);
+	assert.equal(putPaths[0], putPaths[1], "reconciliation retries the identical idempotent Matrix transaction path");
+	assert.equal(putPaths[1]?.endsWith(`/${transactionId}`), true);
+	assert.equal(restarted.snapshot().conversations[0]?.publishingControlPoll, null);
+	assert.equal(restarted.activeControlPollOption(manifest.conversationId, "$accepted-poll", "pi-control-0"), "!model scoped/model");
+	const [authorized] = authorizedRoomEvents(sync([vote]), manifest.roomId, config.operatorUserId, true, Date.now());
+	assert.equal(authorized?.kind, "poll_response");
+	const selected = await matrix.controlPollAnswer(manifest.roomId, "$accepted-poll", "pi-control-0");
+	const response = { controlId: deriveControlId(manifest.conversationId, "$window-vote"), matrixEventId: "$window-vote",
+		name: "model" as const, argument: "scoped/model" };
+	assert.equal(await restarted.acceptActiveControlPollResponse(manifest.conversationId, "$accepted-poll", "pi-control-0", selected!, response), true,
+		"the vote arriving in the crash window is accepted after intent reconciliation");
+	assert.deepEqual(restarted.pendingControls(manifest.conversationId), [response]);
 });
 
 test("active control polls survive publication restart and atomically queue one response before dispatch", async () => {

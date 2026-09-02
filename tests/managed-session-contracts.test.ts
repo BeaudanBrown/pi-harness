@@ -255,6 +255,19 @@ test("runtime parser strictly bounds active control poll authorization state", (
 	] })), /invalid active control poll/);
 });
 
+test("runtime parser strictly bounds complete control poll publication intents", () => {
+	const sourceControl = { controlId: `control_${"b".repeat(32)}`, matrixEventId: "$publishing-source", name: "thinking" };
+	const intent = { sourceControl, scope: "thinking", transactionId: deriveMatrixTransactionId(conversationId, sourceControl.controlId, 0),
+		prompt: "Choose thinking", options: [{ answerId: "pi-control-0", command: "!thinking high" }] };
+	const state = (publishingControlPoll: unknown) => runtime({ pendingControls: [sourceControl], publishingControlPoll });
+	assert.deepEqual(parseHostRuntimeState(state(intent)).conversations[0]?.publishingControlPoll, intent);
+	assert.throws(() => parseHostRuntimeState(state({ ...intent, extra: true })), /publishingControlPoll/);
+	assert.throws(() => parseHostRuntimeState(state({ ...intent, prompt: "x".repeat(4_097) })), /publishingControlPoll/);
+	assert.throws(() => parseHostRuntimeState(state({ ...intent, transactionId: deriveMatrixTransactionId(conversationId, sourceControl.controlId, 1) })), /invalid publishing/);
+	assert.throws(() => parseHostRuntimeState(state({ ...intent, sourceControl: { ...sourceControl, matrixEventId: "$other" } })), /invalid publishing/);
+	assert.throws(() => parseHostRuntimeState(state({ ...intent, options: [{ answerId: "pi-control-0", command: "!model scoped/model" }] })), /invalid publishing/);
+});
+
 test("runtime parser rejects malformed lifecycle state and duplicate durable identities", () => {
 	assert.equal(parseHostRuntimeState(runtime()).conversations[0]?.state, "dormant");
 	assert.throws(() => parseHostRuntimeState(runtime({ state: "active" })), /has no attachment/);

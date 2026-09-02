@@ -350,11 +350,20 @@ const pendingControl = strictObject({
 	]),
 	argument: Type.Optional(boundedString(4_096)),
 });
+const controlPollScope = Type.Union([Type.Literal("model"), Type.Literal("thinking")]);
+const controlPollOptions = Type.Array(strictObject({ answerId: boundedString(255), command: boundedString(255) }), { minItems: 1, maxItems: MAX_CONTROL_POLL_OPTIONS });
+const publishingControlPoll = strictObject({
+	sourceControl: pendingControl,
+	scope: controlPollScope,
+	transactionId: MatrixTransactionIdSchema,
+	prompt: boundedString(4_096),
+	options: controlPollOptions,
+});
 const activeControlPoll = strictObject({
 	pollEventId: boundedString(255),
 	sourceControlId: stableId("control"),
-	scope: Type.Union([Type.Literal("model"), Type.Literal("thinking")]),
-	options: Type.Array(strictObject({ answerId: boundedString(255), command: boundedString(255) }), { minItems: 1, maxItems: MAX_CONTROL_POLL_OPTIONS }),
+	scope: controlPollScope,
+	options: controlPollOptions,
 });
 const projectionEntry = strictObject({
 	entryId: TranscriptEntryIdSchema,
@@ -392,6 +401,7 @@ const runtimeConversation = strictObject({
 	pendingInputs: Type.Array(pendingInput, { maxItems: MAX_PENDING_INPUTS }),
 	pendingControls: Type.Array(pendingControl, { maxItems: MAX_PENDING_CONTROLS }),
 	completedControlIds: Type.Array(stableId("control"), { maxItems: MAX_COMPLETED_CONTROLS }),
+	publishingControlPoll: nullable(publishingControlPoll),
 	activeControlPoll: nullable(activeControlPoll),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	managedWindow: nullable(
@@ -441,6 +451,11 @@ export interface HostRuntimeState {
 		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string }>;
 		pendingControls: Array<{ controlId: string; matrixEventId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string }>;
 		completedControlIds: string[];
+		publishingControlPoll: null | {
+			sourceControl: { controlId: string; matrixEventId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };
+			scope: "model" | "thinking"; transactionId: string; prompt: string;
+			options: Array<{ answerId: string; command: string }>;
+		};
 		activeControlPoll: null | { pollEventId: string; sourceControlId: string; scope: "model" | "thinking"; options: Array<{ answerId: string; command: string }> };
 		projection: Array<{
 			entryId: string;
@@ -631,6 +646,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			}
 			if (!("pendingControls" in conversation)) { conversation.pendingControls = []; changed = true; }
 			if (!("completedControlIds" in conversation)) { conversation.completedControlIds = []; changed = true; }
+			if (!("publishingControlPoll" in conversation)) { conversation.publishingControlPoll = null; changed = true; }
 			if (!("activeControlPoll" in conversation)) { conversation.activeControlPoll = null; changed = true; }
 		}
 		if (changed) candidate = migrated;
@@ -670,6 +686,18 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		const completedControls = new Set(conversation.completedControlIds);
 		if (completedControls.size !== conversation.completedControlIds.length || conversation.completedControlIds.some((id) => controls.has(id))) {
 			throw new ManagedSessionContractError("conflict", `conflicting completed control in ${conversation.conversationId}`);
+		}
+		if (conversation.publishingControlPoll) {
+			const poll = conversation.publishingControlPoll;
+			const source = conversation.pendingControls.find((control) => control.controlId === poll.sourceControl.controlId);
+			const answerIds = new Set(poll.options.map((option) => option.answerId));
+			const commands = new Set(poll.options.map((option) => option.command));
+			if (!source || JSON.stringify(source) !== JSON.stringify(poll.sourceControl) || poll.sourceControl.name !== poll.scope ||
+				poll.transactionId !== deriveMatrixTransactionId(conversation.conversationId, poll.sourceControl.controlId, 0) ||
+				answerIds.size !== poll.options.length || commands.size !== poll.options.length ||
+				poll.options.some((option) => !option.command.startsWith(`!${poll.scope} `))) {
+				throw new ManagedSessionContractError("conflict", `invalid publishing control poll in ${conversation.conversationId}`);
+			}
 		}
 		if (conversation.activeControlPoll) {
 			const answerIds = new Set(conversation.activeControlPoll.options.map((option) => option.answerId));

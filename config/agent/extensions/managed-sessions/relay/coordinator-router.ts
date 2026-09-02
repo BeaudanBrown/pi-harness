@@ -167,6 +167,7 @@ export class CoordinatorRouter {
 		private readonly notifyLaunchFailure: (sourceId: string, manifest: ConversationManifest) => Promise<void> = async () => undefined,
 		private readonly projectNotice: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void> = async () => undefined,
 		private readonly diagnostic: (message: string) => void = () => undefined,
+		private readonly reconcileControlPollPublications: () => Promise<void> = async () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -203,6 +204,9 @@ export class CoordinatorRouter {
 				const cursor = runtime.matrixCursor;
 				const established = cursor.status === "established";
 				const sync = await this.matrix.sync(cursor.status === "established" ? cursor.since : undefined, signal);
+				// A vote may already be in this response from the uncertain PUT window. Bind the
+				// idempotently recovered poll event before inspecting or advancing the response.
+				await this.reconcileControlPollPublications();
 				for (const manifest of this.registry.listManifests()) {
 					const events = authorizedRoomEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
 					const texts = operatorTextEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
