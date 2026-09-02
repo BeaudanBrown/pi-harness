@@ -250,6 +250,17 @@ async function currentRepo(cwd: string, requested?: string, commandOptions: GitH
 }
 
 /** Read aloop context only from the repository belonging to the current checkout. */
+export async function publishExactIssueComment(cwd: string, number: number, body: string, apply: boolean, commandOptions: GitHubCommandOptions = {}): Promise<unknown> {
+	const repo = await currentRepo(cwd, undefined, commandOptions);
+	const issue = issueNumber(number);
+	const comments = await ghJson(cwd, ["api", `repos/${repo}/issues/${issue}/comments`, "--paginate"], commandOptions);
+	if (Array.isArray(comments) && comments.some((comment: any) => comment?.body === body)) {
+		return { dryRun: !apply, status: "existing", issue, byteLength: Buffer.byteLength(body) };
+	}
+	if (!apply) return { dryRun: true, status: "would-publish", issue, byteLength: Buffer.byteLength(body), body };
+	return await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues/${issue}/comments`], { body }, commandOptions);
+}
+
 export async function currentGitHubLogin(cwd: string, requestedRepo?: string, commandOptions: GitHubCommandOptions = {}): Promise<string> {
 	await currentRepo(cwd, requestedRepo, commandOptions);
 	const user = await ghJson(cwd, ["api", "user"], commandOptions);

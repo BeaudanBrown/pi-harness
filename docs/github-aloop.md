@@ -84,9 +84,11 @@ restart.
 ## Durable handoffs and issue closure
 
 After every attempt, including unsuccessful and contract-violating attempts,
-the supervisor prepares a structured handoff and publishes the exact generated
-comment on the selected child issue through the dry-run-first GitHub mutation
-tool. A handoff records:
+the supervisor prepares a structured handoff. Preparation stores the exact
+comment bytes in the private local spool and returns a short handoff ID. The
+supervisor passes only that ID to `aloop_publish_handoff`, first with
+`dry_run=true` and then with `dry_run=false`; publication is idempotent and never
+requires model copy/paste of the encoded marker. A handoff records:
 
 - implementation or remediation attempt type;
 - commit, or the absence of a valid commit;
@@ -133,7 +135,7 @@ history; invocation budgets intentionally do not persist as hidden loop state.
 On startup, aloop also scans local attempt results whose commits belong to the
 current branch. If it finds an attempt artifact with no matching durable GitHub
 handoff, it blocks another worker launch. Inspect the result and commit,
-independently assess the attempt, then prepare and publish the missing handoff.
+independently assess the attempt, then prepare and publish the missing handoff by its short ID.
 Do not manufacture a successful handoff from a worker summary alone.
 
 Common recovery cases:

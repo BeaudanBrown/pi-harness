@@ -1,9 +1,9 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
-import { currentGitHubLogin, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
+import { currentGitHubLogin, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
 	assessAloopRunBudget,
@@ -22,7 +22,7 @@ import {
 	type ClosureEvidence,
 } from "./core.js";
 
-const TOOL_NAMES = ["aloop_launch_worker", "aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_check_closure"];
+const TOOL_NAMES = ["aloop_launch_worker", "aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_publish_handoff", "aloop_check_closure"];
 const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
@@ -59,6 +59,11 @@ const PrepareHandoffParams = Type.Object({
 	discovered_work: Type.Array(Type.String()),
 	next_action: Type.String({ minLength: 1 }),
 	artifact_directory: Type.String({ minLength: 1 }),
+});
+
+const PublishHandoffParams = Type.Object({
+	handoff_id: Type.String({ pattern: "^[a-f0-9]{24}$", description: "Short ID returned by aloop_prepare_handoff." }),
+	dry_run: Type.Boolean({ description: "Must be true before publication is applied." }),
 });
 
 const ClosureCheckParams = Type.Object({
@@ -438,9 +443,44 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				artifactDirectory: params.artifact_directory,
 				timestamp: new Date().toISOString(),
 			});
+			const bytes = Buffer.from(comment, "utf8");
+			const handoffId = createHash("sha256").update(`${params.issue}\0`).update(bytes).digest("hex").slice(0, 24);
+			const spoolDirectory = path.resolve(ctx.cwd, ".pi/tmp/aloop/handoffs");
+			await mkdir(spoolDirectory, { recursive: true, mode: 0o700 });
+			const spoolPath = path.join(spoolDirectory, `${handoffId}.json`);
+			const record = `${JSON.stringify({ version: 1, id: handoffId, issue: params.issue, sha256: createHash("sha256").update(bytes).digest("hex"), comment })}\n`;
+			try {
+				await writeFile(spoolPath, record, { encoding: "utf8", mode: 0o600, flag: "wx" });
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "EEXIST" || await readFile(spoolPath, "utf8") !== record) throw error;
+			}
 			return {
-				content: [{ type: "text", text: `Publish this exact comment on #${params.issue} with github_issue_mutate (dry-run, review, then apply):\n\n${comment}` }],
-				details: { issue: params.issue, comment },
+				content: [{ type: "text", text: `Prepared handoff ${handoffId} for #${params.issue} (${bytes.length} bytes). Call aloop_publish_handoff with dry_run=true, then with dry_run=false; do not copy the comment through the model.` }],
+				details: { issue: params.issue, handoffId, byteLength: bytes.length, spoolPath: `.pi/tmp/aloop/handoffs/${handoffId}.json` },
+			};
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_publish_handoff",
+		label: "Aloop Publish Handoff",
+		description: "Dry-run or idempotently publish the exact prepared handoff bytes by short ID.",
+		promptSnippet: "Publish a prepared handoff by ID without copying its encoded comment.",
+		promptGuidelines: ["Always call with dry_run=true before dry_run=false. The spooled bytes are authoritative."],
+		parameters: PublishHandoffParams,
+		async execute(_id, params: { handoff_id: string; dry_run: boolean }, signal, _onUpdate, ctx) {
+			if (!runBudget) throw new Error("Run /aloop #<epic> before publishing a handoff.");
+			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
+			const status = await lstat(spoolPath);
+			if (status.isSymbolicLink() || !status.isFile() || status.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
+			const record = JSON.parse(await readFile(spoolPath, "utf8"));
+			if (record?.version !== 1 || record.id !== params.handoff_id || !Number.isInteger(record.issue) || typeof record.comment !== "string") throw new Error("Prepared handoff spool entry is malformed.");
+			const digest = createHash("sha256").update(Buffer.from(record.comment, "utf8")).digest("hex");
+			if (digest !== record.sha256) throw new Error("Prepared handoff bytes failed integrity validation.");
+			const result = await publishExactIssueComment(ctx.cwd, record.issue, record.comment, !params.dry_run, { signal, deadlineMs: runBudget.deadlineMs });
+			return {
+				content: [{ type: "text", text: `${params.dry_run ? "Dry run complete" : "Publication complete"} for handoff ${params.handoff_id} on #${record.issue}; ${Buffer.byteLength(record.comment)} exact bytes.` }],
+				details: { handoffId: params.handoff_id, issue: record.issue, dryRun: params.dry_run, byteLength: Buffer.byteLength(record.comment), result },
 			};
 		},
 	});
