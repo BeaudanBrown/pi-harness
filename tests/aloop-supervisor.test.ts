@@ -81,8 +81,16 @@ test("aloop invocations have explicit bounded runtime and attempt budgets", () =
 	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 0"), /between 1 and 240/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-attempts 21"), /between 1 and 20/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 5 --max-minutes 6"), /Duplicate/);
-	assert.equal(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 1, settled: false }, 1_000).allowed, true);
-	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 2, settled: false }, 1_000).reason ?? "", /attempt limit/);
+	assert.deepEqual(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 1, settled: false }, 1_000), {
+		allowed: true,
+		remainingMs: 1_000,
+		attemptsRemaining: 1,
+		finalPermittedAttempt: true,
+	});
+	const exhausted = assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 2, settled: false }, 1_000);
+	assert.equal(exhausted.attemptsRemaining, 0);
+	assert.equal(exhausted.finalPermittedAttempt, false);
+	assert.match(exhausted.reason ?? "", /attempt limit/);
 	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 0, settled: false }, 2_000).reason ?? "", /time limit/);
 	assert.match(assessAloopRunBudget({ deadlineMs: 2_000, maxAttempts: 2, attemptsStarted: 0, settled: true }, 1_000).reason ?? "", /settled/);
 });
@@ -96,6 +104,7 @@ test("selection accepts only open unblocked descendant leaves", () => {
 	const selected = selectAloopLeaf(graph, 4);
 	assert.equal(selected.title, "Ready");
 	assert.doesNotThrow(() => requireAloopClaim(selected, "someone"));
+	assert.throws(() => requireAloopClaim(issue({ number: 5, title: "Unassigned" }), "someone"), /must be claimed/);
 	assert.throws(() => requireAloopClaim(selected, "different-user"), /must be claimed/);
 	assert.throws(() => selectAloopLeaf(graph, 2), /not an open, unblocked/);
 	assert.throws(() => selectAloopLeaf(graph, 3), /not an open, unblocked/);

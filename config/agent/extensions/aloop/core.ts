@@ -118,12 +118,22 @@ export function parseAloopRunRequest(value: string): AloopRunRequest {
 	return { epic, maxMinutes, maxAttempts };
 }
 
-export function assessAloopRunBudget(budget: AloopRunBudget, nowMs: number): { allowed: boolean; reason?: string; remainingMs: number } {
+export type AloopBudgetAssessment = {
+	allowed: boolean;
+	reason?: string;
+	remainingMs: number;
+	attemptsRemaining: number;
+	finalPermittedAttempt: boolean;
+};
+
+export function assessAloopRunBudget(budget: AloopRunBudget, nowMs: number): AloopBudgetAssessment {
 	const remainingMs = Math.max(0, budget.deadlineMs - nowMs);
-	if (budget.settled) return { allowed: false, remainingMs, reason: "This aloop invocation has settled. Run /aloop again to continue from durable state." };
-	if (remainingMs === 0) return { allowed: false, remainingMs, reason: "This aloop invocation reached its time limit. Run /aloop again to continue from durable state." };
-	if (budget.attemptsStarted >= budget.maxAttempts) return { allowed: false, remainingMs, reason: `This aloop invocation reached its ${budget.maxAttempts}-attempt limit. Run /aloop again to continue from durable state.` };
-	return { allowed: true, remainingMs };
+	const attemptsRemaining = Math.max(0, budget.maxAttempts - budget.attemptsStarted);
+	const assessment = { remainingMs, attemptsRemaining, finalPermittedAttempt: attemptsRemaining === 1 };
+	if (budget.settled) return { ...assessment, allowed: false, reason: "This aloop invocation has settled. Run /aloop again to continue from durable state." };
+	if (remainingMs === 0) return { ...assessment, allowed: false, reason: "This aloop invocation reached its time limit. Run /aloop again to continue from durable state." };
+	if (attemptsRemaining === 0) return { ...assessment, allowed: false, reason: `This aloop invocation reached its ${budget.maxAttempts}-attempt limit. Run /aloop again to continue from durable state.` };
+	return { ...assessment, allowed: true };
 }
 
 function bounded(value: string, limit: number): string {

@@ -333,9 +333,10 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 				const attemptNumber = runBudget.attemptsStarted;
 				const startedAt = Date.now();
 				const workerTimeoutMs = Math.min(params.timeout_ms ?? 30 * 60_000, launchBudget.remainingMs);
+				const finalAttemptNotice = attemptNumber === runBudget.maxAttempts ? " This is the final permitted attempt for this invocation." : "";
 				const progress = () => onUpdate?.({
-					content: [{ type: "text", text: `Aloop attempt ${attemptNumber}/${runBudget!.maxAttempts} for #${issue.number} is running (${Math.floor((Date.now() - startedAt) / 1_000)}s elapsed; hard timeout ${Math.ceil(workerTimeoutMs / 60_000)}m).` }],
-					details: { issue: issue.number, attemptNumber, maxAttempts: runBudget!.maxAttempts, elapsedMs: Date.now() - startedAt, timeoutMs: workerTimeoutMs },
+					content: [{ type: "text", text: `Aloop attempt ${attemptNumber}/${runBudget!.maxAttempts} for #${issue.number} is running (${Math.floor((Date.now() - startedAt) / 1_000)}s elapsed; ${Math.ceil((runBudget!.deadlineMs - Date.now()) / 60_000)}m remaining; hard timeout ${Math.ceil(workerTimeoutMs / 60_000)}m).${finalAttemptNotice}` }],
+					details: { issue: issue.number, attemptNumber, maxAttempts: runBudget!.maxAttempts, finalPermittedAttempt: attemptNumber === runBudget!.maxAttempts, elapsedMs: Date.now() - startedAt, remainingMs: Math.max(0, runBudget!.deadlineMs - Date.now()), timeoutMs: workerTimeoutMs },
 				});
 				progress();
 				const heartbeat = setInterval(progress, 15_000);
