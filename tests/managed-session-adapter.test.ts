@@ -365,6 +365,67 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
+test("durable control marker restoration rejects extra, malformed, and unbounded data", async () => {
+	const validId = `control_${"e".repeat(32)}`;
+	const malformedMarkers = [
+		["pi-managed-session-control-result", null],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", extra: true }],
+		["pi-managed-session-control-result", { controlId: validId, status: "unknown", message: "done" }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "" }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "x".repeat(4_097) }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", options: [] }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", options: Array(21).fill("choice") }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", options: ["x".repeat(256)] }],
+		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "provider/model", state: "started", extra: true }],
+		["pi-managed-session-control-execution", { controlId: validId, name: "thinking", argument: "x".repeat(4_097), state: "started" }],
+		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "", state: "started" }],
+		["pi-managed-session-control-execution", [validId, "model", "started"]],
+	] as const;
+	for (const [index, [customType, data]] of malformedMarkers.entries()) {
+		const handlers = new Map<string, (...args: any[]) => any>();
+		const branch = [custom("binding", BINDING_ENTRY_TYPE, binding), custom(`bad-${index}`, customType, data)];
+		const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+			registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined } as unknown as ExtensionAPI;
+		createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: "/tmp/not-used" })(api);
+		const ctx: any = { hasUI: false, sessionManager: { getSessionId: () => sessionId, getBranch: () => branch } };
+		await assert.rejects(handlers.get("session_start")!({ reason: "resume" }, ctx), /Malformed durable control (result|execution) state/,
+			`case ${index} must fail closed`);
+	}
+});
+
+test("recovered uncertain model and thinking mutations are not invoked again", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const modelId = `control_${"f".repeat(32)}`;
+	const thinkingId = `control_${"1".repeat(32)}`;
+	const branch: any[] = [
+		custom("binding", BINDING_ENTRY_TYPE, binding),
+		custom("model-started", "pi-managed-session-control-execution", { controlId: modelId, name: "model", argument: "scoped/model", state: "started" }),
+		custom("thinking-started", "pi-managed-session-control-execution", { controlId: thinkingId, name: "thinking", argument: "high", state: "started" }),
+	];
+	const handlers = new Map<string, (...args: any[]) => any>();
+	let leaf = "thinking-started"; let setModelCalls = 0; let setThinkingCalls = 0;
+	const model = { provider: "scoped", id: "model", reasoning: true, contextWindow: 100, maxTokens: 10 };
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [], appendEntry: (customType: string, data: unknown) => { leaf = `result-${branch.length}`; branch.push(custom(leaf, customType, data)); },
+		setModel: async () => { setModelCalls += 1; return true; }, setThinkingLevel: () => { setThinkingCalls += 1; }, getThinkingLevel: () => "high",
+		sendUserMessage: () => undefined, sendMessage: () => undefined } as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => true, model, thinkingLevel: "high", scopedModels: [{ model }], modelRegistry: { getAvailable: () => [model] },
+		getContextUsage: () => undefined, abort: () => undefined, shutdown: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf, getSessionFile: () => "/tmp/session.jsonl" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	for (const [controlId, name, argument] of [[modelId, "model", "scoped/model"], [thinkingId, "thinking", "high"]] as const) {
+		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `${name}-replay`, conversationId, role: "relay", type: "control.deliver",
+			payload: { controlId, name, argument } });
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		assert.match(String(relay.frames.at(-1)?.payload.message), /not repeated/i);
+	}
+	assert.equal(setModelCalls, 0, "uncertain recovered model selection is not repeated");
+	assert.equal(setThinkingCalls, 0, "uncertain recovered thinking selection is not repeated");
+	assert.equal(branch.filter((entry) => entry.customType === "pi-managed-session-control-result").length, 2, "conservative outcomes are durable");
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
 test("durable control execution closes compaction and stop crash windows without repeating compaction", async (t) => {
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const branch: any[] = [custom("binding", BINDING_ENTRY_TYPE, binding)];

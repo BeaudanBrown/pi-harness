@@ -41,6 +41,50 @@ const CONTROL_EXECUTION_ENTRY_TYPE = "pi-managed-session-control-execution";
 type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[] };
 type StatefulControlName = "model" | "thinking" | "compact" | "stop";
 type ControlExecution = { controlId: string; name: StatefulControlName; argument?: string; state: "started" };
+
+function hasExactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
+	const keys = Reflect.ownKeys(value);
+	return required.every((key) => Object.hasOwn(value, key)) && keys.every((key) =>
+		typeof key === "string" && (required.includes(key) || optional.includes(key))) &&
+		keys.length >= required.length && keys.length <= required.length + optional.length;
+}
+
+function isBoundedText(value: unknown, maxLength: number): value is string {
+	return typeof value === "string" && value.length >= 1 && value.length <= maxLength;
+}
+
+function parseControlResult(value: unknown): ControlResult {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ManagedAdapterError("Malformed durable control result state");
+	const record = value as Record<string, unknown>;
+	if (!hasExactKeys(record, ["controlId", "status", "message"], ["options"]) ||
+		typeof record.controlId !== "string" || !/^control_[a-f0-9]{32}$/.test(record.controlId) ||
+		(record.status !== "ok" && record.status !== "rejected") || !isBoundedText(record.message, 4_096)) {
+		throw new ManagedAdapterError("Malformed durable control result state");
+	}
+	let options: string[] | undefined;
+	if (Object.hasOwn(record, "options")) {
+		const candidate = record.options;
+		if (!Array.isArray(candidate) || candidate.length < 1 || candidate.length > 20 || candidate.some((option) => !isBoundedText(option, 255))) {
+			throw new ManagedAdapterError("Malformed durable control result state");
+		}
+		options = [...candidate] as string[];
+	}
+	return { controlId: record.controlId as string, status: record.status, message: record.message, ...(options ? { options } : {}) };
+}
+
+function parseControlExecution(value: unknown): ControlExecution {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ManagedAdapterError("Malformed durable control execution state");
+	const record = value as Record<string, unknown>;
+	if (!hasExactKeys(record, ["controlId", "name", "state"], ["argument"]) ||
+		typeof record.controlId !== "string" || !/^control_[a-f0-9]{32}$/.test(record.controlId) ||
+		!(["model", "thinking", "compact", "stop"] as unknown[]).includes(record.name) || record.state !== "started" ||
+		(Object.hasOwn(record, "argument") && !isBoundedText(record.argument, 4_096))) {
+		throw new ManagedAdapterError("Malformed durable control execution state");
+	}
+	return { controlId: record.controlId as string, name: record.name as StatefulControlName, state: "started",
+		...(record.argument === undefined ? {} : { argument: record.argument as string }) };
+}
+
 type ActivityOutcome = "completed" | "checkpoint" | "cancelled" | "interrupted" | "failed";
 interface BusyActivity {
 	activityId: string; revision: number; startedAt: number; startContext?: number; inputTokens: number; outputTokens: number;
@@ -495,8 +539,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 			const recoveredExecution = controlExecutions.get(payload.controlId);
 			if (recoveredExecution && (recoveredExecution.name !== payload.name || recoveredExecution.argument !== payload.argument)) throw new ManagedAdapterError("Conflicting replay for durable control execution");
-			if (recoveredExecution?.name === "compact" && recoveredControlExecutions.has(payload.controlId)) {
-				return controlReply(payload.controlId, "rejected", "Compaction was interrupted after durable execution began; it was not repeated during recovery. Context and history remain preserved.");
+			if (recoveredExecution && recoveredControlExecutions.has(payload.controlId)) {
+				if (recoveredExecution.name === "compact") {
+					return controlReply(payload.controlId, "rejected", "Compaction was interrupted after durable execution began; it was not repeated during recovery. Context and history remain preserved.");
+				}
+				if (recoveredExecution.name === "model" || recoveredExecution.name === "thinking") {
+					return controlReply(payload.controlId, "rejected", `${recoveredExecution.name === "model" ? "Model selection" : "Thinking selection"} may have completed before interruption; the native mutation was not repeated during recovery. Check !status before retrying with a new control.`);
+				}
 			}
 			if (["model", "thinking", "compact", "new"].includes(payload.name) && !ctx.isIdle()) {
 				return controlReply(payload.controlId, "rejected", `Cannot change ${payload.name} while Pi is busy; the active run was not altered.`);
@@ -678,15 +727,17 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
 			controlResults.clear(); controlExecutions.clear(); recoveredControlExecutions.clear();
 			for (const entry of ctx.sessionManager.getBranch()) {
-				if (entry.type !== "custom" || typeof entry.data !== "object" || entry.data === null) continue;
+				if (entry.type !== "custom") continue;
 				if (entry.customType === CONTROL_RESULT_ENTRY_TYPE) {
-					const result = entry.data as ControlResult;
-					if (/^control_[a-f0-9]{32}$/.test(result.controlId) && (result.status === "ok" || result.status === "rejected") && typeof result.message === "string") controlResults.set(result.controlId, result);
+					const result = parseControlResult(entry.data);
+					const prior = controlResults.get(result.controlId);
+					if (prior && (prior.status !== result.status || prior.message !== result.message || JSON.stringify(prior.options) !== JSON.stringify(result.options))) {
+						throw new ManagedAdapterError("Conflicting durable control result state");
+					}
+					controlResults.set(result.controlId, result);
 				}
 				if (entry.customType === CONTROL_EXECUTION_ENTRY_TYPE) {
-					const execution = entry.data as ControlExecution;
-					if (!/^control_[a-f0-9]{32}$/.test(execution.controlId) || !["model", "thinking", "compact", "stop"].includes(execution.name) || execution.state !== "started" ||
-						(execution.argument !== undefined && typeof execution.argument !== "string")) throw new ManagedAdapterError("Malformed durable control execution state");
+					const execution = parseControlExecution(entry.data);
 					const prior = controlExecutions.get(execution.controlId);
 					if (prior && (prior.name !== execution.name || prior.argument !== execution.argument)) throw new ManagedAdapterError("Conflicting durable control execution state");
 					controlExecutions.set(execution.controlId, execution); recoveredControlExecutions.add(execution.controlId);
