@@ -131,6 +131,9 @@ test("authorized poll responses accept stable and unstable forms and reject malf
 		poll("$foreign", "m.poll.response", "m.poll.response", "@other:example.com"),
 		poll("$thread", "m.poll.response", "m.poll.response", config.operatorUserId, { rel_type: "m.thread", event_id: "$poll" }),
 		poll("$extra", "m.poll.response", "m.poll.response", config.operatorUserId, { rel_type: "m.reference", event_id: "$poll", extra: true }),
+		{ ...poll("$mismatch", "m.poll.response", "org.matrix.msc3381.poll.response"), content: {
+			"org.matrix.msc3381.poll.response": { answers: ["yes"] }, "m.relates_to": { rel_type: "m.reference", event_id: "$poll" },
+		} },
 	] } } } } };
 	assert.deepEqual(authorizedRoomEvents(response, "!room:example.com", config.operatorUserId, true, now), [
 		{ kind: "poll_response", eventId: "$stable", pollEventId: "$poll", answerId: "yes" },

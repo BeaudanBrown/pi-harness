@@ -68,7 +68,10 @@ export function authorizedRoomEvents(response: unknown, roomId: string, operator
 			typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) continue;
 		const content = event.content as Record<string, unknown>;
 		if (event.type === "m.poll.response" || event.type === "org.matrix.msc3381.poll.response") {
-			const responseContent = (content["m.poll.response"] ?? content["org.matrix.msc3381.poll.response"]) as { answers?: unknown } | undefined;
+			const responseKey = event.type;
+			const otherResponseKey = event.type === "m.poll.response" ? "org.matrix.msc3381.poll.response" : "m.poll.response";
+			if (content[otherResponseKey] !== undefined) continue;
+			const responseContent = content[responseKey] as { answers?: unknown } | undefined;
 			const relation = content["m.relates_to"] as { rel_type?: unknown; event_id?: unknown } | undefined;
 			if (!responseContent || Object.keys(responseContent).length !== 1 || !Array.isArray(responseContent.answers) || responseContent.answers.length !== 1 ||
 				typeof responseContent.answers[0] !== "string" || responseContent.answers[0].length < 1 || responseContent.answers[0].length > 255 ||

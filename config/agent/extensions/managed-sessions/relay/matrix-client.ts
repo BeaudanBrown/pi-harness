@@ -146,7 +146,7 @@ export class ManagedMatrixClient {
 	async replaceMessage(roomId: string, transactionId: string, eventId: string, body: string, notice = true, signal?: AbortSignal): Promise<string> {
 		boundedText(eventId, "replacement event ID", 255); const msgtype = notice ? "m.notice" : "m.text";
 		const replacement = { msgtype, body: boundedText(body, "replacement body") };
-		return this.sendEvent(roomId, "m.room.message", transactionId, { ...replacement, "m.new_content": replacement,
+		return this.sendEvent(roomId, "m.room.message", transactionId, { msgtype, body: `* ${replacement.body}`, "m.new_content": replacement,
 			"m.relates_to": { rel_type: "m.replace", event_id: eventId } }, signal);
 	}
 	async setTyping(roomId: string, typing: boolean, timeoutMs = MAX_TYPING_TIMEOUT_MS, signal?: AbortSignal): Promise<void> {
@@ -155,21 +155,25 @@ export class ManagedMatrixClient {
 		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(this.botUserId)}`,
 			typing ? { typing: true, timeout: timeoutMs } : { typing: false }, signal);
 	}
-	async startPoll(roomId: string, transactionId: string, question: string, answers: readonly MatrixPollAnswer[], signal?: AbortSignal): Promise<string> {
+	async startPoll(roomId: string, transactionId: string, question: string, answers: readonly MatrixPollAnswer[], signal?: AbortSignal, dialect: "stable" | "unstable" = "unstable"): Promise<string> {
 		if (answers.length < 1 || answers.length > MAX_POLL_ANSWERS || new Set(answers.map((answer) => answer.id)).size !== answers.length) throw new Error("Poll answers are malformed or out of bounds");
 		const text = boundedText(question, "poll question", 4_096);
 		const normalized = answers.map((answer) => ({ id: boundedText(answer.id, "poll answer ID", 255), text: boundedText(answer.text, "poll answer", 1_024) }));
-		const stablePoll = { question: { "m.text": text }, kind: "m.poll.disclosed", max_selections: 1,
-			answers: normalized.map((answer) => ({ id: answer.id, "m.text": answer.text })) };
-		const unstablePoll = { question: { "org.matrix.msc1767.text": text }, kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
-			answers: normalized.map((answer) => ({ id: answer.id, "org.matrix.msc1767.text": answer.text })) };
-		return this.sendEvent(roomId, "m.poll.start", transactionId, { "m.poll.start": stablePoll, "org.matrix.msc3381.poll.start": unstablePoll,
-			"m.text": text, "org.matrix.msc1767.text": text }, signal);
+		if (dialect === "stable") return this.sendEvent(roomId, "m.poll.start", transactionId, { "m.poll.start": {
+			question: { "m.text": text }, kind: "m.poll.disclosed", max_selections: 1,
+			answers: normalized.map((answer) => ({ id: answer.id, "m.text": answer.text })),
+		}, "m.text": text }, signal);
+		return this.sendEvent(roomId, "org.matrix.msc3381.poll.start", transactionId, { "org.matrix.msc3381.poll.start": {
+			question: { "org.matrix.msc1767.text": text }, kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
+			answers: normalized.map((answer) => ({ id: answer.id, "org.matrix.msc1767.text": answer.text })),
+		}, "org.matrix.msc1767.text": text }, signal);
 	}
-	async endPoll(roomId: string, transactionId: string, pollEventId: string, fallback = "Poll closed", signal?: AbortSignal): Promise<string> {
+	async endPoll(roomId: string, transactionId: string, pollEventId: string, fallback = "Poll closed", signal?: AbortSignal, dialect: "stable" | "unstable" = "unstable"): Promise<string> {
 		boundedText(pollEventId, "poll event ID", 255); const text = boundedText(fallback, "poll end fallback", 1_024);
-		return this.sendEvent(roomId, "m.poll.end", transactionId, { "m.relates_to": { rel_type: "m.reference", event_id: pollEventId },
-			"m.poll.end": {}, "org.matrix.msc3381.poll.end": {}, "m.text": text, "org.matrix.msc1767.text": text }, signal);
+		const relation = { rel_type: "m.reference", event_id: pollEventId };
+		return dialect === "stable"
+			? this.sendEvent(roomId, "m.poll.end", transactionId, { "m.relates_to": relation, "m.poll.end": {}, "m.text": text }, signal)
+			: this.sendEvent(roomId, "org.matrix.msc3381.poll.end", transactionId, { "m.relates_to": relation, "org.matrix.msc3381.poll.end": {}, "org.matrix.msc1767.text": text }, signal);
 	}
 	private async sendEvent(roomId: string, eventType: string, transactionId: string, content: JsonObject, signal?: AbortSignal): Promise<string> {
 		this.assertManagedRoom(roomId); transaction(transactionId);
