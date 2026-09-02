@@ -16,6 +16,10 @@ interface MatrixTextEvent {
 	replyToEventId?: string;
 }
 
+export type AuthorizedMatrixRoomEvent =
+	| ({ kind: "text" } & MatrixTextEvent)
+	| { kind: "poll_response"; eventId: string; pollEventId: string; answerId: string };
+
 const MAX_TIMELINE_EVENTS = 512;
 const MAX_INITIAL_EVENT_AGE_MS = 24 * 60 * 60 * 1_000;
 const MAX_FUTURE_EVENT_SKEW_MS = 5 * 60 * 1_000;
@@ -39,6 +43,43 @@ function inputKind(body: string): { kind: "prompt" | "steer" | "abort"; body?: s
 		return steering ? { kind: "steer", body: steering } : undefined;
 	}
 	return { kind: "prompt", body: text };
+}
+
+export function authorizedRoomEvents(response: unknown, roomId: string, operatorUserId: string, hasCursor: boolean, now = Date.now()): AuthorizedMatrixRoomEvent[] {
+	if (typeof response !== "object" || response === null) return [];
+	const rooms = (response as { rooms?: unknown }).rooms;
+	const joined = typeof rooms === "object" && rooms !== null ? (rooms as { join?: unknown }).join : undefined;
+	const room = typeof joined === "object" && joined !== null ? (joined as Record<string, unknown>)[roomId] : undefined;
+	if (typeof room !== "object" || room === null) return [];
+	const roomValue = room as { timeline?: unknown; state?: unknown };
+	const stateEvents = typeof roomValue.state === "object" && roomValue.state !== null && Array.isArray((roomValue.state as { events?: unknown }).events) ? (roomValue.state as { events: unknown[] }).events : [];
+	const membership = [...stateEvents].reverse().find((value) => typeof value === "object" && value !== null && (value as { type?: unknown }).type === "m.room.member" && (value as { state_key?: unknown }).state_key === operatorUserId) as { content?: unknown } | undefined;
+	if (membership && (typeof membership.content !== "object" || membership.content === null || (membership.content as { membership?: unknown }).membership !== "join")) return [];
+	const timeline = roomValue.timeline;
+	if (typeof timeline !== "object" || timeline === null || !Array.isArray((timeline as { events?: unknown }).events)) return [];
+	const timelineValue = timeline as { events: unknown[]; limited?: unknown };
+	if (timelineValue.limited === true || timelineValue.events.length > MAX_TIMELINE_EVENTS) throw new Error("Matrix room timeline requires bounded gap recovery before advancing the cursor");
+	const result: AuthorizedMatrixRoomEvent[] = []; const seen = new Set<string>();
+	for (const value of timelineValue.events) {
+		if (typeof value !== "object" || value === null) continue;
+		const event = value as { event_id?: unknown; sender?: unknown; type?: unknown; content?: unknown; origin_server_ts?: unknown };
+		if (event.sender !== operatorUserId || typeof event.event_id !== "string" || !event.event_id || event.event_id.length > 255 || seen.has(event.event_id) ||
+			typeof event.origin_server_ts !== "number" || !Number.isSafeInteger(event.origin_server_ts) || event.origin_server_ts > now + MAX_FUTURE_EVENT_SKEW_MS || (!hasCursor && event.origin_server_ts < now - MAX_INITIAL_EVENT_AGE_MS) ||
+			typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) continue;
+		const content = event.content as Record<string, unknown>;
+		if (event.type === "m.poll.response" || event.type === "org.matrix.msc3381.poll.response") {
+			const responseContent = (content["m.poll.response"] ?? content["org.matrix.msc3381.poll.response"]) as { answers?: unknown } | undefined;
+			const relation = content["m.relates_to"] as { rel_type?: unknown; event_id?: unknown } | undefined;
+			if (!responseContent || !Array.isArray(responseContent.answers) || responseContent.answers.length !== 1 || typeof responseContent.answers[0] !== "string" || responseContent.answers[0].length > 255 ||
+				!relation || relation.rel_type !== "m.reference" || typeof relation.event_id !== "string" || relation.event_id.length > 255) continue;
+			seen.add(event.event_id); result.push({ kind: "poll_response", eventId: event.event_id, pollEventId: relation.event_id, answerId: responseContent.answers[0] });
+		} else if (event.type === "m.room.message" && content.msgtype === "m.text" && typeof content.body === "string" && content.body.length > 0 && content.body.length <= MAX_INPUT_TEXT_LENGTH) {
+			const relation = content["m.relates_to"];
+			if (relation !== undefined) continue; // replies are parsed by the established strict text parser below
+			seen.add(event.event_id); result.push({ kind: "text", eventId: event.event_id, body: content.body });
+		}
+	}
+	return result;
 }
 
 export function operatorTextEvents(response: unknown, roomId: string, operatorUserId: string, hasCursor: boolean, now = Date.now()): MatrixTextEvent[] {

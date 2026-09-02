@@ -30,6 +30,21 @@ type FetchLike = typeof fetch;
 type JsonObject = Record<string, unknown>;
 const MAX_MATRIX_RESPONSE_BYTES = 4 * 1024 * 1024;
 const MAX_RETRY_AFTER_MS = 120_000;
+const MAX_TYPING_TIMEOUT_MS = 30_000;
+const MAX_MESSAGE_BODY_LENGTH = 32_768;
+const MAX_POLL_ANSWERS = 20;
+
+export interface MatrixPollAnswer { id: string; text: string }
+
+function boundedText(value: string, field: string, maximum = MAX_MESSAGE_BODY_LENGTH): string {
+	if (!value || value.length > maximum || /[\0]/.test(value)) throw new Error(`${field} must be bounded text`);
+	return value;
+}
+
+function transaction(value: string): string {
+	if (!/^[A-Za-z0-9._~-]{1,255}$/.test(value)) throw new Error("Matrix transaction ID is malformed");
+	return value;
+}
 
 function requiredString(value: unknown, field: string): string {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ManagedMatrixError("invalid_response", `Matrix response omitted ${field}`);
@@ -121,9 +136,40 @@ export class ManagedMatrixClient {
 	}
 	async setRoomName(roomId: string, name: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.name/`, { name }, signal); }
 	async sendText(roomId: string, transactionId: string, body: string, formattedBody?: string, signal?: AbortSignal): Promise<string> {
-		this.assertManagedRoom(roomId); const content: JsonObject = { msgtype: "m.text", body };
-		if (formattedBody !== undefined) { content.format = "org.matrix.custom.html"; content.formatted_body = formattedBody; }
-		return requiredString(await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/m.room.message/${encodeURIComponent(transactionId)}`, content, signal), "event_id");
+		this.assertManagedRoom(roomId); const content: JsonObject = { msgtype: "m.text", body: boundedText(body, "message body") };
+		if (formattedBody !== undefined) { content.format = "org.matrix.custom.html"; content.formatted_body = boundedText(formattedBody, "formatted message body", MAX_MESSAGE_BODY_LENGTH * 2); }
+		return this.sendEvent(roomId, "m.room.message", transactionId, content, signal);
+	}
+	async sendNotice(roomId: string, transactionId: string, body: string, signal?: AbortSignal): Promise<string> {
+		return this.sendEvent(roomId, "m.room.message", transactionId, { msgtype: "m.notice", body: boundedText(body, "notice body") }, signal);
+	}
+	async replaceMessage(roomId: string, transactionId: string, eventId: string, body: string, notice = true, signal?: AbortSignal): Promise<string> {
+		boundedText(eventId, "replacement event ID", 255); const msgtype = notice ? "m.notice" : "m.text";
+		const replacement = { msgtype, body: boundedText(body, "replacement body") };
+		return this.sendEvent(roomId, "m.room.message", transactionId, { ...replacement, "m.new_content": replacement,
+			"m.relates_to": { rel_type: "m.replace", event_id: eventId } }, signal);
+	}
+	async setTyping(roomId: string, typing: boolean, timeoutMs = MAX_TYPING_TIMEOUT_MS, signal?: AbortSignal): Promise<void> {
+		this.assertManagedRoom(roomId);
+		if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > MAX_TYPING_TIMEOUT_MS) throw new Error("Typing timeout is out of bounds");
+		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(this.botUserId)}`,
+			typing ? { typing: true, timeout: timeoutMs } : { typing: false }, signal);
+	}
+	async startPoll(roomId: string, transactionId: string, question: string, answers: readonly MatrixPollAnswer[], signal?: AbortSignal): Promise<string> {
+		if (answers.length < 1 || answers.length > MAX_POLL_ANSWERS || new Set(answers.map((answer) => answer.id)).size !== answers.length) throw new Error("Poll answers are malformed or out of bounds");
+		const stableAnswers = answers.map((answer) => ({ id: boundedText(answer.id, "poll answer ID", 255), "m.text": boundedText(answer.text, "poll answer", 1_024) }));
+		const poll = { question: { "m.text": boundedText(question, "poll question", 4_096) }, kind: "m.poll.disclosed", max_selections: 1, answers: stableAnswers };
+		return this.sendEvent(roomId, "m.poll.start", transactionId, { "m.poll.start": poll, "org.matrix.msc3381.poll.start": poll,
+			"m.text": question, "org.matrix.msc1767.text": question }, signal);
+	}
+	async endPoll(roomId: string, transactionId: string, pollEventId: string, fallback = "Poll closed", signal?: AbortSignal): Promise<string> {
+		boundedText(pollEventId, "poll event ID", 255); const text = boundedText(fallback, "poll end fallback", 1_024);
+		return this.sendEvent(roomId, "m.poll.end", transactionId, { "m.relates_to": { rel_type: "m.reference", event_id: pollEventId },
+			"m.poll.end": {}, "org.matrix.msc3381.poll.end": {}, "m.text": text, "org.matrix.msc1767.text": text }, signal);
+	}
+	private async sendEvent(roomId: string, eventType: string, transactionId: string, content: JsonObject, signal?: AbortSignal): Promise<string> {
+		this.assertManagedRoom(roomId); transaction(transactionId);
+		return requiredString(await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(eventType)}/${encodeURIComponent(transactionId)}`, content, signal), "event_id");
 	}
 	async leaveRoom(roomId: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {}, signal); this.#managedRoomIds.delete(roomId); }
 	private assertManagedRoom(roomId: string): void { if (!this.#managedRoomIds.has(roomId)) throw new ManagedMatrixError("invalid_response", "Matrix room is not owned by this relay"); }

@@ -49,6 +49,27 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 	await assert.rejects(() => client.sendText("!unmanaged:example.com", "pi_other", "no"), /not owned/);
 });
 
+test("Matrix rich primitives use bounded stable transactions and compatible poll content", async () => {
+	const calls: Array<{ path: string; body: Record<string, unknown> }> = [];
+	const client = new ManagedMatrixClient(config, async (input, init) => {
+		calls.push({ path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body ?? "{}")) as Record<string, unknown> });
+		return Response.json({ event_id: `$event-${calls.length}` });
+	}, ["!rich:example.com"]);
+	await client.setTyping("!rich:example.com", true, 5_000);
+	await client.setTyping("!rich:example.com", false);
+	await client.sendNotice("!rich:example.com", "pi_notice", "working");
+	await client.replaceMessage("!rich:example.com", "pi_edit", "$event-3", "done");
+	await client.startPoll("!rich:example.com", "pi_poll", "Continue?", [{ id: "yes", text: "Yes" }, { id: "no", text: "No" }]);
+	await client.endPoll("!rich:example.com", "pi_poll_end", "$event-5");
+	assert.deepEqual(calls[0]?.body, { typing: true, timeout: 5_000 });
+	assert.deepEqual(calls[1]?.body, { typing: false });
+	assert.equal(calls[3]?.body["m.relates_to"] && (calls[3]?.body["m.relates_to"] as Record<string, unknown>).rel_type, "m.replace");
+	assert.ok(calls[4]?.body["m.poll.start"]); assert.ok(calls[4]?.body["org.matrix.msc3381.poll.start"]);
+	assert.ok(calls[5]?.body["m.poll.end"]); assert.ok(calls[5]?.body["org.matrix.msc3381.poll.end"]);
+	assert.ok(calls.slice(2).every((call) => call.path.includes("/send/")));
+	await assert.rejects(() => client.startPoll("!rich:example.com", "pi_bad", "q", [], undefined), /out of bounds/);
+});
+
 test("Matrix host Space operations are fixed, managed-room scoped, and accessibility checked", async () => {
 	const calls: Array<{ method?: string; path: string; body?: string }> = [];
 	let creates = 0;
