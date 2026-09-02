@@ -23,7 +23,8 @@ if (mode === "timeout") {
 		symlinkSync(process.env.FAKE_ALOOP_OUTSIDE, resultPath);
 	}
 	const result = {
-		status: "implemented",
+		status: "implemented-and-verified",
+		verifiedCommit: execFileSync("git", ["rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
 		summary: "Synthetic implementation completed.",
 		verification: ["synthetic check passed"],
 		acceptanceCriteria: [{ criterion: "synthetic criterion", satisfied: true, evidence: "fixture evidence" }],

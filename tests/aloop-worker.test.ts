@@ -56,7 +56,8 @@ test("worker prompt and command are compact, non-interactive, and deny superviso
 
 test("structured worker results are parsed from the final assistant JSON event", () => {
 	const result = {
-		status: "implemented",
+		status: "implemented-and-verified",
+		verifiedCommit: "a".repeat(40),
 		summary: "Implemented.",
 		verification: ["tests passed"],
 		acceptanceCriteria: [{ criterion: "works", satisfied: true, evidence: "test" }],
@@ -70,6 +71,9 @@ test("structured worker results are parsed from the final assistant JSON event",
 	].join("\n");
 	assert.deepEqual(parseAloopWorkerResult(stream), result);
 	assert.throws(() => parseAloopWorkerResult(JSON.stringify({ type: "agent_end" })), /final assistant text/);
+	const invalidPass = { ...result, verifiedCommit: null };
+	const invalidStream = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(invalidPass) }] } });
+	assert.throws(() => parseAloopWorkerResult(invalidStream), /requires verification bound/);
 });
 
 test("attempt contract rejects dirty, missing, rewritten, and multiple commits", () => {
@@ -177,7 +181,7 @@ test("worker execution records a clean one-commit attempt and complete artifacts
 		});
 		assert.equal(outcome.status, "completed");
 		assert.match(outcome.commit ?? "", /^[0-9a-f]{40}$/);
-		assert.equal(outcome.workerResult?.status, "implemented");
+		assert.equal(outcome.workerResult?.status, "implemented-and-verified");
 		assert.match(await readFile(path.join(cwd, outcome.artifacts.stdout), "utf8"), /message_end/);
 		assert.match(await readFile(path.join(cwd, outcome.artifacts.stderr), "utf8"), /synthetic stderr/);
 		assert.equal((await exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd })).stdout.trim(), "");

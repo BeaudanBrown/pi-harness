@@ -31,8 +31,12 @@ export type AloopWorkerInput = {
 	env?: NodeJS.ProcessEnv;
 };
 
+export type AloopWorkerResultStatus = "implemented-and-verified" | "partial" | "verification-failed" | "blocked" | "no-change";
+
 export type AloopWorkerResult = {
-	status: "implemented" | "needs-remediation" | "blocked";
+	status: AloopWorkerResultStatus;
+	/** Exact final commit against which the worker ran verification; null for unsuccessful/no-change outcomes. */
+	verifiedCommit: string | null;
 	summary: string;
 	verification: string[];
 	acceptanceCriteria: Array<{ criterion: string; satisfied: boolean; evidence: string }>;
@@ -138,7 +142,8 @@ ${handoffs.length > 0 ? handoffs.join("\n") : "- None"}
 
 Your final assistant message must contain only one JSON object with this exact shape:
 {
-  "status": "implemented" | "needs-remediation" | "blocked",
+  "status": "implemented-and-verified" | "partial" | "verification-failed" | "blocked" | "no-change",
+  "verifiedCommit": "full SHA checked after the final commit, or null",
   "summary": "concise implementation summary",
   "verification": ["checks and outcomes"],
   "acceptanceCriteria": [{"criterion": "criterion text", "satisfied": true, "evidence": "specific evidence"}],
@@ -204,15 +209,26 @@ export function parseAloopWorkerResult(jsonl: string): AloopWorkerResult {
 		throw new Error("Final assistant message was not a JSON object.");
 	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Worker result must be a JSON object.");
-	if (!["implemented", "needs-remediation", "blocked"].includes(parsed.status)) throw new Error("Worker result has an invalid status.");
+	if (!["implemented-and-verified", "partial", "verification-failed", "blocked", "no-change"].includes(parsed.status)) throw new Error("Worker result has an invalid status.");
+	if (parsed.verifiedCommit !== null && (typeof parsed.verifiedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(parsed.verifiedCommit))) throw new Error("Worker result verifiedCommit must be a full Git object ID or null.");
 	if (typeof parsed.summary !== "string" || typeof parsed.nextAction !== "string") throw new Error("Worker result requires summary and nextAction strings.");
 	if (!isStringArray(parsed.verification) || !isStringArray(parsed.discoveredWork)) throw new Error("Worker result verification and discoveredWork must be string arrays.");
 	if (!Array.isArray(parsed.acceptanceCriteria) || !parsed.acceptanceCriteria.every((criterion: any) =>
 		criterion && typeof criterion.criterion === "string" && typeof criterion.satisfied === "boolean" && typeof criterion.evidence === "string")) {
 		throw new Error("Worker result acceptanceCriteria is invalid.");
 	}
+	if (parsed.status === "implemented-and-verified") {
+		if (!parsed.verifiedCommit) throw new Error("implemented-and-verified requires verification bound to the final commit.");
+		if (parsed.verification.length === 0) throw new Error("implemented-and-verified requires verification evidence.");
+		if (parsed.acceptanceCriteria.length === 0 || parsed.acceptanceCriteria.some((criterion: any) => !criterion.satisfied || !criterion.evidence.trim())) {
+			throw new Error("implemented-and-verified requires passing evidence for every acceptance criterion.");
+		}
+	} else if (parsed.verifiedCommit !== null) {
+		throw new Error("Only implemented-and-verified may report a verified commit.");
+	}
 	return {
 		status: parsed.status,
+		verifiedCommit: parsed.verifiedCommit,
 		summary: boundedText(parsed.summary, 2_000),
 		verification: parsed.verification.slice(0, 20).map((item: string) => boundedText(item, 1_000)),
 		acceptanceCriteria: parsed.acceptanceCriteria.slice(0, 20).map((criterion: any) => ({
@@ -456,6 +472,9 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	if (!launchError) {
 		try {
 			workerResult = parseAloopWorkerResult(processResult.stdoutTail);
+			if (workerResult.status === "implemented-and-verified" && workerResult.verifiedCommit !== afterHead) {
+				throw new Error(`Worker verification is bound to ${workerResult.verifiedCommit}, not final commit ${afterHead}.`);
+			}
 		} catch (error) {
 			parseError = error instanceof Error ? error.message : String(error);
 		}

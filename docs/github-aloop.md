@@ -62,8 +62,12 @@ and shell tools but no harness extensions or skills. It must not mutate GitHub,
 push, or fetch. Every attempt starts from a clean worktree and must finish with
 a clean worktree and exactly one new local commit without rewriting earlier
 history. The worker returns structured verification, acceptance-criteria,
-discovered-work, and next-action evidence. Its `implemented` status is a claim,
-not acceptance; the supervisor must review the evidence and repository change.
+discovered-work, and next-action evidence. Outcomes are explicitly
+`implemented-and-verified`, `partial`, `verification-failed`, `blocked`, or
+`no-change`. An `implemented-and-verified` result must name the exact final
+commit, report verification evidence, and provide passing evidence for every
+acceptance criterion; it remains a claim, not acceptance. The supervisor must
+independently verify and review the repository change.
 
 Workers never run in parallel in one supervisor session. The supervisor must
 publish the current attempt's handoff before launching another worker. While a
