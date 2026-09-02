@@ -401,6 +401,26 @@ export function extractAcceptanceCriteria(body: string): string[] {
 	return criteria;
 }
 
+export function recognizeClosedAloopRetry(input: {
+	issue: EpicIssueContext;
+	epicNumber: number;
+	authenticatedLogin: string;
+	handoffId: string;
+	receiptId: string;
+}): { commit: string } {
+	if (input.issue.number === input.epicNumber || input.issue.state !== "closed") throw new Error("Durable closure retry applies only to a closed descendant.");
+	requireAloopClaim(input.issue, input.authenticatedLogin);
+	for (const comment of input.issue.recentHandoffs) {
+		const spool = createAloopHandoffSpoolRecord(input.issue.number, comment.body);
+		if (spool.id !== input.handoffId) continue;
+		const [handoff] = parseAloopHandoffs([comment]);
+		if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff identifies a completed closure.");
+		if (handoff.verificationReceiptId !== input.receiptId) throw new Error("The published handoff is bound to a different supervisor verification receipt.");
+		return { commit: handoff.commit };
+	}
+	throw new Error("No exact published handoff identifies this completed closure.");
+}
+
 export type AloopClosureReceipt = VerificationReceipt & {
 	postVerificationHead: string;
 	postVerificationClean: boolean;
@@ -435,6 +455,12 @@ export async function closeAcceptedAloopIssue<T>(input: {
 	if (input.issue.state === "closed") return { applied: false, alreadyClosed: true, commit: handoff.commit };
 	if (input.dryRun) input.dryRunClosureIds.add(closureId);
 	else if (!input.dryRunClosureIds.has(closureId)) throw new Error("Accepted issue closure must complete a dry run before apply.");
+	const evidenceReasons = validateSuccessfulHandoffEvidence({
+		issueBody: input.issue.body,
+		verification: handoff.verification,
+		acceptanceCriteriaAssessment: handoff.acceptanceCriteriaAssessment,
+	});
+	if (evidenceReasons.length > 0) throw new Error(`Closure blocked: ${evidenceReasons.join("; ")}.`);
 	const gate = evaluateSupervisorAttempt({
 		returnedCommit: handoff.commit,
 		currentHead: input.currentHead,

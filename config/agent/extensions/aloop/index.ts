@@ -19,6 +19,7 @@ import {
 	parseAloopHandoffs,
 	parseAloopRunRequest,
 	publishPreparedAloopHandoff,
+	recognizeClosedAloopRetry,
 	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
 	type AloopAttemptRecord,
@@ -36,6 +37,22 @@ type PendingHandoff = {
 	commit: string | null;
 	artifactDirectory: string;
 };
+
+type AloopVerificationPolicy = {
+	canonicalCommand: string;
+	productionIntegrationCommand: string;
+};
+
+async function loadVerificationPolicy(cwd: string): Promise<AloopVerificationPolicy> {
+	const policyPath = path.resolve(cwd, ".aloop.json");
+	const status = await lstat(policyPath);
+	if (!status.isFile() || status.isSymbolicLink() || status.size > 20_000) throw new Error(".aloop.json is unsafe or oversized.");
+	const value = JSON.parse(await readFile(policyPath, "utf8")) as Partial<AloopVerificationPolicy>;
+	if (!value.canonicalCommand?.trim() || !value.productionIntegrationCommand?.trim()) {
+		throw new Error(".aloop.json must declare canonicalCommand and productionIntegrationCommand.");
+	}
+	return { canonicalCommand: value.canonicalCommand.trim(), productionIntegrationCommand: value.productionIntegrationCommand.trim() };
+}
 
 const LaunchWorkerParams = Type.Object({
 	issue: Type.Number({ minimum: 1, description: "Selected open, unblocked descendant leaf issue number." }),
@@ -424,6 +441,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (result.code !== 0) throw new Error((result.stderr || result.stdout || `git ${args[0]} failed`).trim());
 				return result.stdout.trim();
 			};
+			const policy = await loadVerificationPolicy(ctx.cwd);
+			if (params.command !== policy.canonicalCommand || params.production_integration_command !== policy.productionIntegrationCommand) {
+				throw new Error("Verification commands must exactly match the repository-defined .aloop.json policy.");
+			}
 			const expected = await inspect(["rev-parse", `${params.commit}^{commit}`]);
 			const beforeHead = await inspect(["rev-parse", "HEAD"]);
 			const beforeStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
@@ -581,6 +602,17 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const context = await currentContext(ctx.cwd, signal);
 			const issue = context.issues.find((candidate) => candidate.number === params.issue);
 			if (!issue) throw new Error(`Issue #${params.issue} is absent from the active epic context.`);
+			const login = await dependencies.currentLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget!.deadlineMs });
+			if (issue.state === "closed") {
+				const retry = recognizeClosedAloopRetry({
+					issue,
+					epicNumber: context.epic.number,
+					authenticatedLogin: login,
+					handoffId: params.handoff_id,
+					receiptId: params.verification_receipt_id,
+				});
+				return { content: [{ type: "text", text: `Closure already applied for #${params.issue} at ${retry.commit}.` }], details: { issue: params.issue, commit: retry.commit, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, dryRun: params.dry_run, applied: false, alreadyClosed: true } };
+			}
 
 			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
 			const spoolStatus = await lstat(spoolPath);
@@ -594,7 +626,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const head = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
 			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
 			if (head.code !== 0 || status.code !== 0) throw new Error("Could not inspect Git before accepted issue closure.");
-			const login = await dependencies.currentLogin(ctx.cwd, undefined, { signal, deadlineMs: runBudget!.deadlineMs });
 			const closure = await closeAcceptedAloopIssue({
 				issue,
 				epicNumber: context.epic.number,

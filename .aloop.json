@@ -1,0 +1,4 @@
+{
+  "canonicalCommand": "nix run .#verify",
+  "productionIntegrationCommand": "nix build .#pi-harness-resources"
+}

@@ -267,6 +267,7 @@ test("publication operation preserves exact bytes across dry-run, failure, and i
 test("registered aloop tools wire claim refresh, exact publication retry, and idempotent verified closure", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-extension-"));
 	try {
+		writeFileSync(join(cwd, ".aloop.json"), JSON.stringify({ canonicalCommand: "unit-check", productionIntegrationCommand: "package-check" }));
 		const tools = new Map<string, { execute: (...args: unknown[]) => Promise<{ details?: Record<string, unknown> }> }>();
 		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
 		let graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done" })]);
@@ -321,6 +322,7 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		});
 		const ctx = { cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined } as unknown as ExtensionContext;
 		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-attempts 2", ctx);
+		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("bypass", { commit: fakeHead, command: "true", production_integration_command: "true" }, ctx.signal, undefined, ctx), /must exactly match/);
 		const verified = await tools.get("aloop_supervisor_verify")!.execute("verify", { commit: fakeHead, command: "unit-check", production_integration_command: "package-check" }, ctx.signal, undefined, ctx);
 		assert.deepEqual(shellCommands, ["unit-check", "package-check"]);
 		assert.equal((verified.details?.receipt as { productionIntegrationExitStatus?: number }).productionIntegrationExitStatus, 0);
@@ -329,14 +331,14 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		assert.deepEqual(workerIssues, [2]);
 
 		const receiptId = "verify-aaaaaaaaaaaa-1-12345678";
-		const successfulComment = formatAloopHandoff(handoff({ issue: 2, commit: fakeHead, verificationReceiptId: receiptId, successful: true }));
+		const successfulComment = formatAloopHandoff(handoff({ issue: 2, commit: fakeHead, verificationReceiptId: receiptId, successful: true, verification: ["canonical and production checks passed"], acceptanceCriteriaAssessment: ["PASS — Done — registered tool evidence"] }));
 		const spool = createAloopHandoffSpoolRecord(2, successfulComment);
 		mkdirSync(join(cwd, ".pi/tmp/aloop/handoffs"), { recursive: true });
 		writeFileSync(join(cwd, `.pi/tmp/aloop/handoffs/${spool.id}.json`), `${JSON.stringify(spool)}\n`);
 		await tools.get("aloop_publish_handoff")!.execute("publish-dry", { handoff_id: spool.id, dry_run: true }, ctx.signal, undefined, ctx);
 		await assert.rejects(() => tools.get("aloop_publish_handoff")!.execute("publish-fail", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx), /network interruption/);
 		await tools.get("aloop_publish_handoff")!.execute("publish-retry", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx);
-		graph = context([issue({ number: 2, title: "Leaf", assignee: "operator", recentHandoffs: [comment(1, successfulComment, "2026-09-01T00:00:00Z")] })]);
+		graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done", assignee: "operator", recentHandoffs: [comment(1, successfulComment, "2026-09-01T00:00:00Z")] })]);
 		mkdirSync(join(cwd, ".pi/tmp/aloop/receipts"), { recursive: true });
 		writeFileSync(join(cwd, `.pi/tmp/aloop/receipts/${receiptId}.json`), JSON.stringify({
 			commit: fakeHead,
@@ -352,7 +354,9 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		await tools.get("aloop_close_accepted_issue")!.execute("close-dry", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: true }, ctx.signal, undefined, ctx);
 		await tools.get("aloop_close_accepted_issue")!.execute("close", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: false }, ctx.signal, undefined, ctx);
 		assert.equal(closeCalls, 1);
-		graph = context([issue({ number: 2, title: "Leaf", state: "closed", assignee: "operator", recentHandoffs: [comment(1, successfulComment, "2026-09-01T00:00:00Z")] })]);
+		graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n\n- Done", state: "closed", assignee: "operator", recentHandoffs: [comment(1, successfulComment, "2026-09-01T00:00:00Z")] })]);
+		rmSync(join(cwd, ".pi/tmp/aloop/handoffs"), { recursive: true, force: true });
+		rmSync(join(cwd, ".pi/tmp/aloop/receipts"), { recursive: true, force: true });
 		fakeHead = "b".repeat(40);
 		await tools.get("aloop_close_accepted_issue")!.execute("close-retry", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: false }, ctx.signal, undefined, ctx);
 		assert.equal(closeCalls, 1);
@@ -441,11 +445,11 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 		verificationReceiptId: "verify-aaaaaaaaaaaa-1-12345678",
 		successful: true,
 		verification: ["canonical verification passed"],
-		acceptanceCriteriaAssessment: ["PASS — all criteria — evidence"],
+		acceptanceCriteriaAssessment: ["PASS — Done — evidence"],
 	}));
 	const spool = createAloopHandoffSpoolRecord(2, handoffComment);
 	const published = comment(1, handoffComment, "2026-09-01T01:00:00Z");
-	const child = issue({ number: 2, title: "Child", assignee: "operator", recentHandoffs: [published] });
+	const child = issue({ number: 2, title: "Child", body: "## Acceptance criteria\n\n- Done", assignee: "operator", recentHandoffs: [published] });
 	const receipt = {
 		commit: commitId,
 		command: "nix run .#verify",

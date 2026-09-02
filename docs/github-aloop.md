@@ -105,8 +105,10 @@ requires model copy/paste of the encoded marker. A handoff records:
 
 Only a correctly encoded handoff on its matching issue counts. An accepted
 handoff must reference the receipt ID returned by `aloop_supervisor_verify`;
-`aloop_supervisor_verify` executes both the repository-defined canonical check
-and a separately supplied production packaging or registered-entry-point check.
+The repository commits a `.aloop.json` policy containing `canonicalCommand` and
+`productionIntegrationCommand`. `aloop_supervisor_verify` rejects caller-supplied
+commands that do not exactly match that policy, then executes both checks. This
+prevents placeholder commands such as `true` from becoming production evidence.
 Preparation rechecks that both receipt exit statuses passed at the returned
 commit and confirms that HEAD and the
 complete worktree (including untracked files) are still identical.
