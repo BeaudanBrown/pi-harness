@@ -96,6 +96,7 @@ requires model copy/paste of the encoded marker. A handoff records:
 
 - implementation or remediation attempt type;
 - commit, or the absence of a valid commit;
+- the supervisor verification receipt ID for accepted attempts;
 - supervisor acceptance result and approach;
 - whether the approach was materially new;
 - verification and acceptance-criteria assessment;
@@ -104,13 +105,17 @@ requires model copy/paste of the encoded marker. A handoff records:
 
 Only a correctly encoded handoff on its matching issue counts. An accepted
 handoff must reference the receipt ID returned by `aloop_supervisor_verify`;
-preparation rechecks that the receipt passed at the returned commit and that
-HEAD and the complete worktree (including untracked files) are still identical.
+preparation rechecks that the receipt passed at the returned commit, records
+production packaging or entry-point evidence, and confirms that HEAD and the
+complete worktree (including untracked files) are still identical.
 Commit all intended sources before verification: Git-backed Nix flakes omit
 untracked files, so a check run while eventual source files are untracked is
 invalid even if its command exits successfully. The supervisor closes a child
 only after that handoff is durable and its acceptance criteria pass independent
-review.
+review. `aloop_close_accepted_issue` is also dry-run-first. Once GitHub reports
+the issue closed, the exact published handoff and bound receipt ID provide a
+durable idempotency key, so an interrupted closure can be retried after a
+session restart without closing twice.
 
 Two consecutive unsuccessful attempts without a materially new approach stop
 the loop for an explicit user decision. Material product, architecture, or

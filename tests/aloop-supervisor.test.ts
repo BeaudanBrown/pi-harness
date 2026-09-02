@@ -171,6 +171,7 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 	const second = formatAloopHandoff(handoff({
 		attemptType: "remediation",
 		commit: "abcdef2",
+		verificationReceiptId: "verify-abcdef200000-1-12345678",
 		successful: true,
 		approach: "Materially different remediation",
 		materiallyNewApproach: true,
@@ -322,7 +323,8 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		assert.equal(claims, 1);
 		assert.deepEqual(workerIssues, [2]);
 
-		const successfulComment = formatAloopHandoff(handoff({ issue: 2, commit: fakeHead, successful: true }));
+		const receiptId = "verify-aaaaaaaaaaaa-1-12345678";
+		const successfulComment = formatAloopHandoff(handoff({ issue: 2, commit: fakeHead, verificationReceiptId: receiptId, successful: true }));
 		const spool = createAloopHandoffSpoolRecord(2, successfulComment);
 		mkdirSync(join(cwd, ".pi/tmp/aloop/handoffs"), { recursive: true });
 		writeFileSync(join(cwd, `.pi/tmp/aloop/handoffs/${spool.id}.json`), `${JSON.stringify(spool)}\n`);
@@ -330,7 +332,6 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 		await assert.rejects(() => tools.get("aloop_publish_handoff")!.execute("publish-fail", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx), /network interruption/);
 		await tools.get("aloop_publish_handoff")!.execute("publish-retry", { handoff_id: spool.id, dry_run: false }, ctx.signal, undefined, ctx);
 		graph = context([issue({ number: 2, title: "Leaf", assignee: "operator", recentHandoffs: [comment(1, successfulComment, "2026-09-01T00:00:00Z")] })]);
-		const receiptId = "verify-aaaaaaaaaaaa-1-12345678";
 		mkdirSync(join(cwd, ".pi/tmp/aloop/receipts"), { recursive: true });
 		writeFileSync(join(cwd, `.pi/tmp/aloop/receipts/${receiptId}.json`), JSON.stringify({
 			commit: fakeHead,
@@ -340,6 +341,7 @@ test("registered aloop tools wire claim refresh, exact publication retry, and id
 			sourceIdentity: "tree:verified",
 			postVerificationHead: fakeHead,
 			postVerificationClean: true,
+			productionIntegration: "canonical verification packages the production extension",
 		}));
 		await tools.get("aloop_close_accepted_issue")!.execute("close-dry", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: true }, ctx.signal, undefined, ctx);
 		await tools.get("aloop_close_accepted_issue")!.execute("close", { issue: 2, handoff_id: spool.id, verification_receipt_id: receiptId, dry_run: false }, ctx.signal, undefined, ctx);
@@ -428,6 +430,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	const handoffComment = formatAloopHandoff(handoff({
 		issue: 2,
 		commit: commitId,
+		verificationReceiptId: "verify-aaaaaaaaaaaa-1-12345678",
 		successful: true,
 		verification: ["canonical verification passed"],
 		acceptanceCriteriaAssessment: ["PASS — all criteria — evidence"],
@@ -443,6 +446,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 		sourceIdentity: "tree:verified",
 		postVerificationHead: commitId,
 		postVerificationClean: true,
+		productionIntegration: "canonical verification packages the production extension",
 	};
 	const closureIds = new Set<string>();
 	let closes = 0;
@@ -462,6 +466,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	};
 
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: false }), /dry run before apply/);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receiptId: "verify-bbbbbbbbbbbb-2-87654321" }), /different supervisor verification receipt/);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, issue: { ...child, recentHandoffs: [] } }), /not durably published/);
 	const unsuccessfulComment = formatAloopHandoff(handoff({ issue: 2, commit: commitId, successful: false }));
 	const unsuccessfulSpool = createAloopHandoffSpoolRecord(2, unsuccessfulComment);
@@ -469,6 +474,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, exitStatus: 1 } }), /verification failed/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, commit: "b".repeat(40) } }), /different commit/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, timestamp: "invalid" } }), /incomplete/i);
+	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, receipt: { ...receipt, productionIntegration: "" } }), /Production packaging/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, currentHead: "b".repeat(40) }), /differs/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, worktreeStatus: " M source.ts" }), /changed after verification/i);
 	await assert.rejects(() => closeAcceptedAloopIssue({ ...base, dryRun: true, issue: { ...child, assignee: "other" } }), /must be claimed/);
@@ -480,7 +486,7 @@ test("accepted child closure rejects invalid evidence and is dry-run-first and i
 	const applied = await closeAcceptedAloopIssue({ ...base, dryRun: false });
 	assert.equal(applied.applied, true);
 	assert.equal(closes, 1);
-	const repeated = await closeAcceptedAloopIssue({ ...base, issue: { ...child, state: "closed" }, currentHead: "b".repeat(40), worktreeStatus: " M later-work.ts", dryRun: false });
+	const repeated = await closeAcceptedAloopIssue({ ...base, issue: { ...child, state: "closed" }, currentHead: "b".repeat(40), worktreeStatus: " M later-work.ts", dryRunClosureIds: new Set(), dryRun: false });
 	assert.equal(repeated.alreadyClosed, true);
 	assert.equal(closes, 1);
 });

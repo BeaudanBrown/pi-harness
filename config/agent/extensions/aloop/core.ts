@@ -9,6 +9,7 @@ export type AloopAttemptHandoff = {
 	issue: number;
 	attemptType: "implementation" | "remediation";
 	commit: string | null;
+	verificationReceiptId?: string;
 	successful: boolean;
 	approach: string;
 	materiallyNewApproach: boolean;
@@ -52,6 +53,7 @@ export type VerificationReceipt = {
 	timestamp: string;
 	sourceIdentity: string;
 	derivationIdentity?: string;
+	productionIntegration?: string;
 };
 
 export type SupervisorAttemptGate = {
@@ -153,6 +155,7 @@ export function normalizeAloopHandoff(input: Omit<AloopAttemptHandoff, "version"
 	if (!Number.isInteger(input.issue) || input.issue < 1) throw new Error("Aloop handoff issue must be a positive integer.");
 	if (input.attemptType !== "implementation" && input.attemptType !== "remediation") throw new Error("Aloop handoff attemptType is invalid.");
 	if (input.commit !== null && !/^[0-9a-f]{7,64}$/i.test(input.commit)) throw new Error("Aloop handoff commit must be a Git object ID or null.");
+	if (input.verificationReceiptId !== undefined && !/^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}$/.test(input.verificationReceiptId)) throw new Error("Aloop handoff verification receipt ID is invalid.");
 	if (typeof input.successful !== "boolean" || typeof input.materiallyNewApproach !== "boolean") throw new Error("Aloop handoff outcome flags are invalid.");
 	if (![input.verification, input.acceptanceCriteriaAssessment, input.discoveredWork].every((items) => Array.isArray(items) && items.every((item) => typeof item === "string"))) {
 		throw new Error("Aloop handoff evidence fields must be string arrays.");
@@ -166,6 +169,7 @@ export function normalizeAloopHandoff(input: Omit<AloopAttemptHandoff, "version"
 		issue: input.issue,
 		attemptType: input.attemptType,
 		commit: input.commit,
+		verificationReceiptId: input.verificationReceiptId,
 		successful: input.successful,
 		approach: bounded(input.approach.trim(), 1_000),
 		materiallyNewApproach: input.materiallyNewApproach,
@@ -182,7 +186,7 @@ export function formatAloopHandoff(input: Omit<AloopAttemptHandoff, "version"> &
 	const handoff = normalizeAloopHandoff(input);
 	// Compact keys plus DEFLATE avoid duplicating the human-readable evidence in a
 	// large Base64 JSON marker. The visible Markdown remains intentionally concise.
-	const compact = { v: 2, i: handoff.issue, y: handoff.attemptType, c: handoff.commit, s: handoff.successful, a: handoff.approach, n: handoff.materiallyNewApproach, q: handoff.verification, r: handoff.acceptanceCriteriaAssessment, d: handoff.discoveredWork, x: handoff.nextAction, p: handoff.artifactDirectory, t: handoff.timestamp };
+	const compact = { v: 2, i: handoff.issue, y: handoff.attemptType, c: handoff.commit, u: handoff.verificationReceiptId, s: handoff.successful, a: handoff.approach, n: handoff.materiallyNewApproach, q: handoff.verification, r: handoff.acceptanceCriteriaAssessment, d: handoff.discoveredWork, x: handoff.nextAction, p: handoff.artifactDirectory, t: handoff.timestamp };
 	const encoded = deflateRawSync(Buffer.from(JSON.stringify(compact), "utf8"), { level: 9 }).toString("base64url");
 	const list = (items: string[]) => items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- None";
 	return `<!-- ${HANDOFF_PREFIX}${encoded} -->
@@ -191,6 +195,7 @@ export function formatAloopHandoff(input: Omit<AloopAttemptHandoff, "version"> &
 
 - Attempt type: ${handoff.attemptType}
 - Commit: ${handoff.commit ? `\`${handoff.commit}\`` : "None"}
+- Verification receipt: ${handoff.verificationReceiptId ? `\`${handoff.verificationReceiptId}\`` : "None"}
 - Accepted: ${handoff.successful ? "yes" : "no"}
 - Approach: ${handoff.approach}
 - Materially new approach: ${handoff.materiallyNewApproach ? "yes" : "no"}
@@ -218,7 +223,7 @@ export function parseAloopHandoffs(comments: IssueHandoff[]): AloopAttemptHandof
 			const payload = Buffer.from(match[2]!, "base64url");
 			const decoded = match[1] === "v2" ? inflateRawSync(payload, { maxOutputLength: 64_000 }).toString("utf8") : payload.toString("utf8");
 			const value = JSON.parse(decoded);
-			const raw = match[1] === "v2" ? { version: 1, issue: value.i, attemptType: value.y, commit: value.c, successful: value.s, approach: value.a, materiallyNewApproach: value.n, verification: value.q, acceptanceCriteriaAssessment: value.r, discoveredWork: value.d, nextAction: value.x, artifactDirectory: value.p, timestamp: value.t } : value;
+			const raw = match[1] === "v2" ? { version: 1, issue: value.i, attemptType: value.y, commit: value.c, verificationReceiptId: value.u, successful: value.s, approach: value.a, materiallyNewApproach: value.n, verification: value.q, acceptanceCriteriaAssessment: value.r, discoveredWork: value.d, nextAction: value.x, artifactDirectory: value.p, timestamp: value.t } : value;
 			if (!raw || raw.version !== 1 || typeof raw !== "object") continue;
 			const handoff = normalizeAloopHandoff(raw);
 			parsed.push({ ...handoff, commentCreatedAt: comment.createdAt, commentId: comment.id });
@@ -420,20 +425,23 @@ export async function closeAcceptedAloopIssue<T>(input: {
 	if (!input.issue.recentHandoffs.some((comment) => comment.body === spool.comment)) throw new Error("The exact prepared handoff is not durably published on GitHub.");
 	const [handoff] = parseAloopHandoffs([{ id: 0, author: "aloop", body: spool.comment, createdAt: "", url: "" }]);
 	if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
+	if (handoff.verificationReceiptId !== input.receiptId) throw new Error("The published handoff is bound to a different supervisor verification receipt.");
 	requireAloopClaim(input.issue, input.authenticatedLogin);
 	const closureId = `${input.issue.number}:${input.handoffId}:${input.receiptId}`;
-	if (input.dryRun) input.dryRunClosureIds.add(closureId);
-	else if (!input.dryRunClosureIds.has(closureId)) throw new Error("Accepted issue closure must complete a dry run before apply.");
 	// Once GitHub records the issue as closed, an exact published handoff is the
 	// durable idempotency key. A later commit must not turn a successful retry
 	// into an error or invoke closure a second time.
 	if (input.issue.state === "closed") return { applied: false, alreadyClosed: true, commit: handoff.commit };
+	if (input.dryRun) input.dryRunClosureIds.add(closureId);
+	else if (!input.dryRunClosureIds.has(closureId)) throw new Error("Accepted issue closure must complete a dry run before apply.");
 	const gate = evaluateSupervisorAttempt({
 		returnedCommit: handoff.commit,
 		currentHead: input.currentHead,
 		worktreeStatus: input.worktreeStatus,
 		receipt: input.receipt,
 		acceptanceCriteria: [{ satisfied: true, evidence: "The published handoff records supervisor acceptance." }],
+		productionIntegrationRequired: true,
+		productionIntegrationEvidence: input.receipt.productionIntegration,
 	});
 	if (!gate.allowed || input.receipt.postVerificationHead !== handoff.commit || input.receipt.postVerificationClean !== true) {
 		throw new Error(`Closure blocked: ${[...gate.reasons, "the published handoff, receipt, and current clean Git commit must match"].join("; ")}.`);

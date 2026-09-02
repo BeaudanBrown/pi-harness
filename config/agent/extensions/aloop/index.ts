@@ -48,7 +48,7 @@ const LaunchWorkerParams = Type.Object({
 const SupervisorVerifyParams = Type.Object({
 	commit: Type.String({ minLength: 7, description: "Exact full or abbreviated worker commit to verify." }),
 	command: Type.String({ minLength: 1, description: "Repository-defined canonical verification command." }),
-	production_integration: Type.Optional(Type.String({ description: "Packaging or production entry-point evidence when applicable." })),
+	production_integration: Type.String({ minLength: 1, description: "Evidence that the verified command exercised production packaging or entry-point reachability." }),
 });
 
 const PrepareHandoffParams = Type.Object({
@@ -415,7 +415,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		promptSnippet: "Verify the returned worker commit independently before accepting its handoff.",
 		promptGuidelines: ["Run after the worker's final commit. Any untracked or modified source blocks verification; any later change invalidates the receipt."],
 		parameters: SupervisorVerifyParams,
-		async execute(_id, params: { commit: string; command: string; production_integration?: string }, signal, onUpdate, ctx) {
+		async execute(_id, params: { commit: string; command: string; production_integration: string }, signal, onUpdate, ctx) {
 			if (!runBudget) throw new Error("Run /aloop #<epic> before supervisor verification.");
 			const inspect = async (args: string[]) => {
 				const remaining = assessAloopRunBudget(runBudget!, Date.now());
@@ -442,7 +442,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				exitStatus: result.code,
 				timestamp: new Date().toISOString(),
 				sourceIdentity,
-				productionIntegration: params.production_integration?.trim() || undefined,
+				productionIntegration: params.production_integration.trim(),
 				postVerificationHead: afterHead,
 				postVerificationClean: afterStatus === "",
 			};
@@ -498,14 +498,15 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const worktree = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
 				if (head.code !== 0 || currentHead.code !== 0 || worktree.code !== 0) throw new Error("Could not validate the supervisor verification receipt against Git.");
 				const expected = head.stdout.trim();
-				if (receipt.commit !== expected || currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || worktree.stdout.trim()) {
-					throw new Error("Accepted handoff is not bound to a passing receipt at the current clean commit; rerun supervisor verification after all source changes.");
+				if (receipt.commit !== expected || currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || !receipt.productionIntegration?.trim() || worktree.stdout.trim()) {
+					throw new Error("Accepted handoff is not bound to a passing receipt with production-integration evidence at the current clean commit; rerun supervisor verification after all source changes.");
 				}
 			}
 			const comment = formatAloopHandoff({
 				issue: params.issue,
 				attemptType: params.attempt_type,
 				commit: params.commit ?? null,
+				verificationReceiptId: params.verification_receipt_id,
 				successful: params.successful,
 				approach: params.approach,
 				materiallyNewApproach: params.materially_new_approach,
