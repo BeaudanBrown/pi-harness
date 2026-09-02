@@ -7,6 +7,7 @@ import {
 	buildSupervisorKickoff,
 	evaluateEpicClosure,
 	evaluateRetryBoundary,
+	evaluateSupervisorAttempt,
 	findOutstandingAttempts,
 	formatAloopHandoff,
 	handoffCommentsForIssue,
@@ -153,6 +154,23 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 	assert.match(kickoff, /After every attempt/);
 	assert.match(kickoff, /two unsuccessful attempts/);
 	assert.match(kickoff, /aloop_check_closure/);
+});
+
+test("compact handoffs remain compatible and materially smaller than duplicated JSON", () => {
+	const value = handoff({ verification: ["canonical verification passed with extensive evidence ".repeat(20)] });
+	const formatted = formatAloopHandoff(value);
+	const legacyBytes = Buffer.from(JSON.stringify(value), "utf8").toString("base64url").length + JSON.stringify(value).length;
+	assert.match(formatted, /pi-aloop-handoff:v2:/);
+	assert.ok(formatted.length < legacyBytes);
+	assert.equal(parseAloopHandoffs([comment(1, formatted, value.timestamp)])[0]?.commit, value.commit);
+});
+
+test("supervisor gate binds successful evidence to a clean exact commit", () => {
+	const receipt = { commit: "abcdef1", command: "nix run .#verify", exitStatus: 0, timestamp: "2026-09-01T00:00:00Z", sourceIdentity: "tree:123" };
+	assert.deepEqual(evaluateSupervisorAttempt({ returnedCommit: "abcdef1", currentHead: "abcdef1", worktreeStatus: "", receipt, acceptanceCriteria: [{ satisfied: true, evidence: "test" }]}), { allowed: true, reasons: [] });
+	const changed = evaluateSupervisorAttempt({ returnedCommit: "abcdef1", currentHead: "abcdef2", worktreeStatus: " M source.ts", receipt, acceptanceCriteria: [{ satisfied: false, evidence: "" }], productionIntegrationRequired: true });
+	assert.equal(changed.allowed, false);
+	assert.match(changed.reasons.join(" "), /differs.*changed after verification.*acceptance criterion.*Production packaging/i);
 });
 
 test("closure gate requires closed descendants, review, verification, and every epic criterion", () => {

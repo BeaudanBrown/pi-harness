@@ -1,6 +1,7 @@
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../github-issues/github-context.js";
 
-const HANDOFF_PREFIX = "pi-aloop-handoff:v1:";
+const HANDOFF_PREFIX = "pi-aloop-handoff:v2:";
 
 export type AloopAttemptHandoff = {
 	version: 1;
@@ -43,11 +44,49 @@ export type AloopRunBudget = {
 	settled: boolean;
 };
 
+export type VerificationReceipt = {
+	commit: string;
+	command: string;
+	exitStatus: number;
+	timestamp: string;
+	sourceIdentity: string;
+	derivationIdentity?: string;
+};
+
+export type SupervisorAttemptGate = {
+	allowed: boolean;
+	reasons: string[];
+};
+
 export type ClosureEvidence = {
 	verification: Array<{ check: string; passed: boolean; evidence: string }>;
 	acceptanceCriteria: Array<{ criterion: string; satisfied: boolean; evidence: string }>;
 	descendantReviews: Array<{ issue: number; reviewed: boolean; evidence: string }>;
 };
+
+export function evaluateSupervisorAttempt(input: {
+	returnedCommit: string | null;
+	currentHead: string;
+	worktreeStatus: string;
+	receipt: VerificationReceipt | null;
+	acceptanceCriteria: Array<{ satisfied: boolean; evidence: string }>;
+	productionIntegrationRequired?: boolean;
+	productionIntegrationEvidence?: string;
+}): SupervisorAttemptGate {
+	const reasons: string[] = [];
+	if (!input.returnedCommit) reasons.push("The worker returned no valid commit.");
+	if (input.returnedCommit && input.currentHead !== input.returnedCommit) reasons.push("The returned commit differs from the current Git HEAD.");
+	if (input.worktreeStatus.trim()) reasons.push("The worktree changed after verification.");
+	if (!input.receipt) reasons.push("Independent supervisor verification has no durable receipt.");
+	else {
+		if (input.receipt.commit !== input.returnedCommit || input.receipt.commit !== input.currentHead) reasons.push("The verification receipt is bound to a different commit.");
+		if (input.receipt.exitStatus !== 0) reasons.push(`Supervisor verification failed with exit status ${input.receipt.exitStatus}.`);
+		if (!input.receipt.command.trim() || !input.receipt.sourceIdentity.trim() || !Number.isFinite(Date.parse(input.receipt.timestamp))) reasons.push("The verification receipt is incomplete.");
+	}
+	if (input.acceptanceCriteria.some((criterion) => !criterion.satisfied || !criterion.evidence.trim())) reasons.push("At least one acceptance criterion lacks passing evidence.");
+	if (input.productionIntegrationRequired && !input.productionIntegrationEvidence?.trim()) reasons.push("Production packaging or entry-point reachability is unproven.");
+	return { allowed: reasons.length === 0, reasons };
+}
 
 function positiveBoundedInteger(value: string, option: string, maximum: number): number {
 	if (!/^\d+$/.test(value)) throw new Error(`${option} must be a positive integer.`);
@@ -130,7 +169,10 @@ export function normalizeAloopHandoff(input: Omit<AloopAttemptHandoff, "version"
 
 export function formatAloopHandoff(input: Omit<AloopAttemptHandoff, "version"> & { version?: 1 }): string {
 	const handoff = normalizeAloopHandoff(input);
-	const encoded = Buffer.from(JSON.stringify(handoff), "utf8").toString("base64url");
+	// Compact keys plus DEFLATE avoid duplicating the human-readable evidence in a
+	// large Base64 JSON marker. The visible Markdown remains intentionally concise.
+	const compact = { v: 2, i: handoff.issue, y: handoff.attemptType, c: handoff.commit, s: handoff.successful, a: handoff.approach, n: handoff.materiallyNewApproach, q: handoff.verification, r: handoff.acceptanceCriteriaAssessment, d: handoff.discoveredWork, x: handoff.nextAction, p: handoff.artifactDirectory, t: handoff.timestamp };
+	const encoded = deflateRawSync(Buffer.from(JSON.stringify(compact), "utf8"), { level: 9 }).toString("base64url");
 	const list = (items: string[]) => items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- None";
 	return `<!-- ${HANDOFF_PREFIX}${encoded} -->
 
@@ -159,10 +201,13 @@ ${handoff.nextAction}`;
 export function parseAloopHandoffs(comments: IssueHandoff[]): AloopAttemptHandoff[] {
 	const parsed: Array<AloopAttemptHandoff & { commentCreatedAt: string; commentId: number }> = [];
 	for (const comment of comments) {
-		const match = comment.body.match(/<!-- pi-aloop-handoff:v1:([A-Za-z0-9_-]+) -->/);
+		const match = comment.body.match(/<!-- pi-aloop-handoff:(v[12]):([A-Za-z0-9_-]+) -->/);
 		if (!match) continue;
 		try {
-			const raw = JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8"));
+			const payload = Buffer.from(match[2]!, "base64url");
+			const decoded = match[1] === "v2" ? inflateRawSync(payload, { maxOutputLength: 64_000 }).toString("utf8") : payload.toString("utf8");
+			const value = JSON.parse(decoded);
+			const raw = match[1] === "v2" ? { version: 1, issue: value.i, attemptType: value.y, commit: value.c, successful: value.s, approach: value.a, materiallyNewApproach: value.n, verification: value.q, acceptanceCriteriaAssessment: value.r, discoveredWork: value.d, nextAction: value.x, artifactDirectory: value.p, timestamp: value.t } : value;
 			if (!raw || raw.version !== 1 || typeof raw !== "object") continue;
 			const handoff = normalizeAloopHandoff(raw);
 			parsed.push({ ...handoff, commentCreatedAt: comment.createdAt, commentId: comment.id });
