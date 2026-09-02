@@ -231,6 +231,21 @@ export function parseAloopHandoffs(comments: IssueHandoff[]): AloopAttemptHandof
 		.map(({ commentCreatedAt: _createdAt, commentId: _commentId, ...handoff }) => handoff);
 }
 
+export function authorizeHandoffPublication(input: {
+	handoffId: string;
+	dryRun: boolean;
+	dryRunHandoffIds: Set<string>;
+}): void {
+	if (!/^[0-9a-f]{16}$/.test(input.handoffId)) throw new Error("Prepared handoff ID is invalid.");
+	if (input.dryRun) {
+		input.dryRunHandoffIds.add(input.handoffId);
+		return;
+	}
+	if (!input.dryRunHandoffIds.has(input.handoffId)) {
+		throw new Error(`Handoff ${input.handoffId} must complete a dry run before publication.`);
+	}
+}
+
 export type AloopHandoffSpoolRecord = {
 	version: 1;
 	id: string;

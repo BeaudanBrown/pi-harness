@@ -7,6 +7,7 @@ import { join } from "node:path";
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
 import {
 	assessAloopRunBudget,
+	authorizeHandoffPublication,
 	buildEpicReport,
 	buildSupervisorKickoff,
 	createAloopHandoffSpoolRecord,
@@ -179,6 +180,22 @@ test("compact handoffs remain compatible and materially smaller than duplicated 
 	assert.match(formatted, /pi-aloop-handoff:v2:/);
 	assert.ok(formatted.length < legacyBytes);
 	assert.equal(parseAloopHandoffs([comment(1, formatted, value.timestamp)])[0]?.commit, value.commit);
+});
+
+test("handoff publication requires dry-run first and permits idempotent retries", () => {
+	const dryRuns = new Set<string>();
+	const handoffId = "0123456789abcdef";
+	assert.throws(
+		() => authorizeHandoffPublication({ handoffId, dryRun: false, dryRunHandoffIds: dryRuns }),
+		/must complete a dry run/,
+	);
+	authorizeHandoffPublication({ handoffId, dryRun: true, dryRunHandoffIds: dryRuns });
+	assert.doesNotThrow(() => authorizeHandoffPublication({ handoffId, dryRun: false, dryRunHandoffIds: dryRuns }));
+	assert.doesNotThrow(() => authorizeHandoffPublication({ handoffId, dryRun: false, dryRunHandoffIds: dryRuns }));
+	assert.throws(
+		() => authorizeHandoffPublication({ handoffId: "wrong", dryRun: true, dryRunHandoffIds: dryRuns }),
+		/ID is invalid/,
+	);
 });
 
 test("handoff spool identity is deterministic, exact-byte preserving, and tamper evident", () => {

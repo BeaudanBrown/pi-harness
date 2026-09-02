@@ -7,6 +7,7 @@ import { claimCurrentRepositoryIssue, closeCurrentRepositoryIssue, currentGitHub
 import { runAloopWorker } from "../github-issues/aloop-worker.js";
 import {
 	assessAloopRunBudget,
+	authorizeHandoffPublication,
 	buildSupervisorKickoff,
 	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
@@ -148,6 +149,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 	let pendingHandoffs: PendingHandoff[] = [];
 	let workerRunning = false;
 	let runBudget: AloopRunBudget | null = null;
+	const dryRunHandoffIds = new Set<string>();
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearDeadlineTimer(): void {
@@ -516,6 +518,7 @@ export default function aloopExtension(pi: ExtensionAPI): void {
 			const status = await lstat(spoolPath);
 			if (status.isSymbolicLink() || !status.isFile() || status.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
 			const record = validateAloopHandoffSpoolRecord(JSON.parse(await readFile(spoolPath, "utf8")), params.handoff_id);
+			authorizeHandoffPublication({ handoffId: params.handoff_id, dryRun: params.dry_run, dryRunHandoffIds });
 			const result = await publishExactIssueComment(ctx.cwd, record.issue, record.comment, !params.dry_run, { signal, deadlineMs: runBudget.deadlineMs });
 			return {
 				content: [{ type: "text", text: `${params.dry_run ? "Dry run complete" : "Publication complete"} for handoff ${params.handoff_id} on #${record.issue}; ${Buffer.byteLength(record.comment)} exact bytes.` }],
