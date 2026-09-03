@@ -243,7 +243,9 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 			setSessionName: () => undefined,
 			sendUserMessage: () => { kickoffCount += 1; },
 			appendEntry: () => undefined,
-			exec: async (_command: string, args: string[]) => args[0] === "log"
+			exec: async (_command: string, args: string[]) => _command === "gh"
+				? { code: 0, stdout: "supervisor\n", stderr: "" }
+				: args[0] === "log"
 				? { code: 0, stdout: "history\n", stderr: "" }
 				: args[0] === "show"
 					? { code: 0, stdout: verificationPolicyDocument, stderr: "" }
@@ -254,6 +256,7 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 		registerAloopExtension(pi, {
 			retrieveEpicContext: async () => { retrievals += 1; return activeGraph; },
 			closeIssue: async () => { closes += 1; return {}; },
+			publishComment: async () => ({ user: { login: "supervisor" } }),
 		});
 		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal,
 			abort: () => { aborts += 1; }, ui: { notify: () => undefined, setStatus: () => undefined } } as unknown as ExtensionContext;
@@ -301,10 +304,9 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 		assert.ok(activeTools.includes("aloop_finish_attempt"), "human boundary must retain active aloop tools for slash-command continuation");
 		fakeHead = "b".repeat(40);
 		await commands.get("aloop-authorize-recovery")!.handler(`2 ${attemptKey}`, ctx);
-		const authorization = JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), "utf8"));
-		assert.deepEqual({ issue: authorization.issue, attemptKey: authorization.attemptKey, reviewedHead: authorization.reviewedHead, closureHead: authorization.closureHead, commentSha256: authorization.commentSha256, approvedVia: authorization.approvedVia }, {
-			issue: 2, attemptKey, reviewedHead: "a".repeat(40), closureHead: "b".repeat(40), commentSha256: createHash("sha256").update(accepted).digest("hex"), approvedVia: "aloop-authorize-recovery command",
-		});
+		assert.equal(require("node:fs").existsSync(join(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`)), false);
+		assert.match(activeGraph.issues[1]!.recentHandoffs.at(-1)!.body, /pi-aloop-recovery-authorization:v1:/);
+		await commands.get("aloop")!.handler("#1", ctx);
 		fakeHead = "c".repeat(40);
 		const changedAfterApproval = await tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(changedAfterApproval.terminate, true);
@@ -356,7 +358,6 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => undefined, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;
 		await commands.get("aloop").handler("#1", ctx);
 		await tools.get("aloop_launch_worker").execute("launch", { issue: 2 }, ctx.signal, undefined, ctx);
-		await tools.get("aloop_review_attempt").execute("review", { issue: 2 }, ctx.signal, undefined, ctx);
 		const params = { issue: 2, outcome: "accepted", summary: "Complete.", outstanding_findings: [], decisions: [], verification: ["reviewed"], next_action: "Continue." };
 		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("findings", { ...params, outstanding_findings: ["still broken"] }, ctx.signal, undefined, ctx), /all outstanding findings to be resolved/);
 		const checkpoint = await tools.get("aloop_checkpoint").execute("checkpoint", { issue: 2, decision: "Choose mode", options: ["A", "B"] }, ctx.signal, undefined, ctx);
@@ -365,6 +366,8 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		await commands.get("aloop-decision").handler("2 A", ctx);
 		assert.match(published.at(-1)!.body, /human decision recorded: A/i);
 		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/decisions", `${checkpoint.details.marker}.json`), "utf8")).approvedVia, "aloop-decision command");
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("generic-does-not-approve-review", params, ctx.signal, undefined, ctx), /fresh independent review.*review checkpoint/i);
+		await tools.get("aloop_review_attempt").execute("review", { issue: 2 }, ctx.signal, undefined, ctx);
 		const failed = await tools.get("aloop_finish_attempt").execute("failed", params, ctx.signal, undefined, ctx);
 		assert.equal(failed.details.settled, false);
 		assert.equal(closes, 0);

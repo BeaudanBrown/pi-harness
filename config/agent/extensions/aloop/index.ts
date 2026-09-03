@@ -46,6 +46,13 @@ const LaunchWorkerParams = Type.Object({
 });
 
 const MAX_PATCH_TIMEOUT_MS = 20 * 60_000;
+const CheckpointParams = Type.Object({
+	issue: Type.Number({ minimum: 1 }),
+	decision: Type.String({ minLength: 1 }),
+	options: Type.Array(Type.String()),
+	kind: Type.Optional(Type.Union([Type.Literal("general"), Type.Literal("review")])),
+});
+
 const ApplyPatchParams = Type.Object({
 	issue: Type.Number({ minimum: 1, description: "Issue whose unsettled full attempt needs a narrow correction." }),
 	correction: Type.String({ minLength: 1, description: "Exact bounded correction for the targeted patch worker." }),
@@ -338,23 +345,35 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		} catch { return false; }
 	}
 
-	async function recoveryAuthorized(cwd: string, issue: number, handoff: { attemptKey: string; commitRange: string }, body: string, closureHead: string): Promise<boolean> {
-		try {
-			const record = JSON.parse(await readFile(path.resolve(cwd, ".pi/tmp/aloop/recovery-approvals", `${handoff.attemptKey}.json`), "utf8"));
-			return record?.version === 2 && record?.issue === issue && record?.attemptKey === handoff.attemptKey
-				&& record?.reviewedHead === handoff.commitRange.split("..").at(-1) && record?.closureHead === closureHead
-				&& record?.commentSha256 === createHash("sha256").update(body).digest("hex")
-				&& record?.approved === true && record?.approvedVia === "aloop-authorize-recovery command" && typeof record?.approvedAt === "string";
-		} catch { return false; }
+	function recoveryAuthorizationBody(issue: number, handoff: { attemptKey: string; commitRange: string }, acceptedBody: string, closureHead: string): string {
+		const payload = Buffer.from(JSON.stringify({ version: 1, issue, attemptKey: handoff.attemptKey, reviewedHead: handoff.commitRange.split("..").at(-1), closureHead, commentSha256: createHash("sha256").update(acceptedBody).digest("hex") }), "utf8").toString("base64url");
+		return `Human closure-recovery authorization recorded for #${issue}.\n\n<!-- pi-aloop-recovery-authorization:v1:${payload} -->`;
 	}
 
 	function authenticatedSupervisorComment(author: string | null): boolean {
 		return supervisorLogin !== null && author === supervisorLogin;
 	}
 
+	function recoveryAuthorized(issue: number, handoff: { attemptKey: string; commitRange: string }, body: string, closureHead: string, comments: Array<{ author: string | null; body: string }>): boolean {
+		const expected = { version: 1, issue, attemptKey: handoff.attemptKey, reviewedHead: handoff.commitRange.split("..").at(-1), closureHead, commentSha256: createHash("sha256").update(body).digest("hex") };
+		return comments.some((comment) => {
+			if (!authenticatedSupervisorComment(comment.author)) return false;
+			const encoded = comment.body.match(/<!-- pi-aloop-recovery-authorization:v1:([A-Za-z0-9_-]+) -->/)?.[1];
+			if (!encoded) return false;
+			try { return JSON.stringify(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"))) === JSON.stringify(expected); } catch { return false; }
+		});
+	}
+
 	function checkpointState(issue: { recentHandoffs: Array<{ body: string }> }): { open: string[]; resolved: string[] } {
 		const open = issue.recentHandoffs.flatMap((comment) => comment.body.match(/pi-aloop-decision:([a-f0-9]{20}):open/)?.[1] ?? []);
 		const resolved = issue.recentHandoffs.flatMap((comment) => comment.body.match(/pi-aloop-decision:([a-f0-9]{20}):resolved/)?.[1] ?? []);
+		return { open, resolved };
+	}
+
+	function reviewCheckpointState(issue: { recentHandoffs: Array<{ author: string | null; body: string }> }, head: string): { open: string[]; resolved: string[] } {
+		const token = `:${head}:`;
+		const open = issue.recentHandoffs.flatMap((comment) => authenticatedSupervisorComment(comment.author) && comment.body.match(new RegExp(`pi-aloop-review-decision:([a-f0-9]{20})${token}open`))?.[1] ? [comment.body.match(new RegExp(`pi-aloop-review-decision:([a-f0-9]{20})${token}open`))![1]!] : []);
+		const resolved = issue.recentHandoffs.flatMap((comment) => authenticatedSupervisorComment(comment.author) && comment.body.match(new RegExp(`pi-aloop-review-decision:([a-f0-9]{20})${token}resolved`))?.[1] ? [comment.body.match(new RegExp(`pi-aloop-review-decision:([a-f0-9]{20})${token}resolved`))![1]!] : []);
 		return { open, resolved };
 	}
 
@@ -486,13 +505,18 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const issue = context.issues.find((candidate) => candidate.number === issueNumber);
 			if (!issue) throw new Error("Decision issue is not in the active epic.");
 			const state = checkpointState(issue);
-			const openMarker = [...state.open].reverse().find((marker) => !state.resolved.includes(marker));
+			const genericMarker = [...state.open].reverse().find((marker) => !state.resolved.includes(marker));
+			const reviewOpen = issue.recentHandoffs.flatMap((comment) => comment.body.match(/pi-aloop-review-decision:([a-f0-9]{20}):([a-f0-9]{7,64}):open/) ? [{ marker: comment.body.match(/pi-aloop-review-decision:([a-f0-9]{20}):([a-f0-9]{7,64}):open/)![1]!, head: comment.body.match(/pi-aloop-review-decision:([a-f0-9]{20}):([a-f0-9]{7,64}):open/)![2]! }] : []).reverse().find(({ marker, head }) => !reviewCheckpointState(issue, head).resolved.includes(marker));
+			const openMarker = reviewOpen?.marker ?? genericMarker;
 			if (!openMarker) throw new Error("No open aloop checkpoint exists for this issue.");
-			const body = `Aloop human decision recorded: ${decision}\n\n<!-- pi-aloop-decision:${openMarker}:resolved -->`;
-			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/decisions", `${openMarker}.json`), { version: 1, marker: openMarker, issue: issueNumber, decision, approvedAt: new Date().toISOString(), approvedVia: "aloop-decision command" });
+			const body = reviewOpen
+				? `Aloop human review decision recorded: ${decision}\n\n<!-- pi-aloop-review-decision:${openMarker}:${reviewOpen.head}:resolved -->`
+				: `Aloop human decision recorded: ${decision}\n\n<!-- pi-aloop-decision:${openMarker}:resolved -->`;
+			if (!reviewOpen) await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/decisions", `${openMarker}.json`), { version: 1, marker: openMarker, issue: issueNumber, decision, approvedAt: new Date().toISOString(), approvedVia: "aloop-decision command" });
 			await dependencies.publishComment(ctx.cwd, issueNumber, body, false, { signal: ctx.signal });
-			await dependencies.publishComment(ctx.cwd, issueNumber, body, true, { signal: ctx.signal });
-			issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
+			const publication: any = await dependencies.publishComment(ctx.cwd, issueNumber, body, true, { signal: ctx.signal });
+			const author = typeof publication?.author === "string" ? publication.author : typeof publication?.user?.login === "string" ? publication.user.login : null;
+			issue.recentHandoffs.push({ id: Date.now(), author, body, createdAt: new Date().toISOString(), url: null });
 			pendingHumanBoundaries.delete(`decision:${openMarker}`);
 			pi.sendUserMessage(`Human decision recorded for #${issueNumber}: ${decision}. Continue the aloop supervision flow.`);
 			if (ctx.hasUI) ctx.ui.notify(`Recorded decision for #${issueNumber}.`, "info");
@@ -519,11 +543,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd: ctx.cwd, timeout: 30_000, signal: ctx.signal }),
 			]);
 			if (headResult.code !== 0 || statusResult.code !== 0 || statusResult.stdout.trim()) throw new Error("Recovery authorization requires a clean current HEAD.");
-			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), {
-				version: 2, issue, attemptKey, reviewedHead: accepted.commitRange.split("..").at(-1), closureHead: headResult.stdout.trim(),
-				commentSha256: createHash("sha256").update(acceptedComment.body).digest("hex"), approved: true,
-				approvedAt: new Date().toISOString(), approvedVia: "aloop-authorize-recovery command",
-			});
+			const body = recoveryAuthorizationBody(issue, accepted, acceptedComment.body, headResult.stdout.trim());
+			await dependencies.publishComment(ctx.cwd, issue, body, false, { signal: ctx.signal });
+			const publication: any = await dependencies.publishComment(ctx.cwd, issue, body, true, { signal: ctx.signal });
+			const author = typeof publication?.author === "string" ? publication.author : typeof publication?.user?.login === "string" ? publication.user.login : null;
+			child.recentHandoffs.push({ id: Date.now(), author, body, createdAt: new Date().toISOString(), url: null });
 			pendingHumanBoundaries.delete(`recovery:${attemptKey}`);
 			pi.sendUserMessage(`Human closure-recovery authorization recorded for #${issue} attempt ${attemptKey}. Continue with aloop_finish_attempt.`);
 			if (ctx.hasUI) ctx.ui.notify(`Authorized closure recovery for #${issue} attempt ${attemptKey}.`, "info");
@@ -786,7 +810,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						if (head.code !== 0 || status.code !== 0 || status.stdout.trim()) throw new Error("Recovery closure requires a clean current worktree.");
 						const closureHead = head.stdout.trim();
 						const automaticProvenance = publishedAttemptDigests.get(settled.attemptKey) === createHash("sha256").update(settledComment.body).digest("hex") || authenticatedSupervisorComment(settledComment.author);
-						const explicitAuthorization = await recoveryAuthorized(ctx.cwd, params.issue, settled, settledComment.body, closureHead);
+						const explicitAuthorization = recoveryAuthorized(params.issue, settled, settledComment.body, closureHead, issue.recentHandoffs);
 						if (!automaticProvenance && !explicitAuthorization) {
 							pendingHumanBoundaries.add(`recovery:${settled.attemptKey}`);
 							return { content: [{ type: "text", text: `Accepted handoff requires human closure authorization: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}` }], details: { settled: false, checkpoint: true, issue: params.issue, attemptKey: settled.attemptKey }, terminate: true };
@@ -810,11 +834,13 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const checkpoints = checkpointState(issue);
 			const attestedResolutions = new Set<string>();
 			for (const marker of checkpoints.open) if (checkpoints.resolved.includes(marker) && await decisionAttested(ctx.cwd, marker)) attestedResolutions.add(marker);
-			const hasResolvedCheckpoint = checkpoints.open.some((marker) => attestedResolutions.has(marker));
 			if (checkpoints.open.some((marker) => !attestedResolutions.has(marker))) throw new Error("Attempt finalization is blocked by an unresolved or unattested human checkpoint.");
+			const reviewCheckpoints = reviewCheckpointState(issue, head);
+			if (reviewCheckpoints.open.some((marker) => !reviewCheckpoints.resolved.includes(marker))) throw new Error("Attempt finalization is blocked by an unresolved authenticated review checkpoint.");
 			if (params.outcome === "accepted") {
 				if (statusResult.stdout.trim()) throw new Error("Accepted finalization requires a clean worktree.");
-				if ((!review || review.head !== head || !review.available) && !hasResolvedCheckpoint) throw new Error("Accepted finalization requires fresh independent review at the current HEAD; unavailable review requires a resolved human checkpoint.");
+				const hasReviewDecision = reviewCheckpoints.open.some((marker) => reviewCheckpoints.resolved.includes(marker));
+				if ((!review || review.head !== head || !review.available) && !hasReviewDecision) throw new Error("Accepted finalization requires fresh independent review at the current HEAD; unavailable review requires a resolved authenticated review checkpoint bound to that HEAD.");
 				verification.push(review?.available && review.head === head
 					? `Independent review completed at ${head}.`
 					: `Human review decision recorded at ${head}.`);
@@ -869,7 +895,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					|| authenticatedSupervisorComment(durableComment.author)
 				);
 				const explicitAuthorization = durableComment !== undefined
-					&& await recoveryAuthorized(ctx.cwd, params.issue, handoff, durableComment.body, head);
+					&& recoveryAuthorized(params.issue, handoff, durableComment.body, head, issue.recentHandoffs);
 				if (!automaticProvenance && !explicitAuthorization) {
 					pendingHumanBoundaries.add(`recovery:${attemptKey}`);
 					return { content: [{ type: "text", text: `Accepted handoff requires human closure authorization: /aloop-authorize-recovery ${params.issue} ${attemptKey}` }], details: { settled: false, checkpoint: true, issue: params.issue, attemptKey }, terminate: true };
@@ -889,19 +915,22 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		label: "Aloop Checkpoint",
 		description: "Create or resolve a transport-neutral human decision boundary and record it on the child issue.",
 		promptSnippet: "Stop for a durable human decision when supervisor judgment cannot proceed safely.",
-		parameters: Type.Object({
-			issue: Type.Number({ minimum: 1 }), decision: Type.String({ minLength: 1 }), options: Type.Array(Type.String()),
-		}),
-		async execute(_id, params: { issue: number; decision: string; options: string[] }, signal, _onUpdate, ctx) {
+		parameters: CheckpointParams,
+		async execute(_id, params: { issue: number; decision: string; options: string[]; kind?: "general" | "review" }, signal, _onUpdate, ctx) {
 			const context = await currentContext(ctx.cwd, signal);
 			const issue = context.issues.find((candidate) => candidate.number === params.issue);
 			if (!issue) throw new Error("Checkpoint issue is not in the active epic.");
-			const marker = createHash("sha256").update(`${params.issue}:${params.decision}`).digest("hex").slice(0, 20);
-			const body = `Aloop needs a human decision: ${params.decision}\n\n${params.options.map((option) => `- ${option}`).join("\n")}\n\nReply with \`/aloop-decision ${params.issue} <decision>\`.\n\n<!-- pi-aloop-decision:${marker}:open -->`;
-			if (!issue.recentHandoffs.some((comment) => comment.body.includes(`pi-aloop-decision:${marker}:open`))) {
+			const headResult = params.kind === "review" ? await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal }) : null;
+			if (headResult && headResult.code !== 0) throw new Error("Could not bind review checkpoint to the current HEAD.");
+			const head = headResult?.stdout.trim();
+			const marker = createHash("sha256").update(`${params.issue}:${params.kind ?? "general"}:${head ?? ""}:${params.decision}`).digest("hex").slice(0, 20);
+			const markerText = params.kind === "review" ? `pi-aloop-review-decision:${marker}:${head}:open` : `pi-aloop-decision:${marker}:open`;
+			const body = `Aloop needs a human ${params.kind === "review" ? "review" : "decision"}: ${params.decision}\n\n${params.options.map((option) => `- ${option}`).join("\n")}\n\nReply with \`/aloop-decision ${params.issue} <decision>\`.\n\n<!-- ${markerText} -->`;
+			if (!issue.recentHandoffs.some((comment) => comment.body.includes(markerText))) {
 				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
-				await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
-				issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
+				const publication: any = await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
+				const author = typeof publication?.author === "string" ? publication.author : typeof publication?.user?.login === "string" ? publication.user.login : null;
+				issue.recentHandoffs.push({ id: Date.now(), author, body, createdAt: new Date().toISOString(), url: null });
 			}
 			pendingHumanBoundaries.add(`decision:${marker}`);
 			return { content: [{ type: "text", text: `Human decision required for #${params.issue}: ${params.decision}. Reply with /aloop-decision ${params.issue} <decision>.` }], details: { checkpoint: true, resolved: false, marker }, terminate: true };

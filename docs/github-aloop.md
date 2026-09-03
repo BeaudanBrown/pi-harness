@@ -117,9 +117,11 @@ restart.
 
 `aloop_review_attempt` resolves the cumulative issue base and current `HEAD`,
 then runs fresh Standards and Spec agents. Review prose informs supervisor
-judgment; it is not machine-parsed. If review is unavailable,
-`aloop_finish_attempt` refuses automatic acceptance and the supervisor uses
-`aloop_checkpoint` to create a durable human boundary.
+judgment; it is not machine-parsed. If review is unavailable or stale,
+`aloop_finish_attempt` refuses automatic acceptance. The supervisor must create
+an explicitly `review`-kind `aloop_checkpoint`; only its GitHub-authenticated,
+resolved decision bound to the current `HEAD` can replace independent review.
+Generic decision checkpoints never authorize review bypass.
 
 `aloop_finish_attempt` hides verification receipts, local spool IDs, exact
 publication bytes, and closure ordering. For accepted work it requires a clean
@@ -135,9 +137,12 @@ v1/v2 compatibility, but writers emit only v3.
 
 There is no semantic retry-count gate. The
 supervisor chooses a narrow patch, trivial direct edit, fresh full remediation,
-or human checkpoint according to the evidence. `aloop_context` serves the
-startup-cached GitHub graph and accepts an explicit refresh; successful
-publication and closure update that snapshot in memory.
+or human checkpoint according to the evidence. Accepted closure recovery is
+reconstructed only from the authenticated GitHub handoff and its matching
+GitHub-recorded human authorization, plus the clean bound Git `HEAD`; local
+queues or approval files never authorize closure after restart. `aloop_context`
+serves the startup-cached GitHub graph and accepts an explicit refresh;
+successful publication and closure update that snapshot in memory.
 
 `aloop_epic_completion` is two phase. `prepare` refreshes the graph, requires no
 open descendants or unsettled attempts, runs canonical verification plus any
