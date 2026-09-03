@@ -245,14 +245,22 @@ coordinator-ensure` hook recreates `default/coordinator`. The coordinator
 session and binding survive restart; an inaccessible coordinator room is
 replaced against that same session and host Space.
 
-The coordinator-only profile exposes typed workspace and conversation
-list/status/start/resume/stop/delete tools. Starting a project conversation
-accepts only a named root, immediate-child workspace, safe relative cwd,
-optional project Space name, and immutable concept. The relay resolves placement
+The coordinator-only profile exposes typed workspace, local-project creation,
+and conversation list/status/start/resume/stop/delete tools. Project creation
+accepts only a configured root, safe absent immediate-child name, optional
+project Space name, and immutable concept. The trusted launcher creates no
+scaffold or remote: it initializes local Git on `main`, records a durable retry
+identity, and preserves partial repositories for explicit retry. Stable private
+Matrix aliases and durable provisioning phases prevent uncertain retries from
+duplicating project Spaces or rooms. Starting a
+project conversation accepts only a named root, immediate-child workspace, safe
+relative cwd, optional project Space name, and immutable concept. The relay resolves placement
 through the fixed launcher, durably creates the Pi session and binding boundary
 before Matrix rooms, and launches the ordinary adapter through the trusted
 `direnv exec`/Pi dispatch. No objective or orientation is lifecycle metadata:
-the first Matrix text is the first task. Project room text routes directly
+the first Matrix text is the first task. New-project results include a bounded
+Element X-compatible room link. Managed Pi uses run-scoped project approval and
+never persists trust for unrelated interactive launches. Project room text routes directly
 without host addressing; dormant input resumes the same persisted session.
 Stop terminates only the exact managed window, while confirmed bridge deletion
 leaves the Pi session, process/window, workspace, and project files intact.

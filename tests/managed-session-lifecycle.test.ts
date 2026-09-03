@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { chmod, mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -19,6 +20,65 @@ import { TranscriptProjector } from "../config/agent/extensions/managed-sessions
 
 const hostId = "lifecycle-host";
 const matrixConfig = { homeserver: "https://matrix.example.com", accessToken: "relay-secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
+
+test("packaged project-create launcher confines creation, initializes only local Git main, and resumes exact partial work", async (t) => {
+	const launcher = process.env.PI_MANAGED_TEST_LAUNCHER; if (!launcher) return t.skip("packaged launcher is unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-project-create-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const workspaceRoot = join(root, "roots"); await mkdir(workspaceRoot);
+	const env = { ...process.env, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot, PI_MANAGED_TEST_TMUX_SOCKET: `unused-${process.pid}` };
+	const invoke = (request: Record<string, unknown>) => JSON.parse(execFileSync(launcher, ["managed", "project-create"], {
+		input: `${JSON.stringify(request)}\n`, encoding: "utf8", env,
+	})) as Record<string, unknown>;
+	const request = { creationKey: "create-safe", resumeExisting: false, rootKey: "projects", workspace: "safe-project" };
+	assert.deepEqual(invoke(request), { rootKey: "projects", workspace: "safe-project", relativeCwd: "", workspacePath: join(workspaceRoot, "safe-project"), cwd: join(workspaceRoot, "safe-project") });
+	const created = join(workspaceRoot, "safe-project");
+	assert.deepEqual(await readdir(created), [".git"], "creation adds no scaffold, task, or control file outside Git metadata");
+	assert.equal(execFileSync("git", ["-C", created, "symbolic-ref", "--short", "HEAD"], { encoding: "utf8" }).trim(), "main");
+	assert.equal(execFileSync("git", ["-C", created, "remote"], { encoding: "utf8" }).trim(), "");
+	assert.equal(execFileSync("git", ["-C", created, "config", "--local", "--get", "pi-managed.creationKey"], { encoding: "utf8" }).trim(), request.creationKey);
+	assert.deepEqual(invoke({ ...request, resumeExisting: true }), invoke({ ...request, resumeExisting: true }), "matching completed retries are idempotent");
+
+	await mkdir(join(workspaceRoot, "occupied")); await writeFile(join(workspaceRoot, "occupied", "keep.txt"), "keep");
+	assert.throws(() => invoke({ ...request, workspace: "occupied" })); assert.equal(await readFile(join(workspaceRoot, "occupied", "keep.txt"), "utf8"), "keep");
+	await mkdir(join(root, "outside")); await symlink(join(root, "outside"), join(workspaceRoot, "linked"));
+	for (const workspace of ["linked", "../escape", "nested/project", ".hidden", "bad name"]) assert.throws(() => invoke({ ...request, workspace }));
+	assert.throws(() => invoke({ ...request, rootKey: "foreign" }));
+	const linkedRoot = join(root, "linked-root"); await symlink(workspaceRoot, linkedRoot);
+	assert.throws(() => execFileSync(launcher, ["managed", "project-create"], { input: `${JSON.stringify(request)}\n`, encoding: "utf8",
+		env: { ...env, PI_MANAGED_TEST_WORKSPACE_ROOT: linkedRoot } }));
+	await mkdir(join(workspaceRoot, "empty-existing"));
+	assert.throws(() => invoke({ ...request, workspace: "empty-existing", creationKey: "create-empty" }));
+	assert.throws(() => invoke({ ...request, workspace: "empty-existing", creationKey: "create-empty", resumeExisting: true }),
+		"a retry cannot reinterpret an arbitrary pre-existing empty target as its own partial work");
+	const partialKey = "create-partial";
+	const partialStaging = join(workspaceRoot, `.pi-managed-create-${createHash("sha256").update(partialKey).digest("hex").slice(0, 32)}`);
+	await mkdir(partialStaging);
+	assert.equal(invoke({ ...request, workspace: "partial", creationKey: partialKey, resumeExisting: true }).workspace, "partial",
+		"an exact durable retry can resume the deterministic empty staging-directory crash boundary");
+	const symlinkKey = "create-symlink-git"; const externalRepo = join(root, "external-repo"); await mkdir(externalRepo);
+	execFileSync("git", ["-C", externalRepo, "init", "-b", "main"]); execFileSync("git", ["-C", externalRepo, "config", "--local", "pi-managed.creationKey", symlinkKey]);
+	const symlinkStaging = join(workspaceRoot, `.pi-managed-create-${createHash("sha256").update(symlinkKey).digest("hex").slice(0, 32)}`);
+	await mkdir(symlinkStaging); await symlink(join(externalRepo, ".git"), join(symlinkStaging, ".git"));
+	assert.throws(() => invoke({ ...request, workspace: "symlink-git", creationKey: symlinkKey, resumeExisting: true }),
+		"retry rejects symlinked Git metadata before running Git");
+	await mkdir(join(workspaceRoot, "foreign")); await writeFile(join(workspaceRoot, "foreign", "foreign.txt"), "untouched");
+	assert.throws(() => invoke({ ...request, workspace: "foreign", creationKey: "create-foreign", resumeExisting: true }));
+	assert.equal(await readFile(join(workspaceRoot, "foreign", "foreign.txt"), "utf8"), "untouched");
+});
+
+test("idempotent Matrix provisioning recovers an uncertain create response without a duplicate Space", async () => {
+	let postCalls = 0; const alias = "pi-0123456789abcdef0123456789abcdef-space";
+	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("/createRoom")) { postCalls += 1; if (postCalls === 1) throw new TypeError("response lost"); return new Response("alias exists", { status: 400 }); }
+		if (path.includes("/directory/room/")) return Response.json({ room_id: "!stable:example.com" });
+		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId, type: "m.space" });
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		throw new Error(`unexpected Matrix request ${init?.method} ${path}`);
+	}, [], { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, sleep: async () => undefined });
+	assert.equal(await matrix.createPrivateSpaceIdempotent("Stable Space", alias), "!stable:example.com");
+	assert.equal(postCalls, 1, "the alias resolves the room from the uncertain response without issuing a duplicate create");
+});
 
 test("project launcher contract preserves an empty relative cwd", () => {
 	const manifest: ConversationManifest = {
@@ -78,16 +138,22 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const registry = new RelayRegistry(hostId, runtime, new ConversationManifestStore(manifests));
 	await registry.load();
 	const coordinatorId = deriveConversationId(hostId, "coordinator");
+	const projectCreationKey = "coordinator-create-beta"; const createdProjectId = deriveConversationId(hostId, projectCreationKey);
 	const coordinator: ConversationManifest = { schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "coordinator", conversationId: coordinatorId,
 		ownerHostId: hostId, creationKey: "coordinator", concept: "host coordinator", piSessionId: "coordinator-session",
 		roomId: "!coordinator:example.com", hostSpace: "!host:example.com", bindingBoundaryEntryId: `entry_${"1".repeat(32)}`, createdAt: new Date().toISOString() };
 	await registry.createCoordinatorConversation(coordinator);
 	await registry.setMatrixCursor(coordinatorId, "lifecycle-test-cursor");
 	const matrixCalls: string[] = [];
-	let roomIndex = 0; let syncIndex = 0;
+	let roomIndex = 0; let syncIndex = 0; let failCreatedSpaceLink = true;
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
 		const path = new URL(String(input)).pathname; matrixCalls.push(`${init?.method ?? "GET"} ${path}`);
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
+			...(decodeURIComponent(path).includes("!room3:example.com") ? { type: "m.space" } : {}) });
+		if (path.includes("/state/m.space.child/") && decodeURIComponent(path).includes("!room3:example.com") && failCreatedSpaceLink) {
+			failCreatedSpaceLink = false; return new Response("injected outage", { status: 503 });
+		}
 		if (path.endsWith("/sync")) {
 			syncIndex += 1;
 			return Response.json({ next_batch: `cursor-${syncIndex}`, rooms: { join: syncIndex === 1 ? {
@@ -97,12 +163,15 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		}
 		if (path.endsWith("/createRoom")) {
 			assert.ok((await stat(sessions)).isDirectory(), "project Pi session directory exists before Matrix binding");
+			const body = JSON.parse(String(init?.body)) as { room_alias_name?: string };
+			if (body.room_alias_name === `pi-${createdProjectId.slice(5)}-space`) assert.ok(await stat(join(sessions, createdProjectId, "session.jsonl")),
+				"the exact empty Pi session is durable before project-create starts Matrix binding");
 			roomIndex += 1; return Response.json({ room_id: roomIndex === 1 ? "!project:example.com" : `!room${roomIndex}:example.com` });
 		}
 		return Response.json({ event_id: "$ok" });
-	}, [coordinator.roomId, coordinator.hostSpace!]);
+	}, [coordinator.roomId, coordinator.hostSpace!], { maxAttempts: 1 });
 	const launcher = join(root, "tmux_project");
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nworkspace-resolve) cat >/dev/null; printf '{"rootKey":"projects","workspace":"alpha","relativeCwd":"","workspacePath":"${workspace}","cwd":"${workspace}"}\\n';;\nroot-ensure) cat >/dev/null; printf '{"sessionName":"alpha","workspacePath":"${workspace}"}\\n';;\nwindow-inspect) body=$(cat); conversation=$(printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).conversationId))'); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; case "$PI_MANAGED_PROJECT_SESSION_FILE" in *generation-2.jsonl) test "$PI_MANAGED_SESSION_MODEL" = scoped/model; test "$PI_MANAGED_SESSION_THINKING" = high;; esac; body=$(cat); conversation=$(printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).conversationId))'); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"alpha","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"alpha","relativeCwd":"","role":"conversation"}\\n' "$conversation";;\nwindow-terminate) cat >/dev/null; printf '{"terminated":true}\\n';;\nbridge-clear) cat >/dev/null; printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nproject-create) name=$(field workspace); test ! -e "${workspaceRoot}/$name" || test "$(field resumeExisting)" = true; mkdir -p "${workspaceRoot}/$name"; mkdir -p "${workspaceRoot}/$name/.git"; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s"}\\n' "$name" "$name" "$name";;\nworkspace-resolve) name=$(field workspace); printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s"}\\n' "$name" "$name" "$name";;\nroot-ensure) name=$(field workspace); printf '{"sessionName":"%s","workspacePath":"${workspaceRoot}/%s"}\\n' "$name" "$name";;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; case "$PI_MANAGED_PROJECT_SESSION_FILE" in *generation-2.jsonl) test "$PI_MANAGED_SESSION_MODEL" = scoped/model; test "$PI_MANAGED_SESSION_THINKING" = high;; esac; conversation=$(field conversationId); name=$(field placement.workspace); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"%s","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"%s","relativeCwd":"","role":"conversation"}\\n' "$conversation" "$name" "$name";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") });
 	await server.start(); t.after(async () => server.close());
@@ -129,13 +198,39 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	assert.equal(manifest.projectSpace, "!project:example.com");
 	assert.ok(matrixCalls.some((call) => call.includes("m.space.child")));
 	assert.equal(registry.listConversations().filter((item) => item.conversationId === conversationId).length, 1);
+
+	await writeFile(record, "", "utf8");
+	const projectCreateRequest = { operation: "project.create", creationKey: projectCreationKey,
+		rootKey: "projects", workspace: "beta", concept: "beta project", projectSpace: "Beta Space" };
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, projectCreateRequest)), /Matrix PUT/);
+	const interruptedCreation = JSON.parse(await readFile(join(sessions, createdProjectId, "project-creation.json"), "utf8"));
+	assert.deepEqual({ sessionPersisted: interruptedCreation.sessionPersisted, projectSpaceId: interruptedCreation.projectSpaceId,
+		hostSpaceLinked: interruptedCreation.hostSpaceLinked, roomId: interruptedCreation.roomId },
+		{ sessionPersisted: true, projectSpaceId: "!room3:example.com", hostSpaceLinked: undefined, roomId: undefined },
+		"a failed post-Space boundary preserves the repository, empty session, and exact retry phase");
+	const attachingCreated = attachFromRecord(record, server, registry);
+	const created = await lifecycle.request(lifecycleEnvelope(coordinatorId, projectCreateRequest));
+	const createdSocket = await attachingCreated;
+	assert.deepEqual(created, { operation: "project.create", targetConversationId: createdProjectId, conversationState: "active",
+		roomLink: "https://matrix.to/#/!room4%3Aexample.com" });
+	assert.equal((await readFile(join(sessions, createdProjectId, "session.jsonl"), "utf8")).trim().split("\n").length, 2,
+		"new project session is empty except for its binding boundary");
+	assert.ok(await stat(join(workspaceRoot, "beta", ".git")), "the host launcher initialized the requested project before binding");
+	const durableCreation = JSON.parse(await readFile(join(sessions, createdProjectId, "project-creation.json"), "utf8"));
+	assert.deepEqual({ sessionPersisted: durableCreation.sessionPersisted, projectSpaceId: durableCreation.projectSpaceId,
+		hostSpaceLinked: durableCreation.hostSpaceLinked, roomId: durableCreation.roomId, roomLinked: durableCreation.roomLinked },
+		{ sessionPersisted: true, projectSpaceId: "!room3:example.com", hostSpaceLinked: true, roomId: "!room4:example.com", roomLinked: true },
+		"every project-create side-effect boundary is durable before the next boundary");
+	assert.deepEqual(await lifecycle.request(lifecycleEnvelope(coordinatorId, projectCreateRequest)), created,
+		"the durable creation key makes a completed project-create retry idempotent");
+
 	await writeFile(record, "", "utf8");
 	const secondConversationId = deriveConversationId(hostId, "coordinator-project-two");
 	const attachingSecond = attachFromRecord(record, server, registry);
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.start", creationKey: "coordinator-project-two",
 		concept: "alpha review", placement: { rootKey: "projects", workspace: "alpha", relativeCwd: "" } }));
 	const independentSocket = await attachingSecond;
-	assert.equal(registry.listConversations().filter((item) => item.kind === "project" && item.state === "active").length, 2,
+	assert.equal(registry.listConversations().filter((item) => item.kind === "project" && item.state === "active").length, 3,
 		"multiple independent conversations may remain active in one workspace");
 	assert.notEqual(registry.manifestByConversationId(secondConversationId)?.piSessionId, manifest.piSessionId);
 
@@ -206,7 +301,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	})), /explicit confirmation/);
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.delete", targetConversationId: secondConversationId, confirmed: true }));
 	assert.equal(registry.manifestByConversationId(secondConversationId), undefined, "stopped conversations remain bridge-deletable without a window");
-	secondSocket.destroy(); independentSocket.destroy();
+	secondSocket.destroy(); independentSocket.destroy(); createdSocket.destroy();
 });
 
 test("packaged lifecycle launches real Pi through direnv and projects its final answer", { timeout: 30_000 }, async (t) => {
@@ -221,6 +316,9 @@ test("packaged lifecycle launches real Pi through direnv and projects its final 
 	const projectExtension = join(workspace, ".pi/extensions/provider.ts");
 	const launcherExtension = join(root, "launcher-extension.ts");
 	const tmuxSocket = `pi44-${process.pid}-${Date.now()}`; const projectLog = join(root, "project.log");
+	await mkdir(workspaceRoot, { recursive: true });
+	execFileSync(launcher, ["managed", "project-create"], { input: `${JSON.stringify({ creationKey: "live-create-alpha", resumeExisting: false, rootKey: "projects", workspace: "alpha" })}\n`,
+		env: { ...process.env, PI_MANAGED_TEST_TMUX_SOCKET: tmuxSocket, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot } });
 	await mkdir(join(workspace, ".pi/extensions"), { recursive: true });
 	await mkdir(join(workspace, ".pi/skills/project-probe"), { recursive: true });
 	await mkdir(join(workspace, ".pi/prompts"), { recursive: true });
@@ -339,4 +437,6 @@ export default function (pi: ExtensionAPI) {
 	const project = registry.manifestByCreationKey("real-project")!;
 	assert.equal(registry.pendingInputs(project.conversationId)[0]?.status, "completed");
 	assert.equal(execFileSync(tmux, ["-L", tmuxSocket, "list-windows", "-t", "=alpha", "-F", "#{window_name}"], { encoding: "utf8" }).trim().split("\n").filter((name) => name.startsWith("pi-")).length, 1);
+	await assert.rejects(() => stat(join(home, ".pi", "agent", "trust.json")), /ENOENT/,
+		"run-scoped managed approval does not persist project trust for this or unrelated workspaces");
 });

@@ -30,7 +30,7 @@ The v1 trust boundary is one configured Unix user and one configured Matrix oper
 
 ### Conversation lifecycle
 
-One enabled host owns independent conversations. Creating a project conversation validates a workspace identity, persists Pi first, then binds Matrix. Task objectives arrive only as later user messages; they are never lifecycle metadata, coordinator-generated orientation, or injected prompts. Multiple conversations may use one workspace; conflict avoidance remains the operator’s responsibility.
+One enabled host owns independent conversations. Creating a project conversation validates a workspace identity, persists Pi first, then binds Matrix. The coordinator may first request creation of one absent immediate-child workspace: the host launcher records a length-framed workspace-derived durable creation key, initializes only a local Git repository on `main`, and then follows the same empty-session binding path. Private deterministic Matrix aliases and a durable provisioning intent reconcile uncertain Space and room creation responses before later phases continue. It does not accept scaffolding, commands, initial tasks, remotes, or publication. Task objectives arrive only as later user messages; they are never lifecycle metadata, coordinator-generated orientation, or injected prompts. Multiple conversations may use one workspace; conflict avoidance remains the operator’s responsibility.
 
 Stopping durably cancels the current delivery, terminates only the exact managed Pi instance/window, and leaves the conversation dormant. Bridge deletion removes relay, Matrix, and binding metadata only. It does not delete Pi history, a process/window, workspace files, or Git state. The coordinator cannot be deleted. Native `/fork` and `/new` produce unbound sessions. A session switch detaches the old session, then attaches the new session only if that exact session already has a binding.
 
@@ -57,7 +57,7 @@ The schema permits only:
 - transcript offer and acknowledgement;
 - structured checkpoint offer and acknowledgement;
 - ordinary self bind/status/confirmed bridge deletion;
-- coordinator workspace list and conversation list/status/start/resume/stop/confirmed delete;
+- coordinator workspace list, bounded local-project creation, and conversation list/status/start/resume/stop/confirmed delete;
 - relay attachment acceptance, typed operation results, termination requests, and typed errors.
 
 Role/type combinations are encoded in the union: ordinary adapters cannot construct coordinator lifecycle requests, coordinator deletion is absent, and only the relay can deliver input, acknowledge projection, request termination, or report errors. The relay still authenticates peer UID, attachment nonce, registered conversation role, and request correlation; the claimed schema role grants no authority by itself.

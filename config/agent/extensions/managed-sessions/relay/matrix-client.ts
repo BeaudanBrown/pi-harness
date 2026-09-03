@@ -211,10 +211,34 @@ export class ManagedMatrixClient {
 
 	async createPrivateSpace(name: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, true, signal); }
 	async createPrivateRoom(name: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, false, signal); }
-	private async createRoom(name: string, space: boolean, signal?: AbortSignal): Promise<string> {
-		const response = await this.request("POST", "/_matrix/client/v3/createRoom", { visibility: "private", preset: "private_chat", name,
-			invite: [this.operatorUserId], is_direct: false, creation_content: { ...(space ? { type: "m.space" } : {}), "m.federate": false } }, signal);
-		const roomId = requiredString(response, "room_id"); this.#managedRoomIds.add(roomId); return roomId;
+	async createPrivateSpaceIdempotent(name: string, aliasLocalpart: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, true, signal, aliasLocalpart); }
+	async createPrivateRoomIdempotent(name: string, aliasLocalpart: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, false, signal, aliasLocalpart); }
+	private async createRoom(name: string, space: boolean, signal?: AbortSignal, aliasLocalpart?: string): Promise<string> {
+		if (aliasLocalpart !== undefined && !/^[a-z0-9._=-]{1,128}$/.test(aliasLocalpart)) throw new Error("Matrix room alias localpart is malformed");
+		let roomId: string;
+		try {
+			const response = await this.request("POST", "/_matrix/client/v3/createRoom", { visibility: "private", preset: "private_chat", name,
+				invite: [this.operatorUserId], is_direct: false, ...(aliasLocalpart ? { room_alias_name: aliasLocalpart } : {}),
+				creation_content: { ...(space ? { type: "m.space" } : {}), "m.federate": false } }, signal);
+			roomId = requiredString(response, "room_id");
+		} catch (error) {
+			if (!aliasLocalpart || !(error instanceof ManagedMatrixError) || !(error.code === "network" || [400, 409].includes(error.status ?? 0))) throw error;
+			const server = this.botUserId.slice(this.botUserId.indexOf(":") + 1);
+			if (!server || server === this.botUserId) throw new ManagedMatrixError("invalid_response", "Matrix bot ID omitted its server name");
+			const resolved = await this.request("GET", `/_matrix/client/v3/directory/room/${encodeURIComponent(`#${aliasLocalpart}:${server}`)}`, undefined, signal);
+			roomId = requiredString(resolved, "room_id");
+		}
+		if (!/^![^\s:]{1,200}:[^\s]{1,200}$/.test(roomId) || roomId.length > 255) throw new ManagedMatrixError("invalid_response", "Matrix response returned a malformed room ID");
+		this.#managedRoomIds.add(roomId);
+		if (aliasLocalpart) {
+			const createEvent = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.create/`, undefined, signal);
+			if (typeof createEvent !== "object" || createEvent === null || Array.isArray(createEvent) ||
+				((createEvent as JsonObject).creator !== undefined && (createEvent as JsonObject).creator !== this.botUserId) || !await this.memberJoined(roomId, this.botUserId, signal) ||
+				(space && (createEvent as JsonObject).type !== "m.space") || (!space && (createEvent as JsonObject).type === "m.space")) {
+				this.#managedRoomIds.delete(roomId); throw new ManagedMatrixError("invalid_response", "Matrix idempotent room identity was not bot-owned");
+			}
+		}
+		return roomId;
 	}
 	async addSpaceChild(spaceId: string, roomId: string, signal?: AbortSignal): Promise<void> {
 		this.assertManagedRoom(spaceId); this.assertManagedRoom(roomId); const roomServer = roomId.slice(roomId.lastIndexOf(":") + 1);

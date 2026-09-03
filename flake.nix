@@ -107,7 +107,7 @@
         };
         managedSessionLauncher = pkgs.writeShellApplication {
           name = "tmux_project";
-          runtimeInputs = [ pkgs.coreutils pkgs.direnv pkgs.findutils pkgs.gawk pkgs.jq pkgs.tmux ];
+          runtimeInputs = [ pkgs.coreutils pkgs.direnv pkgs.findutils pkgs.gawk pkgs.git pkgs.jq pkgs.tmux ];
           text = ''
             set -euo pipefail
             [[ "''${1-}" == managed ]]
@@ -120,6 +120,48 @@
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
                 find "$PI_MANAGED_TEST_WORKSPACE_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | \
                   jq -Rsc 'split("\n") | map(select(length > 0) | {rootKey:"projects",workspace:.}) | {workspaces:.}'
+                ;;
+              project-create)
+                : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
+                root_key=$(jq -er 'if (keys == ["creationKey","resumeExisting","rootKey","workspace"]) and (.rootKey == "projects") and (.creationKey | test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")) and (.workspace | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")) and (.resumeExisting | type == "boolean") then .rootKey else error("invalid request") end' <<<"$request")
+                creation_key=$(jq -er '.creationKey' <<<"$request")
+                workspace=$(jq -er '.workspace' <<<"$request")
+                resume_existing=$(jq -r '.resumeExisting' <<<"$request")
+                configured_root=$(realpath "$PI_MANAGED_TEST_WORKSPACE_ROOT")
+                [[ -d "$configured_root" && ! -L "$PI_MANAGED_TEST_WORKSPACE_ROOT" ]]
+                workspace_path="$configured_root/$workspace"
+                staging="$configured_root/.pi-managed-create-$(printf '%s' "$creation_key" | sha256sum | cut -c1-32)"
+                marker="$staging/.pi-managed-project-creation"
+                if [[ -e "$workspace_path" || -L "$workspace_path" ]]; then
+                  [[ "$resume_existing" == true && -d "$workspace_path" && ! -L "$workspace_path" && $(stat -c %u "$workspace_path") == $(id -u) ]]
+                  [[ -d "$workspace_path/.git" && ! -L "$workspace_path/.git" && $(stat -c %u "$workspace_path/.git") == $(id -u) ]]
+                  [[ $(git -C "$workspace_path" config --local --get pi-managed.creationKey 2>/dev/null || true) == "$creation_key" ]]
+                else
+                  if [[ ! -e "$staging" && ! -L "$staging" ]]; then
+                    mkdir --mode=700 "$staging"
+                    printf '%s\n' "$creation_key" > "$marker"; chmod 600 "$marker"
+                  else
+                    [[ "$resume_existing" == true && -d "$staging" && ! -L "$staging" && $(stat -c %u "$staging") == $(id -u) ]]
+                    if [[ -f "$marker" && ! -L "$marker" && $(stat -c %u "$marker") == $(id -u) && $(cat "$marker") == "$creation_key" ]]; then :
+                    elif [[ -d "$staging/.git" && ! -L "$staging/.git" && $(stat -c %u "$staging/.git") == $(id -u) && $(git -C "$staging" config --local --get pi-managed.creationKey 2>/dev/null || true) == "$creation_key" ]]; then :
+                    elif [[ -z $(find "$staging" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
+                      printf '%s\n' "$creation_key" > "$marker"; chmod 600 "$marker"
+                    else exit 1; fi
+                  fi
+                  [[ ! -e "$staging/.git" || ( -d "$staging/.git" && ! -L "$staging/.git" && $(stat -c %u "$staging/.git") == $(id -u) ) ]]
+                  git -C "$staging" init -b main >/dev/null
+                  [[ -d "$staging/.git" && ! -L "$staging/.git" && $(stat -c %u "$staging/.git") == $(id -u) ]]
+                  [[ $(realpath "$(git -C "$staging" rev-parse --show-toplevel)") == "$staging" ]]
+                  [[ $(git -C "$staging" symbolic-ref --short HEAD) == main ]]
+                  git -C "$staging" config --local pi-managed.creationKey "$creation_key"
+                  rm -f "$marker"
+                  [[ ! -e "$workspace_path" && ! -L "$workspace_path" ]]
+                  mv -T "$staging" "$workspace_path"
+                fi
+                [[ $(realpath "$(git -C "$workspace_path" rev-parse --show-toplevel)") == "$workspace_path" ]]
+                [[ $(git -C "$workspace_path" symbolic-ref --short HEAD) == main ]]
+                jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg workspacePath "$workspace_path" \
+                  '{rootKey:$rootKey,workspace:$workspace,relativeCwd:"",workspacePath:$workspacePath,cwd:$workspacePath}'
                 ;;
               workspace-resolve|root-ensure)
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"

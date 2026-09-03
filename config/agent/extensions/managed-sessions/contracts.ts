@@ -85,6 +85,14 @@ const lifecycleArguments = Type.Union([
 	strictObject({ operation: Type.Literal("conversation.list") }),
 	strictObject({ operation: Type.Literal("conversation.status"), targetConversationId: ConversationIdSchema }),
 	strictObject({
+		operation: Type.Literal("project.create"),
+		creationKey: identifier,
+		rootKey: identifier,
+		workspace: boundedString(128),
+		concept: boundedString(128),
+		projectSpace: Type.Optional(boundedString(128)),
+	}),
+	strictObject({
 		operation: Type.Literal("conversation.start"),
 		creationKey: identifier,
 		concept: boundedString(128),
@@ -325,6 +333,11 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			]),
 			targetConversationId: ConversationIdSchema,
 			conversationState: Type.Optional(Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")])),
+		}),
+		strictObject({
+			operation: Type.Literal("project.create"), targetConversationId: ConversationIdSchema,
+			conversationState: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
+			roomLink: boundedString(512),
 		}),
 	])),
 	relayEnvelope("termination.request", {
@@ -712,9 +725,10 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		assertWorkspaceIdentity((envelope.payload as { placement: WorkspaceIdentity }).placement);
 	}
 	if (envelope.type === "lifecycle.request") {
-		const payload = envelope.payload as { request: { operation: string; placement?: WorkspaceIdentity } };
-		if (payload.request.operation === "conversation.start" && payload.request.placement) {
-			assertWorkspaceIdentity(payload.request.placement);
+		const payload = envelope.payload as { request: { operation: string; placement?: WorkspaceIdentity; workspace?: string } };
+		if (payload.request.operation === "conversation.start" && payload.request.placement) assertWorkspaceIdentity(payload.request.placement);
+		if (payload.request.operation === "project.create" && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(payload.request.workspace ?? "")) {
+			throw new ManagedSessionContractError("malformed", "project workspace must be one safe immediate-child name");
 		}
 	}
 }
@@ -1071,6 +1085,8 @@ function deriveV2(prefix: string, domain: string, parts: readonly (string | numb
 export const deriveGenerationId = (conversationId: string, ordinal: number): string => deriveV2("generation", "generation", [conversationId, ordinal]);
 export const deriveGenerationTransitionId = (conversationId: string, from: number, to: number): string => deriveV2("transition", "generation-transition", [conversationId, from, to]);
 
+export const deriveProjectCreationKey = (rootKey: string, workspace: string): string =>
+	derive("coordinator", "project-creation", [rootKey, workspace]);
 export const deriveConversationId = (hostId: string, creationKey: string): string =>
 	derive("conv", "conversation", [hostId, creationKey]);
 export const deriveDeliveryId = (conversationId: string, matrixEventId: string): string =>

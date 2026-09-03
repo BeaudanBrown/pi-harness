@@ -11,6 +11,7 @@ import {
 	deriveConversationId,
 	deriveDeliveryId,
 	deriveMatrixTransactionId,
+	deriveProjectCreationKey,
 	deriveTranscriptEntryId,
 	encodeNdjsonEnvelope,
 	parseConversationManifest,
@@ -107,6 +108,11 @@ test("unknown and forward protocol versions fail closed", () => {
 	assert.throws(() => parseManagedSessionEnvelope({ ...attachEnvelope(), protocolVersion: undefined }), /unsupported|protocolVersion/);
 });
 
+test("project creation keys use stable length-framed workspace identity", () => {
+	assert.equal(deriveProjectCreationKey("projects", "new-project"), "coordinator_e7f203823119c23de6a9b349601d4ae8");
+	assert.notEqual(deriveProjectCreationKey("project", "snew-project"), deriveProjectCreationKey("projects", "new-project"));
+});
+
 test("role and operation combinations enforce capabilities", () => {
 	const selfBind = {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
@@ -134,6 +140,15 @@ test("role and operation combinations enforce capabilities", () => {
 		payload: { request: { operation: "workspace.list" } },
 	};
 	assert.equal(parseManagedSessionEnvelope(lifecycle).type, "lifecycle.request");
+	const projectCreate = { ...lifecycle, payload: { request: { operation: "project.create", creationKey: "create-1", rootKey: "projects", workspace: "new-project", concept: "new project" } } };
+	assert.equal(parseManagedSessionEnvelope(projectCreate).type, "lifecycle.request");
+	for (const request of [
+		{ ...projectCreate.payload.request, workspace: "nested/project" },
+		{ ...projectCreate.payload.request, workspace: "../escape" },
+		{ ...projectCreate.payload.request, command: "touch owned" },
+		{ ...projectCreate.payload.request, objective: "injected task" },
+	]) assert.throws(() => parseManagedSessionEnvelope({ ...projectCreate, payload: { request } }), /managed-session envelope|immediate-child/);
+	assert.throws(() => parseManagedSessionEnvelope({ ...projectCreate, role: "ordinary_adapter" }), /managed-session envelope/);
 	assert.throws(
 		() => parseManagedSessionEnvelope({ ...lifecycle, role: "ordinary_adapter" }),
 		/managed-session envelope/,
@@ -172,6 +187,8 @@ test("role and operation combinations enforce capabilities", () => {
 		payload: { operation: "workspace.list", workspaces: [{ rootKey: "projects", workspace: "pi-harness" }] },
 	};
 	assert.equal(parseManagedSessionEnvelope(listResult).type, "lifecycle.result");
+	assert.equal(parseManagedSessionEnvelope({ ...listResult, payload: { operation: "project.create", targetConversationId: conversationId,
+		conversationState: "active", roomLink: "https://matrix.to/#/%21project%3Aexample.com" } }).type, "lifecycle.result");
 	assert.throws(() => parseManagedSessionEnvelope({ ...listResult, payload: { ...listResult.payload, paths: ["/tmp"] } }));
 });
 
