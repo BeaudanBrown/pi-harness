@@ -47,4 +47,6 @@ Use the `playwright-browser` skill and `pi-playwright` interface for stateful br
 
 ## Verification
 
-- Canonical gate: `nix run .#verify`
+- Canonical deterministic gate: `nix run .#verify` (also exported through `nix flake check`).
+- LSP changes additionally require `nix run .#verify-lsp-live`.
+- See `docs/verification.md` for focused checks and test classification.

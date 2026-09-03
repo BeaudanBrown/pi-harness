@@ -604,11 +604,16 @@ completes the explicit, approval-gated GitHub migration described above.
 ## Local Workflow
 
 For extension and prompt iteration in this repository, edit `config/agent` and
-run the fast verification gate:
+run the deterministic verification gate:
 
 ```bash
 nix run .#verify
 ```
+
+The gate is also exported through `nix flake check`, with independently cached
+schema, type, unit, package, module, managed-session, Pi-R, and evaluation
+checks. See [`docs/verification.md`](docs/verification.md) for focused commands,
+test classification, and maintenance guidance.
 
 The installed `pi` wrapper points at immutable Nix store paths. Rebuild or update
 the flake input to pick up packaged resource changes. For fast iteration on an
@@ -660,6 +665,9 @@ Use Pi's built-in session commands for conversation state:
 ## Verification
 
 ```bash
-nix run .#verify
-nix run .#verify-lsp-live
+nix run .#verify       # deterministic aggregate; also run by nix flake check
+nix run .#verify-lsp-live  # additional real-language-server coverage
 ```
+
+See [`docs/verification.md`](docs/verification.md) for the check contracts and
+focused development workflow.

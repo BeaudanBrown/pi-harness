@@ -110,4 +110,6 @@ nix run .#verify-lsp-live
 
 The live gate includes a fake protocol server plus real TypeScript and Nix smoke
 fixtures. It validates document sync, fallback command availability, setup
-hints, and basic real-server startup without requiring an LLM session.
+hints, and basic real-server startup without requiring an LLM session. It stays
+separate from the deterministic aggregate because of its larger language-server
+closure; see [`verification.md`](verification.md).
