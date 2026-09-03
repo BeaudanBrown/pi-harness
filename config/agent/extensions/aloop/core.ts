@@ -1,8 +1,7 @@
-import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { createHash } from "node:crypto";
+import { inflateRawSync } from "node:zlib";
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../github-issues/github-context.js";
 
-const HANDOFF_PREFIX = "pi-aloop-handoff:v2:";
 const HANDOFF_V3_PREFIX = "<!-- pi-aloop-handoff:v3:";
 
 export type AloopHandoffV3 = {
@@ -196,73 +195,20 @@ function normalizedText(value: string): string {
 	return value.trim().replace(/\s+/g, " ").toLowerCase();
 }
 
-function boundedStrings(values: string[], count = 8, length = 250): string[] {
-	return values.slice(0, count).map((value) => bounded(value, length));
+function parseLegacyAloopHandoff(value: unknown): AloopAttemptHandoff | null {
+	const input = value as Partial<AloopAttemptHandoff> | null;
+	if (!input || input.version !== 1 || typeof input.issue !== "number" || !Number.isInteger(input.issue) || input.issue < 1
+		|| (input.attemptType !== "implementation" && input.attemptType !== "remediation")
+		|| (input.commit !== null && (typeof input.commit !== "string" || !/^[0-9a-f]{7,64}$/i.test(input.commit)))
+		|| (input.verificationReceiptId !== undefined && (typeof input.verificationReceiptId !== "string" || !/^verify-[a-f0-9]{12}-[0-9]+-[a-f0-9]{8}$/.test(input.verificationReceiptId)))
+		|| typeof input.successful !== "boolean" || typeof input.approach !== "string" || typeof input.materiallyNewApproach !== "boolean"
+		|| ![input.verification, input.acceptanceCriteriaAssessment, input.discoveredWork].every((items) => Array.isArray(items) && items.every((item) => typeof item === "string"))
+		|| typeof input.nextAction !== "string" || typeof input.artifactDirectory !== "string" || typeof input.timestamp !== "string"
+		|| !Number.isFinite(Date.parse(input.timestamp))) return null;
+	return input as AloopAttemptHandoff;
 }
 
-export function normalizeAloopHandoff(input: Omit<AloopAttemptHandoff, "version"> & { version?: 1 }): AloopAttemptHandoff {
-	if (!Number.isInteger(input.issue) || input.issue < 1) throw new Error("Aloop handoff issue must be a positive integer.");
-	if (input.attemptType !== "implementation" && input.attemptType !== "remediation") throw new Error("Aloop handoff attemptType is invalid.");
-	if (input.commit !== null && !/^[0-9a-f]{7,64}$/i.test(input.commit)) throw new Error("Aloop handoff commit must be a Git object ID or null.");
-	if (input.verificationReceiptId !== undefined && !/^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}$/.test(input.verificationReceiptId)) throw new Error("Aloop handoff verification receipt ID is invalid.");
-	if (typeof input.successful !== "boolean" || typeof input.materiallyNewApproach !== "boolean") throw new Error("Aloop handoff outcome flags are invalid.");
-	if (![input.verification, input.acceptanceCriteriaAssessment, input.discoveredWork].every((items) => Array.isArray(items) && items.every((item) => typeof item === "string"))) {
-		throw new Error("Aloop handoff evidence fields must be string arrays.");
-	}
-	if (typeof input.timestamp !== "string" || !Number.isFinite(Date.parse(input.timestamp))) throw new Error("Aloop handoff timestamp is invalid.");
-	if (![input.approach, input.nextAction, input.artifactDirectory].every((value) => typeof value === "string" && value.trim())) {
-		throw new Error("Aloop handoff requires approach, nextAction, and artifactDirectory.");
-	}
-	return {
-		version: 1,
-		issue: input.issue,
-		attemptType: input.attemptType,
-		commit: input.commit,
-		verificationReceiptId: input.verificationReceiptId,
-		successful: input.successful,
-		approach: bounded(input.approach.trim(), 1_000),
-		materiallyNewApproach: input.materiallyNewApproach,
-		verification: boundedStrings(input.verification),
-		acceptanceCriteriaAssessment: boundedStrings(input.acceptanceCriteriaAssessment),
-		discoveredWork: boundedStrings(input.discoveredWork),
-		nextAction: bounded(input.nextAction.trim(), 1_000),
-		artifactDirectory: bounded(input.artifactDirectory.trim(), 500),
-		timestamp: input.timestamp,
-	};
-}
-
-export function formatAloopHandoff(input: Omit<AloopAttemptHandoff, "version"> & { version?: 1 }): string {
-	const handoff = normalizeAloopHandoff(input);
-	// Compact keys plus DEFLATE avoid duplicating the human-readable evidence in a
-	// large Base64 JSON marker. The visible Markdown remains intentionally concise.
-	const compact = { v: 2, i: handoff.issue, y: handoff.attemptType, c: handoff.commit, u: handoff.verificationReceiptId, s: handoff.successful, a: handoff.approach, n: handoff.materiallyNewApproach, q: handoff.verification, r: handoff.acceptanceCriteriaAssessment, d: handoff.discoveredWork, x: handoff.nextAction, p: handoff.artifactDirectory, t: handoff.timestamp };
-	const encoded = deflateRawSync(Buffer.from(JSON.stringify(compact), "utf8"), { level: 9 }).toString("base64url");
-	const list = (items: string[]) => items.length > 0 ? items.map((item) => `- ${item}`).join("\n") : "- None";
-	return `<!-- ${HANDOFF_PREFIX}${encoded} -->
-
-## Aloop attempt handoff
-
-- Attempt type: ${handoff.attemptType}
-- Commit: ${handoff.commit ? `\`${handoff.commit}\`` : "None"}
-- Verification receipt: ${handoff.verificationReceiptId ? `\`${handoff.verificationReceiptId}\`` : "None"}
-- Accepted: ${handoff.successful ? "yes" : "no"}
-- Approach: ${handoff.approach}
-- Materially new approach: ${handoff.materiallyNewApproach ? "yes" : "no"}
-- Attempt artifacts: \`${handoff.artifactDirectory}\`
-
-### Verification
-${list(handoff.verification)}
-
-### Acceptance-criteria assessment
-${list(handoff.acceptanceCriteriaAssessment)}
-
-### Discovered work
-${list(handoff.discoveredWork)}
-
-### Next action
-${handoff.nextAction}`;
-}
-
+/** Read-only compatibility for v1/v2 comments written by older aloop versions. */
 export function parseAloopHandoffs(comments: IssueHandoff[]): AloopAttemptHandoff[] {
 	const parsed: Array<AloopAttemptHandoff & { commentCreatedAt: string; commentId: number }> = [];
 	for (const comment of comments) {
@@ -273,79 +219,13 @@ export function parseAloopHandoffs(comments: IssueHandoff[]): AloopAttemptHandof
 			const decoded = match[1] === "v2" ? inflateRawSync(payload, { maxOutputLength: 64_000 }).toString("utf8") : payload.toString("utf8");
 			const value = JSON.parse(decoded);
 			const raw = match[1] === "v2" ? { version: 1, issue: value.i, attemptType: value.y, commit: value.c, verificationReceiptId: value.u, successful: value.s, approach: value.a, materiallyNewApproach: value.n, verification: value.q, acceptanceCriteriaAssessment: value.r, discoveredWork: value.d, nextAction: value.x, artifactDirectory: value.p, timestamp: value.t } : value;
-			if (!raw || raw.version !== 1 || typeof raw !== "object") continue;
-			const handoff = normalizeAloopHandoff(raw);
-			parsed.push({ ...handoff, commentCreatedAt: comment.createdAt, commentId: comment.id });
-		} catch {
-			// Ignore malformed or manually edited markers; visible comment text remains available to the supervisor.
-		}
+			const handoff = parseLegacyAloopHandoff(raw);
+			if (handoff) parsed.push({ ...handoff, commentCreatedAt: comment.createdAt, commentId: comment.id });
+		} catch { /* Ignore malformed legacy comments. */ }
 	}
 	return parsed
 		.sort((left, right) => left.commentCreatedAt.localeCompare(right.commentCreatedAt) || left.commentId - right.commentId)
 		.map(({ commentCreatedAt: _createdAt, commentId: _commentId, ...handoff }) => handoff);
-}
-
-export function authorizeHandoffPublication(input: {
-	handoffId: string;
-	dryRun: boolean;
-	dryRunHandoffIds: Set<string>;
-}): void {
-	if (!/^[0-9a-f]{24}$/.test(input.handoffId)) throw new Error("Prepared handoff ID is invalid.");
-	if (input.dryRun) {
-		input.dryRunHandoffIds.add(input.handoffId);
-		return;
-	}
-	if (!input.dryRunHandoffIds.has(input.handoffId)) {
-		throw new Error(`Handoff ${input.handoffId} must complete a dry run before publication.`);
-	}
-}
-
-export async function publishPreparedAloopHandoff<T>(input: {
-	record: AloopHandoffSpoolRecord;
-	handoffId: string;
-	dryRun: boolean;
-	dryRunHandoffIds: Set<string>;
-	publish: (issue: number, comment: string, apply: boolean) => Promise<T>;
-}): Promise<T> {
-	const record = validateAloopHandoffSpoolRecord(input.record, input.handoffId);
-	authorizeHandoffPublication(input);
-	return await input.publish(record.issue, record.comment, !input.dryRun);
-}
-
-export type AloopHandoffSpoolRecord = {
-	version: 1;
-	id: string;
-	issue: number;
-	sha256: string;
-	comment: string;
-};
-
-export function createAloopHandoffSpoolRecord(issue: number, comment: string): AloopHandoffSpoolRecord {
-	const bytes = Buffer.from(comment, "utf8");
-	return {
-		version: 1,
-		id: createHash("sha256").update(`${issue}\0`).update(bytes).digest("hex").slice(0, 24),
-		issue,
-		sha256: createHash("sha256").update(bytes).digest("hex"),
-		comment,
-	};
-}
-
-export function validateAloopHandoffSpoolRecord(value: unknown, expectedId: string): AloopHandoffSpoolRecord {
-	const record = value as Partial<AloopHandoffSpoolRecord> | null;
-	if (record?.version !== 1 || record.id !== expectedId || !Number.isInteger(record.issue) || typeof record.comment !== "string" || typeof record.sha256 !== "string") {
-		throw new Error("Prepared handoff spool entry is malformed.");
-	}
-	const expected = createAloopHandoffSpoolRecord(record.issue!, record.comment);
-	if (record.id !== expected.id || record.sha256 !== expected.sha256) throw new Error("Prepared handoff bytes failed integrity validation.");
-	return record as AloopHandoffSpoolRecord;
-}
-
-export function handoffCommentsForIssue(issue: EpicIssueContext): IssueHandoff[] {
-	return issue.recentHandoffs.filter((comment) => {
-		const structured = parseAloopHandoffs([comment]);
-		return structured.length === 0 || structured.some((handoff) => handoff.issue === issue.number);
-	});
 }
 
 export function selectAloopLeaf(context: GitHubEpicContext, issueNumber: number): EpicIssueContext {
@@ -358,6 +238,26 @@ export function selectAloopLeaf(context: GitHubEpicContext, issueNumber: number)
 }
 
 export type AloopAcceptedRecoveryRecord = { issue: number; head: string; commentSha256: string };
+
+export function validatedChildReviewEvidence(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, trustedAuthor: string | null): string | null {
+	if (!trustedAuthor) return null;
+	for (const comment of [...issue.recentHandoffs].reverse()) {
+		if (comment.author !== trustedAuthor) continue;
+		const v3 = parseAloopHandoffV3(comment.body);
+		if (v3?.issue === issue.number && v3.outcome === "accepted" && v3.outstandingFindings.length === 0) {
+			const head = v3.commitRange.split("..").at(-1)!;
+			const reviewed = v3.verification.some((item) => item === `Independent review completed at ${head}.` || item === `Human review decision recorded at ${head}.`);
+			const verified = v3.verification.some((item) => item === `Canonical command passed at ${head}.`);
+			if (reviewed && verified) return `Accepted v3 handoff ${comment.url ?? "recorded on GitHub"} binds review and canonical verification to ${head}.`;
+			continue;
+		}
+		const legacy = parseAloopHandoffs([comment]).find((handoff) => handoff.issue === issue.number);
+		if (legacy?.successful && legacy.commit && legacy.verificationReceiptId && legacy.verification.some((item) => item.trim()) && legacy.acceptanceCriteriaAssessment.some((item) => item.trim())) {
+			return `Validated legacy read-only handoff ${comment.url ?? "recorded on GitHub"} binds acceptance review and verification receipt ${legacy.verificationReceiptId} to ${legacy.commit}.`;
+		}
+	}
+	return null;
+}
 
 export function acceptedOpenAloopIssues(context: GitHubEpicContext, recoveryRecords?: ReadonlyMap<string, AloopAcceptedRecoveryRecord>): number[] {
 	return context.issues
@@ -404,45 +304,6 @@ export function nextIssueRetryNumber(handoffs: AloopAttemptHandoff[], attemptTyp
 	return Math.max(1, failuresSinceAcceptance);
 }
 
-export function evaluateRetryBoundary(
-	handoffs: AloopAttemptHandoff[],
-	materiallyNewApproach: boolean,
-): { allowed: boolean; unsuccessfulAttempts: number; reason?: string } {
-	let unsuccessfulAttempts = 0;
-	for (let index = handoffs.length - 1; index >= 0; index -= 1) {
-		const handoff = handoffs[index]!;
-		if (handoff.successful || handoff.materiallyNewApproach) break;
-		unsuccessfulAttempts += 1;
-	}
-	if (unsuccessfulAttempts >= 2 && !materiallyNewApproach) {
-		return {
-			allowed: false,
-			unsuccessfulAttempts,
-			reason: "Two unsuccessful attempts without a materially new approach require user intervention.",
-		};
-	}
-	return { allowed: true, unsuccessfulAttempts };
-}
-
-export function validateSuccessfulHandoffEvidence(input: {
-	issueBody: string;
-	verification: string[];
-	acceptanceCriteriaAssessment: string[];
-}): string[] {
-	const reasons: string[] = [];
-	if (input.verification.length === 0 || input.verification.some((item) => !item.trim())) {
-		reasons.push("Successful handoffs require non-empty verification evidence; the bound receipt determines mechanical pass/fail.");
-	}
-	const criteria = extractAcceptanceCriteria(input.issueBody);
-	if (criteria.length > 0 && input.acceptanceCriteriaAssessment.length === 0) {
-		reasons.push("Successful handoffs require the supervisor's acceptance assessment.");
-	}
-	if (input.acceptanceCriteriaAssessment.some((item) => !item.trim())) {
-		reasons.push("Successful handoffs cannot contain empty acceptance assessments.");
-	}
-	return reasons;
-}
-
 export function extractAcceptanceCriteria(body: string): string[] {
 	const lines = body.split("\n");
 	const start = lines.findIndex((line) => /^##+\s+acceptance criteria\s*$/i.test(line.trim()));
@@ -454,79 +315,6 @@ export function extractAcceptanceCriteria(body: string): string[] {
 		if (match) criteria.push(match[1]!.trim());
 	}
 	return criteria;
-}
-
-export function recognizeClosedAloopRetry(input: {
-	issue: EpicIssueContext;
-	epicNumber: number;
-	handoffId: string;
-	receiptId: string;
-}): { commit: string } {
-	if (input.issue.number === input.epicNumber || input.issue.state !== "closed") throw new Error("Durable closure retry applies only to a closed descendant.");
-	for (const comment of input.issue.recentHandoffs) {
-		const spool = createAloopHandoffSpoolRecord(input.issue.number, comment.body);
-		if (spool.id !== input.handoffId) continue;
-		const [handoff] = parseAloopHandoffs([comment]);
-		if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff identifies a completed closure.");
-		if (handoff.verificationReceiptId !== input.receiptId) throw new Error("The published handoff is bound to a different supervisor verification receipt.");
-		return { commit: handoff.commit };
-	}
-	throw new Error("No exact published handoff identifies this completed closure.");
-}
-
-export type AloopClosureReceipt = VerificationReceipt & {
-	postVerificationHead: string;
-	postVerificationClean: boolean;
-};
-
-export async function closeAcceptedAloopIssue<T>(input: {
-	issue: EpicIssueContext;
-	epicNumber: number;
-	handoffId: string;
-	spool: AloopHandoffSpoolRecord;
-	receiptId: string;
-	receipt: AloopClosureReceipt;
-	currentHead: string;
-	worktreeStatus: string;
-	dryRun: boolean;
-	dryRunClosureIds: Set<string>;
-	close: (issue: number) => Promise<T>;
-}): Promise<{ applied: boolean; alreadyClosed: boolean; result?: T; commit: string }> {
-	if (input.issue.number === input.epicNumber) throw new Error("Receipt-gated closure applies only to a descendant of the active epic.");
-	if (input.spool.issue !== input.issue.number) throw new Error("Prepared handoff does not identify this issue.");
-	const spool = validateAloopHandoffSpoolRecord(input.spool, input.handoffId);
-	if (!input.issue.recentHandoffs.some((comment) => comment.body === spool.comment)) throw new Error("The exact prepared handoff is not durably published on GitHub.");
-	const [handoff] = parseAloopHandoffs([{ id: 0, author: "aloop", body: spool.comment, createdAt: "", url: "" }]);
-	if (!handoff?.successful || !handoff.commit) throw new Error("Only a successful commit-bearing handoff may close an issue.");
-	if (handoff.verificationReceiptId !== input.receiptId) throw new Error("The published handoff is bound to a different supervisor verification receipt.");
-	const closureId = `${input.issue.number}:${input.handoffId}:${input.receiptId}`;
-	// Once GitHub records the issue as closed, an exact published handoff is the
-	// durable idempotency key. A later commit must not turn a successful retry
-	// into an error or invoke closure a second time.
-	if (input.issue.state === "closed") return { applied: false, alreadyClosed: true, commit: handoff.commit };
-	if (input.dryRun) input.dryRunClosureIds.add(closureId);
-	else if (!input.dryRunClosureIds.has(closureId)) throw new Error("Accepted issue closure must complete a dry run before apply.");
-	const evidenceReasons = validateSuccessfulHandoffEvidence({
-		issueBody: input.issue.body,
-		verification: handoff.verification,
-		acceptanceCriteriaAssessment: handoff.acceptanceCriteriaAssessment,
-	});
-	if (evidenceReasons.length > 0) throw new Error(`Closure blocked: ${evidenceReasons.join("; ")}.`);
-	const gate = evaluateSupervisorAttempt({
-		returnedCommit: handoff.commit,
-		currentHead: input.currentHead,
-		worktreeStatus: input.worktreeStatus,
-		receipt: input.receipt,
-		acceptanceCriteria: [{ satisfied: true, evidence: "The published handoff records supervisor acceptance." }],
-		productionIntegrationRequired: input.receipt.productionIntegration !== undefined,
-		productionIntegrationEvidence: input.receipt.productionIntegrationExitStatus === 0 ? input.receipt.productionIntegration?.join(" ") : undefined,
-	});
-	if (!gate.allowed || input.receipt.postVerificationHead !== handoff.commit || input.receipt.postVerificationClean !== true) {
-		throw new Error(`Closure blocked: ${[...gate.reasons, "the published handoff, receipt, and current clean Git commit must match"].join("; ")}.`);
-	}
-	if (input.dryRun) return { applied: false, alreadyClosed: false, commit: handoff.commit };
-	const result = await input.close(input.issue.number);
-	return { applied: true, alreadyClosed: false, result, commit: handoff.commit };
 }
 
 export function evaluateEpicClosure(context: GitHubEpicContext, evidence: ClosureEvidence): { allowed: boolean; reasons: string[] } {

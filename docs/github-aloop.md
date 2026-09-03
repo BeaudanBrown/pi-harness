@@ -133,7 +133,7 @@ only useful outcome, findings, decisions, verification, and next action; an
 HTML marker carries hidden idempotent recovery state. Readers retain minimal
 v1/v2 compatibility, but writers emit only v3.
 
-There is no semantic retry count or `materially_new_approach` gate. The
+There is no semantic retry-count gate. The
 supervisor chooses a narrow patch, trivial direct edit, fresh full remediation,
 or human checkpoint according to the evidence. `aloop_context` serves the
 startup-cached GitHub graph and accepts an explicit refresh; successful
@@ -141,8 +141,9 @@ publication and closure update that snapshot in memory.
 
 `aloop_epic_completion` is two phase. `prepare` refreshes the graph, requires no
 open descendants or unsettled attempts, runs canonical verification plus any
-epic-frequency integration, and validates durable supervised child handoffs plus
-supplied evidence for every epic acceptance criterion before terminating at a
+epic-frequency integration, and validates only accepted child handoffs authored by the GitHub-authenticated
+supervisor that bind durable review and canonical verification, plus supplied
+evidence for every epic acceptance criterion before terminating at a
 human approval boundary. Child-level independent reviews remain the semantic
 review evidence; there is no mandatory separate epic review or machine-parsed
 prose gate. The durable preparation record retains that final

@@ -11,36 +11,25 @@ import {
 	acceptedOpenAloopIssues,
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
-	closeAcceptedAloopIssue,
-	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
 	findOutstandingAttempts,
-	formatAloopHandoff,
 	formatAloopHandoffV3,
 	parseAloopHandoffV3,
 	nextIssueRetryNumber,
 	parseAloopHandoffs,
 	parseAloopRunRequest,
-	publishPreparedAloopHandoff,
-	recognizeClosedAloopRetry,
 	selectAloopLeaf,
-	validateAloopHandoffSpoolRecord,
-	validateSuccessfulHandoffEvidence,
+	validatedChildReviewEvidence,
 	type AloopAttemptRecord,
 	type AloopRunBudget,
 	type ClosureEvidence,
 } from "./core.js";
 
-const LEGACY_TOOL_NAMES = ["aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_publish_handoff", "aloop_close_accepted_issue", "aloop_check_closure"];
 const TOOL_NAMES = ["aloop_context", "aloop_abort", "aloop_launch_worker", "aloop_review_attempt", "aloop_apply_patch", "aloop_finish_attempt", "aloop_checkpoint", "aloop_epic_completion"];
-const ALL_ALOOP_TOOLS = [...TOOL_NAMES, ...LEGACY_TOOL_NAMES];
+const ALL_ALOOP_TOOLS = TOOL_NAMES;
 const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
-
-function sameArgv(left: unknown, right: string[] | undefined): boolean {
-	return right !== undefined && Array.isArray(left) && left.length === right.length && left.every((value, index) => value === right[index]);
-}
 
 type PendingHandoff = {
 	issue: number;
@@ -61,37 +50,6 @@ const ApplyPatchParams = Type.Object({
 	issue: Type.Number({ minimum: 1, description: "Issue whose unsettled full attempt needs a narrow correction." }),
 	correction: Type.String({ minLength: 1, description: "Exact bounded correction for the targeted patch worker." }),
 	timeout_ms: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_PATCH_TIMEOUT_MS })),
-});
-
-const SupervisorVerifyParams = Type.Object({
-	commit: Type.String({ minLength: 7, description: "Exact full or abbreviated worker commit to verify with the repository-owned .aloop.json policy." }),
-});
-
-const PrepareHandoffParams = Type.Object({
-	issue: Type.Number({ minimum: 1 }),
-	attempt_type: Type.String({ description: "implementation or remediation" }),
-	commit: Type.Optional(Type.String({ description: "Attempt commit, omitted when the attempt produced no valid commit." })),
-	successful: Type.Boolean({ description: "Supervisor acceptance result, not merely the worker's claim." }),
-	approach: Type.String({ minLength: 1 }),
-	materially_new_approach: Type.Boolean(),
-	verification: Type.Array(Type.String()),
-	acceptance_criteria_assessment: Type.Array(Type.String()),
-	discovered_work: Type.Array(Type.String()),
-	next_action: Type.String({ minLength: 1 }),
-	artifact_directory: Type.String({ minLength: 1 }),
-	verification_receipt_id: Type.Optional(Type.String({ pattern: "^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}$", description: "Required for an accepted handoff; returned by aloop_supervisor_verify." })),
-});
-
-const PublishHandoffParams = Type.Object({
-	handoff_id: Type.String({ pattern: "^[a-f0-9]{24}$", description: "Short ID returned by aloop_prepare_handoff." }),
-	dry_run: Type.Boolean({ description: "Must be true before publication is applied." }),
-});
-
-const CloseAcceptedIssueParams = Type.Object({
-	issue: Type.Number({ minimum: 1 }),
-	handoff_id: Type.String({ pattern: "^[a-f0-9]{24}$", description: "Published successful handoff ID." }),
-	verification_receipt_id: Type.String({ pattern: "^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}$" }),
-	dry_run: Type.Boolean({ description: "Must be true before closure is applied." }),
 });
 
 const VerificationEvidenceParams = Type.Array(Type.Object({
@@ -234,9 +192,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	let runBudget: AloopRunBudget | null = null;
 	let policySnapshot: AloopPolicySnapshot | null = null;
 	let cachedContext: Awaited<ReturnType<typeof retrieveCurrentRepositoryEpicContext>> | null = null;
-	const dryRunHandoffIds = new Set<string>();
-	const dryRunClosureIds = new Set<string>();
-	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
 	let supervisorLogin: string | null = null;
 	const pendingHumanBoundaries = new Set<string>();
 	const publishedAttemptDigests = new Map<string, string>();
@@ -257,9 +212,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		runBudget = null;
 		policySnapshot = null;
 		cachedContext = null;
-		dryRunHandoffIds.clear();
-		dryRunClosureIds.clear();
-		issuedReceipts.clear();
 		supervisorLogin = null;
 		pendingHumanBoundaries.clear();
 		publishedAttemptDigests.clear();
@@ -353,29 +305,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			await writeDurableResult(resultPath, { ...result, diagnosis });
 		}
 		return { result, diagnosis, logPath: path.relative(ctx.cwd, logPath), resultPath: path.relative(ctx.cwd, resultPath) };
-	}
-
-	async function reusableReceipt(cwd: string, expected: string, sourceIdentity: string, pending: PendingHandoff, snapshot: AloopPolicySnapshot) {
-		const directory = path.resolve(cwd, ".pi/tmp/aloop/receipts");
-		let names: string[];
-		try { names = (await readdir(directory)).filter((name) => /^verify-[0-9a-f]{12}-[0-9]+-[0-9a-f]{8}\.json$/.test(name)).sort().reverse(); }
-		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
-		for (const name of names.slice(0, 200)) {
-			try {
-				const receiptPath = path.join(directory, name);
-				const status = await lstat(receiptPath);
-				if (!status.isFile() || status.isSymbolicLink() || status.size > 100_000) continue;
-				const document = await readFile(receiptPath, "utf8");
-				const receipt = JSON.parse(document);
-				if (receipt.commit !== expected || receipt.sourceIdentity !== sourceIdentity || receipt.policySha256 !== snapshot.sha256
-					|| receipt.issue !== pending.issue || receipt.artifactDirectory !== pending.artifactDirectory
-					|| receipt.exitStatus !== 0 || receipt.canonicalTimedOut === true || receipt.canonicalCancelled === true || receipt.canonicalSpawnError
-					|| receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true
-					|| (snapshot.policy.productionIntegration?.frequency === "issue" && (receipt.productionIntegrationExitStatus !== 0 || receipt.productionIntegrationTimedOut === true || receipt.productionIntegrationCancelled === true || receipt.productionIntegrationSpawnError))) continue;
-				return { receiptId: name.slice(0, -5), receiptPath: path.relative(cwd, receiptPath), receipt, document };
-			} catch { /* Malformed historical receipts are not reusable. */ }
-		}
-		return undefined;
 	}
 
 	pi.on("session_start", (_event, ctx) => {
@@ -886,6 +815,9 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (params.outcome === "accepted") {
 				if (statusResult.stdout.trim()) throw new Error("Accepted finalization requires a clean worktree.");
 				if ((!review || review.head !== head || !review.available) && !hasResolvedCheckpoint) throw new Error("Accepted finalization requires fresh independent review at the current HEAD; unavailable review requires a resolved human checkpoint.");
+				verification.push(review?.available && review.head === head
+					? `Independent review completed at ${head}.`
+					: `Human review decision recorded at ${head}.`);
 				const policy = activePolicy().policy;
 				const canonical = await executeVerificationCommand("canonical", policy.canonicalCommand, ctx, signal, onUpdate);
 				if (canonical.result.code !== 0 || canonical.result.timedOut || canonical.result.cancelled || canonical.result.spawnError) {
@@ -931,6 +863,17 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			}
 			pendingHandoffs = pendingHandoffs.filter((candidate) => candidate !== pending);
 			if (params.outcome === "accepted" && issue.state !== "closed") {
+				const durableComment = [...issue.recentHandoffs].reverse().find((comment) => comment.body === body);
+				const automaticProvenance = durableComment !== undefined && (
+					publishedAttemptDigests.get(attemptKey) === createHash("sha256").update(durableComment.body).digest("hex")
+					|| authenticatedSupervisorComment(durableComment.author)
+				);
+				const explicitAuthorization = durableComment !== undefined
+					&& await recoveryAuthorized(ctx.cwd, params.issue, handoff, durableComment.body, head);
+				if (!automaticProvenance && !explicitAuthorization) {
+					pendingHumanBoundaries.add(`recovery:${attemptKey}`);
+					return { content: [{ type: "text", text: `Accepted handoff requires human closure authorization: /aloop-authorize-recovery ${params.issue} ${attemptKey}` }], details: { settled: false, checkpoint: true, issue: params.issue, attemptKey }, terminate: true };
+				}
 				await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
 				issue.state = "closed";
 				const cachedIssue = cachedContext?.issues.find((candidate) => candidate.number === params.issue);
@@ -1007,8 +950,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					descendantReviews: context.issues
 						.filter((issue) => issue.number !== context.epic.number)
 						.map((issue) => {
-							const durableHandoff = [...issue.recentHandoffs].reverse().find((comment) => /pi-aloop-handoff:/.test(comment.body));
-							return { issue: issue.number, reviewed: issue.state === "closed" && durableHandoff !== undefined, evidence: durableHandoff ? `Closed with durable supervised handoff ${durableHandoff.url ?? "recorded on GitHub"}.` : "No durable supervised handoff found." };
+							const evidence = validatedChildReviewEvidence(issue, supervisorLogin);
+							return { issue: issue.number, reviewed: issue.state === "closed" && evidence !== null, evidence: evidence ?? "No validated accepted handoff binds durable review and verification." };
 						}),
 				};
 				const gate = evaluateEpicClosure(context, evidence);
@@ -1032,304 +975,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
-		name: "aloop_supervisor_verify",
-		label: "Aloop Supervisor Verify",
-		description: "Independently run a repository-defined check against an exact committed, clean source tree and persist a commit-bound receipt.",
-		promptSnippet: "Verify the returned worker commit independently before accepting its handoff.",
-		promptGuidelines: ["Pass only the worker commit. The tool loads and executes the repository-owned .aloop.json policy. Any untracked or modified source blocks verification; any later change invalidates the receipt."],
-		parameters: SupervisorVerifyParams,
-		async execute(_id, params: { commit: string }, signal, onUpdate, ctx) {
-			if (!runBudget) throw new Error("Run /aloop #<epic> before supervisor verification.");
-			const inspect = async (args: string[]) => {
-				const remaining = assessAloopRunBudget(runBudget!, Date.now());
-				if (!remaining.allowed) throw new Error(remaining.reason);
-				const result = await pi.exec("git", args, { timeout: Math.max(1, Math.min(30_000, remaining.remainingMs)), signal });
-				if (result.code !== 0) throw new Error((result.stderr || result.stdout || `git ${args[0]} failed`).trim());
-				return result.stdout.trim();
-			};
-			const snapshot = activePolicy();
-			const policy = snapshot.policy;
-			const expected = await inspect(["rev-parse", `${params.commit}^{commit}`]);
-			const pendingAttempt = pendingHandoffs.find((pending) => pending.commit === expected);
-			if (!pendingAttempt) throw new Error(`Supervisor verification requires a pending worker attempt at ${expected}; launch and commit the worker attempt first.`);
-			const beforeHead = await inspect(["rev-parse", "HEAD"]);
-			const beforeStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
-			if (beforeHead !== expected) throw new Error(`Returned commit ${expected} differs from current HEAD ${beforeHead}.`);
-			if (beforeStatus) throw new Error("Supervisor verification requires a clean worktree, including no untracked files. Commit intended sources before verification.");
-			const sourceIdentity = `tree:${await inspect(["rev-parse", `${expected}^{tree}`])}`;
-			const reusable = await reusableReceipt(ctx.cwd, expected, sourceIdentity, pendingAttempt, snapshot);
-			if (reusable) {
-				issuedReceipts.set(reusable.receiptId, { document: reusable.document, issue: pendingAttempt.issue, commit: expected, artifactDirectory: pendingAttempt.artifactDirectory });
-				return { content: [{ type: "text", text: `Reused valid supervisor verification receipt ${reusable.receiptPath} at ${expected}.` }], details: { valid: true, reused: true, ...reusable } };
-			}
-			const canonical = await executeVerificationCommand("canonical verification", policy.canonicalCommand, ctx, signal, onUpdate);
-			const canonicalPassed = canonical.result.code === 0 && !canonical.result.timedOut && !canonical.result.cancelled && !canonical.result.spawnError;
-			const issueProduction = policy.productionIntegration?.frequency === "issue" && canonicalPassed
-				? await executeVerificationCommand("issue production integration", policy.productionIntegration.command, ctx, signal, onUpdate)
-				: undefined;
-			const afterHead = await inspect(["rev-parse", "HEAD"]);
-			const afterStatus = await inspect(["status", "--porcelain=v1", "--untracked-files=all"]);
-			const receipt = {
-				version: 2,
-				issue: pendingAttempt.issue,
-				artifactDirectory: pendingAttempt.artifactDirectory,
-				commit: expected,
-				command: policy.canonicalCommand.argv,
-				exitStatus: canonical.result.code,
-				timestamp: new Date().toISOString(),
-				sourceIdentity,
-				policySha256: snapshot.sha256,
-				policyStartCommit: snapshot.startCommit,
-				canonicalLog: canonical.logPath,
-				canonicalResult: canonical.resultPath,
-				canonicalTimedOut: canonical.result.timedOut,
-				canonicalCancelled: canonical.result.cancelled,
-				canonicalSpawnError: canonical.result.spawnError,
-				productionIntegration: issueProduction ? policy.productionIntegration!.command.argv : undefined,
-				productionIntegrationExitStatus: issueProduction?.result.code,
-				productionIntegrationLog: issueProduction?.logPath,
-				productionIntegrationTimedOut: issueProduction?.result.timedOut,
-				productionIntegrationCancelled: issueProduction?.result.cancelled,
-				productionIntegrationSpawnError: issueProduction?.result.spawnError,
-				postVerificationHead: afterHead,
-				postVerificationClean: afterStatus === "",
-			};
-			const receiptId = `verify-${expected.slice(0, 12)}-${Date.now()}-${randomBytes(4).toString("hex")}`;
-			const receiptDirectory = path.resolve(ctx.cwd, ".pi/tmp/aloop/receipts");
-			await mkdir(receiptDirectory, { recursive: true, mode: 0o700 });
-			const receiptPath = path.join(receiptDirectory, `${receiptId}.json`);
-			const receiptDocument = `${JSON.stringify(receipt, null, 2)}\n`;
-			await writeFile(receiptPath, receiptDocument, { encoding: "utf8", mode: 0o600, flag: "wx" });
-			const productionPassed = policy.productionIntegration?.frequency !== "issue"
-				|| (issueProduction?.result.code === 0 && !issueProduction.result.timedOut && !issueProduction.result.cancelled && !issueProduction.result.spawnError);
-			const valid = canonicalPassed && productionPassed && afterHead === expected && afterStatus === "";
-			if (valid) issuedReceipts.set(receiptId, { document: receiptDocument, issue: pendingAttempt.issue, commit: expected, artifactDirectory: pendingAttempt.artifactDirectory });
-			return {
-				content: [{ type: "text", text: `${valid ? "Supervisor verification passed" : "Supervisor verification failed or was invalidated"} at ${expected}. Receipt: .pi/tmp/aloop/receipts/${receiptId}.json (canonical exit ${canonical.result.code}; production exit ${issueProduction?.result.code ?? "not-required-for-issue"}; post-check clean=${afterStatus === ""}).` }],
-				details: { valid, receiptId, receiptPath: `.pi/tmp/aloop/receipts/${receiptId}.json`, receipt, canonical, production: issueProduction },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "aloop_prepare_handoff",
-		label: "Aloop Prepare Handoff",
-		description: "Format a bounded durable aloop attempt handoff comment after the supervisor assesses worker evidence.",
-		promptSnippet: "Prepare the exact structured GitHub comment required after every aloop worker attempt.",
-		promptGuidelines: ["Use aloop_prepare_handoff after every aloop_launch_worker result, then publish its returned ID with aloop_publish_handoff using dry-run first and apply second. Never copy the encoded comment through the model or use generic issue mutation."],
-		parameters: PrepareHandoffParams,
-		async execute(_id, params: {
-			issue: number; attempt_type: string; commit?: string; successful: boolean; approach: string; materially_new_approach: boolean;
-			verification: string[]; acceptance_criteria_assessment: string[]; discovered_work: string[]; next_action: string; artifact_directory: string; verification_receipt_id?: string;
-		}, signal, _onUpdate, ctx) {
-			const context = await currentContext(ctx.cwd, signal);
-			refreshPending(context);
-			if (params.attempt_type !== "implementation" && params.attempt_type !== "remediation") throw new Error("attempt_type must be implementation or remediation.");
-			const pending = pendingHandoffs.find((candidate) =>
-				candidate.issue === params.issue
-				&& candidate.commit === (params.commit ?? null)
-				&& candidate.artifactDirectory === params.artifact_directory,
-			);
-			if (!pending) throw new Error("No outstanding worker attempt matches this handoff.");
-			if (params.successful) {
-				if (!params.commit || !params.verification_receipt_id) throw new Error("Accepted handoffs require a commit and independent supervisor verification receipt ID.");
-				const selectedIssue = context.issues.find((candidate) => candidate.number === params.issue);
-				if (!selectedIssue || selectedIssue.number === context.epic.number) throw new Error("Accepted handoffs apply only to descendants of the active epic.");
-				const evidenceReasons = validateSuccessfulHandoffEvidence({
-					issueBody: selectedIssue.body,
-					verification: params.verification,
-					acceptanceCriteriaAssessment: params.acceptance_criteria_assessment,
-				});
-				if (evidenceReasons.length > 0) throw new Error(`Accepted handoff lacks required evidence:\n- ${evidenceReasons.join("\n- ")}`);
-				const issuedReceipt = issuedReceipts.get(params.verification_receipt_id);
-				if (!issuedReceipt || issuedReceipt.issue !== params.issue || issuedReceipt.commit !== params.commit || issuedReceipt.artifactDirectory !== params.artifact_directory) throw new Error("Accepted handoffs require a receipt issued after the matching worker attempt in this invocation.");
-				const snapshot = activePolicy();
-				const policy = snapshot.policy;
-				const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
-				const receiptStatus = await lstat(receiptPath);
-				if (receiptStatus.isSymbolicLink() || !receiptStatus.isFile() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
-				const receiptDocument = await readFile(receiptPath, "utf8");
-				if (receiptDocument !== issuedReceipt.document) throw new Error("Supervisor verification receipt changed after it was issued.");
-				const receipt = JSON.parse(receiptDocument);
-				const head = await pi.exec("git", ["rev-parse", `${params.commit}^{commit}`], { timeout: 10_000, signal });
-				const currentHead = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
-				const worktree = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
-				if (head.code !== 0 || currentHead.code !== 0 || worktree.code !== 0) throw new Error("Could not validate the supervisor verification receipt against Git.");
-				const expected = head.stdout.trim();
-				const issueProduction = policy.productionIntegration?.frequency === "issue" ? policy.productionIntegration.command.argv : undefined;
-				if (receipt.commit !== expected || receipt.policySha256 !== snapshot.sha256 || !sameArgv(receipt.command, policy.canonicalCommand.argv)
-					|| (issueProduction !== undefined && (!sameArgv(receipt.productionIntegration, issueProduction) || receipt.productionIntegrationExitStatus !== 0))
-					|| currentHead.stdout.trim() !== expected || receipt.exitStatus !== 0 || receipt.postVerificationHead !== expected || receipt.postVerificationClean !== true || worktree.stdout.trim()) {
-					throw new Error("Accepted handoff is not bound to a passing policy-matched receipt at the current clean commit; rerun supervisor verification after all source changes.");
-				}
-			}
-			const comment = formatAloopHandoff({
-				issue: params.issue,
-				attemptType: params.attempt_type,
-				commit: params.commit ?? null,
-				verificationReceiptId: params.verification_receipt_id,
-				successful: params.successful,
-				approach: params.approach,
-				materiallyNewApproach: params.materially_new_approach,
-				verification: params.verification,
-				acceptanceCriteriaAssessment: params.acceptance_criteria_assessment,
-				discoveredWork: params.discovered_work,
-				nextAction: params.next_action,
-				artifactDirectory: params.artifact_directory,
-				timestamp: new Date().toISOString(),
-			});
-			const bytes = Buffer.from(comment, "utf8");
-			const spoolRecord = createAloopHandoffSpoolRecord(params.issue, comment);
-			const handoffId = spoolRecord.id;
-			const spoolDirectory = path.resolve(ctx.cwd, ".pi/tmp/aloop/handoffs");
-			await mkdir(spoolDirectory, { recursive: true, mode: 0o700 });
-			const spoolPath = path.join(spoolDirectory, `${handoffId}.json`);
-			const record = `${JSON.stringify(spoolRecord)}\n`;
-			try {
-				await writeFile(spoolPath, record, { encoding: "utf8", mode: 0o600, flag: "wx" });
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "EEXIST" || await readFile(spoolPath, "utf8") !== record) throw error;
-			}
-			return {
-				content: [{ type: "text", text: `Prepared handoff ${handoffId} for #${params.issue} (${bytes.length} bytes). Call aloop_publish_handoff with dry_run=true, then with dry_run=false; do not copy the comment through the model.` }],
-				details: { issue: params.issue, handoffId, byteLength: bytes.length, spoolPath: `.pi/tmp/aloop/handoffs/${handoffId}.json` },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "aloop_publish_handoff",
-		label: "Aloop Publish Handoff",
-		description: "Dry-run or idempotently publish the exact prepared handoff bytes by short ID.",
-		promptSnippet: "Publish a prepared handoff by ID without copying its encoded comment.",
-		promptGuidelines: ["Always call with dry_run=true before dry_run=false. The spooled bytes are authoritative."],
-		parameters: PublishHandoffParams,
-		async execute(_id, params: { handoff_id: string; dry_run: boolean }, signal, _onUpdate, ctx) {
-			if (!runBudget) throw new Error("Run /aloop #<epic> before publishing a handoff.");
-			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
-			const status = await lstat(spoolPath);
-			if (status.isSymbolicLink() || !status.isFile() || status.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
-			const record = validateAloopHandoffSpoolRecord(JSON.parse(await readFile(spoolPath, "utf8")), params.handoff_id);
-			const result = await publishPreparedAloopHandoff({
-				record,
-				handoffId: params.handoff_id,
-				dryRun: params.dry_run,
-				dryRunHandoffIds,
-				publish: async (issue, comment, apply) => await dependencies.publishComment(ctx.cwd, issue, comment, apply, { signal, deadlineMs: runBudget!.deadlineMs }),
-			});
-			return {
-				content: [{ type: "text", text: `${params.dry_run ? "Dry run complete" : "Publication complete"} for handoff ${params.handoff_id} on #${record.issue}; ${Buffer.byteLength(record.comment)} exact bytes.` }],
-				details: { handoffId: params.handoff_id, issue: record.issue, dryRun: params.dry_run, byteLength: Buffer.byteLength(record.comment), result },
-			};
-		},
-	});
-
-	pi.registerTool({
-		name: "aloop_close_accepted_issue",
-		label: "Aloop Close Accepted Issue",
-		description: "Close a child only when its exact successful handoff is published and its supervisor receipt still matches the current clean commit.",
-		promptSnippet: "Close a verified child through the receipt-gated aloop operation.",
-		promptGuidelines: ["Use only after aloop_publish_handoff applies the exact prepared bytes. Always dry-run before apply; never use generic issue closure for accepted aloop attempts."],
-		parameters: CloseAcceptedIssueParams,
-		async execute(_id, params: { issue: number; handoff_id: string; verification_receipt_id: string; dry_run: boolean }, signal, _onUpdate, ctx) {
-			const context = await currentContext(ctx.cwd, signal, true);
-			const issue = context.issues.find((candidate) => candidate.number === params.issue);
-			if (!issue) throw new Error(`Issue #${params.issue} is absent from the active epic context.`);
-			if (issue.state === "closed") {
-				const retry = recognizeClosedAloopRetry({
-					issue,
-					epicNumber: context.epic.number,
-					handoffId: params.handoff_id,
-					receiptId: params.verification_receipt_id,
-				});
-				return { content: [{ type: "text", text: `Closure already applied for #${params.issue} at ${retry.commit}.` }], details: { issue: params.issue, commit: retry.commit, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, dryRun: params.dry_run, applied: false, alreadyClosed: true } };
-			}
-
-			const issuedReceipt = issuedReceipts.get(params.verification_receipt_id);
-			if (!issuedReceipt || issuedReceipt.issue !== params.issue) throw new Error("Accepted issue closure requires the immutable receipt issued for this worker attempt.");
-			const snapshot = activePolicy();
-			const policy = snapshot.policy;
-			const spoolPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/handoffs/${params.handoff_id}.json`);
-			const spoolStatus = await lstat(spoolPath);
-			if (!spoolStatus.isFile() || spoolStatus.isSymbolicLink() || spoolStatus.size > 100_000) throw new Error("Prepared handoff spool entry is unsafe or oversized.");
-			const spool = validateAloopHandoffSpoolRecord(JSON.parse(await readFile(spoolPath, "utf8")), params.handoff_id);
-
-			const receiptPath = path.resolve(ctx.cwd, `.pi/tmp/aloop/receipts/${params.verification_receipt_id}.json`);
-			const receiptStatus = await lstat(receiptPath);
-			if (!receiptStatus.isFile() || receiptStatus.isSymbolicLink() || receiptStatus.size > 100_000) throw new Error("Supervisor verification receipt is unsafe or oversized.");
-			const receiptDocument = await readFile(receiptPath, "utf8");
-			if (receiptDocument !== issuedReceipt.document) throw new Error("Supervisor verification receipt changed after it was issued.");
-			const receipt = JSON.parse(receiptDocument);
-			const issueProduction = policy.productionIntegration?.frequency === "issue" ? policy.productionIntegration.command.argv : undefined;
-			if (receipt.policySha256 !== snapshot.sha256 || !sameArgv(receipt.command, policy.canonicalCommand.argv)
-				|| (issueProduction !== undefined && !sameArgv(receipt.productionIntegration, issueProduction))) {
-				throw new Error("The supervisor receipt does not match the invocation's committed verification-policy snapshot.");
-			}
-			const head = await pi.exec("git", ["rev-parse", "HEAD"], { timeout: 10_000, signal });
-			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000, signal });
-			if (head.code !== 0 || status.code !== 0) throw new Error("Could not inspect Git before accepted issue closure.");
-			const closure = await closeAcceptedAloopIssue({
-				issue,
-				epicNumber: context.epic.number,
-				handoffId: params.handoff_id,
-				spool,
-				receiptId: params.verification_receipt_id,
-				receipt,
-				currentHead: head.stdout.trim(),
-				worktreeStatus: status.stdout,
-				dryRun: params.dry_run,
-				dryRunClosureIds,
-				close: async (issueNumber) => await dependencies.closeIssue(ctx.cwd, issueNumber, { signal, deadlineMs: runBudget!.deadlineMs }),
-			});
-			const action = params.dry_run ? "Closure dry run complete" : closure.alreadyClosed ? "Closure already applied" : "Closed verified issue";
-			return { content: [{ type: "text", text: `${action} for #${params.issue} at ${closure.commit}.` }], details: { issue: params.issue, handoffId: params.handoff_id, receiptId: params.verification_receipt_id, dryRun: params.dry_run, ...closure } };
-		},
-	});
-
-	pi.registerTool({
-		name: "aloop_check_closure",
-		label: "Aloop Check Closure",
-		description: "Gate epic closure on closed descendants, descendant review, project verification, and epic acceptance evidence.",
-		promptSnippet: "Check whether the active aloop epic has enough evidence to close.",
-		promptGuidelines: ["Call aloop_check_closure before closing an epic; do not close when it returns allowed=false."],
-		parameters: ClosureCheckParams,
-		async execute(_id, params: {
-			verification: ClosureEvidence["verification"];
-			acceptance_criteria: ClosureEvidence["acceptanceCriteria"];
-			descendant_reviews: ClosureEvidence["descendantReviews"];
-		}, signal, onUpdate, ctx) {
-			const context = await currentContext(ctx.cwd, signal);
-			refreshPending(context);
-			const reasons: string[] = pendingHandoffs.map((pending) => `Attempt handoff for #${pending.issue} is not durable on GitHub (${pending.artifactDirectory}).`);
-			const epicProduction = activePolicy().policy.productionIntegration;
-			if (epicProduction?.frequency === "epic") {
-				const beforeHead = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal });
-				const beforeStatus = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: ctx.cwd, timeout: 30_000, signal });
-				if (beforeHead.code !== 0 || beforeStatus.code !== 0 || beforeStatus.stdout.trim()) {
-					reasons.push("Epic production integration requires a clean readable HEAD.");
-				} else {
-					const production = await executeVerificationCommand("epic production integration", epicProduction.command, ctx, signal, onUpdate);
-					const afterHead = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal });
-					const afterStatus = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { cwd: ctx.cwd, timeout: 30_000, signal });
-					if (afterHead.code !== 0 || afterStatus.code !== 0) reasons.push("Could not verify HEAD and worktree cleanliness after epic production integration.");
-					if (production.result.code !== 0 || production.result.timedOut || production.result.cancelled) reasons.push(`Epic production integration failed; log: ${production.logPath}.`);
-					if (afterHead.stdout.trim() !== beforeHead.stdout.trim() || afterStatus.stdout.trim()) reasons.push("Epic production integration changed HEAD or the worktree.");
-				}
-			}
-			const gate = evaluateEpicClosure(context, {
-				verification: params.verification,
-				acceptanceCriteria: params.acceptance_criteria,
-				descendantReviews: params.descendant_reviews,
-			});
-			reasons.push(...gate.reasons);
-			const allowed = reasons.length === 0;
-			return {
-				content: [{ type: "text", text: allowed ? `Closure allowed for epic #${context.epic.number}.` : `Closure blocked for epic #${context.epic.number}:\n- ${reasons.join("\n- ")}` }],
-				details: { allowed, reasons, epic: context.epic.number },
-			};
-		},
-	});
 }
 
 export default registerAloopExtension;
