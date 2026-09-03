@@ -108,8 +108,11 @@ export class ManagedImageTransport {
 
 	async consume(blobId: string, liveBlobIds: ReadonlySet<string>): Promise<void> { await this.spool.remove(blobId, liveBlobIds); }
 
-	private pending(blob: SpoolBlob): PendingImage { return { blobId: blob.blobId, sha256: blob.sha256, mimeType: blob.mimeType, byteLength: blob.byteLength,
-		width: blob.width, height: blob.height, chunkCount: Math.ceil(blob.byteLength / MAX_MEDIA_CHUNK_BYTES) }; }
+	private pending(blob: SpoolBlob): PendingImage {
+		if (!MIME_TYPES.includes(blob.mimeType as ImageMimeType)) throw new Error("Inbound image spool MIME is invalid");
+		return { blobId: blob.blobId, sha256: blob.sha256, mimeType: blob.mimeType as ImageMimeType, byteLength: blob.byteLength,
+			width: blob.width, height: blob.height, chunkCount: Math.ceil(blob.byteLength / MAX_MEDIA_CHUNK_BYTES) };
+	}
 
 	private async normalize(bytes: Buffer, mimeType: ImageMimeType): Promise<Buffer> {
 		if (!this.normalizer) throw new Error("Image normalization is unavailable");

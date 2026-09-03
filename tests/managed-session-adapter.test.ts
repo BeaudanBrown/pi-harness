@@ -331,7 +331,7 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 		createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: "/tmp/relay.sock" })(api);
 		assert.deepEqual([...commands.keys()], ["remote"]);
 		assert.equal(commands.has("remote-off"), false);
-		assert.deepEqual(tools, role === "ordinary_adapter" ? ["remote_checkpoint"] : [
+		assert.deepEqual(tools, role === "ordinary_adapter" ? ["remote_artifact_export", "remote_checkpoint"] : [
 			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_session_start",
 			"remote_session_resume", "remote_session_stop", "remote_session_delete",
 		]);
@@ -339,10 +339,10 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 	}
 });
 
-test("a shutdown racing attachment startup cannot reactivate remote_checkpoint", async (t) => {
+test("a shutdown racing attachment startup cannot reactivate managed conversation tools", async (t) => {
 	const relay = await FakeRelay.start(0, 100); t.after(() => relay.close());
 	const handlers = new Map<string, (...args: any[]) => any>();
-	let activeTools = ["read", "remote_checkpoint"];
+	let activeTools = ["read", "remote_checkpoint", "remote_artifact_export"];
 	const api = {
 		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
 		registerCommand: () => undefined, registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined,
@@ -363,7 +363,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	const branch: any[] = [custom("binding", BINDING_ENTRY_TYPE, binding)];
 	const handlers = new Map<string, (...args: any[]) => any>();
 	let idle = false; let setModelCalls = 0; let thinking = "medium"; let contextTokens = 90; let compactFocus: string | undefined; let promptCalls = 0;
-	let activeTools = ["read", "remote_checkpoint"];
+	let activeTools = ["read", "remote_checkpoint", "remote_artifact_export"];
 	const models = [
 		...Array.from({ length: 25 }, (_, index) => ({ provider: "scoped", id: `model-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 })),
 		...Array.from({ length: 5 }, (_, index) => ({ provider: "small", id: `choice-${index}`, reasoning: false, contextWindow: 100, maxTokens: 10 })),
@@ -381,7 +381,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 		getContextUsage: () => ({ tokens: contextTokens }), compact: ({ customInstructions, onComplete }: any) => { compactFocus = customInstructions; contextTokens = 40; onComplete({ estimatedTokensAfter: 40 }); },
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
-	assert.deepEqual(activeTools, ["read", "remote_checkpoint"], "checkpoint activates only for the live managed binding");
+	assert.deepEqual(activeTools, ["read", "remote_checkpoint", "remote_artifact_export"], "managed conversation tools activate only for the live binding");
 	const send = async (id: number, name: string, argument?: string) => { relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: `control-${id}`, conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${String(id).padStart(32, "a")}`, name, ...(argument ? { argument } : {}) } } as ManagedSessionEnvelope); await new Promise((resolve) => setTimeout(resolve, 30)); };
 	await send(1, "model", "scoped/model-1");

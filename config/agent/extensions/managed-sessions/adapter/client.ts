@@ -9,6 +9,7 @@ import {
 	parseNdjsonEnvelope,
 } from "../contracts.js";
 import type { AdapterRole, SessionBinding } from "./state.js";
+import { artifactChunks, type WorkspaceArtifact } from "./artifact-export.js";
 
 const REQUEST_TIMEOUT_MS = 5_000;
 const LIFECYCLE_REQUEST_TIMEOUT_MS = 120_000;
@@ -128,6 +129,30 @@ export class BoundAdapterClient {
 		});
 		if (result.type !== "self.result" || result.payload.operation !== "control.result" || result.payload.status !== "ok") {
 			throw new ManagedAdapterError("Relay did not confirm control result", "invalid_response");
+		}
+	}
+
+	async exportArtifact(artifact: WorkspaceArtifact): Promise<void> {
+		if (this.options.role !== "ordinary_adapter") throw new ManagedAdapterError("Artifact export requires an ordinary managed conversation", "permission_denied");
+		const chunks = artifactChunks(artifact.data);
+		const payload = { uploadId: artifact.uploadId, blobId: artifact.blobId, sha256: artifact.sha256, filename: artifact.filename,
+			mimeType: artifact.mimeType, mediaType: artifact.mediaType, byteLength: artifact.byteLength, chunkCount: chunks.length,
+			...(artifact.width === undefined ? {} : { width: artifact.width }), ...(artifact.height === undefined ? {} : { height: artifact.height }) };
+		const begin = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("artifact-begin"),
+			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "artifact.begin", payload }, LIFECYCLE_REQUEST_TIMEOUT_MS);
+		if (begin.type !== "artifact.acknowledge" || begin.payload.uploadId !== artifact.uploadId || !["ready", "sent"].includes(String(begin.payload.status))) {
+			throw new ManagedAdapterError("Relay did not accept artifact export", "invalid_response");
+		}
+		if (begin.payload.status === "sent") return;
+		for (let index = 0; index < chunks.length; index += 1) {
+			const chunk = chunks[index]!;
+			const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("artifact-chunk"),
+				conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "artifact.chunk", payload: { uploadId: artifact.uploadId,
+					blobId: artifact.blobId, index, sha256: createHash("sha256").update(chunk).digest("hex"), data: chunk.toString("base64") } }, LIFECYCLE_REQUEST_TIMEOUT_MS);
+			const expected = index + 1 === chunks.length ? "sent" : "ready";
+			if (result.type !== "artifact.acknowledge" || result.payload.uploadId !== artifact.uploadId || result.payload.status !== expected) {
+				throw new ManagedAdapterError("Relay did not confirm artifact transfer", "invalid_response");
+			}
 		}
 	}
 

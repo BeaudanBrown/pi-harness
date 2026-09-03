@@ -13,6 +13,7 @@ export const MAX_COMPLETED_CONTROLS = 4_096;
 export const MAX_CONTROL_POLL_OPTIONS = 20;
 export const MAX_CHECKPOINT_POLL_OPTIONS = 8;
 export const MAX_PROJECTION_ENTRIES = 4_096;
+export const MAX_ARTIFACT_EXPORTS = 256;
 
 const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
 	Type.Object(properties, { additionalProperties: false });
@@ -30,8 +31,11 @@ export const MatrixTransactionIdSchema = Type.String({ pattern: "^pi_[a-f0-9]{48
 export const GenerationIdSchema = stableId("generation");
 export const TransitionIdSchema = stableId("transition");
 const BlobIdSchema = stableId("blob");
+const UploadIdSchema = stableId("upload");
 const MediaDigestSchema = Type.String({ pattern: "^[a-f0-9]{64}$" });
 const MediaMimeSchema = Type.Union([Type.Literal("image/jpeg"), Type.Literal("image/png"), Type.Literal("image/webp")]);
+const ArtifactMimeSchema = Type.String({ minLength: 3, maxLength: 127, pattern: "^[a-z0-9][a-z0-9!#$&^_.+-]*/[a-z0-9][a-z0-9!#$&^_.+-]*$" });
+const ArtifactMediaTypeSchema = Type.Union([Type.Literal("image"), Type.Literal("audio"), Type.Literal("file")]);
 const mediaDescriptor = {
 	blobId: BlobIdSchema, sha256: MediaDigestSchema, mimeType: MediaMimeSchema,
 	byteLength: Type.Integer({ minimum: 1, maximum: 25 * 1024 * 1024 }),
@@ -160,6 +164,18 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema,
 		reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]),
 	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "artifact.begin", {
+		uploadId: UploadIdSchema, blobId: BlobIdSchema, sha256: MediaDigestSchema,
+		filename: boundedString(255), mimeType: ArtifactMimeSchema, mediaType: ArtifactMediaTypeSchema,
+		byteLength: Type.Integer({ minimum: 1, maximum: 25 * 1024 * 1024 }),
+		chunkCount: Type.Integer({ minimum: 1, maximum: 800 }),
+		width: Type.Optional(Type.Integer({ minimum: 1, maximum: 16_384 })),
+		height: Type.Optional(Type.Integer({ minimum: 1, maximum: 16_384 })),
+	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "artifact.chunk", {
+		uploadId: UploadIdSchema, blobId: BlobIdSchema, index: Type.Integer({ minimum: 0, maximum: 799 }),
+		sha256: MediaDigestSchema, data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }),
+	}),
 	clientEnvelope(adapterRole, "transcript.offer", {
 		entryId: TranscriptEntryIdSchema,
 		piSessionId: identifier,
@@ -254,6 +270,9 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	}),
 	relayEnvelope("media.result", {
 		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema, status: Type.Literal("rejected"),
+	}),
+	relayEnvelope("artifact.acknowledge", {
+		uploadId: UploadIdSchema, status: Type.Union([Type.Literal("ready"), Type.Literal("sent")]),
 	}),
 	relayEnvelope("transcript.acknowledge", {
 		entryId: TranscriptEntryIdSchema,
@@ -434,6 +453,16 @@ const closingCheckpointPoll = strictObject({
 	closureTransactionId: MatrixTransactionIdSchema,
 	fallback: Type.Union([Type.Literal("Selection accepted"), Type.Literal("Answered by text")]),
 });
+const artifactExport = strictObject({
+	uploadId: UploadIdSchema, blobId: BlobIdSchema, sha256: MediaDigestSchema,
+	filename: boundedString(255), mimeType: ArtifactMimeSchema, mediaType: ArtifactMediaTypeSchema,
+	byteLength: Type.Integer({ minimum: 1, maximum: 25 * 1024 * 1024 }),
+	width: Type.Optional(Type.Integer({ minimum: 1, maximum: 16_384 })),
+	height: Type.Optional(Type.Integer({ minimum: 1, maximum: 16_384 })),
+	transactionId: MatrixTransactionIdSchema,
+	state: Type.Union([Type.Literal("spooled"), Type.Literal("created"), Type.Literal("uploaded"), Type.Literal("sent")]),
+	mxcUrl: Type.Optional(boundedString(512)), reservationExpiresAt: Type.Optional(timestamp), eventId: Type.Optional(boundedString(255)), createdAt: timestamp,
+});
 const projectionEntry = strictObject({
 	entryId: TranscriptEntryIdSchema,
 	kind: Type.Union([
@@ -475,6 +504,7 @@ const runtimeConversation = strictObject({
 	publishingCheckpointPoll: nullable(publishingCheckpointPoll),
 	activeCheckpointPoll: nullable(activeCheckpointPoll),
 	closingCheckpointPolls: Type.Array(closingCheckpointPoll, { maxItems: 64 }),
+	artifactExports: Type.Array(artifactExport, { maxItems: MAX_ARTIFACT_EXPORTS }),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	managedWindow: nullable(
 		strictObject({
@@ -549,6 +579,7 @@ export interface HostRuntimeState {
 		publishingCheckpointPoll: null | { checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string };
 		activeCheckpointPoll: null | { checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string; pollEventId: string };
 		closingCheckpointPolls: Array<{ checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string; pollEventId: string; resolutionEventId: string; selectedAnswerId?: string; closureTransactionId: string; fallback: "Selection accepted" | "Answered by text" }>;
+		artifactExports: Array<{ uploadId: string; blobId: string; sha256: string; filename: string; mimeType: string; mediaType: "image" | "audio" | "file"; byteLength: number; width?: number; height?: number; transactionId: string; state: "spooled" | "created" | "uploaded" | "sent"; mxcUrl?: string; reservationExpiresAt?: string; eventId?: string; createdAt: string }>;
 		projection: Array<{
 			entryId: string;
 			kind: string;
@@ -623,17 +654,21 @@ function assertInputBody(kind: string, body: string | undefined): void {
 }
 
 function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
-	if (envelope.type === "media.chunk") {
+	if (envelope.type === "media.chunk" || envelope.type === "artifact.chunk") {
 		const payload = envelope.payload as { data: string; sha256: string };
 		const decoded = Buffer.from(payload.data, "base64");
 		if (decoded.length < 1 || decoded.length > 32 * 1024 || decoded.toString("base64") !== payload.data || createHash("sha256").update(decoded).digest("hex") !== payload.sha256) {
 			throw new ManagedSessionContractError("malformed", "media chunk failed canonical base64, size, or digest validation");
 		}
 	}
-	if (envelope.type === "media.begin") {
-		const payload = envelope.payload as { byteLength: number; chunkCount: number; width: number; height: number };
-		if (Math.ceil(payload.byteLength / (32 * 1024)) !== payload.chunkCount || payload.width * payload.height > 40_000_000) {
-			throw new ManagedSessionContractError("malformed", "media descriptor failed chunk or pixel bounds");
+	if (envelope.type === "media.begin" || envelope.type === "artifact.begin") {
+		const payload = envelope.payload as { byteLength: number; chunkCount: number; mediaType?: string; width?: number; height?: number; filename?: string };
+		if (Math.ceil(payload.byteLength / (32 * 1024)) !== payload.chunkCount ||
+			(envelope.type === "media.begin" && (!payload.width || !payload.height || payload.width * payload.height > 40_000_000)) ||
+			(envelope.type === "artifact.begin" && ((payload.mediaType === "image") !== (payload.width !== undefined && payload.height !== undefined) ||
+				(payload.width !== undefined && payload.height !== undefined && payload.width * payload.height > 40_000_000) ||
+				!payload.filename || /[\\/\u0000-\u001f\u007f]/.test(payload.filename)))) {
+			throw new ManagedSessionContractError("malformed", "media descriptor failed chunk, filename, or dimension bounds");
 		}
 	}
 	if (envelope.type === "input.deliver") {
@@ -780,6 +815,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			if (!("publishingCheckpointPoll" in conversation)) { conversation.publishingCheckpointPoll = null; changed = true; }
 			if (!("activeCheckpointPoll" in conversation)) { conversation.activeCheckpointPoll = null; changed = true; }
 			if (!("closingCheckpointPolls" in conversation)) { conversation.closingCheckpointPolls = []; changed = true; }
+			if (!("artifactExports" in conversation)) { conversation.artifactExports = []; changed = true; }
 		}
 		if (changed) candidate = migrated;
 	}
@@ -885,6 +921,19 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		}
 		if (conversation.activeCheckpointPoll && closingPollIds.has(conversation.activeCheckpointPoll.pollEventId)) {
 			throw new ManagedSessionContractError("conflict", `active checkpoint poll is already closing in ${conversation.conversationId}`);
+		}
+		const uploadIds = new Set<string>();
+		for (const artifact of conversation.artifactExports) {
+			if (uploadIds.has(artifact.uploadId) || artifact.transactionId !== deriveMatrixTransactionId(conversation.conversationId, artifact.uploadId, 0) ||
+				(artifact.mediaType === "image") !== (artifact.width !== undefined && artifact.height !== undefined) ||
+				(artifact.width !== undefined && artifact.height !== undefined && artifact.width * artifact.height > 40_000_000) ||
+				(["created", "uploaded", "sent"].includes(artifact.state) !== (artifact.mxcUrl !== undefined && artifact.reservationExpiresAt !== undefined)) ||
+				((artifact.state === "sent") !== (artifact.eventId !== undefined))) {
+				throw new ManagedSessionContractError("conflict", `invalid artifact export in ${conversation.conversationId}`);
+			}
+			assertTimestamp(artifact.createdAt, "artifactExport.createdAt");
+			if (artifact.reservationExpiresAt) assertTimestamp(artifact.reservationExpiresAt, "artifactExport.reservationExpiresAt");
+			uploadIds.add(artifact.uploadId);
 		}
 		if (conversation.attachment) assertTimestamp(conversation.attachment.connectedAt, "attachment.connectedAt");
 		if (conversation.lastLaunchError) assertTimestamp(conversation.lastLaunchError.at, "lastLaunchError.at");

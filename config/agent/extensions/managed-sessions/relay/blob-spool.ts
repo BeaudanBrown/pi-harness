@@ -13,7 +13,7 @@ export interface BlobSpoolLimits { maxBlobs: number; maxBlobBytes: number; maxTo
 export interface SpoolBlob {
 	blobId: string;
 	sha256: string;
-	mimeType: "image/jpeg" | "image/png" | "image/webp";
+	mimeType: string;
 	byteLength: number;
 	width: number;
 	height: number;
@@ -25,7 +25,7 @@ function parseBlob(value: unknown): SpoolBlob {
 	const record = value as Record<string, unknown>;
 	if (Object.keys(record).sort().join(",") !== "blobId,byteLength,createdAt,height,mimeType,sha256,width" ||
 		typeof record.blobId !== "string" || !BLOB_ID.test(record.blobId) || typeof record.sha256 !== "string" || !DIGEST.test(record.sha256) ||
-		!["image/jpeg", "image/png", "image/webp"].includes(String(record.mimeType)) || !Number.isSafeInteger(record.byteLength) || Number(record.byteLength) < 1 || Number(record.byteLength) > MAX_BLOB_BYTES ||
+		typeof record.mimeType !== "string" || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(record.mimeType) || record.mimeType.length > 127 || !Number.isSafeInteger(record.byteLength) || Number(record.byteLength) < 1 || Number(record.byteLength) > MAX_BLOB_BYTES ||
 		!Number.isSafeInteger(record.width) || Number(record.width) < 1 || Number(record.width) > 16_384 ||
 		!Number.isSafeInteger(record.height) || Number(record.height) < 1 || Number(record.height) > 16_384 || Number(record.width) * Number(record.height) > 40_000_000 ||
 		typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))) throw new Error("Malformed blob spool metadata");

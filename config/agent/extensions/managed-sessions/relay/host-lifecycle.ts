@@ -342,7 +342,7 @@ export class HostLifecycle {
 		const sessionFile = existingSessionFile ?? join(resolve(this.options.projectSessionDirectory), manifest.conversationId,
 			activeGeneration.ordinal === 1 ? "session.jsonl" : `generation-${activeGeneration.ordinal}.jsonl`);
 		const resolved = await this.invoke("workspace-resolve", manifest.placement);
-		if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical cwd");
+		if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd) || typeof resolved.workspacePath !== "string" || !isAbsolute(resolved.workspacePath)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical workspace paths");
 		const root = await this.invoke("root-ensure", manifest.placement);
 		if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
 		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal);
@@ -362,6 +362,7 @@ export class HostLifecycle {
 					PI_MANAGED_SESSION_CONVERSATION_ID: manifest.conversationId, PI_MANAGED_SESSION_CONCEPT: manifest.concept,
 					PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: manifest.bindingBoundaryEntryId,
 					PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
+					PI_MANAGED_SESSION_WORKSPACE_PATH: resolved.workspacePath,
 					...(activeGeneration.model ? { PI_MANAGED_SESSION_MODEL: activeGeneration.model } : {}),
 					...(activeGeneration.thinking ? { PI_MANAGED_SESSION_THINKING: activeGeneration.thinking } : {}),
 				});

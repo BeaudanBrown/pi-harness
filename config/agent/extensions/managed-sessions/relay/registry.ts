@@ -98,6 +98,7 @@ export class RelayRegistry {
 				publishingCheckpointPoll: null,
 				activeCheckpointPoll: null,
 				closingCheckpointPolls: [],
+				artifactExports: [],
 				projection: [],
 				managedWindow: null,
 			})),
@@ -619,6 +620,7 @@ export class RelayRegistry {
 					publishingCheckpointPoll: null,
 					activeCheckpointPoll: null,
 					closingCheckpointPolls: [],
+					artifactExports: [],
 					projection: [],
 					managedWindow: null,
 				});
@@ -652,7 +654,7 @@ export class RelayRegistry {
 			this.state.conversations.push({
 				conversationId: manifest.conversationId, state: "dormant", attachment: null,
 				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], publishingControlPoll: null, activeControlPoll: null,
-				publishingCheckpointPoll: null, activeCheckpointPoll: null, closingCheckpointPolls: [], projection: [], managedWindow: null,
+				publishingCheckpointPoll: null, activeCheckpointPoll: null, closingCheckpointPolls: [], artifactExports: [], projection: [], managedWindow: null,
 			});
 			return manifest;
 			});
@@ -723,9 +725,31 @@ export class RelayRegistry {
 	}
 
 	liveMediaBlobIds(): Set<string> {
-		return new Set(this.state.conversations.flatMap((conversation) => conversation.pendingInputs
-			.filter((input) => input.media && input.status !== "completed" && input.status !== "cancelled")
-			.map((input) => input.media!.blobId)));
+		return new Set(this.state.conversations.flatMap((conversation) => [
+			...conversation.pendingInputs.filter((input) => input.media && input.status !== "completed" && input.status !== "cancelled").map((input) => input.media!.blobId),
+			...conversation.artifactExports.filter((artifact) => artifact.state !== "sent").map((artifact) => artifact.blobId),
+		]));
+	}
+
+	artifactExports(conversationId?: string): Array<{ conversationId: string; artifact: RuntimeConversation["artifactExports"][number] }> {
+		return this.state.conversations.filter((conversation) => !conversationId || conversation.conversationId === conversationId)
+			.flatMap((conversation) => conversation.artifactExports.map((artifact) => ({ conversationId: conversation.conversationId, artifact: structuredClone(artifact) })));
+	}
+
+	async recordArtifactExport(conversationId: string, artifact: RuntimeConversation["artifactExports"][number]): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const existing = conversation.artifactExports.find((candidate) => candidate.uploadId === artifact.uploadId);
+			if (existing) {
+				const immutable = ["blobId", "sha256", "filename", "mimeType", "mediaType", "byteLength", "width", "height", "transactionId", "createdAt"] as const;
+				if (immutable.some((field) => existing[field] !== artifact[field])) throw new RelayRegistryError("invalid_state", "Artifact export retry conflicts with durable state");
+				Object.assign(existing, structuredClone(artifact));
+			} else {
+				if (conversation.artifactExports.length >= 256) throw new RelayRegistryError("capacity_reached", "Artifact export history capacity was reached");
+				conversation.artifactExports.push(structuredClone(artifact));
+			}
+			parseHostRuntimeState(this.state);
+		});
 	}
 
 	async markInputDelivered(conversationId: string, deliveryId: string): Promise<void> {

@@ -234,6 +234,43 @@ export class ManagedMatrixClient {
 	async sendNotice(roomId: string, transactionId: string, body: string, signal?: AbortSignal): Promise<string> {
 		return this.sendEvent(roomId, "m.room.message", transactionId, { msgtype: "m.notice", body: boundedText(body, "notice body") }, signal);
 	}
+	async createMedia(signal?: AbortSignal): Promise<{ contentUri: string; unusedExpiresAt: string }> {
+		const response = await this.request("POST", "/_matrix/media/v1/create", {}, signal);
+		const contentUri = requiredString(response, "content_uri"); this.parseMxc(contentUri);
+		const expiration = typeof response === "object" && response !== null ? Number((response as JsonObject).unused_expires_at) : NaN;
+		if (!Number.isSafeInteger(expiration) || expiration <= Date.now() || expiration > Date.now() + 7 * 24 * 60 * 60 * 1_000) throw new ManagedMatrixError("invalid_response", "Matrix media reservation omitted its bounded expiry");
+		return { contentUri, unusedExpiresAt: new Date(expiration).toISOString() };
+	}
+	async uploadMedia(contentUri: string, filename: string, mimeType: string, bytes: Buffer, signal?: AbortSignal): Promise<void> {
+		const { serverName, mediaId } = this.parseMxc(contentUri);
+		if (!filename || filename.length > 255 || /[\\/\0-\x1f\x7f]/.test(filename)) throw new Error("Matrix media filename is unsafe");
+		if (!/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(mimeType) || bytes.length < 1 || bytes.length > MAX_BLOB_BYTES) throw new Error("Matrix media upload metadata is invalid");
+		const path = `/_matrix/media/v3/upload/${encodeURIComponent(serverName)}/${encodeURIComponent(mediaId)}?filename=${encodeURIComponent(filename)}`;
+		let last: ManagedMatrixError | undefined;
+		for (let attempt = 0; attempt < this.#retry.maxAttempts; attempt += 1) {
+			try {
+				const response = await this.fetchImplementation(new URL(path, this.homeserver), { method: "PUT", redirect: "error", headers: {
+					Authorization: `Bearer ${this.#accessToken}`, "Content-Type": mimeType, "Content-Length": String(bytes.length),
+				}, body: new Uint8Array(bytes), signal });
+				if (response.ok || response.status === 409) return; // A retry after an uncertain successful PUT cannot overwrite the reserved MXC URI.
+				last = new ManagedMatrixError("http", `Matrix PUT /_matrix/media/v3/upload returned HTTP ${response.status}`, response.status, response.status === 429 || response.status >= 500);
+			} catch (error) {
+				if (error instanceof ManagedMatrixError) last = error;
+				else if (signal?.aborted || error instanceof Error && error.name === "AbortError") throw new ManagedMatrixError("cancelled", "Matrix media upload was cancelled");
+				else last = new ManagedMatrixError("network", "Matrix media upload failed", undefined, true);
+			}
+			if (!last.retryable || attempt + 1 >= this.#retry.maxAttempts) throw last;
+			await this.#retry.sleep(Math.min(this.#retry.maxDelayMs, this.#retry.baseDelayMs * (2 ** attempt)), signal);
+		}
+		throw last ?? new ManagedMatrixError("network", "Matrix media upload failed", undefined, true);
+	}
+	async sendMedia(roomId: string, transactionId: string, value: { contentUri: string; filename: string; mimeType: string; mediaType: "image" | "audio" | "file"; byteLength: number; width?: number; height?: number }, signal?: AbortSignal): Promise<string> {
+		this.parseMxc(value.contentUri); boundedText(value.filename, "media filename", 255);
+		const info: JsonObject = { mimetype: value.mimeType, size: value.byteLength };
+		if (value.mediaType === "image") { info.w = value.width; info.h = value.height; }
+		return this.sendEvent(roomId, "m.room.message", transactionId, { msgtype: `m.${value.mediaType}`, body: value.filename,
+			filename: value.filename, url: value.contentUri, info }, signal);
+	}
 	async replaceMessage(roomId: string, transactionId: string, eventId: string, body: string, notice = true, signal?: AbortSignal): Promise<string> {
 		boundedText(eventId, "replacement event ID", 255); const msgtype = notice ? "m.notice" : "m.text";
 		const replacement = { msgtype, body: boundedText(body, "replacement body") };
@@ -280,6 +317,12 @@ export class ManagedMatrixClient {
 	}
 	async leaveRoom(roomId: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {}, signal); this.#managedRoomIds.delete(roomId); }
 	private assertManagedRoom(roomId: string): void { if (!this.#managedRoomIds.has(roomId)) throw new ManagedMatrixError("invalid_response", "Matrix room is not owned by this relay"); }
+	private parseMxc(value: string): { serverName: string; mediaId: string } {
+		let parsed: URL; try { parsed = new URL(value); } catch { throw new ManagedMatrixError("invalid_response", "Matrix content URI is malformed"); }
+		const mediaId = parsed.pathname.slice(1);
+		if (parsed.protocol !== "mxc:" || !parsed.host || !mediaId || mediaId.includes("/") || parsed.username || parsed.password || parsed.search || parsed.hash) throw new ManagedMatrixError("invalid_response", "Matrix content URI is malformed");
+		return { serverName: parsed.host, mediaId };
+	}
 
 	private async request(method: string, path: string, body?: JsonObject, signal?: AbortSignal): Promise<unknown> {
 		const safePath = path.split("?")[0]; let last: ManagedMatrixError | undefined;

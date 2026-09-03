@@ -52,7 +52,13 @@ const media = Type.Union([
 	envelope("relay", "media.chunk", strict({ deliveryId: id("delivery"), blobId: id("blob"), index: Type.Integer({ minimum: 0, maximum: 799 }), sha256: digest, data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }) })),
 	envelope("ordinary_adapter", "media.reject", strict({ deliveryId: id("delivery"), blobId: id("blob"), reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]) })),
 	envelope("coordinator_adapter", "media.reject", strict({ deliveryId: id("delivery"), blobId: id("blob"), reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]) })),
-	envelope("ordinary_adapter", "media.export", strict({ uploadId: id("upload"), workspaceArtifactId: text(128), mediaType: Type.Union([Type.Literal("image"), Type.Literal("audio"), Type.Literal("file")]) })),
+	envelope("ordinary_adapter", "artifact.begin", strict({ uploadId: id("upload"), blobId: id("blob"), sha256: digest, filename: text(255),
+		mimeType: text(127), mediaType: Type.Union([Type.Literal("image"), Type.Literal("audio"), Type.Literal("file")]),
+		byteLength: Type.Integer({ minimum: 1, maximum: MAX_BLOB_BYTES }), chunkCount: Type.Integer({ minimum: 1, maximum: 800 }),
+		width: Type.Optional(Type.Integer({ minimum: 1, maximum: 16_384 })), height: Type.Optional(Type.Integer({ minimum: 1, maximum: 16_384 })) })),
+	envelope("ordinary_adapter", "artifact.chunk", strict({ uploadId: id("upload"), blobId: id("blob"), index: Type.Integer({ minimum: 0, maximum: 799 }), sha256: digest,
+		data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }) })),
+	envelope("relay", "artifact.acknowledge", strict({ uploadId: id("upload"), status: Type.Union([Type.Literal("ready"), Type.Literal("sent")]) })),
 ]);
 const generation = Type.Union([
 	envelope("relay", "generation.activate", strict({ transitionId: id("transition"), generationId, ordinal: Type.Integer({ minimum: 1 }) })),
@@ -78,10 +84,17 @@ export function parseManagedSessionV2Envelope(value: unknown) {
 			throw new ManagedSessionContractError("malformed", "v2 media descriptor failed chunk or pixel bounds");
 		}
 	}
-	if (envelope.type === "media.chunk") {
+	if (envelope.type === "media.chunk" || envelope.type === "artifact.chunk") {
 		const data = Buffer.from(String(envelope.payload.data), "base64");
 		if (data.length < 1 || data.length > MAX_MEDIA_CHUNK_BYTES || data.toString("base64") !== envelope.payload.data || createHash("sha256").update(data).digest("hex") !== envelope.payload.sha256) {
 			throw new ManagedSessionContractError("malformed", "v2 media chunk failed canonical base64, size, or digest validation");
+		}
+	}
+	if (envelope.type === "artifact.begin") {
+		if (Math.ceil(Number(envelope.payload.byteLength) / MAX_MEDIA_CHUNK_BYTES) !== envelope.payload.chunkCount ||
+			(envelope.payload.mediaType === "image") !== (envelope.payload.width !== undefined && envelope.payload.height !== undefined) ||
+			Number(envelope.payload.width ?? 1) * Number(envelope.payload.height ?? 1) > 40_000_000 || /[\\/\u0000-\u001f\u007f]/.test(String(envelope.payload.filename))) {
+			throw new ManagedSessionContractError("malformed", "v2 artifact descriptor failed filename, chunk, or dimension bounds");
 		}
 	}
 	if (envelope.type === "activity.update") {

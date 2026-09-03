@@ -21,6 +21,7 @@ import {
 	type WorkspaceIdentity,
 } from "../contracts.js";
 import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind, type ReceivedImage } from "./client.js";
+import { resolveWorkspaceArtifact } from "./artifact-export.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	CHECKPOINT_ENTRY_TYPE,
@@ -122,6 +123,7 @@ interface AdapterEnvironment {
 	concept?: string;
 	bindingBoundaryEntryId?: string;
 	placement?: WorkspaceIdentity;
+	workspacePath?: string;
 }
 
 function environmentConfig(environment: NodeJS.ProcessEnv): AdapterEnvironment {
@@ -140,6 +142,7 @@ function environmentConfig(environment: NodeJS.ProcessEnv): AdapterEnvironment {
 		concept: environment.PI_MANAGED_SESSION_CONCEPT?.trim(),
 		bindingBoundaryEntryId: environment.PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID?.trim(),
 		placement: rootKey && workspace ? { rootKey, workspace, relativeCwd } : undefined,
+		workspacePath: environment.PI_MANAGED_SESSION_WORKSPACE_PATH?.trim(),
 	};
 }
 
@@ -208,8 +211,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const recoveredControlExecutions = new Set<string>();
 		const setCheckpointActive = (active: boolean): void => {
 			if (role !== "ordinary_adapter" || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
-			const names = pi.getActiveTools().filter((name) => name !== "remote_checkpoint");
-			pi.setActiveTools(active ? [...names, "remote_checkpoint"] : names);
+			const managed = ["remote_checkpoint", "remote_artifact_export"];
+			const names = pi.getActiveTools().filter((name) => !managed.includes(name));
+			pi.setActiveTools(active ? [...names, ...managed] : names);
 		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
 		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string }) => {
@@ -348,6 +352,21 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		};
 		let unregisterAloopCheckpointDelegate: () => void = () => undefined;
 		if (role === "ordinary_adapter") {
+			pi.registerTool({
+				name: "remote_artifact_export",
+				label: "Export Workspace Artifact",
+				description: "Intentionally send one bounded workspace-relative regular file to this managed Matrix room. Hidden/control paths, symlinks, traversal, executables, active content, malformed media, and files over 25 MiB are rejected. No per-file approval is requested.",
+				promptSnippet: "Use remote_artifact_export only when you intentionally want to send one workspace artifact to the operator's managed Matrix room.",
+				parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 512, description: "Path relative to the managed workspace root" }) }, { additionalProperties: false }),
+				execute: async (toolCallId, params) => {
+					if (!binding || !client?.connected || !config.placement || !config.workspacePath) throw new ManagedAdapterError("remote_artifact_export requires an active host-resolved managed project conversation");
+					const artifact = await resolveWorkspaceArtifact({ requestedPath: params.path, cwd: process.cwd(), workspacePath: config.workspacePath, placement: config.placement,
+						conversationId: binding.conversationId, toolCallId });
+					await client.exportArtifact(artifact);
+					return { content: [{ type: "text" as const, text: `Exported ${artifact.filename} (${artifact.mimeType}, ${artifact.byteLength} bytes) to the managed Matrix room.` }],
+						details: { filename: artifact.filename, mimeType: artifact.mimeType, mediaType: artifact.mediaType, byteLength: artifact.byteLength } };
+				},
+			});
 			pi.registerTool({
 			name: "remote_checkpoint",
 			label: "Remote Checkpoint",

@@ -29,6 +29,7 @@ import { redactManagedValue } from "./redaction.js";
 import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
 import { BlobSpool } from "./blob-spool.js";
 import { ManagedImageTransport } from "./image-media.js";
+import { ManagedArtifactExporter } from "./artifact-export.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -66,11 +67,13 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	try {
 		await registry.load();
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
-		const media = new ManagedImageTransport(new BlobSpool(resolve(runtimeDirectory, "media-spool")), matrix,
-			environment.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER?.trim());
+		const spool = new BlobSpool(resolve(runtimeDirectory, "media-spool"));
+		const media = new ManagedImageTransport(spool, matrix, environment.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER?.trim());
 		await media.initialize(registry.liveMediaBlobIds());
 		const authenticatedUserId = await matrix.whoami();
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
+		const artifactExporter = new ManagedArtifactExporter(spool, registry, matrix);
+		await artifactExporter.reconcile();
 		const controlPollPublisher = new ControlPollPublisher(registry, matrix);
 		await controlPollPublisher.reconcile();
 		const coordinatorValues = [
@@ -94,7 +97,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await activityProjector.load();
 		const eventProjector = new RelayEventProjector(registry, matrix);
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "media.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "media.result" | "artifact.acknowledge" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -196,6 +199,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
 					}
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
+				}
+				if (envelope.type === "artifact.begin") {
+					if (attachment.role !== "ordinary_adapter") throw new RelayRegistryError("permission_denied", "Artifact export requires an ordinary managed adapter");
+					const status = await artifactExporter.begin(attachment.conversationId, envelope.payload as never);
+					return response(attachment.conversationId, envelope.messageId, "artifact.acknowledge", { uploadId: envelope.payload.uploadId, status });
+				}
+				if (envelope.type === "artifact.chunk") {
+					if (attachment.role !== "ordinary_adapter") throw new RelayRegistryError("permission_denied", "Artifact export requires an ordinary managed adapter");
+					const payload = envelope.payload as { uploadId: string; blobId: string; index: number; sha256: string; data: string };
+					const status = await artifactExporter.chunk(attachment.conversationId, payload);
+					return response(attachment.conversationId, envelope.messageId, "artifact.acknowledge", { uploadId: payload.uploadId, status });
 				}
 				if (envelope.type === "media.reject") {
 					const payload = envelope.payload as { deliveryId: string; blobId: string; reason: "unsupported_model" | "invalid_media" };
