@@ -19,18 +19,18 @@ export type AloopHandoffV3 = {
 	timestamp: string;
 };
 
-const MAX_HANDOFF_LIST_ITEMS = 3;
-const REDACTED_HANDOFF_VALUE = "[redacted]";
-
-function clipHandoffText(value: string, limit: number): string {
-	const points = Array.from(value);
-	return points.length <= limit ? value : `${points.slice(0, limit - 1).join("")}…`;
-}
+const REDACTED_HANDOFF_VALUE = "•";
+export const ALOOP_HANDOFF_LIMITS = { summary: 200, nextAction: 200, findings: 6, finding: 80, decisions: 4, decision: 80, verificationItems: 6, verification: 100 } as const;
 
 /** Removes local recovery plumbing before any caller-provided text reaches a GitHub handoff. */
 function redactHandoffText(value: string): string {
 	return value
-		.replace(/(?:~|\/)[^\s<>"']*?\/\.pi\/tmp(?:\/[^\s<>"']*)?|\b\.pi\/tmp(?:\/[^\s<>"']*)?/g, REDACTED_HANDOFF_VALUE)
+		.replace(/\bfile:\/\/[^\s<>"']+/gi, REDACTED_HANDOFF_VALUE)
+		.replace(/\b[A-Za-z]:[\\/][^\s<>"']+/g, REDACTED_HANDOFF_VALUE)
+		.replace(/~[A-Za-z0-9._-]*[\\/][^\s<>"']+/g, REDACTED_HANDOFF_VALUE)
+		.replace(/\\{1,2}[^\s<>"']+/g, REDACTED_HANDOFF_VALUE)
+		.replace(/(^|[^A-Za-z0-9_\/])\/(?!\/)[^\s<>"']+/g, `$1${REDACTED_HANDOFF_VALUE}`)
+		.replace(/\b\.pi\/tmp(?:\/[^\s<>"']*)?/g, REDACTED_HANDOFF_VALUE)
 		.replace(/\bverify-[a-f0-9]{12}-\d+-[a-f0-9]{8}\b/gi, REDACTED_HANDOFF_VALUE)
 		.replace(/\bspool(?:\s+(?:id|identifier))?\s*(?:[:=]\s*|\s+)[a-f0-9]{24,64}\b/gi, `spool ${REDACTED_HANDOFF_VALUE}`)
 		.replace(/\b(?:spool|blob)-[a-z0-9][a-z0-9_-]{7,}\b/gi, REDACTED_HANDOFF_VALUE)
@@ -38,22 +38,9 @@ function redactHandoffText(value: string): string {
 }
 
 export function normalizeAloopHandoffV3(input: AloopHandoffV3): AloopHandoffV3 {
-	// An unsuccessful handoff is the durable complete state for the next worker.
-	// Refuse, rather than silently dropping, findings which exceed its bounded format.
-	if (input.outstandingFindings.length > MAX_HANDOFF_LIST_ITEMS) {
-		throw new Error(`Aloop v3 handoff supports at most ${MAX_HANDOFF_LIST_ITEMS} outstanding findings; consolidate them before finalizing.`);
-	}
-	const text = (value: string, limit: number) => clipHandoffText(redactHandoffText(value), limit);
-	const list = (values: string[]) => values.slice(0, MAX_HANDOFF_LIST_ITEMS).map((value) => text(value, 100));
-	const verification = input.verification.map((value) => text(value, 100));
-	const lastMatching = (pattern: RegExp) => [...verification].reverse().find((value) => pattern.test(value));
-	const required = [
-		lastMatching(/^(Independent review completed|Human review decision recorded) at [0-9a-f]{7,64}\.$/i),
-		lastMatching(/^Canonical command passed at [0-9a-f]{7,64}\.$/i),
-		lastMatching(/^Production integration passed at [0-9a-f]{7,64}\.$/i),
-	].filter((value): value is string => value !== undefined);
-	const advisory = verification.filter((value) => !required.includes(value)).slice(0, Math.max(0, 3 - required.length));
-	return { ...input, summary: text(input.summary, 300), outstandingFindings: list(input.outstandingFindings), decisions: list(input.decisions), verification: [...advisory, ...required], nextAction: text(input.nextAction, 300) };
+	const text = (value: string) => redactHandoffText(value);
+	const list = (values: string[]) => values.map(text);
+	return { ...input, summary: text(input.summary), outstandingFindings: list(input.outstandingFindings), decisions: list(input.decisions), verification: list(input.verification), nextAction: text(input.nextAction) };
 }
 
 function visibleHandoffText(value: string): string {
@@ -61,17 +48,23 @@ function visibleHandoffText(value: string): string {
 }
 
 export function formatAloopHandoffV3(input: AloopHandoffV3): string {
+	const limits = ALOOP_HANDOFF_LIMITS;
+	const boundedList = (values: string[], count: number, length: number) => values.length <= count && values.every((value) => Array.from(value).length <= length);
 	if (input.version !== 3 || !["accepted", "incomplete", "decision-required", "environment-blocked", "rejected"].includes(input.outcome)
 		|| !Number.isInteger(input.issue) || input.issue <= 0 || !/^[0-9a-f]{7,64}$/i.test(input.issueBaseCommit)
 		|| !/^[0-9a-f]{7,64}\.\.[0-9a-f]{7,64}$/i.test(input.commitRange) || input.commitRange.split("..", 1)[0] !== input.issueBaseCommit
-		|| !/^[a-f0-9]{24}$/.test(input.attemptKey) || input.timestamp.length > 64 || Number.isNaN(Date.parse(input.timestamp))) {
+		|| !/^[a-f0-9]{24}$/.test(input.attemptKey) || input.timestamp.length > 64 || Number.isNaN(Date.parse(input.timestamp))
+		|| Array.from(input.summary).length > limits.summary || Array.from(input.nextAction).length > limits.nextAction
+		|| !boundedList(input.outstandingFindings, limits.findings, limits.finding) || !boundedList(input.decisions, limits.decisions, limits.decision)
+		|| !boundedList(input.verification, limits.verificationItems, limits.verification)
+		|| (input.outcome === "accepted" && input.outstandingFindings.length > 0)) {
 		throw new Error("Invalid fixed fields in aloop v3 handoff.");
 	}
 	const handoff = normalizeAloopHandoffV3(input);
 	const payload = Buffer.from(JSON.stringify(handoff), "utf8").toString("base64url");
 	const lines = handoff.outcome === "accepted"
-		? [`Aloop accepted ${handoff.commitRange}.`, handoff.summary, `Outstanding: ${handoff.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Verification: ${handoff.verification.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`]
-		: [`Aloop attempt settled as ${handoff.outcome}.`, handoff.summary, `Outstanding: ${handoff.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`];
+		? [`Aloop accepted ${handoff.commitRange}.`, handoff.summary, "Outstanding: none.", `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Verification: ${handoff.verification.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`]
+		: [`Aloop attempt settled as ${handoff.outcome}.`, handoff.summary, `Outstanding: ${handoff.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Verification: ${handoff.verification.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`];
 	const body = `${lines.map(visibleHandoffText).join("\n\n")}\n\n${HANDOFF_V3_PREFIX}${payload} -->`;
 	if (Buffer.byteLength(body) > 19_000) throw new Error("Aloop v3 handoff exceeds the safe GitHub retrieval bound.");
 	return body;
@@ -92,11 +85,12 @@ export function parseAloopHandoffV3(body: string): AloopHandoffV3 | null {
 			&& value.commitRange.split("..", 1)[0] === value.issueBaseCommit
 			&& outcomes.includes(value.outcome) && typeof value.summary === "string" && value.summary.trim()
 			&& strings(value.outstandingFindings) && strings(value.decisions) && strings(value.verification)
-			&& Array.from(value.summary).length <= 300
-			&& value.outstandingFindings.length <= MAX_HANDOFF_LIST_ITEMS && value.outstandingFindings.every((item: string) => Array.from(item).length <= 100)
-			&& value.decisions.length <= MAX_HANDOFF_LIST_ITEMS && value.decisions.every((item: string) => Array.from(item).length <= 100)
-			&& value.verification.length <= MAX_HANDOFF_LIST_ITEMS && value.verification.every((item: string) => Array.from(item).length <= 100)
-			&& typeof value.nextAction === "string" && value.nextAction.trim() && Array.from(value.nextAction).length <= 300
+			&& Array.from(value.summary).length <= ALOOP_HANDOFF_LIMITS.summary
+			&& value.outstandingFindings.length <= ALOOP_HANDOFF_LIMITS.findings && value.outstandingFindings.every((item: string) => Array.from(item).length <= ALOOP_HANDOFF_LIMITS.finding)
+			&& value.decisions.length <= ALOOP_HANDOFF_LIMITS.decisions && value.decisions.every((item: string) => Array.from(item).length <= ALOOP_HANDOFF_LIMITS.decision)
+			&& value.verification.length <= ALOOP_HANDOFF_LIMITS.verificationItems && value.verification.every((item: string) => Array.from(item).length <= ALOOP_HANDOFF_LIMITS.verification)
+			&& !(value.outcome === "accepted" && value.outstandingFindings.length > 0)
+			&& typeof value.nextAction === "string" && value.nextAction.trim() && Array.from(value.nextAction).length <= ALOOP_HANDOFF_LIMITS.nextAction
 			&& typeof value.attemptKey === "string" && /^[a-f0-9]{24}$/.test(value.attemptKey)
 			&& typeof value.timestamp === "string" && value.timestamp.length <= 64 && !Number.isNaN(Date.parse(value.timestamp));
 		if (valid) return value as AloopHandoffV3;

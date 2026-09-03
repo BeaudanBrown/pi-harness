@@ -8,6 +8,7 @@ import { runAloopPatchWorker, runAloopWorker, selectAloopPatchModel } from "../g
 import { balancedLogExcerpt, runDurableCommand, writeDurableResult } from "../worker-runner/command-execution.js";
 import { snapshotAloopPolicy, type AloopCommandDefinition, type AloopPolicySnapshot } from "./policy.js";
 import {
+	ALOOP_HANDOFF_LIMITS,
 	acceptedOpenAloopIssues,
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
@@ -790,11 +791,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		parameters: Type.Object({
 			issue: Type.Number({ minimum: 1 }),
 			outcome: Type.Union([Type.Literal("accepted"), Type.Literal("incomplete"), Type.Literal("decision-required"), Type.Literal("environment-blocked"), Type.Literal("rejected")]),
-			summary: Type.String({ minLength: 1 }),
-			outstanding_findings: Type.Array(Type.String()),
-			decisions: Type.Array(Type.String()),
-			verification: Type.Array(Type.String()),
-			next_action: Type.String({ minLength: 1 }),
+			summary: Type.String({ minLength: 1, maxLength: ALOOP_HANDOFF_LIMITS.summary }),
+			outstanding_findings: Type.Array(Type.String({ maxLength: ALOOP_HANDOFF_LIMITS.finding }), { maxItems: ALOOP_HANDOFF_LIMITS.findings }),
+			decisions: Type.Array(Type.String({ maxLength: ALOOP_HANDOFF_LIMITS.decision }), { maxItems: ALOOP_HANDOFF_LIMITS.decisions }),
+			verification: Type.Array(Type.String({ maxLength: ALOOP_HANDOFF_LIMITS.verification }), { maxItems: 3, description: "Advisory entries; aloop reserves three additional slots for review, canonical, and production receipts." }),
+			next_action: Type.String({ minLength: 1, maxLength: ALOOP_HANDOFF_LIMITS.nextAction }),
 		}),
 		async execute(_id, params: { issue: number; outcome: "accepted" | "incomplete" | "decision-required" | "environment-blocked" | "rejected"; summary: string; outstanding_findings: string[]; decisions: string[]; verification: string[]; next_action: string }, signal, onUpdate, ctx) {
 			if (params.outcome === "accepted" && params.outstanding_findings.length > 0) throw new Error("Accepted finalization requires all outstanding findings to be resolved.");

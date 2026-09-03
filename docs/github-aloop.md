@@ -130,8 +130,12 @@ production commands, publishes one concise v3 current-state handoff, closes the
 child, updates the cached graph, and returns the next frontier. Canonical or
 production failure cannot be overridden autonomously and leaves the attempt
 unsettled with durable logs and diagnosis. Unsuccessful finalization publishes
-one complete current-state snapshot for the next fresh worker. V3 comments show
-only useful outcome, findings, decisions, verification, and next action; an
+one complete bounded current-state snapshot for the next fresh worker. The tool
+schema requires semantic consolidation when state exceeds 6 findings (80
+characters each), 4 decisions (80 each), 3 advisory verification entries (100
+each, with 3 additional slots reserved for generated receipts), or 200-character
+summary/next-action fields; every accepted input item is preserved
+rather than silently truncated. V3 comments show those complete bounded fields; an
 HTML marker carries hidden idempotent recovery state. Readers retain minimal
 v1/v2 compatibility, but writers emit only v3.
 
