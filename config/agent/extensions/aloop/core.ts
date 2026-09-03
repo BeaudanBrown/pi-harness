@@ -239,24 +239,34 @@ export function selectAloopLeaf(context: GitHubEpicContext, issueNumber: number)
 
 export type AloopAcceptedRecoveryRecord = { issue: number; head: string; commentSha256: string };
 
-export function validatedChildReviewEvidence(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, trustedAuthor: string | null): string | null {
-	if (!trustedAuthor) return null;
+type CurrentStateHandoff = { handoff: AloopHandoffV3; body: string; author: string | null; url: string | null };
+
+/** The newest valid v3 snapshot is authoritative; malformed comments are not state snapshots. */
+export function latestCurrentStateHandoff(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">): CurrentStateHandoff | null {
 	for (const comment of [...issue.recentHandoffs].reverse()) {
-		if (comment.author !== trustedAuthor) continue;
-		const v3 = parseAloopHandoffV3(comment.body);
-		if (v3?.issue === issue.number && v3.outcome === "accepted" && v3.outstandingFindings.length === 0) {
-			const head = v3.commitRange.split("..").at(-1)!;
-			const reviewed = v3.verification.some((item) => item === `Independent review completed at ${head}.` || item === `Human review decision recorded at ${head}.`);
-			const verified = v3.verification.some((item) => item === `Canonical command passed at ${head}.`);
-			if (reviewed && verified) return `Accepted v3 handoff ${comment.url ?? "recorded on GitHub"} binds review and canonical verification to ${head}.`;
-			continue;
-		}
-		const legacy = parseAloopHandoffs([comment]).find((handoff) => handoff.issue === issue.number);
-		if (legacy?.successful && legacy.commit && legacy.verificationReceiptId && legacy.verification.some((item) => item.trim()) && legacy.acceptanceCriteriaAssessment.some((item) => item.trim())) {
-			return `Validated legacy read-only handoff ${comment.url ?? "recorded on GitHub"} binds acceptance review and verification receipt ${legacy.verificationReceiptId} to ${legacy.commit}.`;
-		}
+		const handoff = parseAloopHandoffV3(comment.body);
+		if (handoff?.issue === issue.number) return { handoff, body: comment.body, author: comment.author, url: comment.url };
 	}
 	return null;
+}
+
+/** Validates the single current v3 state used by both recovery and epic closure evidence. */
+export function validatedAcceptedCurrentStateHandoff(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, expectedHead?: string): CurrentStateHandoff | null {
+	const current = latestCurrentStateHandoff(issue);
+	if (!current || current.handoff.outcome !== "accepted" || current.handoff.outstandingFindings.length !== 0) return null;
+	const head = current.handoff.commitRange.split("..").at(-1)!;
+	if (expectedHead !== undefined && head !== expectedHead) return null;
+	const reviewed = current.handoff.verification.some((item) => item === `Independent review completed at ${head}.` || item === `Human review decision recorded at ${head}.`);
+	const verified = current.handoff.verification.some((item) => item === `Canonical command passed at ${head}.`);
+	return reviewed && verified ? current : null;
+}
+
+export function validatedChildReviewEvidence(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, trustedAuthor: string | null): string | null {
+	if (!trustedAuthor) return null;
+	const current = validatedAcceptedCurrentStateHandoff(issue);
+	if (!current || current.author !== trustedAuthor) return null;
+	const head = current.handoff.commitRange.split("..").at(-1)!;
+	return `Accepted v3 handoff ${current.url ?? "recorded on GitHub"} binds review and canonical verification to ${head}.`;
 }
 
 export function acceptedOpenAloopIssues(context: GitHubEpicContext, recoveryRecords?: ReadonlyMap<string, AloopAcceptedRecoveryRecord>): number[] {

@@ -139,8 +139,9 @@ There is no semantic retry-count gate. The
 supervisor chooses a narrow patch, trivial direct edit, fresh full remediation,
 or human checkpoint according to the evidence. Accepted closure recovery is
 reconstructed only from the authenticated GitHub handoff and its matching
-GitHub-recorded human authorization, plus the clean bound Git `HEAD`; local
-queues or approval files never authorize closure after restart. `aloop_context`
+GitHub-recorded human authorization, plus the clean bound Git `HEAD`; recovery
+authorization is GitHub-recorded, not local. Local queues or approval files
+never authorize closure after restart. `aloop_context`
 serves the startup-cached GitHub graph and accepts an explicit refresh;
 successful publication and closure update that snapshot in memory.
 

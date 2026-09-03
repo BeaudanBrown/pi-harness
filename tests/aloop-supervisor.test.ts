@@ -28,6 +28,7 @@ import {
 	parseAloopHandoffV3,
 	parseAloopRunRequest,
 	selectAloopLeaf,
+	validatedAcceptedCurrentStateHandoff,
 	validatedChildReviewEvidence,
 	type AloopAttemptHandoff,
 } from "../config/agent/extensions/aloop/core.js";
@@ -180,6 +181,14 @@ test("epic evidence accepts only validated accepted handoffs bound to review and
 	assert.equal(validatedChildReviewEvidence(issue({ number: 2, title: "Rejected", state: "closed", recentHandoffs: [comment(3, formatAloopHandoffV3({ ...base, outcome: "rejected", verification: [`Independent review completed at ${"b".repeat(40)}.`, `Canonical command passed at ${"b".repeat(40)}.`] }), "2026-09-03T00:00:00Z")] }), "supervisor"), null);
 	const forged = { ...comment(4, valid, "2026-09-03T00:00:00Z"), author: "untrusted-user" };
 	assert.equal(validatedChildReviewEvidence(issue({ number: 2, title: "Untrusted", state: "closed", recentHandoffs: [forged] }), "supervisor"), null);
+	const supersedingRejected = formatAloopHandoffV3({ ...base, outcome: "rejected", verification: [], attemptKey: "d".repeat(24), timestamp: "2026-09-03T00:01:00Z" });
+	const superseded = issue({ number: 2, title: "Superseded", state: "closed", recentHandoffs: [comment(1, valid, "2026-09-03T00:00:00Z"), comment(2, supersedingRejected, "2026-09-03T00:01:00Z")] });
+	assert.equal(validatedChildReviewEvidence(superseded, "supervisor"), null, "epic evidence must not fall back to an older accepted state");
+	assert.equal(validatedAcceptedCurrentStateHandoff(superseded, "b".repeat(40)), null, "recovery uses the same current-state validator");
+	const unresolved = formatAloopHandoffV3({ ...base, outstandingFindings: ["Follow up"], verification: [`Independent review completed at ${"b".repeat(40)}.`, `Canonical command passed at ${"b".repeat(40)}.`] });
+	assert.equal(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Unresolved", recentHandoffs: [comment(3, unresolved, "2026-09-03T00:02:00Z")] }), "b".repeat(40)), null, "recovery rejects accepted states with outstanding findings");
+	const missingCanonical = formatAloopHandoffV3({ ...base, verification: [`Independent review completed at ${"b".repeat(40)}.`] });
+	assert.equal(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Unverified", recentHandoffs: [comment(4, missingCanonical, "2026-09-03T00:03:00Z")] }), "b".repeat(40)), null, "recovery requires canonical evidence at the recovered HEAD");
 });
 
 test("v3 handoffs show concise current state while hiding recoverable snapshot payload", () => {
@@ -220,7 +229,7 @@ test("attempt recovery uses the latest durable non-null patch commit", async () 
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("aloop recovery requires trusted provenance and accepts an exact human authorization on a diverged clean HEAD", async () => {
+test("aloop recovery requires GitHub-recorded authorization and evidence bound to the clean current HEAD", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-profile-"));
 	try {
 		writeFileSync(join(cwd, ".aloop.json"), verificationPolicyDocument);
@@ -281,7 +290,7 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 		writeFileSync(join(artifactPath, "result.json"), JSON.stringify({ status: "completed", commit: "a".repeat(40), artifacts: { directory: artifactDirectory } }));
 		const accepted = formatAloopHandoffV3({
 			version: 3, issue: 2, issueBaseCommit: "a".repeat(40), commitRange: `${"a".repeat(40)}..${"a".repeat(40)}`,
-			outcome: "accepted", summary: "done", outstandingFindings: [], decisions: [], verification: ["passed"],
+			outcome: "accepted", summary: "done", outstandingFindings: [], decisions: [], verification: [`Independent review completed at ${"a".repeat(40)}.`, `Canonical command passed at ${"a".repeat(40)}.`],
 			nextAction: "close", attemptKey, timestamp: "2026-09-03T00:00:00Z",
 		});
 		mkdirSync(join(cwd, ".pi/tmp/aloop/finalizations"), { recursive: true });
@@ -302,15 +311,13 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 		assert.match(untrusted.content[0].text, /aloop-authorize-recovery/);
 		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
 		assert.ok(activeTools.includes("aloop_finish_attempt"), "human boundary must retain active aloop tools for slash-command continuation");
-		fakeHead = "b".repeat(40);
 		await commands.get("aloop-authorize-recovery")!.handler(`2 ${attemptKey}`, ctx);
 		assert.equal(require("node:fs").existsSync(join(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`)), false);
 		assert.match(activeGraph.issues[1]!.recentHandoffs.at(-1)!.body, /pi-aloop-recovery-authorization:v1:/);
 		await commands.get("aloop")!.handler("#1", ctx);
 		fakeHead = "c".repeat(40);
-		const changedAfterApproval = await tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx);
-		assert.equal(changedAfterApproval.terminate, true);
-		fakeHead = "b".repeat(40);
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx), /durable review and canonical verification evidence bound to the clean current HEAD/);
+		fakeHead = "a".repeat(40);
 		const recovered = await tools.get("aloop_finish_attempt").execute("recover", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(recovered.details.idempotent, true);
 		assert.equal(closes, 1);

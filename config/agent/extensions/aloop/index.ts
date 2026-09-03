@@ -19,6 +19,7 @@ import {
 	parseAloopHandoffs,
 	parseAloopRunRequest,
 	selectAloopLeaf,
+	validatedAcceptedCurrentStateHandoff,
 	validatedChildReviewEvidence,
 	type AloopAttemptRecord,
 	type AloopRunBudget,
@@ -524,7 +525,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	});
 
 	pi.registerCommand("aloop-authorize-recovery", {
-		description: "Human authorization to close one accepted handoff lacking local provenance: /aloop-authorize-recovery <issue> <attempt-key>",
+		description: "Human authorization to close one accepted handoff requiring GitHub-recorded authorization: /aloop-authorize-recovery <issue> <attempt-key>",
 		handler: async (args, ctx) => {
 			const match = args.trim().match(/^#?(\d+)\s+([a-f0-9]{24})$/);
 			if (!match) throw new Error("Usage: /aloop-authorize-recovery <issue> <attempt-key>");
@@ -809,6 +810,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						]);
 						if (head.code !== 0 || status.code !== 0 || status.stdout.trim()) throw new Error("Recovery closure requires a clean current worktree.");
 						const closureHead = head.stdout.trim();
+						const validated = validatedAcceptedCurrentStateHandoff(issue, closureHead);
+						if (!validated || validated.handoff.attemptKey !== settled.attemptKey || validated.body !== settledComment.body) {
+							throw new Error("Recovery closure requires the latest accepted v3 handoff with no findings and durable review and canonical verification evidence bound to the clean current HEAD.");
+						}
 						const automaticProvenance = publishedAttemptDigests.get(settled.attemptKey) === createHash("sha256").update(settledComment.body).digest("hex") || authenticatedSupervisorComment(settledComment.author);
 						const explicitAuthorization = recoveryAuthorized(params.issue, settled, settledComment.body, closureHead, issue.recentHandoffs);
 						if (!automaticProvenance && !explicitAuthorization) {
