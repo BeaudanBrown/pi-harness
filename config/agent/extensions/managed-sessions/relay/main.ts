@@ -270,7 +270,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					"Managed conversation wake failed; queued input remains available for retry.");
 			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
-			() => controlPollPublisher.reconcile());
+			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile());
 			coordinatorRouter.start();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}

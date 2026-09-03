@@ -5,15 +5,16 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import {
-	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, deriveMatrixTransactionId, deriveTranscriptEntryId,
+	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveCheckpointPollAnswerId, deriveCheckpointPollIntentHash, deriveChunkId, deriveConversationId, deriveDeliveryId, deriveMatrixTransactionId, deriveTranscriptEntryId,
 	encodeNdjsonEnvelope, parseNdjsonEnvelope, type ConversationManifest, type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { renderRemoteCheckpoint } from "../config/agent/extensions/managed-sessions/checkpoint.js";
+import { renderRemoteCheckpoint, renderRemoteCheckpointPollQuestion } from "../config/agent/extensions/managed-sessions/checkpoint.js";
 import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
 import { CoordinatorRouter, authorizedRoomEvents, operatorTextEvents, parseTypedRemoteControl } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
+import { CheckpointPollPublisher } from "../config/agent/extensions/managed-sessions/relay/checkpoint-poll-publisher.js";
 import { ControlPollPublisher } from "../config/agent/extensions/managed-sessions/relay/control-poll-publisher.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
@@ -395,6 +396,164 @@ test("persisted unfinished delivery wakes a crashed process but explicit cancell
 	await registry.cancelPendingInputs(manifest.conversationId);
 	await router.reconcileWake();
 	assert.equal(launches, 1, "durably cancelled input is never recovered");
+});
+
+test("checkpoint poll question and fallback enforce the single-event byte bound", () => {
+	assert.throws(() => renderRemoteCheckpointPollQuestion({ kind: "question", decision: "😀".repeat(600), context: "😀".repeat(600),
+		options: Array.from({ length: 8 }, () => "😀".repeat(150)) }), /single Matrix event limit/);
+	assert.match(renderRemoteCheckpointPollQuestion({ kind: "question", decision: "Choose", options: ["One", "Two"] }), /reply with text/);
+});
+
+test("checkpoint option polls persist opaque mappings and recover the same accepted Matrix transaction", async () => {
+	const { root, registry, manifest } = await fixture();
+	const deliveryId = deriveDeliveryId(manifest.conversationId, "$poll-origin");
+	const entryId = deriveTranscriptEntryId(manifest.piSessionId, "checkpoint:checkpoint-poll-recovery");
+	const transactionId = deriveMatrixTransactionId(manifest.conversationId, entryId, 0);
+	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId, matrixEventId: "$poll-origin", kind: "prompt", body: "choose", status: "accepted" });
+	await registry.acknowledgeInput(manifest.conversationId, deliveryId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "poll-origin-user"));
+	const intentBase = { checkpointId: "checkpoint-poll-recovery", originDeliveryId: deliveryId, entryId, transactionId,
+		question: "Choose one, or reply with text.", options: ["First exact option", "Second exact option"].map((text, index) => ({
+			answerId: deriveCheckpointPollAnswerId("checkpoint-poll-recovery", index), text,
+		})) };
+	const intent = { ...intentBase, intentHash: deriveCheckpointPollIntentHash(intentBase) };
+	await registry.beginProjection(manifest.conversationId, { entryId, kind: "checkpoint", status: "projecting", contentHash: intent.intentHash, originDeliveryId: deliveryId,
+		chunks: [{ chunkId: deriveChunkId(entryId, 0), transactionId, status: "pending" }] });
+	const transactions: string[] = [];
+	const matrix = new ManagedMatrixClient(config, async (input) => {
+		const path = new URL(String(input)).pathname;
+		if (path.includes("/m.poll.start/")) { transactions.push(path.split("/").at(-1)!); return Response.json({ event_id: "$checkpoint-poll" }); }
+		throw new Error(`unexpected request ${path}`);
+	}, [manifest.roomId]);
+	const crashing = new CheckpointPollPublisher(registry, matrix, () => { throw new Error("crash after poll acceptance"); });
+	await assert.rejects(crashing.publish(manifest.conversationId, manifest.roomId, intent), /crash after poll acceptance/);
+	assert.deepEqual(registry.snapshot().conversations[0]?.publishingCheckpointPoll, intent);
+	const restarted = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
+	await restarted.load();
+	await new CheckpointPollPublisher(restarted, matrix).reconcile();
+	assert.deepEqual(transactions, [transactionId, transactionId]);
+	assert.equal(restarted.snapshot().conversations[0]?.publishingCheckpointPoll, null);
+	assert.equal(restarted.snapshot().conversations[0]?.activeCheckpointPoll?.pollEventId, "$checkpoint-poll");
+	assert.notEqual(intent.options[0]?.answerId, intent.options[0]?.text, "persisted answer IDs are opaque");
+	const answer = { deliveryId: deriveDeliveryId(manifest.conversationId, "$recovery-text"), matrixEventId: "$recovery-text", kind: "prompt", body: "Other", status: "accepted" };
+	const closing = await restarted.acceptActiveCheckpointText(manifest.conversationId, answer);
+	assert.ok(closing);
+	const closeTransactions: string[] = []; let failClose = true;
+	const closingMatrix = new ManagedMatrixClient(config, async (input) => {
+		const path = new URL(String(input)).pathname; closeTransactions.push(path.split("/").at(-1)!);
+		if (failClose) { failClose = false; throw new Error("close outage"); }
+		return Response.json({ event_id: "$closed" });
+	}, [manifest.roomId], { maxAttempts: 1 });
+	await assert.rejects(new CheckpointPollPublisher(restarted, closingMatrix).close(manifest.conversationId, manifest.roomId, closing!), /failed/);
+	const closureRestart = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
+	await closureRestart.load();
+	assert.equal(closureRestart.closingCheckpointPolls().length, 1, "accepted answer retains a durable poll closure during outage");
+	await new CheckpointPollPublisher(closureRestart, closingMatrix).reconcile();
+	assert.deepEqual(closeTransactions, [closing!.closureTransactionId, closing!.closureTransactionId]);
+	assert.equal(closureRestart.closingCheckpointPolls().length, 0);
+});
+
+test("text waits behind an unresolved checkpoint poll publication without advancing the cursor", async () => {
+	const { registry, manifest } = await fixture();
+	const originId = deriveDeliveryId(manifest.conversationId, "$publishing-origin");
+	const entryId = deriveTranscriptEntryId(manifest.piSessionId, "checkpoint:publishing-race");
+	const transactionId = deriveMatrixTransactionId(manifest.conversationId, entryId, 0);
+	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId: originId, matrixEventId: "$publishing-origin", kind: "prompt", body: "choose", status: "accepted" });
+	await registry.acknowledgeInput(manifest.conversationId, originId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "publishing-origin-user"));
+	const intentBase = { checkpointId: "publishing-race", originDeliveryId: originId, entryId, transactionId,
+		question: "Choose", options: [{ answerId: deriveCheckpointPollAnswerId("publishing-race", 0), text: "One" }] };
+	const intent = { ...intentBase, intentHash: deriveCheckpointPollIntentHash(intentBase) };
+	await registry.beginProjection(manifest.conversationId, { entryId, kind: "checkpoint", status: "projecting", contentHash: intent.intentHash, originDeliveryId: originId,
+		chunks: [{ chunkId: deriveChunkId(entryId, 0), transactionId, status: "pending" }] });
+	await registry.beginCheckpointPollPublication(manifest.conversationId, intent);
+	let diagnostics = 0; let syncCalls = 0;
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/sync")) { syncCalls += 1; if (syncCalls === 1) return Response.json(sync([event("$publication-window-text", "Fallback answer")]));
+			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true })); }
+		return Response.json({ event_id: "$ok" });
+	}, [manifest.roomId]);
+	const router = new CoordinatorRouter(manifest, registry, matrix, { sendToConversation: () => false } as unknown as ManagedSessionIpcServer,
+		async () => undefined, undefined, undefined, () => { diagnostics += 1; });
+	router.start();
+	for (let attempt = 0; attempt < 100 && diagnostics === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	await router.stop();
+	assert.equal(diagnostics > 0, true);
+	assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor, { status: "established", since: "controls-fixture-cursor" });
+	assert.equal(registry.pendingInputs(manifest.conversationId).some((input) => input.matrixEventId === "$publication-window-text"), false);
+	assert.equal(registry.hasPublishingCheckpointPoll(manifest.conversationId), true);
+});
+
+test("first valid checkpoint vote resumes once with exact option text and retires late votes", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const deliveryId = deriveDeliveryId(manifest.conversationId, "$vote-origin");
+	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId, matrixEventId: "$vote-origin", kind: "prompt", body: "choose", status: "accepted" });
+	await registry.acknowledgeInput(manifest.conversationId, deliveryId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "vote-origin-user"));
+	let pollContent: Record<string, unknown> | undefined; let syncCount = 0; const pollEnds: string[] = [];
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname; const method = init?.method ?? "GET";
+		if (method === "PUT" && path.includes("/m.poll.start/")) { pollContent = JSON.parse(String(init?.body)); return Response.json({ event_id: "$vote-poll" }); }
+		if (method === "GET" && path.endsWith("/event/%24vote-poll")) return Response.json({ sender: config.botUserId, type: "m.poll.start", content: pollContent });
+		if (method === "PUT" && path.includes("/m.poll.end/")) { pollEnds.push(path); return Response.json({ event_id: "$poll-end" }); }
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/sync")) {
+			syncCount += 1;
+			if (syncCount > 1) return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true }));
+			const firstAnswer = deriveCheckpointPollAnswerId("checkpoint-vote", 1);
+			const changedAnswer = deriveCheckpointPollAnswerId("checkpoint-vote", 0);
+			const vote = (id: string, answerId: string, sender = config.operatorUserId) => ({ event_id: id, origin_server_ts: Date.now(), sender, type: "m.poll.response",
+				content: { "m.selections": [answerId], "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } });
+			const cleared = { ...vote("$cleared-vote", firstAnswer), content: { "m.selections": [], "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } };
+			return Response.json(sync([vote("$foreign-vote", firstAnswer, "@foreign:example.com"), cleared, vote("$malformed-vote", "unknown-answer"),
+				vote("$first-vote", firstAnswer), vote("$changed-vote", changedAnswer), vote("$late-vote", firstAnswer)]));
+		}
+		throw new Error(`unexpected request ${method} ${path}`);
+	}, [manifest.roomId]);
+	const projector = new RelayEventProjector(registry, matrix);
+	await projector.projectCheckpoint({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "vote-offer", conversationId: manifest.conversationId,
+		role: "coordinator_adapter", type: "checkpoint.offer", payload: { checkpointId: "checkpoint-vote", originDeliveryId: deliveryId,
+			checkpoint: { kind: "question", decision: "Choose release mode", context: "Only one vote is accepted.", options: ["Hold", "Release exactly"] } } });
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "vote-ipc") }); await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined, undefined, undefined, undefined, undefined,
+		() => projector.checkpointPollPublisher.reconcile());
+	const delivered = readMany(socket, 1); router.start();
+	const [answer] = await delivered; await router.stop();
+	assert.deepEqual([answer.payload.kind, answer.payload.body], ["prompt", "Release exactly"]);
+	assert.equal(registry.snapshot().conversations[0]?.activeCheckpointPoll, null);
+	assert.deepEqual(registry.pendingInputs(manifest.conversationId).filter((input) => input.matrixEventId.endsWith("-vote")).map((input) => input.matrixEventId), ["$first-vote"]);
+	assert.equal(pollEnds.length, 1);
+});
+
+test("ordinary checkpoint text closes the poll and bypasses configured options exactly once", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const originId = deriveDeliveryId(manifest.conversationId, "$text-origin");
+	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId: originId, matrixEventId: "$text-origin", kind: "prompt", body: "choose", status: "accepted" });
+	await registry.acknowledgeInput(manifest.conversationId, originId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "text-origin-user"));
+	let syncCount = 0; let pollEnds = 0;
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.includes("/m.poll.start/")) return Response.json({ event_id: "$text-poll" });
+		if (path.includes("/m.poll.end/")) { pollEnds += 1; return Response.json({ event_id: "$text-poll-end" }); }
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/sync")) {
+			syncCount += 1;
+			if (syncCount === 1) return Response.json(sync([event("$text-answer", "Use a custom safe answer"), event("$later-text", "must not replace") ]));
+			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true }));
+		}
+		return Response.json({ event_id: "$ok" });
+	}, [manifest.roomId]);
+	const projector = new RelayEventProjector(registry, matrix);
+	await projector.projectCheckpoint({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "text-offer", conversationId: manifest.conversationId,
+		role: "coordinator_adapter", type: "checkpoint.offer", payload: { checkpointId: "checkpoint-text", originDeliveryId: originId,
+			checkpoint: { kind: "question", decision: "Choose", options: ["One", "Two"] } } });
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "text-ipc") }); await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
+	const delivered = readMany(socket, 2); router.start(); const answers = await delivered; await router.stop();
+	assert.deepEqual(answers.map((answer) => answer.payload.body), ["Use a custom safe answer", "must not replace"]);
+	assert.equal(registry.snapshot().conversations[0]?.activeCheckpointPoll, null);
+	assert.equal(pollEnds, 1);
 });
 
 test("checkpoint and notice projection retry stable Matrix transactions without duplicates", async () => {

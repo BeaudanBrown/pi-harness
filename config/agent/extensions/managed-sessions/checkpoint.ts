@@ -167,6 +167,27 @@ function checkpointFormattedBytes(body: string): number {
 	return Buffer.byteLength(formatted, "utf8");
 }
 
+function assertCheckpointEventBounds(body: string): void {
+	if (body.length > MAX_CHECKPOINT_BODY_LENGTH || Buffer.byteLength(body, "utf8") > MAX_CHECKPOINT_UTF8_BYTES ||
+		checkpointFormattedBytes(body) > MAX_CHECKPOINT_UTF8_BYTES) {
+		throw new Error("Rendered checkpoint exceeds the single Matrix event limit");
+	}
+}
+
+export function renderRemoteCheckpointPollQuestion(input: Extract<RemoteCheckpointInput, { kind: "question" }>): string {
+	if (!input.options?.length) throw new Error("Checkpoint poll requires declared options");
+	const question = [
+		"❓ Question",
+		`Decision required: ${input.decision}`,
+		input.context ? `Context: ${input.context}` : undefined,
+		input.codeOrDiffRequested && input.requestedCodeOrDiff ? `Requested code/diff:\n${input.requestedCodeOrDiff}` : undefined,
+		"Select one option, or reply with text to provide another answer.",
+	].filter((line): line is string => line !== undefined).join("\n\n");
+	const fallback = [question, ...input.options.map((option, index) => `${index + 1}. ${option}`)].join("\n");
+	assertCheckpointEventBounds(fallback);
+	return question;
+}
+
 export function renderRemoteCheckpoint(input: RemoteCheckpointInput): string {
 	let body: string;
 	if (input.kind === "question") {
@@ -200,9 +221,6 @@ export function renderRemoteCheckpoint(input: RemoteCheckpointInput): string {
 	if (input.codeOrDiffRequested && input.requestedCodeOrDiff) {
 		body += `\n\nRequested code/diff:\n${input.requestedCodeOrDiff}`;
 	}
-	if (body.length > MAX_CHECKPOINT_BODY_LENGTH || Buffer.byteLength(body, "utf8") > MAX_CHECKPOINT_UTF8_BYTES ||
-		checkpointFormattedBytes(body) > MAX_CHECKPOINT_UTF8_BYTES) {
-		throw new Error("Rendered checkpoint exceeds the single Matrix event limit");
-	}
+	assertCheckpointEventBounds(body);
 	return body;
 }

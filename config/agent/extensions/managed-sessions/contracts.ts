@@ -11,6 +11,7 @@ export const MAX_PENDING_INPUTS = 2_048;
 export const MAX_PENDING_CONTROLS = 2_048;
 export const MAX_COMPLETED_CONTROLS = 4_096;
 export const MAX_CONTROL_POLL_OPTIONS = 20;
+export const MAX_CHECKPOINT_POLL_OPTIONS = 8;
 export const MAX_PROJECTION_ENTRIES = 4_096;
 
 const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
@@ -373,6 +374,26 @@ const activeControlPoll = strictObject({
 	scope: controlPollScope,
 	options: controlPollOptions,
 });
+const checkpointPollOptions = Type.Array(strictObject({ answerId: boundedString(255), text: boundedString(300) }), { minItems: 1, maxItems: MAX_CHECKPOINT_POLL_OPTIONS });
+const checkpointPollBase = {
+	checkpointId: identifier,
+	originDeliveryId: DeliveryIdSchema,
+	entryId: TranscriptEntryIdSchema,
+	transactionId: MatrixTransactionIdSchema,
+	question: boundedString(4_096),
+	options: checkpointPollOptions,
+	intentHash: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+};
+const publishingCheckpointPoll = strictObject(checkpointPollBase);
+const activeCheckpointPoll = strictObject({ ...checkpointPollBase, pollEventId: boundedString(255) });
+const closingCheckpointPoll = strictObject({
+	...checkpointPollBase,
+	pollEventId: boundedString(255),
+	resolutionEventId: boundedString(255),
+	selectedAnswerId: Type.Optional(boundedString(255)),
+	closureTransactionId: MatrixTransactionIdSchema,
+	fallback: Type.Union([Type.Literal("Selection accepted"), Type.Literal("Answered by text")]),
+});
 const projectionEntry = strictObject({
 	entryId: TranscriptEntryIdSchema,
 	kind: Type.Union([
@@ -411,6 +432,9 @@ const runtimeConversation = strictObject({
 	completedControlIds: Type.Array(stableId("control"), { maxItems: MAX_COMPLETED_CONTROLS }),
 	publishingControlPoll: nullable(publishingControlPoll),
 	activeControlPoll: nullable(activeControlPoll),
+	publishingCheckpointPoll: nullable(publishingCheckpointPoll),
+	activeCheckpointPoll: nullable(activeCheckpointPoll),
+	closingCheckpointPolls: Type.Array(closingCheckpointPoll, { maxItems: 64 }),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	managedWindow: nullable(
 		strictObject({
@@ -465,6 +489,9 @@ export interface HostRuntimeState {
 			options: Array<{ answerId: string; command: string }>;
 		};
 		activeControlPoll: null | { pollEventId: string; sourceControlId: string; scope: "model" | "thinking"; options: Array<{ answerId: string; command: string }> };
+		publishingCheckpointPoll: null | { checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string };
+		activeCheckpointPoll: null | { checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string; pollEventId: string };
+		closingCheckpointPolls: Array<{ checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string; pollEventId: string; resolutionEventId: string; selectedAnswerId?: string; closureTransactionId: string; fallback: "Selection accepted" | "Answered by text" }>;
 		projection: Array<{
 			entryId: string;
 			kind: string;
@@ -656,6 +683,9 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			if (!("completedControlIds" in conversation)) { conversation.completedControlIds = []; changed = true; }
 			if (!("publishingControlPoll" in conversation)) { conversation.publishingControlPoll = null; changed = true; }
 			if (!("activeControlPoll" in conversation)) { conversation.activeControlPoll = null; changed = true; }
+			if (!("publishingCheckpointPoll" in conversation)) { conversation.publishingCheckpointPoll = null; changed = true; }
+			if (!("activeCheckpointPoll" in conversation)) { conversation.activeCheckpointPoll = null; changed = true; }
+			if (!("closingCheckpointPolls" in conversation)) { conversation.closingCheckpointPolls = []; changed = true; }
 		}
 		if (changed) candidate = migrated;
 	}
@@ -714,6 +744,43 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 				conversation.activeControlPoll.options.some((option) => !option.command.startsWith(`!${conversation.activeControlPoll!.scope} `))) {
 				throw new ManagedSessionContractError("conflict", `invalid active control poll in ${conversation.conversationId}`);
 			}
+		}
+		if (conversation.publishingCheckpointPoll && conversation.activeCheckpointPoll) {
+			throw new ManagedSessionContractError("conflict", `checkpoint poll cannot be publishing and active in ${conversation.conversationId}`);
+		}
+		const checkpointPoll = conversation.publishingCheckpointPoll ?? conversation.activeCheckpointPoll;
+		if (checkpointPoll) {
+			const answerIds = new Set(checkpointPoll.options.map((option) => option.answerId));
+			const projection = conversation.projection.find((candidate) => candidate.entryId === checkpointPoll.entryId);
+			const expectedHash = deriveCheckpointPollIntentHash(checkpointPoll);
+			if (answerIds.size !== checkpointPoll.options.length || checkpointPoll.options.some((option, index) => option.answerId !== deriveCheckpointPollAnswerId(checkpointPoll.checkpointId, index)) ||
+				checkpointPoll.intentHash !== expectedHash || projection?.contentHash !== expectedHash || projection?.kind !== "checkpoint" ||
+				projection?.originDeliveryId !== checkpointPoll.originDeliveryId || projection?.chunks.length !== 1 ||
+				projection?.chunks[0]?.transactionId !== checkpointPoll.transactionId) {
+				throw new ManagedSessionContractError("conflict", `invalid checkpoint poll in ${conversation.conversationId}`);
+			}
+		}
+		const closingPollIds = new Set<string>(); const closingResolutionIds = new Set<string>(); const closingTransactions = new Set<string>();
+		for (const closing of conversation.closingCheckpointPolls) {
+			const answerIds = new Set(closing.options.map((option) => option.answerId));
+			const projection = conversation.projection.find((candidate) => candidate.entryId === closing.entryId);
+			const origin = conversation.pendingInputs.find((candidate) => candidate.deliveryId === closing.originDeliveryId);
+			const resolution = conversation.pendingInputs.find((candidate) => candidate.matrixEventId === closing.resolutionEventId);
+			const selectedOption = closing.options.find((option) => option.answerId === closing.selectedAnswerId);
+			const expectedHash = deriveCheckpointPollIntentHash(closing);
+			if (closingPollIds.has(closing.pollEventId) || closingResolutionIds.has(closing.resolutionEventId) || closingTransactions.has(closing.closureTransactionId) ||
+				closing.closureTransactionId !== deriveMatrixTransactionId(conversation.conversationId, closing.pollEventId, 0) || answerIds.size !== closing.options.length ||
+				closing.options.some((option, index) => option.answerId !== deriveCheckpointPollAnswerId(closing.checkpointId, index)) ||
+				closing.intentHash !== expectedHash || projection?.contentHash !== expectedHash || projection?.kind !== "checkpoint" || projection?.originDeliveryId !== closing.originDeliveryId || projection?.chunks.length !== 1 ||
+				projection?.chunks[0]?.transactionId !== closing.transactionId || !origin || !resolution || resolution.kind !== "prompt" ||
+				((closing.fallback === "Selection accepted") !== (closing.selectedAnswerId !== undefined)) ||
+				(closing.fallback === "Selection accepted" && selectedOption?.text !== resolution.body)) {
+				throw new ManagedSessionContractError("conflict", `invalid closing checkpoint poll in ${conversation.conversationId}`);
+			}
+			closingPollIds.add(closing.pollEventId); closingResolutionIds.add(closing.resolutionEventId); closingTransactions.add(closing.closureTransactionId);
+		}
+		if (conversation.activeCheckpointPoll && closingPollIds.has(conversation.activeCheckpointPoll.pollEventId)) {
+			throw new ManagedSessionContractError("conflict", `active checkpoint poll is already closing in ${conversation.conversationId}`);
 		}
 		if (conversation.attachment) assertTimestamp(conversation.attachment.connectedAt, "attachment.connectedAt");
 		if (conversation.lastLaunchError) assertTimestamp(conversation.lastLaunchError.at, "lastLaunchError.at");
@@ -787,6 +854,24 @@ function derive(prefix: string, domain: string, parts: readonly (string | number
 		hash.update(value, "utf8");
 	}
 	return `${prefix}_${hash.digest("hex").slice(0, length)}`;
+}
+
+export function deriveCheckpointPollAnswerId(checkpointId: string, index: number): string {
+	if (!Number.isSafeInteger(index) || index < 0 || index >= MAX_CHECKPOINT_POLL_OPTIONS) throw new ManagedSessionContractError("malformed", "checkpoint poll answer index is out of bounds");
+	return derive("answer", "checkpoint-poll-answer", [checkpointId, index]);
+}
+
+export function deriveCheckpointPollIntentHash(intent: {
+	checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string;
+	options: Array<{ answerId: string; text: string }>;
+}): string {
+	const hash = createHash("sha256");
+	hash.update("pi-managed-sessions:checkpoint-poll-intent:v1\0", "utf8");
+	for (const value of [intent.checkpointId, intent.originDeliveryId, intent.entryId, intent.transactionId, intent.question,
+		...intent.options.flatMap((option) => [option.answerId, option.text])]) {
+		hash.update(`${Buffer.byteLength(value, "utf8")}:`, "utf8"); hash.update(value, "utf8");
+	}
+	return hash.digest("hex");
 }
 
 export const deriveConversationId = (hostId: string, creationKey: string): string =>

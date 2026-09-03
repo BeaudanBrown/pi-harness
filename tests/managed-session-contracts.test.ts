@@ -5,6 +5,8 @@ import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_NDJSON_FRAME_BYTES,
 	ManagedSessionContractError,
+	deriveCheckpointPollAnswerId,
+	deriveCheckpointPollIntentHash,
 	deriveChunkId,
 	deriveConversationId,
 	deriveDeliveryId,
@@ -282,6 +284,34 @@ test("runtime parser strictly bounds complete control poll publication intents",
 	assert.throws(() => parseHostRuntimeState(state({ ...intent, transactionId: deriveMatrixTransactionId(conversationId, sourceControl.controlId, 1) })), /invalid publishing/);
 	assert.throws(() => parseHostRuntimeState(state({ ...intent, sourceControl: { ...sourceControl, matrixEventId: "$other" } })), /invalid publishing/);
 	assert.throws(() => parseHostRuntimeState(state({ ...intent, options: [{ answerId: "pi-control-0", command: "!model scoped/model" }] })), /invalid publishing/);
+});
+
+test("runtime parser binds checkpoint poll mappings to one durable checkpoint projection", () => {
+	const checkpointEntry = deriveTranscriptEntryId("pi-session-1", "checkpoint:test");
+	const transactionId = deriveMatrixTransactionId(conversationId, checkpointEntry, 0);
+	const intentBase = { checkpointId: "checkpoint-test", originDeliveryId: deliveryId, entryId: checkpointEntry, transactionId,
+		question: "Choose", options: [{ answerId: deriveCheckpointPollAnswerId("checkpoint-test", 0), text: "Exact option" }] };
+	const intent = { ...intentBase, intentHash: deriveCheckpointPollIntentHash(intentBase) };
+	const projection = { entryId: checkpointEntry, kind: "checkpoint", status: "projecting", contentHash: intent.intentHash, originDeliveryId: deliveryId,
+		chunks: [{ chunkId: deriveChunkId(checkpointEntry, 0), transactionId, status: "pending" }] };
+	assert.deepEqual(parseHostRuntimeState(runtime({ projection: [projection], publishingCheckpointPoll: intent })).conversations[0]?.publishingCheckpointPoll, intent);
+	assert.throws(() => parseHostRuntimeState(runtime({ projection: [projection], publishingCheckpointPoll: intent,
+		activeCheckpointPoll: { ...intent, pollEventId: "$poll" } })), /cannot be publishing and active/);
+	assert.throws(() => parseHostRuntimeState(runtime({ projection: [projection], publishingCheckpointPoll: { ...intent, transactionId: deriveMatrixTransactionId(conversationId, checkpointEntry, 1) } })), /invalid checkpoint poll/);
+	assert.throws(() => parseHostRuntimeState(runtime({ projection: [projection], activeCheckpointPoll: { ...intent, pollEventId: "$poll",
+		options: [{ answerId: "same", text: "One" }, { answerId: "same", text: "Two" }] } })), /invalid checkpoint poll/);
+	const closing = { ...intent, pollEventId: "$poll", resolutionEventId: "$answer", selectedAnswerId: intent.options[0]!.answerId,
+		closureTransactionId: deriveMatrixTransactionId(conversationId, "$poll", 0), fallback: "Selection accepted" };
+	const pollInputs = [
+		{ deliveryId, matrixEventId: "$origin", kind: "prompt", body: "Choose", status: "completed" },
+		{ deliveryId: deriveDeliveryId(conversationId, "$answer"), matrixEventId: "$answer", kind: "prompt", body: "Exact option", status: "accepted" },
+	];
+	assert.deepEqual(parseHostRuntimeState(runtime({ pendingInputs: pollInputs, projection: [projection], closingCheckpointPolls: [closing] })).conversations[0]?.closingCheckpointPolls, [closing]);
+	assert.throws(() => parseHostRuntimeState(runtime({ pendingInputs: pollInputs, projection: [projection], closingCheckpointPolls: [{ ...closing, closureTransactionId: transactionId }] })), /invalid closing checkpoint poll/);
+	const substitutedInputs = [pollInputs[0], { ...pollInputs[1], body: "Substituted" }];
+	assert.throws(() => parseHostRuntimeState(runtime({ pendingInputs: substitutedInputs, projection: [projection], closingCheckpointPolls: [{
+		...closing, question: "Changed", options: [{ answerId: deriveCheckpointPollAnswerId("checkpoint-test", 0), text: "Substituted" }],
+	}] })), /invalid closing checkpoint poll/);
 });
 
 test("runtime parser rejects malformed lifecycle state and duplicate durable identities", () => {

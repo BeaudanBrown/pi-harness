@@ -10,7 +10,7 @@ import {
 import { deriveControlId } from "../v2-contracts.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
-import { RelayRegistry } from "./registry.js";
+import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 interface MatrixTextEvent {
 	eventId: string;
@@ -102,8 +102,14 @@ export function authorizedRoomEvents(response: unknown, roomId: string, operator
 			seen.add(event.event_id); result.push({ kind: "poll_response", eventId: event.event_id, pollEventId: relation.event_id, answerId: selections[0] });
 		} else if (event.type === "m.room.message" && content.msgtype === "m.text" && typeof content.body === "string" && content.body.length > 0 && content.body.length <= MAX_INPUT_TEXT_LENGTH) {
 			const relation = content["m.relates_to"];
-			if (relation !== undefined) continue; // replies are parsed by the established strict text parser below
-			seen.add(event.event_id); result.push({ kind: "text", eventId: event.event_id, body: content.body });
+			let replyToEventId: string | undefined;
+			if (relation !== undefined) {
+				if (typeof relation !== "object" || relation === null || Array.isArray(relation) || Object.keys(relation).length !== 1) continue;
+				const reply = (relation as { "m.in_reply_to"?: unknown })["m.in_reply_to"];
+				if (typeof reply !== "object" || reply === null || Array.isArray(reply) || Object.keys(reply).length !== 1 || typeof (reply as { event_id?: unknown }).event_id !== "string") continue;
+				replyToEventId = String((reply as { event_id: string }).event_id);
+			}
+			seen.add(event.event_id); result.push({ kind: "text", eventId: event.event_id, body: content.body, ...(replyToEventId ? { replyToEventId } : {}) });
 		}
 	}
 	return result;
@@ -168,6 +174,7 @@ export class CoordinatorRouter {
 		private readonly projectNotice: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void> = async () => undefined,
 		private readonly diagnostic: (message: string) => void = () => undefined,
 		private readonly reconcileControlPollPublications: () => Promise<void> = async () => undefined,
+		private readonly reconcileCheckpointPollPublications: () => Promise<void> = async () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -207,13 +214,15 @@ export class CoordinatorRouter {
 				// A vote may already be in this response from the uncertain PUT window. Bind the
 				// idempotently recovered poll event before inspecting or advancing the response.
 				await this.reconcileControlPollPublications();
+				await this.reconcileCheckpointPollPublications();
 				for (const manifest of this.registry.listManifests()) {
 					const events = authorizedRoomEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
-					const texts = operatorTextEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
 					if (established) {
-						if ((events.length > 0 || texts.length > 0) && await this.matrix.memberJoined(manifest.roomId, this.matrix.operatorUserId, signal)) {
-							for (const event of texts) await this.accept(manifest, event);
-							for (const event of events) if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
+						if (events.length > 0 && await this.matrix.memberJoined(manifest.roomId, this.matrix.operatorUserId, signal)) {
+							for (const event of events) {
+								if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
+								else await this.accept(manifest, event);
+							}
 						}
 					}
 					await this.ensureWake(manifest);
@@ -234,6 +243,20 @@ export class CoordinatorRouter {
 	}
 
 	private async acceptPoll(manifest: ConversationManifest, event: Extract<AuthorizedMatrixRoomEvent, { kind: "poll_response" }>, signal: AbortSignal): Promise<void> {
+		const checkpointPoll = this.registry.activeCheckpointPoll(manifest.conversationId, event.pollEventId);
+		const checkpointOption = checkpointPoll?.options.find((option) => option.answerId === event.answerId)?.text;
+		if (checkpointPoll && checkpointOption) {
+			const selected = await this.matrix.checkpointPollAnswer(manifest.roomId, event.pollEventId, event.answerId,
+				checkpointPoll.question, checkpointPoll.options.map((option) => ({ id: option.answerId, text: option.text })), signal);
+			if (selected !== checkpointOption) return;
+			const input = { deliveryId: deriveDeliveryId(manifest.conversationId, event.eventId), matrixEventId: event.eventId,
+				kind: "prompt", body: selected, status: "accepted" as const };
+			const closing = await this.registry.acceptActiveCheckpointPollResponse(manifest.conversationId, event.pollEventId, event.answerId, selected, input);
+			if (!closing) return;
+			await this.closeCheckpointPoll(manifest, closing, signal);
+			await this.deliverRecordedInput(manifest, input);
+			return;
+		}
 		const offered = this.registry.activeControlPollOption(manifest.conversationId, event.pollEventId, event.answerId);
 		if (!offered) return;
 		const selected = await this.matrix.controlPollAnswer(manifest.roomId, event.pollEventId, event.answerId, signal).catch(() => undefined);
@@ -289,6 +312,23 @@ export class CoordinatorRouter {
 		await this.launching.get(manifest.conversationId)?.catch(() => undefined);
 	}
 
+	private async closeCheckpointPoll(manifest: ConversationManifest,
+		closing: ReturnType<RelayRegistry["closingCheckpointPolls"]>[number]["closing"], signal?: AbortSignal): Promise<void> {
+		try {
+			await this.matrix.endPoll(manifest.roomId, closing.closureTransactionId, closing.pollEventId, closing.fallback, signal, "stable");
+			await this.registry.completeCheckpointPollClosure(manifest.conversationId, closing.pollEventId, closing.closureTransactionId);
+		} catch (error) {
+			this.diagnostic(error instanceof Error ? error.message : "Matrix checkpoint poll closure failed");
+		}
+	}
+
+	private async deliverRecordedInput(manifest: ConversationManifest, input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
+		const state = this.registry.conversationState(manifest.conversationId);
+		if (this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, input))) {
+			await this.registry.markInputDelivered(manifest.conversationId, input.deliveryId);
+		} else if (state === "dormant") await this.registry.beginLaunch(manifest.conversationId);
+	}
+
 	private async accept(manifest: ConversationManifest, event: MatrixTextEvent): Promise<void> {
 		let body = event.body;
 		if (event.replyToEventId) {
@@ -302,6 +342,19 @@ export class CoordinatorRouter {
 		const control = parseTypedRemoteControl(body);
 		if (control) return this.dispatchControl(manifest, event.eventId, control);
 		if (!input || body.trim().startsWith("!" ) && input.kind === "prompt") return this.dispatchControl(manifest, event.eventId, { name: "help" });
+		if (input.kind === "prompt") {
+			if (this.registry.hasPublishingCheckpointPoll(manifest.conversationId)) {
+				throw new RelayRegistryError("matrix_unavailable", "Checkpoint poll publication must reconcile before accepting text");
+			}
+			const checkpointInput = { deliveryId: deriveDeliveryId(manifest.conversationId, event.eventId), matrixEventId: event.eventId,
+				kind: "prompt", body: input.body!, status: "accepted" as const };
+			const closing = await this.registry.acceptActiveCheckpointText(manifest.conversationId, checkpointInput);
+			if (closing) {
+				await this.closeCheckpointPoll(manifest, closing);
+				await this.deliverRecordedInput(manifest, checkpointInput);
+				return;
+			}
+		}
 		const state = this.registry.conversationState(manifest.conversationId);
 		if (state === "dormant" && (input.kind === "steer" || input.kind === "abort")) {
 			await this.projectNotice(event.eventId, manifest, input.kind === "steer"
@@ -325,10 +378,9 @@ export class CoordinatorRouter {
 			return;
 		}
 		if (recordedState === "active" && input.kind === "abort") await this.registry.cancelPendingInputs(manifest.conversationId);
-		if (this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, {
-			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}),
-		}))) await this.registry.markInputDelivered(manifest.conversationId, deliveryId);
-		else if (recordedState === "dormant") await this.registry.beginLaunch(manifest.conversationId);
+		await this.deliverRecordedInput(manifest, {
+			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
+		});
 	}
 
 	private async ensureWake(manifest: ConversationManifest): Promise<void> {

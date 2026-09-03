@@ -4,7 +4,9 @@ import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_COMPLETED_CONTROLS,
 	MAX_PENDING_CONTROLS,
+	MAX_PENDING_INPUTS,
 	MAX_PROJECTION_ENTRIES,
+	deriveMatrixTransactionId,
 	type ConversationManifest,
 	type HostRuntimeState,
 	type ManagedSessionEnvelope,
@@ -89,6 +91,9 @@ export class RelayRegistry {
 				completedControlIds: [],
 				publishingControlPoll: null,
 				activeControlPoll: null,
+				publishingCheckpointPoll: null,
+				activeCheckpointPoll: null,
+				closingCheckpointPolls: [],
 				projection: [],
 				managedWindow: null,
 			})),
@@ -124,14 +129,7 @@ export class RelayRegistry {
 
 	async recordAcceptedInput(conversationId: string, input: RuntimeConversation["pendingInputs"][number]): Promise<void> {
 		await this.mutate(async () => {
-			const conversation = this.runtimeConversation(conversationId);
-			const existing = conversation.pendingInputs.find((candidate) => candidate.deliveryId === input.deliveryId || candidate.matrixEventId === input.matrixEventId);
-			if (existing) {
-				if (existing.deliveryId !== input.deliveryId || existing.matrixEventId !== input.matrixEventId || existing.kind !== input.kind ||
-					existing.body !== input.body) throw new RelayRegistryError("invalid_state", "Conflicting accepted Matrix input identity");
-				return;
-			}
-			conversation.pendingInputs.push(input);
+			this.addPendingInput(this.runtimeConversation(conversationId), input);
 			parseHostRuntimeState(this.state);
 		});
 	}
@@ -238,6 +236,98 @@ export class RelayRegistry {
 		});
 	}
 
+	async beginCheckpointPollPublication(conversationId: string, intent: NonNullable<RuntimeConversation["publishingCheckpointPoll"]>): Promise<"publishing" | "active"> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const active = conversation.activeCheckpointPoll;
+			if (active?.checkpointId === intent.checkpointId) {
+				const { pollEventId: _pollEventId, ...activeIntent } = active;
+				if (JSON.stringify(activeIntent) !== JSON.stringify(intent)) throw new RelayRegistryError("invalid_state", "Conflicting active checkpoint poll identity");
+				return "active";
+			}
+			if (active) throw new RelayRegistryError("invalid_state", "A different checkpoint poll is already active");
+			if (conversation.publishingCheckpointPoll && JSON.stringify(conversation.publishingCheckpointPoll) !== JSON.stringify(intent)) {
+				throw new RelayRegistryError("invalid_state", "Conflicting checkpoint poll publication intent");
+			}
+			conversation.publishingCheckpointPoll = structuredClone(intent);
+			parseHostRuntimeState(this.state);
+			return "publishing";
+		});
+	}
+
+	hasPublishingCheckpointPoll(conversationId: string): boolean {
+		return this.runtimeConversation(conversationId).publishingCheckpointPoll !== null;
+	}
+
+	publishingCheckpointPolls(): Array<{ conversationId: string; intent: NonNullable<RuntimeConversation["publishingCheckpointPoll"]> }> {
+		return this.state.conversations.flatMap((conversation) => conversation.publishingCheckpointPoll
+			? [{ conversationId: conversation.conversationId, intent: structuredClone(conversation.publishingCheckpointPoll) }] : []);
+	}
+
+	async completeCheckpointPollPublication(conversationId: string, checkpointId: string, pollEventId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const intent = conversation.publishingCheckpointPoll;
+			if (!intent || intent.checkpointId !== checkpointId) {
+				if (conversation.activeCheckpointPoll?.checkpointId === checkpointId && conversation.activeCheckpointPoll.pollEventId === pollEventId) return;
+				throw new RelayRegistryError("invalid_state", "Checkpoint poll publication intent is unavailable");
+			}
+			conversation.activeCheckpointPoll = { ...structuredClone(intent), pollEventId };
+			conversation.publishingCheckpointPoll = null;
+			parseHostRuntimeState(this.state);
+		});
+	}
+
+	activeCheckpointPoll(conversationId: string, pollEventId: string): NonNullable<RuntimeConversation["activeCheckpointPoll"]> | undefined {
+		const poll = this.runtimeConversation(conversationId).activeCheckpointPoll;
+		return poll?.pollEventId === pollEventId ? structuredClone(poll) : undefined;
+	}
+
+	activeCheckpointPollOption(conversationId: string, pollEventId: string, answerId: string): string | undefined {
+		return this.activeCheckpointPoll(conversationId, pollEventId)?.options.find((option) => option.answerId === answerId)?.text;
+	}
+
+	async acceptActiveCheckpointPollResponse(conversationId: string, pollEventId: string, answerId: string, text: string,
+		input: RuntimeConversation["pendingInputs"][number]): Promise<RuntimeConversation["closingCheckpointPolls"][number] | undefined> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const poll = conversation.activeCheckpointPoll;
+			const option = poll?.pollEventId === pollEventId ? poll.options.find((candidate) => candidate.answerId === answerId) : undefined;
+			if (!poll || !option || option.text !== text || !this.addPendingInput(conversation, input)) return undefined;
+			const closing = this.checkpointPollClosure(conversation, poll, input.matrixEventId, "Selection accepted", answerId);
+			conversation.activeCheckpointPoll = null;
+			parseHostRuntimeState(this.state);
+			return structuredClone(closing);
+		});
+	}
+
+	async acceptActiveCheckpointText(conversationId: string, input: RuntimeConversation["pendingInputs"][number]): Promise<RuntimeConversation["closingCheckpointPolls"][number] | undefined> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const poll = conversation.activeCheckpointPoll;
+			if (!poll || !this.addPendingInput(conversation, input)) return undefined;
+			const closing = this.checkpointPollClosure(conversation, poll, input.matrixEventId, "Answered by text");
+			conversation.activeCheckpointPoll = null;
+			parseHostRuntimeState(this.state);
+			return structuredClone(closing);
+		});
+	}
+
+	closingCheckpointPolls(): Array<{ conversationId: string; closing: RuntimeConversation["closingCheckpointPolls"][number] }> {
+		return this.state.conversations.flatMap((conversation) => conversation.closingCheckpointPolls.map((closing) => ({
+			conversationId: conversation.conversationId, closing: structuredClone(closing),
+		})));
+	}
+
+	async completeCheckpointPollClosure(conversationId: string, pollEventId: string, closureTransactionId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const index = conversation.closingCheckpointPolls.findIndex((closing) => closing.pollEventId === pollEventId && closing.closureTransactionId === closureTransactionId);
+			if (index === -1) return;
+			conversation.closingCheckpointPolls.splice(index, 1);
+		});
+	}
+
 	pendingControls(conversationId: string): RuntimeConversation["pendingControls"] {
 		return structuredClone(this.runtimeConversation(conversationId).pendingControls);
 	}
@@ -270,6 +360,28 @@ export class RelayRegistry {
 			}
 			conversation.projection.push(projection);
 			parseHostRuntimeState(this.state);
+		});
+	}
+
+	async beginCheckpointPollProjection(conversationId: string, projection: RuntimeConversation["projection"][number],
+		intent: NonNullable<RuntimeConversation["publishingCheckpointPoll"]>): Promise<RuntimeConversation["projection"][number]> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const existing = conversation.projection.find((candidate) => candidate.entryId === projection.entryId);
+			if (existing) {
+				if (existing.kind !== projection.kind || existing.contentHash !== projection.contentHash || existing.originDeliveryId !== projection.originDeliveryId ||
+					existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
+						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId)) {
+					throw new RelayRegistryError("invalid_state", "Conflicting checkpoint poll projection content");
+				}
+				return structuredClone(existing);
+			}
+			if (conversation.projection.length >= MAX_PROJECTION_ENTRIES) throw new RelayRegistryError("capacity_reached", "Transcript projection capacity was reached");
+			if (conversation.publishingCheckpointPoll || conversation.activeCheckpointPoll) throw new RelayRegistryError("invalid_state", "Another checkpoint poll lifecycle is unresolved");
+			conversation.projection.push(projection);
+			conversation.publishingCheckpointPoll = structuredClone(intent);
+			parseHostRuntimeState(this.state);
+			return structuredClone(projection);
 		});
 	}
 
@@ -400,6 +512,9 @@ export class RelayRegistry {
 					completedControlIds: [],
 					publishingControlPoll: null,
 					activeControlPoll: null,
+					publishingCheckpointPoll: null,
+					activeCheckpointPoll: null,
+					closingCheckpointPolls: [],
 					projection: [],
 					managedWindow: null,
 				});
@@ -432,7 +547,8 @@ export class RelayRegistry {
 			this.manifests.set(manifest.conversationId, manifest);
 			this.state.conversations.push({
 				conversationId: manifest.conversationId, state: "dormant", attachment: null,
-				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], publishingControlPoll: null, activeControlPoll: null, projection: [], managedWindow: null,
+				matrixCursor: { status: "bootstrap" }, pendingInputs: [], pendingControls: [], completedControlIds: [], publishingControlPoll: null, activeControlPoll: null,
+				publishingCheckpointPoll: null, activeCheckpointPoll: null, closingCheckpointPolls: [], projection: [], managedWindow: null,
 			});
 			return manifest;
 			});
@@ -655,6 +771,27 @@ export class RelayRegistry {
 	managedRoomIds(): string[] {
 		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace]
 			.filter((roomId): roomId is string => roomId !== undefined)))];
+	}
+
+	private checkpointPollClosure(conversation: RuntimeConversation, poll: NonNullable<RuntimeConversation["activeCheckpointPoll"]>, resolutionEventId: string,
+		fallback: "Selection accepted" | "Answered by text", selectedAnswerId?: string): RuntimeConversation["closingCheckpointPolls"][number] {
+		if (conversation.closingCheckpointPolls.length >= 64) throw new RelayRegistryError("capacity_reached", "Checkpoint poll closure capacity was reached");
+		const closing = { ...structuredClone(poll), resolutionEventId, ...(selectedAnswerId ? { selectedAnswerId } : {}),
+			closureTransactionId: deriveMatrixTransactionId(conversation.conversationId, poll.pollEventId, 0), fallback };
+		conversation.closingCheckpointPolls.push(closing);
+		return closing;
+	}
+
+	private addPendingInput(conversation: RuntimeConversation, input: RuntimeConversation["pendingInputs"][number]): boolean {
+		const existing = conversation.pendingInputs.find((candidate) => candidate.deliveryId === input.deliveryId || candidate.matrixEventId === input.matrixEventId);
+		if (existing) {
+			if (existing.deliveryId !== input.deliveryId || existing.matrixEventId !== input.matrixEventId || existing.kind !== input.kind ||
+				existing.body !== input.body) throw new RelayRegistryError("invalid_state", "Conflicting accepted Matrix input identity");
+			return false;
+		}
+		if (conversation.pendingInputs.length >= MAX_PENDING_INPUTS) throw new RelayRegistryError("capacity_reached", "Pending input capacity was reached");
+		conversation.pendingInputs.push(input);
+		return true;
 	}
 
 	private addPendingControl(conversation: RuntimeConversation, control: RuntimeConversation["pendingControls"][number]): boolean {
