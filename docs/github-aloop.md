@@ -197,7 +197,7 @@ current-process publication body or the GitHub-authenticated supervisor as the
 v3 comment author, and requires that reviewed HEAD to remain clean in Git. Local
 finalization records aid diagnosis but are not closure authority. When that
 evidence cannot apply, `/aloop-authorize-recovery <issue> <attempt-key>` writes
-an auditable local authorization bound to the same issue, attempt, reviewed
+an auditable GitHub-recorded authorization bound to the same issue, attempt, reviewed
 HEAD, exact comment digest, and current clean closure HEAD. Any later HEAD change
 invalidates the authorization. Arbitrary
 parseable accepted comments and unrelated decisions never become closure

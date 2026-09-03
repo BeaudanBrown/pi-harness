@@ -351,6 +351,14 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		return `Human closure-recovery authorization recorded for #${issue}.\n\n<!-- pi-aloop-recovery-authorization:v1:${payload} -->`;
 	}
 
+	function recoveryDecisionBoundary(issue: number) {
+		return {
+			content: [{ type: "text" as const, text: `Accepted handoff #${issue} needs a human closure-recovery decision before it can settle.` }],
+			details: { settled: false, checkpoint: true, issue, humanDecisionRequired: true },
+			terminate: true,
+		};
+	}
+
 	function authenticatedSupervisorComment(author: string | null): boolean {
 		return supervisorLogin !== null && author === supervisorLogin;
 	}
@@ -818,7 +826,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						const explicitAuthorization = recoveryAuthorized(params.issue, settled, settledComment.body, closureHead, issue.recentHandoffs);
 						if (!automaticProvenance && !explicitAuthorization) {
 							pendingHumanBoundaries.add(`recovery:${settled.attemptKey}`);
-							return { content: [{ type: "text", text: `Accepted handoff requires human closure authorization: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}` }], details: { settled: false, checkpoint: true, issue: params.issue, attemptKey: settled.attemptKey }, terminate: true };
+							return recoveryDecisionBoundary(params.issue);
 						}
 						if (!explicitAuthorization && closureHead !== expectedHead) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
 						await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
@@ -903,7 +911,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					&& recoveryAuthorized(params.issue, handoff, durableComment.body, head, issue.recentHandoffs);
 				if (!automaticProvenance && !explicitAuthorization) {
 					pendingHumanBoundaries.add(`recovery:${attemptKey}`);
-					return { content: [{ type: "text", text: `Accepted handoff requires human closure authorization: /aloop-authorize-recovery ${params.issue} ${attemptKey}` }], details: { settled: false, checkpoint: true, issue: params.issue, attemptKey }, terminate: true };
+					return recoveryDecisionBoundary(params.issue);
 				}
 				await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
 				issue.state = "closed";

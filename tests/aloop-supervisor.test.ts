@@ -308,7 +308,8 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 		const recoveryParams = { issue: 2, outcome: "accepted", summary: "ignored", outstanding_findings: [], decisions: [], verification: [], next_action: "ignored" };
 		const untrusted = await tools.get("aloop_finish_attempt").execute("untrusted", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(untrusted.terminate, true);
-		assert.match(untrusted.content[0].text, /aloop-authorize-recovery/);
+		assert.match(untrusted.content[0].text, /human closure-recovery decision/i);
+		assert.doesNotMatch(JSON.stringify(untrusted), /aloop-authorize-recovery|attemptKey/);
 		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
 		assert.ok(activeTools.includes("aloop_finish_attempt"), "human boundary must retain active aloop tools for slash-command continuation");
 		await commands.get("aloop-authorize-recovery")!.handler(`2 ${attemptKey}`, ctx);
