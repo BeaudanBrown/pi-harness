@@ -156,6 +156,84 @@ let
           --extension "${managedExtensions.ordinary}"
         )
         ${lspExtensionArray}
+        # Disable ambient user discovery, then add only conventional resources
+        # from this project. This preserves project engineering behavior without
+        # reintroducing user-installed local/Pi-R/AgentGraph extensions.
+        project_cwd="$(${pkgs.coreutils}/bin/pwd -P)"
+        repository_root="$(${pkgs.git}/bin/git -C "$project_cwd" rev-parse --show-toplevel 2>/dev/null || printf '%s' "$project_cwd")"
+        repository_root="$(${pkgs.coreutils}/bin/realpath "$repository_root")"
+        case "$project_cwd/" in
+          "$repository_root/"*) ;;
+          *) repository_root="$project_cwd" ;;
+        esac
+        project_config_roots=("$repository_root")
+        [[ "$project_cwd" == "$repository_root" ]] || project_config_roots+=("$project_cwd")
+        project_extension_args=()
+        for config_root in "''${project_config_roots[@]}"; do
+          extension_root="$config_root/.pi/extensions"
+          [[ -d "$extension_root" ]] || continue
+          while IFS= read -r -d "" candidate; do
+            if [[ -d "$candidate" && ! -f "$candidate/index.ts" && ! -f "$candidate/index.js" && ! -f "$candidate/index.mts" && ! -f "$candidate/index.mjs" ]]; then
+              continue
+            fi
+            resource_name="$(${pkgs.coreutils}/bin/basename "$candidate")"
+            resource_name="''${resource_name%.*}"
+            resource_key="''${resource_name,,}"
+            case "$resource_key" in
+              pi-r*|agentgraph*|sesh|tmux-cursor-focus) continue ;;
+            esac
+            project_extension_args+=(--extension "$candidate")
+          done < <(${pkgs.findutils}/bin/find "$extension_root" -mindepth 1 -maxdepth 1 \( -type f \( -name '*.ts' -o -name '*.js' -o -name '*.mts' -o -name '*.mjs' \) -o -type d \) -print0 | ${pkgs.coreutils}/bin/sort -z)
+        done
+        project_skill_args=()
+        add_project_skill_root() {
+          local root=$1 include_root_markdown=$2 candidate resource_name resource_key
+          [[ -d "$root" ]] || return 0
+          while IFS= read -r -d "" candidate; do
+            if [[ "$candidate" == */SKILL.md ]]; then
+              resource_name="$(${pkgs.coreutils}/bin/basename "$(${pkgs.coreutils}/bin/dirname "$candidate")")"
+            else
+              [[ "$include_root_markdown" == 1 ]] || continue
+              resource_name="$(${pkgs.coreutils}/bin/basename "$candidate")"
+              resource_name="''${resource_name%.md}"
+            fi
+            resource_key="''${resource_name,,}"
+            case "$resource_key" in
+              pi-r*|agentgraph*|sesh|tmux-cursor-focus) continue ;;
+            esac
+            project_skill_args+=(--skill "$candidate")
+          done < <(
+            {
+              ${pkgs.findutils}/bin/find "$root" -type f -name SKILL.md -print0
+              if [[ "$include_root_markdown" == 1 ]]; then
+                ${pkgs.findutils}/bin/find "$root" -mindepth 1 -maxdepth 1 -type f -name '*.md' ! -name SKILL.md -print0
+              fi
+            } | ${pkgs.coreutils}/bin/sort -z
+          )
+        }
+        for config_root in "''${project_config_roots[@]}"; do
+          add_project_skill_root "$config_root/.pi/skills" 1
+        done
+        skill_cursor="$project_cwd"
+        while true; do
+          add_project_skill_root "$skill_cursor/.agents/skills" 0
+          [[ "$skill_cursor" == "$repository_root" || "$skill_cursor" == / ]] && break
+          skill_cursor="$(${pkgs.coreutils}/bin/dirname "$skill_cursor")"
+        done
+        project_prompt_args=()
+        for config_root in "''${project_config_roots[@]}"; do
+          prompt_root="$config_root/.pi/prompts"
+          [[ -d "$prompt_root" ]] || continue
+          while IFS= read -r -d "" candidate; do
+            resource_name="$(${pkgs.coreutils}/bin/basename "$candidate")"
+            resource_name="''${resource_name%.md}"
+            resource_key="''${resource_name,,}"
+            case "$resource_key" in
+              pi-r*|agentgraph*|sesh|tmux-cursor-focus) continue ;;
+            esac
+            project_prompt_args+=(--prompt-template "$candidate")
+          done < <(${pkgs.findutils}/bin/find "$prompt_root" -mindepth 1 -maxdepth 1 -type f -name '*.md' -print0 | ${pkgs.coreutils}/bin/sort -z)
+        done
         exec ${managedRawPi}/bin/pi \
           --no-extensions \
           --no-skills \
@@ -163,6 +241,9 @@ let
           --no-themes \
           "''${profile_args[@]}" \
           "''${extension_args[@]}" \
+          "''${project_extension_args[@]}" \
+          "''${project_skill_args[@]}" \
+          "''${project_prompt_args[@]}" \
           --session "$PI_MANAGED_PROJECT_SESSION_FILE" \
           --approve \
           "$@"

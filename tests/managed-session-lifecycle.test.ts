@@ -180,12 +180,20 @@ test("packaged lifecycle launches real Pi through direnv and projects its final 
 	if (!launcher || !managedPi || !direnv || !tmux) return t.skip("packaged project lifecycle probe paths are unavailable");
 	const root = await mkdtemp(join(tmpdir(), "pi-lifecycle-real-"));
 	const workspaceRoot = join(root, "roots"); const workspace = join(workspaceRoot, "alpha");
-	const direnvConfig = join(root, "direnv-config"); const home = join(root, "home"); const provider = join(root, "provider.ts");
+	const direnvConfig = join(root, "direnv-config"); const home = join(root, "home");
+	const projectExtension = join(workspace, ".pi/extensions/provider.ts");
+	const launcherExtension = join(root, "launcher-extension.ts");
 	const tmuxSocket = `pi44-${process.pid}-${Date.now()}`; const projectLog = join(root, "project.log");
-	await mkdir(workspace, { recursive: true }); await mkdir(home, { recursive: true });
+	await mkdir(join(workspace, ".pi/extensions"), { recursive: true });
+	await mkdir(join(workspace, ".pi/skills/project-probe"), { recursive: true });
+	await mkdir(join(workspace, ".pi/prompts"), { recursive: true });
+	await mkdir(home, { recursive: true });
 	await writeFile(join(workspace, ".envrc"), "export PROJECT_PROBE=present\n");
+	await writeFile(join(workspace, ".pi/skills/project-probe/SKILL.md"), "---\nname: project-probe\ndescription: PROJECT_SKILL_DISCOVERED\n---\n\n# Probe\n");
+	await writeFile(join(workspace, ".pi/prompts/project-probe.md"), "---\ndescription: project prompt probe\n---\nPROJECT_PROMPT_EXPANDED\n");
+	await writeFile(launcherExtension, "export default function () {}\n");
 	execFileSync(direnv, ["allow", workspace], { env: { ...process.env, HOME: home, DIRENV_CONFIG: direnvConfig } });
-	await writeFile(provider, `
+	await writeFile(projectExtension, `
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AssistantMessageEventStream } from "@mariozechner/pi-ai";
 export default function (pi: ExtensionAPI) {
@@ -193,10 +201,15 @@ export default function (pi: ExtensionAPI) {
     baseUrl: "https://probe.invalid", apiKey: "test", api: "coordinator-probe-api",
     models: [{ id: "fake", name: "fake", api: "coordinator-probe-api", provider: "coordinator-probe", baseUrl: "https://probe.invalid",
       reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 4096, maxTokens: 256 }],
-    streamSimple: (_model: any, _context: any) => {
+    streamSimple: (_model: any, context: any) => {
       const stream = new AssistantMessageEventStream();
       queueMicrotask(() => {
-        const text = process.env.PROJECT_PROBE === "present" ? "direnv project answer" : "missing project environment";
+        const evidence = JSON.stringify(context);
+        const ready = process.env.PROJECT_PROBE === "present"
+          && evidence.includes("PROJECT_PROMPT_EXPANDED")
+          && evidence.includes("PROJECT_SKILL_DISCOVERED")
+          && evidence.includes("architecture-diagrams");
+        const text = ready ? "direnv project answer" : "missing managed project resources";
         const message = { role: "assistant", content: [{ type: "text", text }], api: "coordinator-probe-api",
           provider: "coordinator-probe", model: "fake", usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0,
           totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };
@@ -235,9 +248,9 @@ export default function (pi: ExtensionAPI) {
 		onAttachment: async (attachment) => {
 			if (attachment.role !== "ordinary_adapter") return;
 			const matrixEventId = "$real-project-task"; const deliveryId = deriveDeliveryId(attachment.conversationId, matrixEventId);
-			await registry.recordAcceptedInput(attachment.conversationId, { deliveryId, matrixEventId, kind: "prompt", body: "answer from project", status: "accepted" });
+			await registry.recordAcceptedInput(attachment.conversationId, { deliveryId, matrixEventId, kind: "prompt", body: "/project-probe", status: "accepted" });
 			server.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "relay-real-task", conversationId: attachment.conversationId,
-				role: "relay", type: "input.deliver", payload: { deliveryId, matrixEventId, kind: "prompt", body: "answer from project" } });
+				role: "relay", type: "input.deliver", payload: { deliveryId, matrixEventId, kind: "prompt", body: "/project-probe" } });
 		},
 		onEnvelope: async (envelope, attachment) => {
 			if (envelope.type === "input.acknowledge") {
@@ -267,7 +280,7 @@ export default function (pi: ExtensionAPI) {
 		registry, matrix, server, environment: { ...launchEnvironment, PATH: `${managedPi.slice(0, managedPi.lastIndexOf("/"))}:${process.env.PATH}`,
 			HOME: home, PI_CODING_AGENT_DIR: join(root, "agent"),
 			DIRENV_CONFIG: direnvConfig, PI_MANAGED_TEST_TMUX_SOCKET: tmuxSocket, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot,
-			PI_MANAGED_TEST_PROVIDER: provider, PI_MANAGED_TEST_PROJECT_LOG: projectLog } });
+			PI_MANAGED_TEST_PROVIDER: launcherExtension, PI_MANAGED_TEST_PROJECT_LOG: projectLog } });
 	let started: Record<string, unknown>;
 	try {
 		started = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.start", creationKey: "real-project",

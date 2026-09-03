@@ -71,8 +71,14 @@ capabilities.
 
 Nix launchers consume the packaged registry rather than maintaining independent
 extension lists. SDK review and diagnostic sessions resolve their prompts and
-tool surfaces from the same registry. Narrow personas use explicit allowlists;
-the ordinary engineering persona retains project-provided engineering resources.
+tool surfaces from the same registry. Narrow personas use explicit allowlists.
+Both ordinary and managed project engineering sessions retain project
+extension, skill, and prompt resources. Managed launchers disable ambient user
+resource discovery, then explicitly add conventional resources from the trusted
+project while filtering the declared local-interaction, Pi-R, and AgentGraph
+extension names. The managed
+coordinator instead disables every discovered resource, context file, and
+built-in tool before loading its lifecycle-only profile.
 Implementation and patch profiles admit project-owned worker extensions and tools
 only through the registry's `aloop-opt-in` policy; `.aloop.json` supplies that
 explicit opt-in when the worker launcher consumes the policy.

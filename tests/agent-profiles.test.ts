@@ -62,6 +62,11 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 	const managed = resolveAgentProfile("managed-project");
 	assert.equal(managed.toolPolicy, full.toolPolicy);
 	assert.deepEqual(managed.extensions, full.extensions.filter((name) => !["pi-r", "agentgraph", "tmux-cursor-focus", "sesh"].includes(name)));
+	for (const extension of ["web-search", "github-issues", "aloop", "diagram-tools", "worker-runner", "review-agents", "nix-runtime"]) {
+		assert.ok(managed.extensions.includes(extension), `managed project retains ${extension}`);
+	}
+	assert.deepEqual(managed.skills, ["harness", "matt-pocock"]);
+	assert.deepEqual(managed.prompts, ["harness"]);
 	assert.deepEqual(managed.inactiveTools, ["diagram_show"]);
 });
 
@@ -85,6 +90,26 @@ test("profile extension applies the selected allowlist at session start", () => 
 		start!();
 		assert.deepEqual(active, ["read", "grep", "find", "ls"]);
 		assert.match(beforeStart!({ systemPrompt: "base" }).systemPrompt, /base[\s\S]*senior code-review agent/);
+	} finally {
+		if (previous === undefined) delete process.env.PI_HARNESS_AGENT_PROFILE;
+		else process.env.PI_HARNESS_AGENT_PROFILE = previous;
+	}
+});
+
+test("managed project activation keeps engineering tools while removing the local viewer", () => {
+	const previous = process.env.PI_HARNESS_AGENT_PROFILE;
+	process.env.PI_HARNESS_AGENT_PROFILE = "managed-project";
+	try {
+		let active = ["read", "web_search", "github_issue_mutate", "run_worker", "review_agents", "diagram_render", "diagram_show", "architecture_query"];
+		let start: (() => void) | undefined;
+		const pi = {
+			getActiveTools: () => active,
+			setActiveTools: (tools: string[]) => { active = tools; },
+			on: (event: string, handler: any) => { if (event === "session_start") start = handler; },
+		} as unknown as ExtensionAPI;
+		agentProfilesExtension(pi);
+		start!();
+		assert.deepEqual(active, ["read", "web_search", "github_issue_mutate", "run_worker", "review_agents", "diagram_render", "architecture_query"]);
 	} finally {
 		if (previous === undefined) delete process.env.PI_HARNESS_AGENT_PROFILE;
 		else process.env.PI_HARNESS_AGENT_PROFILE = previous;

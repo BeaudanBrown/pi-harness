@@ -704,10 +704,29 @@
             grep -F '${piHarnessResources.managedSessionExtensions.ordinary}' ${managedSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'PI_MANAGED_SESSIONS_SOCKET' ${managedSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'PI_HARNESS_AGENT_PROFILE="managed-project"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-            grep -F -- '--no-extensions' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-            grep -F -- '--no-skills' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-            grep -F -- '--no-prompt-templates' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-            grep -F -- '--no-themes' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+            project_case="$(${pkgs.coreutils}/bin/mktemp)"
+            awk '/project\)/ { capture=1 } capture { print } /trusted launch role is required/ { exit }' ${managedSessionCoordinatorPi}/bin/pi > "$project_case"
+            coordinator_binary=$(grep -Eo '/nix/store/[^ ]+-pi-managed-coordinator/bin/pi-managed-coordinator' ${managedSessionCoordinatorPi}/bin/pi | head -1)
+            test -x "$coordinator_binary"
+            grep -F -- '--no-extensions' "$coordinator_binary" >/dev/null
+            grep -F -- '--no-skills' "$coordinator_binary" >/dev/null
+            grep -F -- '--no-prompt-templates' "$coordinator_binary" >/dev/null
+            grep -F -- '--no-themes' "$coordinator_binary" >/dev/null
+            grep -F -- '--no-context-files' "$coordinator_binary" >/dev/null
+            grep -F -- '--no-builtin-tools' "$coordinator_binary" >/dev/null
+            grep -F -- '--no-extensions' "$project_case" >/dev/null
+            grep -F -- '--no-skills' "$project_case" >/dev/null
+            grep -F -- '--no-prompt-templates' "$project_case" >/dev/null
+            grep -F -- '--no-themes' "$project_case" >/dev/null
+            grep -F -- 'project_extension_args+=(--extension' "$project_case" >/dev/null
+            grep -F -- 'project_skill_args+=(--skill' "$project_case" >/dev/null
+            grep -F -- 'project_prompt_args+=(--prompt-template' "$project_case" >/dev/null
+            grep -F -- 'pi-r*|agentgraph*|sesh|tmux-cursor-focus' "$project_case" >/dev/null
+            grep -F -- 'project_config_roots=' "$project_case" >/dev/null
+            grep -F -- '/bin/pwd -P' "$project_case" >/dev/null
+            grep -F -- 'resource_key=' "$project_case" >/dev/null
+            if grep -F -- '--no-context-files' "$project_case" >/dev/null; then exit 1; fi
+            if grep -F -- '--no-builtin-tools' "$project_case" >/dev/null; then exit 1; fi
             if grep -F '/run/secrets/pi-managed-session.env' ${managedSessionPiWrapper}/bin/pi >/dev/null; then
               echo "managed-session Matrix credential file leaked into the interactive Pi wrapper" >&2
               exit 1
