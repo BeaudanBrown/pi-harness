@@ -377,7 +377,11 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 		assert.deepEqual(recoveryContext.details.frontier, []);
 		await assert.rejects(() => tools.get("aloop_launch_worker").execute("duplicate", { issue: 2 }, ctx.signal, undefined, ctx), /Accepted handoffs await child closure/);
 		const recoveryParams = { issue: 2, outcome: "accepted", summary: "ignored", outstanding_findings: [], decisions: [], verification: [], next_action: "ignored" };
-		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("untrusted", recoveryParams, ctx.signal, undefined, ctx), /authenticated supervisor or verified local publication provenance/);
+		const untrusted = await tools.get("aloop_finish_attempt").execute("untrusted", recoveryParams, ctx.signal, undefined, ctx);
+		assert.equal(untrusted.terminate, true);
+		assert.match(untrusted.content[0].text, /aloop-authorize-recovery/);
+		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
+		assert.ok(activeTools.includes("aloop_finish_attempt"), "human boundary must retain active aloop tools for slash-command continuation");
 		fakeHead = "b".repeat(40);
 		await commands.get("aloop-authorize-recovery")!.handler(`2 ${attemptKey}`, ctx);
 		const authorization = JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), "utf8"));
@@ -385,7 +389,8 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 			issue: 2, attemptKey, reviewedHead: "a".repeat(40), closureHead: "b".repeat(40), commentSha256: createHash("sha256").update(accepted).digest("hex"), approvedVia: "aloop-authorize-recovery command",
 		});
 		fakeHead = "c".repeat(40);
-		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx), /human authorization is required/);
+		const changedAfterApproval = await tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx);
+		assert.equal(changedAfterApproval.terminate, true);
 		fakeHead = "b".repeat(40);
 		const recovered = await tools.get("aloop_finish_attempt").execute("recover", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(recovered.details.idempotent, true);
@@ -434,6 +439,7 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		await tools.get("aloop_launch_worker").execute("launch", { issue: 2 }, ctx.signal, undefined, ctx);
 		await tools.get("aloop_review_attempt").execute("review", { issue: 2 }, ctx.signal, undefined, ctx);
 		const params = { issue: 2, outcome: "accepted", summary: "Complete.", outstanding_findings: [], decisions: [], verification: ["reviewed"], next_action: "Continue." };
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("findings", { ...params, outstanding_findings: ["still broken"] }, ctx.signal, undefined, ctx), /all outstanding findings to be resolved/);
 		const checkpoint = await tools.get("aloop_checkpoint").execute("checkpoint", { issue: 2, decision: "Choose mode", options: ["A", "B"] }, ctx.signal, undefined, ctx);
 		assert.equal(checkpoint.terminate, true);
 		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("unresolved", params, ctx.signal, undefined, ctx), /unresolved or unattested human checkpoint/);

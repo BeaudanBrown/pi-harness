@@ -238,6 +238,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	const dryRunClosureIds = new Set<string>();
 	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
 	let supervisorLogin: string | null = null;
+	const pendingHumanBoundaries = new Set<string>();
 	const publishedAttemptDigests = new Map<string, string>();
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
@@ -260,6 +261,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		dryRunClosureIds.clear();
 		issuedReceipts.clear();
 		supervisorLogin = null;
+		pendingHumanBoundaries.clear();
 		publishedAttemptDigests.clear();
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
 	}
@@ -385,6 +387,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
+		if (pendingHumanBoundaries.size > 0) {
+			if (ctx.hasUI && activeEpic !== null) ctx.ui.setStatus(STATUS_KEY, `aloop: #${activeEpic} awaiting human command`);
+			return;
+		}
 		if (!runBudget || runBudget.settled) return;
 		runBudget.settled = true;
 		clearDeadlineTimer();
@@ -534,6 +540,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const prepared = JSON.parse(await readFile(approvalPath, "utf8"));
 			if (args.trim() !== prepared.head || prepared.epic !== activeEpic || prepared.policySha256 !== policySnapshot.sha256) throw new Error("Approval must name the exact durably prepared HEAD.");
 			await writeDurableResult(approvalPath, { ...prepared, approved: true, approvedAt: new Date().toISOString(), approvedVia: "aloop-approve-epic command" });
+			pendingHumanBoundaries.delete(`epic:${prepared.head}`);
+			pi.sendUserMessage(`Human approval recorded for epic #${activeEpic} at ${prepared.head}. Continue with aloop_epic_completion apply.`);
 			if (ctx.hasUI) ctx.ui.notify(`Approved epic #${activeEpic} at ${prepared.head}.`, "info");
 		},
 	});
@@ -556,6 +564,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			await dependencies.publishComment(ctx.cwd, issueNumber, body, false, { signal: ctx.signal });
 			await dependencies.publishComment(ctx.cwd, issueNumber, body, true, { signal: ctx.signal });
 			issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
+			pendingHumanBoundaries.delete(`decision:${openMarker}`);
+			pi.sendUserMessage(`Human decision recorded for #${issueNumber}: ${decision}. Continue the aloop supervision flow.`);
 			if (ctx.hasUI) ctx.ui.notify(`Recorded decision for #${issueNumber}.`, "info");
 		},
 	});
@@ -585,6 +595,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				commentSha256: createHash("sha256").update(acceptedComment.body).digest("hex"), approved: true,
 				approvedAt: new Date().toISOString(), approvedVia: "aloop-authorize-recovery command",
 			});
+			pendingHumanBoundaries.delete(`recovery:${attemptKey}`);
+			pi.sendUserMessage(`Human closure-recovery authorization recorded for #${issue} attempt ${attemptKey}. Continue with aloop_finish_attempt.`);
 			if (ctx.hasUI) ctx.ui.notify(`Authorized closure recovery for #${issue} attempt ${attemptKey}.`, "info");
 		},
 	});
@@ -823,6 +835,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			next_action: Type.String({ minLength: 1 }),
 		}),
 		async execute(_id, params: { issue: number; outcome: "accepted" | "incomplete" | "decision-required" | "environment-blocked" | "rejected"; summary: string; outstanding_findings: string[]; decisions: string[]; verification: string[]; next_action: string }, signal, onUpdate, ctx) {
+			if (params.outcome === "accepted" && params.outstanding_findings.length > 0) throw new Error("Accepted finalization requires all outstanding findings to be resolved.");
 			const context = await currentContext(ctx.cwd, signal);
 			const issue = context.issues.find((candidate) => candidate.number === params.issue);
 			if (!issue) throw new Error("Issue is not in the active epic.");
@@ -846,7 +859,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						const automaticProvenance = publishedAttemptDigests.get(settled.attemptKey) === createHash("sha256").update(settledComment.body).digest("hex") || authenticatedSupervisorComment(settledComment.author);
 						const explicitAuthorization = await recoveryAuthorized(ctx.cwd, params.issue, settled, settledComment.body, closureHead);
 						if (!automaticProvenance && !explicitAuthorization) {
-							throw new Error(`Accepted handoff lacks authenticated supervisor or verified local publication provenance; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
+							pendingHumanBoundaries.add(`recovery:${settled.attemptKey}`);
+							return { content: [{ type: "text", text: `Accepted handoff requires human closure authorization: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}` }], details: { settled: false, checkpoint: true, issue: params.issue, attemptKey: settled.attemptKey }, terminate: true };
 						}
 						if (!explicitAuthorization && closureHead !== expectedHead) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
 						await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
@@ -945,6 +959,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
 				issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
 			}
+			pendingHumanBoundaries.add(`decision:${marker}`);
 			return { content: [{ type: "text", text: `Human decision required for #${params.issue}: ${params.decision}. Reply with /aloop-decision ${params.issue} <decision>.` }], details: { checkpoint: true, resolved: false, marker }, terminate: true };
 		},
 	});
@@ -998,6 +1013,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const gate = evaluateEpicClosure(context, evidence);
 				if (!gate.allowed) return { content: [{ type: "text", text: `Epic evidence is incomplete: ${gate.reasons.join(" ")}` }], details: { ready: false, gate, evidence } };
 				await writeDurableResult(approvalPath, { version: 2, epic: context.epic.number, head, policySha256: snapshot.sha256, evidence, preparedAt: new Date().toISOString() });
+				pendingHumanBoundaries.add(`epic:${head}`);
 				return { content: [{ type: "text", text: `Epic #${context.epic.number} passed final verification at ${head}; all ${evidence.descendantReviews.length} descendants have durable supervised handoffs and ${evidence.acceptanceCriteria.length} epic criteria have evidence. Human approval is required: /aloop-approve-epic ${head}` }], details: { ready: true, epic: context.epic.number, head, evidence }, terminate: true };
 			}
 			let durableApproval: any = null;
