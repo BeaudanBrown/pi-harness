@@ -408,7 +408,8 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		const pi = {
 			registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command),
 			on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, setSessionName: () => undefined, sendUserMessage: () => undefined,
-			exec: async (_command: string, args: string[]) => args[0] === "show" ? { code: 0, stdout: policyDocument, stderr: "" }
+			exec: async (_command: string, args: string[]) => _command === "gh" ? { code: 0, stdout: "test-supervisor\n", stderr: "" }
+				: args[0] === "show" ? { code: 0, stdout: policyDocument, stderr: "" }
 				: args[0] === "log" ? { code: 0, stdout: "history", stderr: "" }
 					: args[0] === "status" ? { code: 0, stdout: require("node:fs").existsSync(join(cwd, ".verification-mutation")) ? "?? .verification-mutation\n" : "", stderr: "" }
 						: { code: 0, stdout: `${head}\n`, stderr: "" },
@@ -419,7 +420,7 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 			runReview: async () => ({ content: [{ type: "text", text: "No findings." }], details: { reports: 2 } }),
 			diagnoseCommand: async () => ({ summary: "canonical failed" }),
 			runWorker: async () => ({ status: "completed", summary: "done", commit: head, workerResult: null, contract: { valid: true, commit: head, violations: [] }, process: { exitCode: 0, signal: null, timedOut: false, cancelled: false, durationMs: 1 }, artifacts: { directory: ".pi/tmp/aloop/issue-2-1-abcdef", prompt: "p", stdout: "o", stderr: "e", result: "r" } }),
-			publishComment: async (_cwd, _issue, body, apply) => { published.push({ body, apply }); return {}; },
+			publishComment: async (_cwd, _issue, body, apply) => { published.push({ body, apply }); return apply ? { user: { login: "test-supervisor" } } : {}; },
 			closeIssue: async () => { closes += 1; if (closes === 1) throw new Error("interrupted closure"); return {}; },
 		});
 		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => undefined, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;

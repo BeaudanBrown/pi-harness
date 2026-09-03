@@ -234,7 +234,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	const dryRunClosureIds = new Set<string>();
 	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
 	let supervisorLogin: string | null = null;
-	const publishedAttemptKeys = new Set<string>();
+	const publishedAttemptDigests = new Map<string, string>();
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearDeadlineTimer(): void {
@@ -256,7 +256,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		dryRunClosureIds.clear();
 		issuedReceipts.clear();
 		supervisorLogin = null;
-		publishedAttemptKeys.clear();
+		publishedAttemptDigests.clear();
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
 	}
 
@@ -839,7 +839,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						]);
 						if (head.code !== 0 || status.code !== 0 || status.stdout.trim()) throw new Error("Recovery closure requires a clean current worktree.");
 						const closureHead = head.stdout.trim();
-						const automaticProvenance = publishedAttemptKeys.has(settled.attemptKey) || authenticatedSupervisorComment(settledComment.author);
+						const automaticProvenance = publishedAttemptDigests.get(settled.attemptKey) === createHash("sha256").update(settledComment.body).digest("hex") || authenticatedSupervisorComment(settledComment.author);
 						const explicitAuthorization = await recoveryAuthorized(ctx.cwd, params.issue, settled, settledComment.body, closureHead);
 						if (!automaticProvenance && !explicitAuthorization) {
 							throw new Error(`Accepted handoff lacks authenticated supervisor or verified local publication provenance; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
@@ -894,16 +894,18 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (!publishedComment) {
 				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
 				try {
-					await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
-					issue.recentHandoffs.push({ id: Date.now(), author: supervisorLogin, body, createdAt: handoff.timestamp, url: null });
+					const publication: any = await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
+					const author = typeof publication?.author === "string" ? publication.author : typeof publication?.user?.login === "string" ? publication.user.login : null;
+					issue.recentHandoffs.push({ id: Date.now(), author, body, createdAt: handoff.timestamp, url: null });
+					if (publication?.status !== "existing" || authenticatedSupervisorComment(author)) publishedAttemptDigests.set(attemptKey, createHash("sha256").update(body).digest("hex"));
 				} catch (error) {
 					const refreshed = await currentContext(ctx.cwd, signal, true);
 					const refreshedIssue = refreshed.issues.find((candidate) => candidate.number === params.issue);
 					const exactPublished = refreshedIssue?.recentHandoffs.find((comment) => comment.body === body);
 					if (!exactPublished) throw error;
 					issue.recentHandoffs.push(exactPublished);
+					if (authenticatedSupervisorComment(exactPublished.author)) publishedAttemptDigests.set(attemptKey, createHash("sha256").update(body).digest("hex"));
 				}
-				publishedAttemptKeys.add(attemptKey);
 			}
 			if (params.outcome === "accepted") {
 				await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/finalizations", `${attemptKey}.json`), { version: 1, attemptKey, issue: params.issue, head, commentSha256: createHash("sha256").update(body).digest("hex") });

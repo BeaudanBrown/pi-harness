@@ -254,8 +254,9 @@ export async function publishExactIssueComment(cwd: string, number: number, body
 	const repo = await currentRepo(cwd, undefined, commandOptions);
 	const issue = issueNumber(number);
 	const comments = await ghJson(cwd, ["api", `repos/${repo}/issues/${issue}/comments`, "--paginate"], commandOptions);
-	if (Array.isArray(comments) && comments.some((comment: any) => comment?.body === body)) {
-		return { dryRun: !apply, status: "existing", issue, byteLength: Buffer.byteLength(body) };
+	const existing = Array.isArray(comments) ? comments.find((comment: any) => comment?.body === body) : undefined;
+	if (existing) {
+		return { dryRun: !apply, status: "existing", issue, byteLength: Buffer.byteLength(body), author: typeof existing?.user?.login === "string" ? existing.user.login : null };
 	}
 	if (!apply) return { dryRun: true, status: "would-publish", issue, byteLength: Buffer.byteLength(body), body };
 	return await ghJsonWithInput(cwd, ["api", "--method", "POST", `repos/${repo}/issues/${issue}/comments`], { body }, commandOptions);
