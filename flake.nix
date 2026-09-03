@@ -105,13 +105,6 @@
           xdgUtils = pkgs.xdg-utils;
           jq = pkgs.jq;
         };
-        developmentProfile = piHarnessResources.agentProfiles.profiles."engineering-full";
-        developmentHarnessExtensionIds = builtins.filter
-          (name: name != "pi-r" && name != "agentgraph" && name != "lsp")
-          developmentProfile.extensions;
-        developmentExtensionArgs = lib.concatMapStringsSep " \\\n"
-          (name: ''--extension "$PWD/config/agent/extensions/${name}/index.ts"'')
-          developmentHarnessExtensionIds;
         managedSessionLauncher = pkgs.writeShellApplication {
           name = "tmux_project";
           runtimeInputs = [ pkgs.coreutils pkgs.direnv pkgs.findutils pkgs.gawk pkgs.jq pkgs.tmux ];
@@ -302,34 +295,6 @@
           terraform-ls
           tailwindcss-language-server
         ];
-        piDevWrapper = pkgs.writeShellApplication {
-          name = "pi";
-          text = ''
-            case "''${1-}" in
-              install|remove|uninstall|update|list|config)
-                exec ${lib.getExe piPackage} "$@"
-                ;;
-              *)
-                export PI_HARNESS_AGENT_PROFILE="engineering-full"
-                export PI_HARNESS_RESOURCES_ROOT="$PWD/config/agent"
-                export PI_HARNESS_MATT_SKILLS_ROOT="${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"
-                export PI_HARNESS_LSP_EXTENSION="${piLspExtension}/share/pi-lsp-extension/src/index.ts"
-                exec ${lib.getExe piPackage} \
-                  --extension "${piRPackage.resourcePaths.extension}" \
-                  ${developmentExtensionArgs} \
-                  --extension "${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts" \
-                  --extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts" \
-                  --skill "$PWD/config/agent/skills" \
-                  --skill "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills" \
-                  --skill "${agentgraphPiResources}/share/agentgraph-pi/skills" \
-                  --prompt-template "$PWD/config/agent/prompts" \
-                  --prompt-template "${agentgraphPiResources}/share/agentgraph-pi/prompts" \
-                  --theme "$PWD/config/agent/themes" \
-                  "$@"
-                ;;
-            esac
-          '';
-        };
         typeSetup = ''
           types_root=.pi-types/node_modules
           mkdir -p "$types_root/@earendil-works" "$types_root/@types"
@@ -345,13 +310,7 @@
         } ''
           mkdir -p source/tests source/tests/fixtures "$out/lib" "$out/bin" "$out/share/pi-harness-eval-self-test"
           cp -r ${./eval} source/eval
-          cp ${./tests/eval-contracts.test.ts} source/tests/eval-contracts.test.ts
-          cp ${./tests/eval-cli.test.ts} source/tests/eval-cli.test.ts
-          cp ${./tests/eval-grading.test.ts} source/tests/eval-grading.test.ts
-          cp ${./tests/eval-launcher.test.ts} source/tests/eval-launcher.test.ts
-          cp ${./tests/eval-rpc.test.ts} source/tests/eval-rpc.test.ts
-          cp ${./tests/eval-trace-metrics.test.ts} source/tests/eval-trace-metrics.test.ts
-          cp ${./tests/eval-workspace.test.ts} source/tests/eval-workspace.test.ts
+          cp ${./tests}/eval-*.test.ts source/tests/
           cp -r ${./tests/fixtures/eval-rpc} source/tests/fixtures/eval-rpc
           cp -r ${./tests/fixtures/eval-traces} source/tests/fixtures/eval-traces
           cat > tsconfig.json <<EOF
@@ -398,7 +357,7 @@
         };
         evalSelfTestApp = pkgs.writeShellApplication {
           name = "pi-eval-self-test";
-          runtimeInputs = [ pkgs.coreutils pkgs.git pkgs.nodejs ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ];
+          runtimeInputs = [ pkgs.bash pkgs.coreutils pkgs.git pkgs.nodejs ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ];
           text = ''
             set -euo pipefail
             home=$(mktemp -d)
@@ -411,15 +370,10 @@
               HOME="$home" \
               TMPDIR="''${TMPDIR:-/tmp}" \
               PATH="$PATH" \
+              PI_TEST_SHELL=${lib.getExe pkgs.bash} \
               ${lib.optionalString pkgs.stdenv.isLinux "PI_EVAL_BWRAP=${lib.getExe pkgs.bubblewrap} \\"}
               ${lib.getExe pkgs.nodejs} --test --test-concurrency=1 \
-                ${evalTooling}/lib/tests/eval-contracts.test.js \
-                ${evalTooling}/lib/tests/eval-cli.test.js \
-                ${evalTooling}/lib/tests/eval-grading.test.js \
-                ${evalTooling}/lib/tests/eval-launcher.test.js \
-                ${evalTooling}/lib/tests/eval-rpc.test.js \
-                ${evalTooling}/lib/tests/eval-trace-metrics.test.js \
-                ${evalTooling}/lib/tests/eval-workspace.test.js
+                ${evalTooling}/lib/tests/eval-*.test.js
           '';
         };
         migrateTkApp = pkgs.writeShellApplication {
@@ -441,514 +395,35 @@
             exec ${piHarnessPackage}/bin/pi "$@"
           '';
         };
-        verifyApp = pkgs.writeShellApplication {
-          name = "verify";
-          runtimeInputs = [
-            pkgs.check-jsonschema
-            pkgs.coreutils
-            pkgs.git
-            pkgs.jq
-            pkgs.nodejs
-            pkgs.typescript
-          ] ++ lib.optionals pkgs.stdenv.isLinux [
-            pkgs.bubblewrap
-          ];
-          text = ''
-            set -euo pipefail
-            test -f config/agent/settings.json
-            jq empty config/agent/settings.json
-            test -f docs/architecture/decisions/0001-synthetic-evaluation-contracts.md
-            test -f docs/architecture/decisions/0002-managed-session-contracts.md
-            test -f config/agent/extensions/managed-sessions/contracts.ts
-            test -f config/agent/extensions/managed-sessions/adapter/ordinary.ts
-            test -f config/agent/extensions/managed-sessions/adapter/coordinator.ts
-            test -f config/agent/extensions/managed-sessions/adapter/client.ts
-            test -f config/agent/extensions/managed-sessions/adapter/state.ts
-            if grep -R -E 'PI_MATRIX|MATRIX_ACCESS_TOKEN|https?://|node:child_process|tmux|send-keys' \
-              config/agent/extensions/managed-sessions/adapter; then
-              echo "managed-session adapter must have no Matrix, process, or tmux authority" >&2
-              exit 1
-            fi
-            test -f config/agent/extensions/managed-sessions/relay/main.ts
-            test -f config/agent/extensions/managed-sessions/relay/ipc-server.ts
-            test -f config/agent/extensions/managed-sessions/relay/registry.ts
-            test -f config/agent/extensions/managed-sessions/relay/matrix-client.ts
-            test -f eval/contracts/path-policy.ts
-            test -f eval/rpc/engine.ts
-            test -f eval/rpc/README.md
-            test -f eval/workspace/materialize.ts
-            test -f eval/workspace/README.md
-            test -f eval/trace/capture.ts
-            test -f eval/trace/README.md
-            test -f eval/grading/grade.ts
-            test -f eval/grading/README.md
-            if grep -R -F 'node:readline' eval/rpc; then
-              echo "eval RPC engine must use strict LF framing, not Node readline" >&2
-              exit 1
-            fi
-            test -f tests/fixtures/eval-rpc/fake-rpc.mjs
-            schema_root=eval/contracts/schemas/v1
-            fixture_root=../../fixtures
-            (
-              cd "$schema_root"
-              for schema in *.schema.json; do
-                check-jsonschema --check-metaschema "$schema"
-              done
-              check-jsonschema --schemafile pack.schema.json "$fixture_root/valid/pack.json"
-              check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/sensor-smoke.json"
-              check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/ui-policy-v1.json"
-              check-jsonschema --schemafile synthetic-provenance.schema.json "$fixture_root/valid/provenance.json"
-              check-jsonschema --schemafile metrics.schema.json "$fixture_root/valid/metrics.json"
-              check-jsonschema --schemafile run-result.schema.json "$fixture_root/valid/run-result.json"
-              check-jsonschema --schemafile comparison.schema.json "$fixture_root/valid/baselines/reviewed-summary.json"
-              for fixture in pack-traversal pack-absolute pack-external-uri pack-nul-path pack-trailing-slash; do
-                if check-jsonschema --schemafile pack.schema.json "$fixture_root/invalid/$fixture.json"; then
-                  echo "invalid eval pack fixture passed validation: $fixture" >&2
-                  exit 1
-                fi
-              done
-              for fixture in pack-duplicate-suite-id pack-unknown-scenario; do
-                check-jsonschema --schemafile pack.schema.json "$fixture_root/invalid/$fixture.json"
-              done
-              for fixture in scenario-generator-missing-outputs scenario-missing-provenance scenario-not-synthetic; do
-                if check-jsonschema --schemafile scenario.schema.json "$fixture_root/invalid/$fixture.json"; then
-                  echo "invalid synthetic scenario fixture passed validation: $fixture" >&2
-                  exit 1
-                fi
-              done
-              for fixture in provenance-extra-property provenance-missing-synthetic provenance-not-synthetic; do
-                if check-jsonschema --schemafile synthetic-provenance.schema.json "$fixture_root/invalid/$fixture.json"; then
-                  echo "invalid synthetic provenance fixture passed validation: $fixture" >&2
-                  exit 1
-                fi
-              done
-              for fixture in \
-                assertion-file-missing-expected \
-                assertion-final-text-missing-condition \
-                assertion-git-missing-condition \
-                assertion-oracle-missing-target \
-                assertion-ui-missing-condition; do
-                if check-jsonschema --schemafile assertion.schema.json "$fixture_root/invalid/$fixture.json"; then
-                  echo "incomplete assertion fixture passed validation: $fixture" >&2
-                  exit 1
-                fi
-              done
-              (
-                cd ../v2
-                for schema in *.schema.json; do
-                  check-jsonschema --check-metaschema "$schema"
-                done
-                check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/sensor-smoke-v2.json"
-                check-jsonschema --schemafile scenario.schema.json "$fixture_root/invalid/scenario-duplicate-ui-dialog.json"
-                if check-jsonschema --schemafile scenario.schema.json "$fixture_root/invalid/scenario-unsupported-version.json"; then
-                  echo "unsupported scenario version passed v2 validation" >&2
-                  exit 1
-                fi
-                if check-jsonschema --schemafile ui-policy.schema.json "$fixture_root/invalid/ui-policy-response-mismatch.json"; then
-                  echo "method-incompatible UI response fixture passed v2 validation" >&2
-                  exit 1
-                fi
-              )
-              (
-                cd ../v3
-                for schema in *.schema.json; do
-                  check-jsonschema --check-metaschema "$schema"
-                done
-                check-jsonschema --schemafile scenario.schema.json "$fixture_root/valid/scenarios/sensor-smoke-v3.json"
-              )
-            )
-            test -d config/agent/extensions
-            test -f config/agent/extensions/web-search/index.ts
-            test -f config/agent/extensions/github-issues/index.ts
-            test -f config/agent/extensions/aloop/index.ts
-            test -f config/agent/extensions/diagram-tools/index.ts
-            test -f config/agent/extensions/worker-runner/index.ts
-            test -f config/agent/extensions/review-agents/index.ts
-            test -f config/agent/extensions/remote-session/index.ts
-            test -f config/agent/extensions/remote-session/matrix-client.ts
-            test -f config/agent/extensions/remote-session/state-store.ts
-            test -f config/agent/extensions/nix-runtime/index.ts
-            test -f config/agent/extensions/codex-fast/index.ts
-            test -f config/agent/extensions/tmux-cursor-focus/index.ts
-            test -f config/agent/extensions/sesh/index.ts
-            test -d config/agent/skills
-            test -f config/agent/skills/playwright-browser/SKILL.md
-            test -d config/agent/prompts
-            test -d config/agent/themes
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/aloop/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts
-            test ! -e ${piHarnessResources}/share/pi-harness/agent/extensions/remote-session
-            if grep -F 'remoteSession =' nix/module.nix >/dev/null; then
-              echo "legacy remoteSession NixOS option still exists" >&2
-              exit 1
-            fi
-            test -f ${piHarnessResources.managedSessionExtensions.ordinary}
-            test -f ${piHarnessResources.managedSessionExtensions.coordinator}
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/managed-sessions/adapter/client.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/managed-sessions/adapter/state.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/nix-runtime/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts
-            test -f ${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts
-            test -d ${piHarnessResources}/share/pi-harness/agent/extensions/node_modules/typebox
-            test -d ${piHarnessResources}/share/pi-harness/agent/skills
-            test -f ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/SKILL.md
-            test -f ${piHarnessResources}/share/pi-harness/agent/skills/playwright-browser/SKILL.md
-            test -f ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/references/inventory-schema.md
-            grep -F 'disable-model-invocation: true' \
-              ${piHarnessResources}/share/pi-harness/agent/skills/migrate-tk-to-github/SKILL.md >/dev/null
-            mattpocock_skills_root=${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills
-            for skill_name in \
-              ask-matt codebase-design code-review diagnosing-bugs domain-modeling \
-              grill-with-docs implement prototype research resolving-merge-conflicts \
-              setup-matt-pocock-skills tdd to-spec to-tickets triage wayfinder grilling handoff; do
-              test -f "$mattpocock_skills_root/$skill_name/SKILL.md"
-              grep -F "name: $skill_name" "$mattpocock_skills_root/$skill_name/SKILL.md" >/dev/null
-            done
-            grep -F 'review_agents' "$mattpocock_skills_root/code-review/SKILL.md" >/dev/null
-            if grep -F "two \`Agent\` tool calls" "$mattpocock_skills_root/code-review/SKILL.md" >/dev/null; then
-              echo "code-review skill still references the unavailable Agent tool" >&2
-              exit 1
-            fi
-            for user_invoked_skill in \
-              ask-matt grill-with-docs implement setup-matt-pocock-skills \
-              to-spec to-tickets triage wayfinder handoff; do
-              grep -F "disable-model-invocation: true" \
-                "$mattpocock_skills_root/$user_invoked_skill/SKILL.md" >/dev/null
-            done
-            test -f "$mattpocock_skills_root/tdd/tests.md"
-            test -f "$mattpocock_skills_root/setup-matt-pocock-skills/issue-tracker-github.md"
-            jq -e '.enableSkillCommands == true' ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            test -d ${piHarnessResources}/share/pi-harness/agent/prompts
-            test -d ${piHarnessResources}/share/pi-harness/agent/themes
-            test -L ${piHarnessPackage}/share/pi-harness/agent
-            test -f ${agentgraphPiResources}/share/agentgraph-pi/extensions/agentgraph/index.ts
-            test -f ${agentgraphPiResources}/share/agentgraph-pi/skills/agentgraph-operator/SKILL.md
-            test -f ${agentgraphPiResources}/share/agentgraph-pi/prompts/graph-change.md
-            test -e ${piHarnessPackage}/bin/ag
-            test -e ${piHarnessPackage}/bin/agentgraph-postgres
-            test -x ${piHarnessPackage}/bin/pi-playwright
-            test ! -e ${piHarnessPackage}/bin/pi-matrix-whoami
-            test ! -e ${piHarnessPackage}/bin/pi-managed-session-relay
-            test -x ${managedSessionRelay}/bin/pi-managed-session-relay
-            test -x ${piHarnessPackage}/bin/pi-r-local
-            launcher_identity=${piHarnessPackage}/share/pi-harness/eval/launcher-identity.json
-            check-jsonschema --check-metaschema eval/launcher/schemas/v1/launcher-identity.schema.json
-            check-jsonschema --check-metaschema eval/launcher/schemas/v1/runtime-provenance.schema.json
-            check-jsonschema --schemafile eval/launcher/schemas/v1/launcher-identity.schema.json "$launcher_identity"
-            jq -e '
-              .schemaVersion == "1.0.0"
-              and .launcher.id == "pi-r-local"
-              and .launcher.path == "${piHarnessPackage}/bin/pi-r-local"
-              and .launcher.defaultArgs == ["--mode", "rpc", "--no-session"]
-              and .launcher.requiredResourceBindings == [
-                "${piRPackage.resourcePaths.root}",
-                "${piRPackage.resourcePaths.extension}",
-                "${piRPackage.resourcePaths.skill}"
-              ]
-              and .piR.resourceRoot == "${piRPackage.resourcePaths.root}"
-              and .piR.extensionPath == "${piRPackage.resourcePaths.extension}"
-              and .piR.skillPath == "${piRPackage.resourcePaths.skill}"
-            ' "$launcher_identity" >/dev/null
-            launcher_attestation=$(mktemp)
-            PI_EVAL_ATTESTATION_PATH="$launcher_attestation" \
-              ${piHarnessPackage}/bin/pi-r-local --version >/dev/null
-            jq -e '
-              .launcherId == "pi-r-local"
-              and .resourceRoot == "${piRPackage.resourcePaths.root}"
-              and .extensionPath == "${piRPackage.resourcePaths.extension}"
-              and .skillPath == "${piRPackage.resourcePaths.skill}"
-            ' "$launcher_attestation" >/dev/null
-            test -x ${piRPackage.resourcePaths.cli}
-            test -x ${piRPackage.resourcePaths.rscript}
-            test -x ${piRPackage.resourcePaths.parser}
-            test -x ${piRPackage.resourcePaths.sandbox}
-            test -f ${piRPackage.resourcePaths.extension}
-            test -f ${piRPackage.resourcePaths.scoutExtension}
-            test -f ${piRPackage.resourcePaths.skill}
-            test -f ${piRPackage.resourcePaths.reference}
-            test -f ${piRPackage.resourcePaths.formatter}
-            test -x ${piRPackage.resourcePaths.parserGrammar}
-            test -f ${piRPackage.resourcePaths.parserQuery}
-            test -f ${piRPackage.resourcePaths.nixpkgsPin}
-            test -f ${piRPackage.resourcePaths.dataInspector}
-            test -f ${piRPackage.resourcePaths.valueSummary}
-            test -n ${pkgs.lib.escapeShellArg piRPackage.resourcePaths.sandboxRuntimePath}
-            grep -F 'PI_R_SANDBOX_PATH' ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F 'PI_R_SANDBOX_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F 'PI_R_DATA_INSPECTOR_SCRIPT' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F 'PI_R_VALUE_SUMMARY_SCRIPT' ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F 'PI_R_VALUE_SUMMARY_SCRIPT' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F 'pi_clean_path' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F 'expandPromptTemplates: options?.expandPromptTemplates ?? false' \
-              ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js >/dev/null
-            grep -F 'expandPromptTemplates?: boolean' \
-              ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/extensions/types.d.ts >/dev/null
-            grep -F 'options?.onPromptExpanded?.(expandedText)' \
-              ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js >/dev/null
-            command_probe_dir=$(mktemp -d)
-            cat > "$command_probe_dir/extension.ts" <<'EOF'
-            import { writeFileSync } from "node:fs";
-            import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-            export default function (pi: ExtensionAPI): void {
-              pi.registerCommand("matrix-command-probe", {
-                handler: async (args) => writeFileSync(process.env.PROBE_RESULT!, args),
-              });
-              pi.on("session_start", () => {
-                pi.sendUserMessage("/matrix-command-probe expanded", { expandPromptTemplates: true });
-              });
-            }
-            EOF
-            PROBE_RESULT="$command_probe_dir/result" \
-              printf '%s\n' '{"type":"get_state"}' | \
-              PROBE_RESULT="$command_probe_dir/result" \
-              timeout 10 ${piPackage}/bin/pi --mode rpc --no-session \
-                --extension "$command_probe_dir/extension.ts" >/dev/null
-            test "$(cat "$command_probe_dir/result")" = expanded
-            rm -rf "$command_probe_dir"
-            test -x ${managedSessionPiWrapper}/bin/pi
-            test -x ${managedSessionStatusWrapper}/bin/pi-managed-session-status
-            grep -F 'cursorConfigured' ${managedSessionStatusWrapper}/bin/pi-managed-session-status >/dev/null
-            jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4 and (.hasGeneralEnvironmentFile | not) and (.hasPrivateTmp | not) and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"' \
-              ${managedSessionModuleReport} >/dev/null
-            managed_relay_launch=$(jq -r .execStart ${managedSessionModuleReport})
-            grep -F 'credential file may contain only one PI_MATRIX_ACCESS_TOKEN assignment' "$managed_relay_launch" >/dev/null
-            grep -F 'export PI_MATRIX_ACCESS_TOKEN=' "$managed_relay_launch" >/dev/null
-            if grep -F 'echo' "$managed_relay_launch" | grep -F 'matrix_token' >/dev/null; then
-              echo "managed relay launcher prints its Matrix token" >&2
-              exit 1
-            fi
-            grep -F '${piHarnessResources.managedSessionExtensions.ordinary}' ${managedSessionPiWrapper}/bin/pi >/dev/null
-            grep -F 'PI_MANAGED_SESSIONS_SOCKET' ${managedSessionPiWrapper}/bin/pi >/dev/null
-            grep -F 'PI_HARNESS_LSP_ENABLED:-0' ${lspDisabledPiWrapper}/bin/pi >/dev/null
-            grep -F 'pi_clean_path' ${managedLspDisabledCoordinatorPi}/bin/pi >/dev/null
-            if grep -F -- '--extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts"' ${lspDisabledPiWrapper}/bin/pi >/dev/null; then exit 1; fi
-            disabled_lsp_probe=$(mktemp -d)
-            cat > "$disabled_lsp_probe/extension.ts" <<'EOF'
-            import { writeFileSync } from "node:fs";
-            export default function (pi: any): void {
-              pi.on("session_start", () => writeFileSync(process.env.PROBE_RESULT!, JSON.stringify({
-                path: process.env.PATH,
-                extension: process.env.PI_HARNESS_LSP_EXTENSION,
-                fallback: process.env.PI_HARNESS_LSP_FALLBACK_PATH,
-              })));
-            }
-            EOF
-            printf '%s\n' '{"type":"get_state"}' | env \
-              PATH="/forbidden-lsp:$PATH" \
-              PI_HARNESS_LSP_EXTENSION="/forbidden-lsp/extension.ts" \
-              PI_HARNESS_LSP_FALLBACK_PATH="/forbidden-lsp" \
-              PROBE_RESULT="$disabled_lsp_probe/result" \
-              timeout 10 ${lspDisabledPiWrapper}/bin/pi --mode rpc --no-session \
-                --no-extensions --extension "$disabled_lsp_probe/extension.ts" >/dev/null
-            jq -e '(.path | split(":") | index("/forbidden-lsp") | not) and (.extension == null) and (.fallback == null)' \
-              "$disabled_lsp_probe/result" >/dev/null
-            rm -rf "$disabled_lsp_probe"
-            grep -F 'PI_HARNESS_AGENT_PROFILE="managed-project"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-            project_case="$(${pkgs.coreutils}/bin/mktemp)"
-            disabled_project_case="$(${pkgs.coreutils}/bin/mktemp)"
-            awk '/project\)/ { capture=1 } capture { print } /trusted launch role is required/ { exit }' ${managedSessionCoordinatorPi}/bin/pi > "$project_case"
-            awk '/project\)/ { capture=1 } capture { print } /trusted launch role is required/ { exit }' ${managedLspDisabledCoordinatorPi}/bin/pi > "$disabled_project_case"
-            coordinator_binary=$(grep -Eo '/nix/store/[^ ]+-pi-managed-coordinator/bin/pi-managed-coordinator' ${managedSessionCoordinatorPi}/bin/pi | head -1)
-            test -x "$coordinator_binary"
-            grep -F -- '--no-extensions' "$coordinator_binary" >/dev/null
-            grep -F -- '--no-skills' "$coordinator_binary" >/dev/null
-            grep -F -- '--no-prompt-templates' "$coordinator_binary" >/dev/null
-            grep -F -- '--no-themes' "$coordinator_binary" >/dev/null
-            grep -F -- '--no-context-files' "$coordinator_binary" >/dev/null
-            grep -F -- '--no-builtin-tools' "$coordinator_binary" >/dev/null
-            grep -F -- 'pi_clean_path' "$coordinator_binary" >/dev/null
-            grep -F -- 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$coordinator_binary" >/dev/null
-            grep -F -- '--no-extensions' "$project_case" >/dev/null
-            grep -F -- '--no-skills' "$project_case" >/dev/null
-            grep -F -- '--no-prompt-templates' "$project_case" >/dev/null
-            grep -F -- '--no-themes' "$project_case" >/dev/null
-            grep -F -- 'project_extension_args+=(--extension' "$project_case" >/dev/null
-            grep -F -- 'project_skill_args+=(--skill' "$project_case" >/dev/null
-            grep -F -- 'project_prompt_args+=(--prompt-template' "$project_case" >/dev/null
-            grep -F -- 'pi-r*|agentgraph*|sesh|tmux-cursor-focus' "$project_case" >/dev/null
-            grep -F -- 'project_config_roots=' "$project_case" >/dev/null
-            grep -F -- '/bin/pwd -P' "$project_case" >/dev/null
-            grep -F -- 'resource_key=' "$project_case" >/dev/null
-            grep -F -- 'PI_HARNESS_LSP_FALLBACK_PATH' "$project_case" >/dev/null
-            grep -F -- 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$disabled_project_case" >/dev/null
-            if grep -F -- '${piLspExtension}/share/pi-lsp-extension/src/index.ts' "$disabled_project_case" >/dev/null; then exit 1; fi
-            grep -F -- 'export PATH=' "$project_case" >/dev/null
-            if grep -F -- '--no-context-files' "$project_case" >/dev/null; then exit 1; fi
-            if grep -F -- '--no-builtin-tools' "$project_case" >/dev/null; then exit 1; fi
-            if grep -F '/run/secrets/pi-managed-session.env' ${managedSessionPiWrapper}/bin/pi >/dev/null; then
-              echo "managed-session Matrix credential file leaked into the interactive Pi wrapper" >&2
-              exit 1
-            fi
-            test -x ${playwrightAgentCli}/bin/playwright-cli-fallback
-            ${playwrightAgentCli}/bin/playwright-cli-fallback --version | grep -Fx '0.1.17' >/dev/null
-            test ! -e ${piHarnessPackage}/bin/tk
-            test -x ${migrateTkApp}/bin/pi-migrate-tk
-            grep -F 'no .tickets directory' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
-            grep -F 'gh auth status' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
-            grep -F -- "--extension \"${piRPackage.resourcePaths.extension}\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/web-search/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/github-issues/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/aloop/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/diagram-tools/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/review-agents/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            if grep -F 'extensions/remote-session/' ${piHarnessPackage}/bin/pi >/dev/null; then
-              echo "legacy direct Matrix bridge must not load in packaged Pi" >&2
-              exit 1
-            fi
-            if grep -F 'managed-sessions/adapter/' ${piHarnessPackage}/bin/pi >/dev/null; then
-              echo "disabled default Pi wrapper must not load managed-session adapters" >&2
-              exit 1
-            fi
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/codex-fast/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/tmux-cursor-focus/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"${piHarnessResources}/share/pi-harness/agent/extensions/sesh/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--skill \"${piHarnessResources}/share/pi-harness/agent/skills\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--skill \"${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--extension \"\$agentgraph_extensions_dir/agentgraph/index.ts\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F -- "--prompt-template \"\$agentgraph_prompts_dir\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "install|remove|uninstall|update|list|config)" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export AGENTGRAPH_CLI=\"\''${AGENTGRAPH_CLI:-" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export AGENTGRAPH_POSTGRES=\"\''${AGENTGRAPH_POSTGRES:-" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export PI_HARNESS_FZF=\"\''${PI_HARNESS_FZF:-" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export PI_HARNESS_TMUX=\"\''${PI_HARNESS_TMUX:-" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export PI_HARNESS_D2=\"\''${PI_HARNESS_D2:-" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export PI_HARNESS_DOT=\"\''${PI_HARNESS_DOT:-" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export PI_HARNESS_IMAGE_VIEWER=\"\''${PI_HARNESS_IMAGE_VIEWER:-" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "PI_HARNESS_AGENTGRAPH_ROOT" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "PI_HARNESS_AGENTGRAPH_SKILLS_DIR" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F "export AGENTGRAPH_PI_RESOURCES=\"\$agentgraph_root\"" ${piHarnessPackage}/bin/pi >/dev/null
-            grep -F '${ticketPackage}/bin' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
-            test -f ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/index.ts
-            grep -F -- '${piLspExtension}/share/pi-lsp-extension/src/index.ts' ${managedSessionPiWrapper}/bin/pi >/dev/null
-            grep -F -- '${piLspExtension}/share/pi-lsp-extension/src/index.ts' "$project_case" >/dev/null
-            grep -F '".nix": "nix"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null
-            grep -F '"dockerfile": "dockerfile"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null
-            grep -F '".hs": "haskell"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null
-            grep -F 'nix: { command: "nil", args: [] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
-            grep -F 'haskell: { command: "haskell-language-server-wrapper", args: ["--lsp"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
-            grep -F 'dockerfile: { command: "docker-langserver", args: ["--stdio"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
-            grep -F 'bash: { command: "bash-language-server", args: ["start"] }' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/lsp-manager.ts >/dev/null
-            grep -F 'const runningStatuses = statuses.filter((s) => s.running);' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/tools/symbols.ts >/dev/null
-            jq -e '.extensions | index("./extensions/github-issues/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/aloop/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/diagram-tools/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/worker-runner/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/review-agents/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/remote-session/index.ts") | not' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '[.extensions[] | select(contains("managed-sessions/adapter/"))] | length == 0' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/nix-runtime/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/codex-fast/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/tmux-cursor-focus/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/sesh/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.extensions | index("./extensions/agent-profiles/index.ts")' \
-              ${piHarnessResources}/share/pi-harness/agent/settings.json >/dev/null
-            jq -e '.profiles | keys | length == 7' \
-              ${piHarnessResources}/share/pi-harness/agent/profiles.json >/dev/null
-
-            grep -F -- '--no-extensions' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F -- '--no-skills' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F -- '--no-context-files' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F -- '--no-prompt-templates' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F -- '--no-themes' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F -- '--extension "${piRPackage.resourcePaths.extension}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F -- '--extension "${piHarnessResources.agentProfileExtension}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            grep -F -- '--skill "${piRPackage.resourcePaths.skill}"' ${piHarnessPackage}/bin/pi-r-local >/dev/null
-            if grep -F "${piHarnessResources}/share/pi-harness/agent/extensions/" ${piHarnessPackage}/bin/pi-r-local | grep -v 'agent-profiles/index.ts' >/dev/null; then
-              echo "pi-local must not load general harness extensions" >&2
-              exit 1
-            fi
-            PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
-              PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
-              node --test ${./tests/pi-r-integration.test.mjs}
-
-            ${typeSetup}
-            tsc --noEmit --project tsconfig.json
-            test_build_dir=$(mktemp -d)
-            tsc --project tsconfig.test.json --outDir "$test_build_dir"
-            ${evalSelfTestApp}/bin/pi-eval-self-test
-            PI_HARNESS_JQ=${lib.getExe pkgs.jq} \
-              PI_MANAGED_ADAPTER_TEST_PI=${piPackage}/bin/pi \
-              PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary} \
-              PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator} \
-              PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid \
-              PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock \
-              PI_MANAGED_SESSIONS_TEST_TMUX=${pkgs.tmux}/bin/tmux \
-              PI_MANAGED_TEST_LAUNCHER=${managedSessionLauncher}/bin/tmux_project \
-              PI_MANAGED_TEST_COORDINATOR_PI=${managedSessionCoordinatorPi}/bin/pi \
-              PI_MANAGED_TEST_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
-              PI_MANAGED_TEST_DIRENV=${pkgs.direnv}/bin/direnv \
-              node --test \
-                "$test_build_dir/tests/agent-profiles.test.js" \
-                "$test_build_dir/tests/github-issues.test.js" \
-                "$test_build_dir/tests/aloop-worker.test.js" \
-                "$test_build_dir/tests/aloop-policy.test.js" \
-                "$test_build_dir/tests/aloop-supervisor.test.js" \
-                "$test_build_dir/tests/managed-session-contracts.test.js" \
-                "$test_build_dir/tests/managed-session-v2-contracts.test.js" \
-                "$test_build_dir/tests/managed-session-activity.test.js" \
-                "$test_build_dir/tests/managed-session-adapter.test.js" \
-                "$test_build_dir/tests/managed-session-adapter-real-pi.test.js" \
-                "$test_build_dir/tests/managed-session-coordinator.test.js" \
-                "$test_build_dir/tests/managed-session-controls.test.js" \
-                "$test_build_dir/tests/managed-session-lifecycle.test.js" \
-                "$test_build_dir/tests/managed-session-relay-adapter.test.js" \
-                "$test_build_dir/tests/managed-session-relay-registry.test.js" \
-                "$test_build_dir/tests/managed-session-relay-ipc.test.js" \
-                "$test_build_dir/tests/managed-session-relay-matrix.test.js" \
-                "$test_build_dir/tests/managed-session-transcript-projector.test.js" \
-                "$test_build_dir/tests/managed-session-transcript-renderer.test.js" \
-                "$test_build_dir/tests/remote-session.test.js" \
-                "$test_build_dir/tests/remote-session-state.test.js" \
-                "$test_build_dir/tests/playwright-resolver.test.js" \
-                "$test_build_dir/tests/review-agents.test.js" \
-                "$test_build_dir/tests/worker-runner.test.js"
-          '';
+        verification = import ./nix/verification.nix {
+          inherit
+            pkgs
+            lib
+            piPackage
+            piHarnessPackage
+            piHarnessResources
+            piRPackage
+            agentgraphPiResources
+            managedSessionRelay
+            managedSessionLauncher
+            managedSessionPiWrapper
+            managedSessionStatusWrapper
+            managedSessionCoordinatorPi
+            managedLspDisabledCoordinatorPi
+            lspDisabledPiWrapper
+            managedSessionModuleReport
+            mattPocockSkillsResources
+            migrateTkApp
+            playwrightAgentCli
+            piLspExtension
+            evalSelfTestApp
+            typeSetup
+            lspPackages
+            ;
+          source = ./.;
         };
-        verifyLspLiveApp = pkgs.writeShellApplication {
-          name = "verify-lsp-live";
-          runtimeInputs = [
-            pkgs.coreutils
-            pkgs.nodejs
-            pkgs.typescript
-          ]
-          ++ lspPackages;
-          text = ''
-            set -euo pipefail
-            for command_name in \
-              typescript-language-server rust-analyzer ocamllsp nil pyright-langserver \
-              gopls jdtls clangd lua-language-server bash-language-server \
-              vscode-json-language-server vscode-html-language-server vscode-css-language-server \
-              yaml-language-server docker-langserver taplo marksman terraform-ls; do
-              command -v "$command_name" >/dev/null
-            done
-            ${typeSetup}
-            test_build_dir=$(mktemp -d)
-            tsc --project tsconfig.test.json --outDir "$test_build_dir"
-            PI_LSP_EXTENSION=${piLspExtension}/share/pi-lsp-extension \
-              PI_LSP_EXTENSION_SOURCE=${piLspExtension}/share/pi-lsp-extension/src \
-              node --test "$test_build_dir/tests/lsp-live.test.js"
-          '';
-        };
+        verifyApp = verification.verifyApp;
+        verifyLspLiveApp = verification.verifyLspLiveApp;
       in
       {
         packages.pi-harness = piHarnessPackage;
@@ -961,8 +436,10 @@
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
 
-        checks.managed-session-test-launcher = managedSessionLauncher;
-        checks.managed-session-test-coordinator-pi = managedSessionCoordinatorPi;
+        checks = verification.checks // {
+          managed-session-test-launcher = managedSessionLauncher;
+          managed-session-test-coordinator-pi = managedSessionCoordinatorPi;
+        };
 
         apps.migrate-tk = flake-utils.lib.mkApp { drv = migrateTkApp; };
         apps.eval = flake-utils.lib.mkApp { drv = evalApp; };
@@ -980,7 +457,6 @@
 
         devShells.default = pkgs.mkShell {
           packages = [
-            # piDevWrapper
             agentgraphPackage
             agentgraphPostgresPackage
             playwrightAgentCli

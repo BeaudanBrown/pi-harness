@@ -18,7 +18,6 @@ let
 
       mkdir -p "$out/share/pi-harness/agent"
       cp -R config/agent/. "$out/share/pi-harness/agent/"
-      rm -rf "$out/share/pi-harness/agent/extensions/remote-session"
 
       mkdir -p "$out/share/pi-harness/agent/extensions/node_modules"
       typebox_dir=""
