@@ -9,6 +9,7 @@ import { balancedLogExcerpt, runDurableCommand, writeDurableResult } from "../wo
 import { snapshotAloopPolicy, type AloopCommandDefinition, type AloopPolicySnapshot } from "./policy.js";
 import {
 	acceptedOpenAloopIssues,
+	type AloopAcceptedRecoveryRecord,
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
 	closeAcceptedAloopIssue,
@@ -232,6 +233,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	const dryRunHandoffIds = new Set<string>();
 	const dryRunClosureIds = new Set<string>();
 	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
+	let acceptedRecoveryRecords = new Map<string, AloopAcceptedRecoveryRecord>();
+	let supervisorLogin: string | null = null;
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearDeadlineTimer(): void {
@@ -252,6 +255,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		dryRunHandoffIds.clear();
 		dryRunClosureIds.clear();
 		issuedReceipts.clear();
+		acceptedRecoveryRecords.clear();
+		supervisorLogin = null;
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
 	}
 
@@ -394,8 +399,45 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		} catch { return false; }
 	}
 
-	function recoveryAuthorized(issue: { recentHandoffs: Array<{ body: string }> }, attemptKey: string): boolean {
-		return issue.recentHandoffs.some((comment) => comment.body.includes(`<!-- pi-aloop-recovery:${attemptKey}:authorized -->`));
+	async function scanAcceptedRecoveryRecords(cwd: string): Promise<Map<string, AloopAcceptedRecoveryRecord>> {
+		const records = new Map<string, AloopAcceptedRecoveryRecord>();
+		const root = path.resolve(cwd, ".pi/tmp/aloop/finalizations");
+		let names: string[];
+		try { names = (await readdir(root)).filter((name) => /^[a-f0-9]{24}\.json$/.test(name)).sort(); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return records; throw error; }
+		for (const name of names) {
+			try {
+				const recordPath = path.join(root, name);
+				const status = await lstat(recordPath);
+				if (status.isSymbolicLink() || !status.isFile() || status.size > 100_000) continue;
+				const record = JSON.parse(await readFile(recordPath, "utf8"));
+				if (record?.version !== 1 || record?.attemptKey !== name.slice(0, -5) || !Number.isInteger(record?.issue)
+					|| typeof record?.head !== "string" || !/^[0-9a-f]{40}$/i.test(record.head)
+					|| typeof record?.commentSha256 !== "string" || !/^[a-f0-9]{64}$/i.test(record.commentSha256)) continue;
+				records.set(record.attemptKey, { issue: record.issue, head: record.head, commentSha256: record.commentSha256 });
+			} catch { /* Malformed local records never grant automatic closure authority. */ }
+		}
+		return records;
+	}
+
+	async function recoveryAuthorized(cwd: string, issue: number, handoff: { attemptKey: string; commitRange: string }, body: string): Promise<boolean> {
+		try {
+			const record = JSON.parse(await readFile(path.resolve(cwd, ".pi/tmp/aloop/recovery-approvals", `${handoff.attemptKey}.json`), "utf8"));
+			return record?.version === 2 && record?.issue === issue && record?.attemptKey === handoff.attemptKey
+				&& record?.head === handoff.commitRange.split("..").at(-1)
+				&& record?.commentSha256 === createHash("sha256").update(body).digest("hex")
+				&& record?.approved === true && record?.approvedVia === "aloop-authorize-recovery command" && typeof record?.approvedAt === "string";
+		} catch { return false; }
+	}
+
+	function exactLocalRecovery(issue: number, handoff: { attemptKey: string; commitRange: string }, body: string): boolean {
+		const record = acceptedRecoveryRecords.get(handoff.attemptKey);
+		return record?.issue === issue && record.head === handoff.commitRange.split("..").at(-1)
+			&& record.commentSha256 === createHash("sha256").update(body).digest("hex");
+	}
+
+	function authenticatedSupervisorComment(author: string | null): boolean {
+		return supervisorLogin !== null && author === supervisorLogin;
 	}
 
 	function checkpointState(issue: { recentHandoffs: Array<{ body: string }> }): { open: string[]; resolved: string[] } {
@@ -472,6 +514,9 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (history.code !== 0) throw new Error((history.stderr || history.stdout || "Could not inspect Git history.").trim());
 				startupTimeout();
 				const records = await scanAttemptArtifacts(ctx.cwd);
+				acceptedRecoveryRecords = await scanAcceptedRecoveryRecords(ctx.cwd);
+				const identity = await pi.exec("gh", ["api", "user", "--jq", ".login"], { cwd: ctx.cwd, timeout: startupTimeout(), signal: ctx.signal });
+				supervisorLogin = identity.code === 0 && /^[A-Za-z0-9-]{1,39}$/.test(identity.stdout.trim()) ? identity.stdout.trim() : null;
 				startupTimeout();
 				const branchRecords: AloopAttemptRecord[] = [];
 				for (const record of records) {
@@ -548,12 +593,17 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const attemptKey = match[2]!;
 			const context = await currentContext(ctx.cwd, ctx.signal);
 			const child = context.issues.find((candidate) => candidate.number === issue);
-			const accepted = child?.recentHandoffs.map((comment) => parseAloopHandoffV3(comment.body)).find((handoff) => handoff?.issue === issue && handoff.attemptKey === attemptKey && handoff.outcome === "accepted");
-			if (!child || !accepted || child.state === "closed") throw new Error("No matching open accepted handoff requires recovery authorization.");
-			const body = `Aloop human recovery authorization recorded for accepted attempt ${attemptKey}.\n\n<!-- pi-aloop-recovery:${attemptKey}:authorized -->`;
-			await dependencies.publishComment(ctx.cwd, issue, body, false, { signal: ctx.signal });
-			await dependencies.publishComment(ctx.cwd, issue, body, true, { signal: ctx.signal });
-			child.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
+			const acceptedComment = child?.recentHandoffs.find((comment) => {
+				const handoff = parseAloopHandoffV3(comment.body);
+				return handoff?.issue === issue && handoff.attemptKey === attemptKey && handoff.outcome === "accepted";
+			});
+			const accepted = acceptedComment && parseAloopHandoffV3(acceptedComment.body);
+			if (!child || !accepted || !acceptedComment || child.state === "closed") throw new Error("No matching open accepted handoff requires recovery authorization.");
+			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), {
+				version: 2, issue, attemptKey, head: accepted.commitRange.split("..").at(-1),
+				commentSha256: createHash("sha256").update(acceptedComment.body).digest("hex"), approved: true,
+				approvedAt: new Date().toISOString(), approvedVia: "aloop-authorize-recovery command",
+			});
 			if (ctx.hasUI) ctx.ui.notify(`Authorized closure recovery for #${issue} attempt ${attemptKey}.`, "info");
 		},
 	});
@@ -800,16 +850,23 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const settled = issue.recentHandoffs.map((comment) => parseAloopHandoffV3(comment.body)).filter((value) => value?.issue === params.issue).at(-1);
 				if (settled) {
 					if (settled.outcome === "accepted" && issue.state !== "closed") {
-						const settledComment = [...issue.recentHandoffs].reverse().find((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === settled.attemptKey);
-						if (!settledComment && !recoveryAuthorized(issue, settled.attemptKey)) {
-							throw new Error(`Accepted handoff lacks durable GitHub evidence; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
+						const settledComment = [...issue.recentHandoffs].reverse().find((comment) => {
+							const handoff = parseAloopHandoffV3(comment.body);
+							return handoff?.issue === params.issue && handoff.attemptKey === settled.attemptKey && handoff.outcome === "accepted";
+						});
+						if (!settledComment) throw new Error("Accepted handoff comment is missing its durable GitHub body.");
+						const automaticProvenance = exactLocalRecovery(params.issue, settled, settledComment.body) || authenticatedSupervisorComment(settledComment.author);
+						const explicitAuthorization = await recoveryAuthorized(ctx.cwd, params.issue, settled, settledComment.body);
+						if (!automaticProvenance && !explicitAuthorization) {
+							throw new Error(`Accepted handoff lacks authenticated supervisor or verified local publication provenance; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
 						}
 						const expectedHead = settled.commitRange.split("..").at(-1);
 						const [head, status] = await Promise.all([
 							pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal }),
 							pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd: ctx.cwd, timeout: 30_000, signal }),
 						]);
-						if (head.code !== 0 || head.stdout.trim() !== expectedHead || status.code !== 0 || status.stdout.trim()) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
+						if (head.code !== 0 || status.code !== 0 || status.stdout.trim()) throw new Error("Recovery closure requires a clean current worktree.");
+						if (!explicitAuthorization && head.stdout.trim() !== expectedHead) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
 						await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
 						issue.state = "closed";
 					}
@@ -861,6 +918,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				try {
 					await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
 					issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: handoff.timestamp, url: null });
+					if (params.outcome === "accepted") {
+						const recoveryRecord: AloopAcceptedRecoveryRecord = { issue: params.issue, head, commentSha256: createHash("sha256").update(body).digest("hex") };
+						await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/finalizations", `${attemptKey}.json`), { version: 1, attemptKey, ...recoveryRecord });
+						acceptedRecoveryRecords.set(attemptKey, recoveryRecord);
+					}
 				} catch (error) {
 					const refreshed = await currentContext(ctx.cwd, signal, true);
 					const refreshedIssue = refreshed.issues.find((candidate) => candidate.number === params.issue);

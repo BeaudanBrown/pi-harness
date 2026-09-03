@@ -184,14 +184,15 @@ handoff, it blocks another worker launch. Inspect the result and commit, run
 verify and publish the v3 handoff. If an accepted v3 handoff is already published
 but its child remains open after an interrupted closure, aloop excludes that
 child from the worker frontier and requires `aloop_finish_attempt` to recover the
-closure before any new worker starts. Automatic recovery requires the accepted
-v3 marker published on GitHub to bind the child and reviewed HEAD, and requires
-that exact HEAD to remain clean in Git. Branch-local `.pi/tmp` state is never
-closure authority. When that durable GitHub/Git evidence is unavailable,
-`/aloop-authorize-recovery <issue> <attempt-key>` records a recovery-specific
-human approval on the child issue, rather than allowing an unrelated decision
-or arbitrary issue text to become closure authority. Do not manufacture
-acceptance from a worker summary alone.
+closure before any new worker starts. Automatic recovery requires either the
+GitHub-authenticated supervisor as the v3 comment author or a matching durable
+local finalization record (issue, attempt key, reviewed HEAD, and exact comment
+digest), and requires that reviewed HEAD to remain clean in Git. When that
+Git-evidence check cannot apply, `/aloop-authorize-recovery <issue> <attempt-key>`
+writes an auditable local authorization bound to the same issue, attempt, reviewed
+HEAD, and exact comment digest; it may close a clean later HEAD. Arbitrary
+parseable accepted comments and unrelated decisions never become closure
+authority. Do not manufacture acceptance from a worker summary alone.
 
 Common recovery cases:
 

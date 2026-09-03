@@ -297,7 +297,7 @@ test("attempt recovery uses the latest durable non-null patch commit", async () 
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
-test("aloop supervisor recovery uses durable GitHub and Git evidence, not branch-local finalization state", async () => {
+test("aloop recovery requires trusted provenance and accepts an exact human authorization on a diverged clean HEAD", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-profile-"));
 	try {
 		writeFileSync(join(cwd, ".aloop.json"), verificationPolicyDocument);
@@ -309,6 +309,7 @@ test("aloop supervisor recovery uses durable GitHub and Git evidence, not branch
 		let retrievals = 0;
 		let aborts = 0;
 		let closes = 0;
+		let fakeHead = "a".repeat(40);
 		let activeGraph = context([issue({ number: 2, title: "Leaf" })]);
 		const pi = {
 			registerTool: (tool: { name: string }) => { activeTools.push(tool.name); tools.set(tool.name, tool); },
@@ -324,7 +325,7 @@ test("aloop supervisor recovery uses durable GitHub and Git evidence, not branch
 				: args[0] === "show"
 					? { code: 0, stdout: verificationPolicyDocument, stderr: "" }
 					: args[0] === "rev-parse"
-						? { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" }
+						? { code: 0, stdout: `${fakeHead}\n`, stderr: "" }
 						: { code: 0, stdout: "", stderr: "" },
 		} as unknown as ExtensionAPI;
 		registerAloopExtension(pi, {
@@ -361,7 +362,7 @@ test("aloop supervisor recovery uses durable GitHub and Git evidence, not branch
 		writeFileSync(join(cwd, `.pi/tmp/aloop/finalizations/${attemptKey}.json`), JSON.stringify({
 			version: 1, attemptKey, issue: 999, head: "f".repeat(40), commentSha256: "0".repeat(64),
 		}));
-		activeGraph = context([issue({ number: 2, title: "Leaf", recentHandoffs: [comment(1, accepted, "2026-09-03T00:00:00Z")] })]);
+		activeGraph = context([issue({ number: 2, title: "Leaf", recentHandoffs: [{ ...comment(1, accepted, "2026-09-03T00:00:00Z"), author: "untrusted-user" }] })]);
 		await commands.get("aloop")!.handler("#1", ctx);
 		assert.ok(activeTools.includes("aloop_launch_worker"));
 		const recoveryContext = await tools.get("aloop_context").execute("context", {}, ctx.signal, undefined, ctx);
@@ -369,7 +370,15 @@ test("aloop supervisor recovery uses durable GitHub and Git evidence, not branch
 		assert.deepEqual(recoveryContext.details.unverifiedAccepted, []);
 		assert.deepEqual(recoveryContext.details.frontier, []);
 		await assert.rejects(() => tools.get("aloop_launch_worker").execute("duplicate", { issue: 2 }, ctx.signal, undefined, ctx), /Accepted handoffs await child closure/);
-		const recovered = await tools.get("aloop_finish_attempt").execute("recover", { issue: 2, outcome: "accepted", summary: "ignored", outstanding_findings: [], decisions: [], verification: [], next_action: "ignored" }, ctx.signal, undefined, ctx);
+		const recoveryParams = { issue: 2, outcome: "accepted", summary: "ignored", outstanding_findings: [], decisions: [], verification: [], next_action: "ignored" };
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("untrusted", recoveryParams, ctx.signal, undefined, ctx), /authenticated supervisor or verified local publication provenance/);
+		fakeHead = "b".repeat(40);
+		await commands.get("aloop-authorize-recovery")!.handler(`2 ${attemptKey}`, ctx);
+		const authorization = JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), "utf8"));
+		assert.deepEqual({ issue: authorization.issue, attemptKey: authorization.attemptKey, head: authorization.head, commentSha256: authorization.commentSha256, approvedVia: authorization.approvedVia }, {
+			issue: 2, attemptKey, head: "a".repeat(40), commentSha256: createHash("sha256").update(accepted).digest("hex"), approvedVia: "aloop-authorize-recovery command",
+		});
+		const recovered = await tools.get("aloop_finish_attempt").execute("recover", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(recovered.details.idempotent, true);
 		assert.equal(closes, 1);
 		await commands.get("aloop-abort")!.handler("", ctx);
