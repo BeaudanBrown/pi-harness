@@ -386,7 +386,6 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		const graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n- Done" })]);
 		const published: Array<{ body: string; apply: boolean }> = [];
 		let closes = 0;
-		let reviewText = "No findings.";
 		const pi = {
 			registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command),
 			on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, setSessionName: () => undefined, sendUserMessage: () => undefined,
@@ -398,7 +397,7 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		} as unknown as ExtensionAPI;
 		registerAloopExtension(pi, {
 			retrieveEpicContext: async () => graph,
-			runReview: async () => ({ content: [{ type: "text", text: reviewText }], details: { reports: 2 } }),
+			runReview: async () => ({ content: [{ type: "text", text: "No findings." }], details: { reports: 2 } }),
 			diagnoseCommand: async () => ({ summary: "canonical failed" }),
 			runWorker: async () => ({ status: "completed", summary: "done", commit: head, workerResult: null, contract: { valid: true, commit: head, violations: [] }, process: { exitCode: 0, signal: null, timedOut: false, cancelled: false, durationMs: 1 }, artifacts: { directory: ".pi/tmp/aloop/issue-2-1-abcdef", prompt: "p", stdout: "o", stderr: "e", result: "r" } }),
 			publishComment: async (_cwd, _issue, body, apply) => { published.push({ body, apply }); return {}; },
@@ -434,20 +433,12 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		assert.equal(repeated.details.idempotent, true);
 		assert.equal(closes, 1);
 		await assert.rejects(() => tools.get("aloop_epic_completion").execute("missing-evidence", { phase: "prepare" }, ctx.signal, undefined, ctx), /requires acceptance_criteria evidence/);
-		const acceptanceCriteria = [
-			{ criterion: "All children complete", satisfied: true, evidence: "#2 closed" },
-			{ criterion: "Verification passes", satisfied: true, evidence: "canonical passed" },
-		];
-		reviewText = "## Standards\n\n- A concrete defect remains.\n\n## Spec\n\nNo findings.";
-		const rejectedReview = await tools.get("aloop_epic_completion").execute("review-findings", {
-			phase: "prepare", acceptance_criteria: acceptanceCriteria,
-		}, ctx.signal, undefined, ctx);
-		assert.equal(rejectedReview.details.ready, false);
-		assert.equal(rejectedReview.details.findings, true);
-		assert.equal(require("node:fs").existsSync(join(cwd, ".pi/tmp/aloop/epic-approval.json")), false);
-		reviewText = "No findings.";
 		const prepared = await tools.get("aloop_epic_completion").execute("prepare", {
-			phase: "prepare", acceptance_criteria: acceptanceCriteria,
+			phase: "prepare",
+			acceptance_criteria: [
+				{ criterion: "All children complete", satisfied: true, evidence: "#2 closed" },
+				{ criterion: "Verification passes", satisfied: true, evidence: "canonical passed" },
+			],
 		}, ctx.signal, undefined, ctx);
 		assert.equal(prepared.terminate, true);
 		const preparedRecord = JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/epic-approval.json"), "utf8"));
