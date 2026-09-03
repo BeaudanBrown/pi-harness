@@ -142,6 +142,13 @@ test("role and operation combinations enforce capabilities", () => {
 	assert.equal(parseManagedSessionEnvelope(lifecycle).type, "lifecycle.request");
 	const projectCreate = { ...lifecycle, payload: { request: { operation: "project.create", creationKey: "create-1", rootKey: "projects", workspace: "new-project", concept: "new project" } } };
 	assert.equal(parseManagedSessionEnvelope(projectCreate).type, "lifecycle.request");
+	const reconciliationKey = `reconcile_${"a".repeat(32)}`;
+	for (const request of [{ operation: "project.reconcile.preview" }, { operation: "project.reconcile.apply", reconciliationKey, confirmed: true },
+		{ operation: "project.space.cleanup", reconciliationKey, confirmed: true }]) {
+		assert.equal(parseManagedSessionEnvelope({ ...lifecycle, payload: { request } }).type, "lifecycle.request");
+		assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, role: "ordinary_adapter", payload: { request } }));
+	}
+	assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, payload: { request: { operation: "project.reconcile.apply", reconciliationKey, confirmed: false } } }));
 	assert.throws(() => parseManagedSessionEnvelope({ ...projectCreate, payload: { request: { ...projectCreate.payload.request, projectSpace: "caller-selected" } } }),
 		"coordinators cannot select grouping through display names or Matrix Space IDs");
 	for (const request of [
@@ -191,6 +198,8 @@ test("role and operation combinations enforce capabilities", () => {
 	assert.equal(parseManagedSessionEnvelope(listResult).type, "lifecycle.result");
 	assert.equal(parseManagedSessionEnvelope({ ...listResult, payload: { operation: "project.create", targetConversationId: conversationId,
 		conversationState: "active", roomLink: "https://matrix.to/#/%21project%3Aexample.com" } }).type, "lifecycle.result");
+	assert.equal(parseManagedSessionEnvelope({ ...listResult, payload: { operation: "project.reconcile.preview", reconciliationKey: `reconcile_${"a".repeat(32)}`,
+		pending: 1, completed: 0, obsoleteSpaces: 1, items: [{ conversationId, concept: "work", workspace: "repo", projectDisplayName: "repo", checkoutDisplayName: "repo", status: "pending" }] } }).type, "lifecycle.result");
 	assert.throws(() => parseManagedSessionEnvelope({ ...listResult, payload: { ...listResult.payload, paths: ["/tmp"] } }));
 });
 

@@ -307,7 +307,14 @@ let
     test -S "$runtime/relay.sock"
     registry="$runtime/registry.json"
     test -f "$registry"
-    ${pkgs.jq}/bin/jq '{service:"active",socket:"ready",conversations:(.conversations|length),states:(.conversations|group_by(.state)|map({key:.[0].state,value:length})|from_entries),cursorConfigured:any(.conversations[]?;.matrixCursor.status == "established")}' "$registry"
+    manifest_dir=${lib.escapeShellArg cfg.managedSessions.manifestDirectory}
+    manifest_dir="''${manifest_dir//%h/$HOME}"
+    test -d "$manifest_dir"
+    pending_reconciliation=0
+    if ${pkgs.bash}/bin/bash -c 'compgen -G "$1/conv_*.json" >/dev/null' _ "$manifest_dir"; then
+      pending_reconciliation=$(${pkgs.jq}/bin/jq -s '[.[] | select(.kind == "project" and (.projectKey == null))] | length' "$manifest_dir"/conv_*.json)
+    fi
+    ${pkgs.jq}/bin/jq --argjson pending "$pending_reconciliation" '{service:"active",socket:"ready",conversations:(.conversations|length),states:(.conversations|group_by(.state)|map({key:.[0].state,value:length})|from_entries),cursorConfigured:any(.conversations[]?;.matrixCursor.status == "established"),pendingProjectReconciliation:$pending}' "$registry"
   '';
 
   managedRelayLaunch = pkgs.writeShellScript "pi-managed-session-relay-launch" ''

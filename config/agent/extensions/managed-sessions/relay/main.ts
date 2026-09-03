@@ -300,6 +300,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
 				endOperationFeedback: (conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId),
 			});
+			const pendingReconciliation = hostLifecycle.pendingReconciliationCount();
+			if (pendingReconciliation > 0) process.stderr.write(`pi-managed-session-relay: ${pendingReconciliation} managed project conversation(s) require explicit Space reconciliation\n`);
 		}
 		await server.start();
 		if (coordinator) {

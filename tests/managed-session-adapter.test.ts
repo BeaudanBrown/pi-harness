@@ -332,7 +332,8 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 		assert.deepEqual([...commands.keys()], ["remote"]);
 		assert.equal(commands.has("remote-off"), false);
 		assert.deepEqual(tools, role === "ordinary_adapter" ? ["remote_artifact_export", "remote_checkpoint"] : [
-			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_project_create", "remote_session_start",
+			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_project_reconcile_preview", "remote_project_reconcile_apply",
+			"remote_project_space_cleanup", "remote_project_create", "remote_session_start",
 			"remote_session_resume", "remote_session_stop", "remote_session_delete",
 		]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));

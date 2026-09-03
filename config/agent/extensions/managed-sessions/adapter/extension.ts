@@ -300,6 +300,17 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			pi.registerTool({ name: "remote_session_status", label: "Managed Conversation Status",
 				description: "Inspect one managed conversation lifecycle state.", parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }) }, { additionalProperties: false }),
 				execute: async (_id, params) => lifecycle({ operation: "conversation.status", targetConversationId: params.conversationId }) });
+			pi.registerTool({ name: "remote_project_reconcile_preview", label: "Preview Managed Project Reconciliation",
+				description: "Preview host-resolved migration of compatibility rooms into stable project Spaces without changing Matrix, manifests, sessions, or workspaces.",
+				parameters: Type.Object({}, { additionalProperties: false }), execute: async () => lifecycle({ operation: "project.reconcile.preview" }) });
+			pi.registerTool({ name: "remote_project_reconcile_apply", label: "Apply Managed Project Reconciliation",
+				description: "Apply exactly one previously previewed reconciliation key. Existing room, Pi session, runtime queue, and workspace identities are preserved.",
+				parameters: Type.Object({ reconciliationKey: Type.String({ pattern: "^reconcile_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "project.reconcile.apply", reconciliationKey: params.reconciliationKey, confirmed: params.confirm }) });
+			pi.registerTool({ name: "remote_project_space_cleanup", label: "Clean Up Obsolete Project Spaces",
+				description: "After completed reconciliation, explicitly leave only verified empty obsolete bot-owned project Spaces. Non-empty, foreign, or referenced Spaces are refused.",
+				parameters: Type.Object({ reconciliationKey: Type.String({ pattern: "^reconcile_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "project.space.cleanup", reconciliationKey: params.reconciliationKey, confirmed: params.confirm }) });
 			pi.registerTool({ name: "remote_project_create", label: "Create Managed Project",
 				description: "Create exactly one new immediate-child local Git repository on main, then start an empty managed conversation in its host-resolved project Space. This never scaffolds files, creates a remote, publishes to GitHub, or transfers coordinator discussion.",
 				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }),

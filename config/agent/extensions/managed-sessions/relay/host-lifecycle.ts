@@ -14,6 +14,7 @@ import {
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
+import { ProjectReconciler } from "./project-reconciliation.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 export interface ManagedWindow {
@@ -166,6 +167,7 @@ export class HostLifecycle {
 	private readonly creations = new Map<string, Promise<Record<string, unknown>>>();
 	private readonly provisions = new Map<string, Promise<{ roomId: string; projectSpace: string }>>();
 	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
+	private readonly reconciler: ProjectReconciler;
 
 	constructor(private readonly options: {
 		hostId: string;
@@ -182,7 +184,11 @@ export class HostLifecycle {
 		endOperationFeedback?: (conversationId: string, operationId: string) => Promise<void>;
 	}) {
 		if (!isAbsolute(options.launcher)) throw new Error("Managed lifecycle launcher must be absolute");
+		this.reconciler = new ProjectReconciler({ registry: options.registry, matrix: options.matrix, intentDirectory: options.projectSessionDirectory,
+			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement) });
 	}
+
+	pendingReconciliationCount(): number { return this.reconciler.pendingCount(); }
 
 	async request(envelope: ManagedSessionEnvelope): Promise<Record<string, unknown>> {
 		if (envelope.role !== "coordinator_adapter" || envelope.type !== "lifecycle.request") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle capability is required");
@@ -192,6 +198,13 @@ export class HostLifecycle {
 			case "conversation.list": return { operation: "conversation.list", conversations: this.options.registry.listConversations() };
 			case "conversation.status": return this.status(String(request.targetConversationId));
 			case "project.create": return this.createProject(request as never);
+			case "project.reconcile.preview": return this.reconciler.preview();
+			case "project.reconcile.apply":
+				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Project reconciliation requires explicit confirmation");
+				return this.reconciler.apply(String(request.reconciliationKey));
+			case "project.space.cleanup":
+				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Obsolete Space cleanup requires explicit confirmation");
+				return this.reconciler.cleanup(String(request.reconciliationKey));
 			case "conversation.start": return this.start(request as never);
 			case "conversation.resume": return this.resume(String(request.targetConversationId));
 			case "conversation.stop": return this.stop(String(request.targetConversationId));

@@ -24,6 +24,7 @@ const timestamp = Type.String({ minLength: 20, maxLength: 35 });
 const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 
 export const ConversationIdSchema = stableId("conv");
+const ReconciliationKeySchema = Type.String({ pattern: "^reconcile_[a-f0-9]{32}$" });
 export const DeliveryIdSchema = stableId("delivery");
 export const TranscriptEntryIdSchema = stableId("entry");
 export const ChunkIdSchema = stableId("chunk");
@@ -84,6 +85,9 @@ const lifecycleArguments = Type.Union([
 	strictObject({ operation: Type.Literal("workspace.list") }),
 	strictObject({ operation: Type.Literal("conversation.list") }),
 	strictObject({ operation: Type.Literal("conversation.status"), targetConversationId: ConversationIdSchema }),
+	strictObject({ operation: Type.Literal("project.reconcile.preview") }),
+	strictObject({ operation: Type.Literal("project.reconcile.apply"), reconciliationKey: ReconciliationKeySchema, confirmed: Type.Literal(true) }),
+	strictObject({ operation: Type.Literal("project.space.cleanup"), reconciliationKey: ReconciliationKeySchema, confirmed: Type.Literal(true) }),
 	strictObject({
 		operation: Type.Literal("project.create"),
 		creationKey: identifier,
@@ -332,6 +336,16 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			targetConversationId: ConversationIdSchema,
 			conversationState: Type.Optional(Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")])),
 		}),
+		strictObject({
+			operation: Type.Literal("project.reconcile.preview"), reconciliationKey: ReconciliationKeySchema,
+			pending: Type.Integer({ minimum: 0 }), completed: Type.Integer({ minimum: 0 }), obsoleteSpaces: Type.Integer({ minimum: 0 }),
+			items: Type.Array(strictObject({ conversationId: ConversationIdSchema, concept: boundedString(128), workspace: boundedString(128),
+				projectDisplayName: boundedString(128), checkoutDisplayName: boundedString(128), status: Type.Union([Type.Literal("pending"), Type.Literal("completed")]) }), { maxItems: 64 }),
+		}),
+		strictObject({ operation: Type.Literal("project.reconcile.apply"), reconciliationKey: ReconciliationKeySchema,
+			reconciled: Type.Integer({ minimum: 0 }), obsoleteSpaces: Type.Integer({ minimum: 0 }) }),
+		strictObject({ operation: Type.Literal("project.space.cleanup"), reconciliationKey: ReconciliationKeySchema,
+			cleaned: Type.Integer({ minimum: 0 }), remaining: Type.Integer({ minimum: 0 }) }),
 		strictObject({
 			operation: Type.Literal("project.create"), targetConversationId: ConversationIdSchema,
 			conversationState: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),

@@ -246,7 +246,7 @@ session and binding survive restart; an inaccessible coordinator room is
 replaced against that same session and host Space.
 
 The coordinator-only profile exposes typed workspace, local-project creation,
-and conversation list/status/start/resume/stop/delete tools. Project creation
+and conversation list/status/start/resume/stop/delete tools, plus explicit project-room reconciliation preview/apply and obsolete-Space cleanup tools. Project creation
 accepts only a configured root, safe absent immediate-child name, and immutable
 concept. The trusted launcher creates no
 scaffold or remote: it initializes local Git on `main`, records a durable retry
@@ -257,8 +257,7 @@ project conversation accepts only a named root, immediate-child workspace, safe
 relative cwd, and immutable concept. The trusted launcher resolves Git common-directory
 identity so a main checkout and its linked worktrees share one deterministic private
 project Space while retaining distinct checkout room names; non-Git workspaces use
-a stable immediate-child fallback. Existing rooms remain untouched until the explicit
-reconciliation workflow. The relay resolves placement
+a stable immediate-child fallback. Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. The coordinator can preview a bounded host-resolved plan, explicitly apply its stable reconciliation key without replacing rooms or sessions, and separately confirm cleanup of obsolete Spaces. Cleanup refuses referenced, non-empty, inaccessible, or foreign Spaces and removes the operator only from verified obsolete empty Spaces before the bot leaves. The relay resolves placement
 through the fixed launcher, durably creates the Pi session and binding boundary
 before Matrix rooms, and launches the ordinary adapter through the trusted
 `direnv exec`/Pi dispatch. No objective or orientation is lifecycle metadata:

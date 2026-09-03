@@ -664,6 +664,25 @@ export class RelayRegistry {
 		}
 	}
 
+	async reconcileProjectManifest(conversationId: string, sourceHash: string, targetHash: string,
+		identity: Required<Pick<ConversationManifest, "projectKey" | "projectDisplayName" | "checkoutDisplayName" | "projectSpace">>): Promise<ConversationManifest> {
+		const existing = this.manifests.get(conversationId);
+		if (!existing || existing.kind !== "project") throw new RelayRegistryError("not_found", "Project conversation was not found");
+		const hash = (value: ConversationManifest) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+		const currentHash = hash(existing);
+		if (currentHash === targetHash) return existing;
+		if (currentHash !== sourceHash || existing.projectKey !== undefined || existing.projectDisplayName !== undefined ||
+			existing.checkoutDisplayName !== undefined) throw new RelayRegistryError("invalid_state", "Project manifest changed after reconciliation preview");
+		const replacement = { ...existing, ...identity };
+		if (hash(replacement) !== targetHash) throw new RelayRegistryError("invalid_state", "Project reconciliation target identity changed");
+		await this.manifestStore.write(replacement);
+		try {
+			return await this.mutate(async () => { this.manifests.set(conversationId, replacement); return replacement; });
+		} catch (error) {
+			await this.manifestStore.write(existing).catch(() => undefined); throw error;
+		}
+	}
+
 	async replaceCoordinatorRoom(conversationId: string, roomId: string, hostSpace?: string): Promise<ConversationManifest> {
 		const existing = this.manifests.get(conversationId);
 		if (!existing || existing.kind !== "coordinator") throw new RelayRegistryError("not_found", "Coordinator conversation was not found");
