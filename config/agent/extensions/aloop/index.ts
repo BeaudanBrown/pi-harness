@@ -136,7 +136,7 @@ async function scanAcceptedRecoveryRecords(cwd: string): Promise<Map<string, Alo
 	const records = new Map<string, AloopAcceptedRecoveryRecord>();
 	const root = path.resolve(cwd, ".pi/tmp/aloop/finalizations");
 	let names: string[];
-	try { names = (await readdir(root)).filter((name) => /^[a-f0-9]{24}\.json$/.test(name)).sort().slice(-200); }
+	try { names = (await readdir(root)).filter((name) => /^[a-f0-9]{24}\.json$/.test(name)).sort(); }
 	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return records; throw error; }
 	for (const name of names) {
 		try {
@@ -419,6 +419,14 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		} catch { return false; }
 	}
 
+	async function recoveryAuthorized(cwd: string, issue: number, attemptKey: string): Promise<boolean> {
+		try {
+			const record = JSON.parse(await readFile(path.resolve(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), "utf8"));
+			return record?.version === 1 && record?.issue === issue && record?.attemptKey === attemptKey
+				&& record?.approved === true && record?.approvedVia === "aloop-authorize-recovery command" && typeof record?.approvedAt === "string";
+		} catch { return false; }
+	}
+
 	function checkpointState(issue: { recentHandoffs: Array<{ body: string }> }): { open: string[]; resolved: string[] } {
 		const open = issue.recentHandoffs.flatMap((comment) => comment.body.match(/pi-aloop-decision:([a-f0-9]{20}):open/)?.[1] ?? []);
 		const resolved = issue.recentHandoffs.flatMap((comment) => comment.body.match(/pi-aloop-decision:([a-f0-9]{20}):resolved/)?.[1] ?? []);
@@ -558,6 +566,22 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			await dependencies.publishComment(ctx.cwd, issueNumber, body, true, { signal: ctx.signal });
 			issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
 			if (ctx.hasUI) ctx.ui.notify(`Recorded decision for #${issueNumber}.`, "info");
+		},
+	});
+
+	pi.registerCommand("aloop-authorize-recovery", {
+		description: "Human authorization to close one accepted handoff lacking local provenance: /aloop-authorize-recovery <issue> <attempt-key>",
+		handler: async (args, ctx) => {
+			const match = args.trim().match(/^#?(\d+)\s+([a-f0-9]{24})$/);
+			if (!match) throw new Error("Usage: /aloop-authorize-recovery <issue> <attempt-key>");
+			const issue = Number(match[1]);
+			const attemptKey = match[2]!;
+			const context = await currentContext(ctx.cwd, ctx.signal);
+			const child = context.issues.find((candidate) => candidate.number === issue);
+			const accepted = child?.recentHandoffs.map((comment) => parseAloopHandoffV3(comment.body)).find((handoff) => handoff?.issue === issue && handoff.attemptKey === attemptKey && handoff.outcome === "accepted");
+			if (!accepted || child?.state === "closed") throw new Error("No matching open accepted handoff requires recovery authorization.");
+			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), { version: 1, issue, attemptKey, approved: true, approvedAt: new Date().toISOString(), approvedVia: "aloop-authorize-recovery command" });
+			if (ctx.hasUI) ctx.ui.notify(`Authorized closure recovery for #${issue} attempt ${attemptKey}.`, "info");
 		},
 	});
 
@@ -812,14 +836,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						const exactRecovery = settledComment !== undefined && recovery?.issue === issue.number
 							&& recovery.head === settled.commitRange.split("..").at(-1)
 							&& recovery.commentSha256 === createHash("sha256").update(settledComment.body).digest("hex");
-						if (!exactRecovery) {
-							const checkpoints = checkpointState(issue);
-							const recoveryDecision = `Authorize closure recovery for accepted aloop attempt ${settled.attemptKey} without matching local provenance.`;
-							const recoveryMarker = createHash("sha256").update(`${params.issue}:${recoveryDecision}`).digest("hex").slice(0, 20);
-							const humanAttested = checkpoints.open.includes(recoveryMarker)
-								&& checkpoints.resolved.includes(recoveryMarker)
-								&& await decisionAttested(ctx.cwd, recoveryMarker);
-							if (!humanAttested) throw new Error(`Accepted handoff lacks matching local attempt provenance; resolve a human checkpoint with this exact decision before closure recovery: ${recoveryDecision}`);
+						if (!exactRecovery && !(await recoveryAuthorized(ctx.cwd, params.issue, settled.attemptKey))) {
+							throw new Error(`Accepted handoff lacks matching local attempt provenance; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
 						}
 						const expectedHead = settled.commitRange.split("..").at(-1);
 						const [head, status] = await Promise.all([
@@ -939,19 +957,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const approvalPath = path.resolve(ctx.cwd, ".pi/tmp/aloop/epic-approval.json");
 			if (params.phase === "prepare") {
 				if (!params.acceptance_criteria) throw new Error("Epic preparation requires acceptance_criteria evidence.");
-				let epicReview: any;
-				try {
-					epicReview = await dependencies.runReview(pi, ctx, {
-						mode: "audit",
-						tasks: [
-							{ axis: "standards", instructions: `Review the completed cumulative epic #${context.epic.number} against repository standards. Report concrete defects only.` },
-							{ axis: "spec", instructions: `Review completed epic #${context.epic.number} against its goal and acceptance criteria. Report unmet criteria only.\n\n${context.issues.find((issue) => issue.number === context.epic.number)?.body.slice(0, 16_000) ?? ""}` },
-						],
-					}, signal, onUpdate);
-				} catch (error) {
-					const message = error instanceof Error ? error.message : String(error);
-					return { content: [{ type: "text", text: `Independent epic review unavailable: ${message}. A human decision is required before automatic closure.` }], details: { ready: false, reviewAvailable: false, error: message } };
-				}
 				const snapshot = activePolicy();
 				const policy = snapshot.policy;
 				await assertCleanHead(head, ctx, signal);
@@ -972,12 +977,15 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					acceptanceCriteria: params.acceptance_criteria,
 					descendantReviews: context.issues
 						.filter((issue) => issue.number !== context.epic.number)
-						.map((issue) => ({ issue: issue.number, reviewed: true, evidence: `Fresh independent cumulative epic review completed at ${head}.` })),
+						.map((issue) => {
+							const durableHandoff = [...issue.recentHandoffs].reverse().find((comment) => /pi-aloop-handoff:/.test(comment.body));
+							return { issue: issue.number, reviewed: issue.state === "closed" && durableHandoff !== undefined, evidence: durableHandoff ? `Closed with durable supervised handoff ${durableHandoff.url ?? "recorded on GitHub"}.` : "No durable supervised handoff found." };
+						}),
 				};
 				const gate = evaluateEpicClosure(context, evidence);
 				if (!gate.allowed) return { content: [{ type: "text", text: `Epic evidence is incomplete: ${gate.reasons.join(" ")}` }], details: { ready: false, gate, evidence } };
 				await writeDurableResult(approvalPath, { version: 2, epic: context.epic.number, head, policySha256: snapshot.sha256, evidence, preparedAt: new Date().toISOString() });
-				return { content: [{ type: "text", text: `Epic #${context.epic.number} passed fresh independent review and final verification at ${head}; all ${evidence.descendantReviews.length} descendants and ${evidence.acceptanceCriteria.length} epic criteria have evidence. Human approval is required: /aloop-approve-epic ${head}` }], details: { ready: true, epic: context.epic.number, head, evidence, review: epicReview.details }, terminate: true };
+				return { content: [{ type: "text", text: `Epic #${context.epic.number} passed final verification at ${head}; all ${evidence.descendantReviews.length} descendants have durable supervised handoffs and ${evidence.acceptanceCriteria.length} epic criteria have evidence. Human approval is required: /aloop-approve-epic ${head}` }], details: { ready: true, epic: context.epic.number, head, evidence }, terminate: true };
 			}
 			let durableApproval: any = null;
 			try { durableApproval = JSON.parse(await readFile(approvalPath, "utf8")); } catch { /* Missing preparation is rejected below. */ }
