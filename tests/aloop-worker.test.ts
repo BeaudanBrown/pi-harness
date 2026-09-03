@@ -13,7 +13,9 @@ import {
 	prepareAloopArtifactDirectory,
 	resolveAloopArtifactPath,
 	resolveProjectWorkerResources,
+	runAloopPatchWorker,
 	runAloopWorker,
+	selectAloopPatchModel,
 	runIsolatedAloopProcess,
 } from "../config/agent/extensions/github-issues/aloop-worker.js";
 import { resolveAgentProfile, withProjectWorkerOptIn } from "../config/agent/extensions/agent-profiles/core.js";
@@ -62,15 +64,14 @@ test("worker prompt and command are compact, non-interactive, and deny superviso
 	assert.equal(command.includes("--approve"), true);
 	assert.deepEqual(command.slice(command.indexOf("--thinking"), command.indexOf("--thinking") + 2), ["--thinking", "medium"]);
 	assert.equal(command.at(-1), prompt);
-	assert.match(prompt, /Do not use GitHub APIs/);
-	assert.match(prompt, /Do not push or fetch/);
-	assert.match(prompt, /exactly one new local commit/);
-	assert.match(prompt, /Current supervisor direction/);
-	assert.match(prompt, /Use the exact protocol fixture/);
-	assert.match(prompt, /Stable payload was malformed/);
-	assert.match(prompt, /Replace the hybrid payload/);
-	assert.doesNotMatch(prompt, /pi-aloop-handoff:v2:/);
-	assert.match(prompt, /final assistant message must contain only one JSON object/);
+	assert.match(prompt, /aloop_issue_context first/);
+	assert.match(prompt, /Never push, fetch, mutate GitHub/);
+	assert.match(prompt, /one or more coherent local commits/);
+	assert.match(prompt, /strict implementation boundary/);
+	assert.doesNotMatch(prompt, /Use the exact protocol fixture|Stable payload was malformed|Replace the hybrid payload/);
+	assert.doesNotMatch(prompt, /Coordinate implementation|Implement the isolated worker|Worker execution/);
+	assert.doesNotMatch(prompt, /pi-aloop-handoff:v2:|final assistant message/);
+	assert.match(prompt, /aloop_submit_result/);
 });
 
 test("implementation worker command resolves declared resources and explicit project opt-ins", async () => {
@@ -85,6 +86,7 @@ test("implementation worker command resolves declared resources and explicit pro
 			resourceRoots: { harness: "/nix/harness", mattSkills: "/nix/matt", lspExtension: "/nix/lsp/index.ts" },
 		});
 		assert.ok(command.includes("/nix/harness/extensions/review-agents/index.ts"));
+		assert.ok(command.includes("/nix/harness/extensions/aloop-worker-runtime/index.ts"));
 		assert.ok(command.includes("/nix/lsp/index.ts"));
 		assert.equal(command.filter((argument) => argument === path.join(cwd, ".pi", "worker.ts")).length, 1);
 		assert.equal(command.some((argument) => argument.includes("extensions/repo/") || argument.endsWith("worker.ts/index.ts")), false);
@@ -96,33 +98,26 @@ test("implementation worker command resolves declared resources and explicit pro
 	}
 });
 
-test("structured worker results are parsed from the final assistant JSON event", () => {
+test("structured worker submissions are parsed without final-message JSON", () => {
 	const result = {
-		status: "implemented-and-verified",
-		verifiedCommit: "a".repeat(40),
+		status: "candidate-complete",
 		summary: "Implemented.",
 		verification: ["tests passed"],
 		acceptanceCriteria: [{ criterion: "works", satisfied: true, evidence: "test" }],
 		discoveredWork: [],
 		nextAction: "Close the issue.",
 	};
-	const stream = [
-		JSON.stringify({ type: "session" }),
-		"not-json startup noise",
-		JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(result) }] } }),
-	].join("\n");
-	assert.deepEqual(parseAloopWorkerResult(stream), result);
-	assert.throws(() => parseAloopWorkerResult(JSON.stringify({ type: "agent_end" })), /final assistant text/);
-	const invalidPass = { ...result, verifiedCommit: null };
-	const invalidStream = JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: JSON.stringify(invalidPass) }] } });
-	assert.throws(() => parseAloopWorkerResult(invalidStream), /requires verification bound/);
+	assert.deepEqual(parseAloopWorkerResult(JSON.stringify(result)), result);
+	assert.throws(() => parseAloopWorkerResult("not-json"), /not valid JSON/);
+	assert.throws(() => parseAloopWorkerResult(JSON.stringify({ ...result, status: "legacy" })), /invalid status/);
 });
 
-test("attempt contract rejects dirty, missing, rewritten, and multiple commits", () => {
-	assert.equal(assessAttemptContract({ beforeHead: "a", afterHead: "b", commitCount: 1, beforeIsAncestor: true, worktreeStatus: "" }).valid, true);
-	assert.match(assessAttemptContract({ beforeHead: "a", afterHead: "a", commitCount: 0, beforeIsAncestor: true, worktreeStatus: "" }).violations.join(" "), /did not create/);
-	assert.match(assessAttemptContract({ beforeHead: "a", afterHead: "c", commitCount: 2, beforeIsAncestor: true, worktreeStatus: "" }).violations.join(" "), /2 commits/);
-	assert.match(assessAttemptContract({ beforeHead: "a", afterHead: "b", commitCount: 1, beforeIsAncestor: true, worktreeStatus: " M file" }).violations.join(" "), /not clean/);
+test("attempt contract allows multiple/no-change outcomes and protects successful cleanliness and ancestry", () => {
+	assert.equal(assessAttemptContract({ beforeHead: "a", afterHead: "c", commitCount: 2, beforeIsAncestor: true, worktreeStatus: "", workerStatus: "candidate-complete" }).valid, true);
+	assert.equal(assessAttemptContract({ beforeHead: "a", afterHead: "a", commitCount: 0, beforeIsAncestor: true, worktreeStatus: "", workerStatus: "already-satisfied" }).valid, true);
+	assert.match(assessAttemptContract({ beforeHead: "a", afterHead: "a", commitCount: 0, beforeIsAncestor: true, worktreeStatus: "", workerStatus: "candidate-complete" }).violations.join(" "), /requires at least one/);
+	assert.match(assessAttemptContract({ beforeHead: "a", afterHead: "b", commitCount: 1, beforeIsAncestor: true, worktreeStatus: " M file", workerStatus: "candidate-complete" }).violations.join(" "), /clean worktree/);
+	assert.equal(assessAttemptContract({ beforeHead: "a", afterHead: "b", commitCount: 1, beforeIsAncestor: true, worktreeStatus: " M file", workerStatus: "incomplete" }).valid, true);
 	assert.match(assessAttemptContract({ beforeHead: "a", afterHead: "b", commitCount: 0, beforeIsAncestor: false, worktreeStatus: "" }).violations.join(" "), /rewrote/);
 });
 
@@ -218,13 +213,19 @@ test("worker execution records a clean one-commit attempt and complete artifacts
 		const outcome = await runAloopWorker({
 			...workerInput,
 			cwd,
+			issueContext: { relationships: { blockedBy: [49] }, decision: "Use v3" },
 			launcher: [process.execPath, fakeWorker],
 			env: { FAKE_ALOOP_MODE: "success" },
 		});
 		assert.equal(outcome.status, "completed");
 		assert.match(outcome.commit ?? "", /^[0-9a-f]{40}$/);
-		assert.equal(outcome.workerResult?.status, "implemented-and-verified");
-		assert.match(await readFile(path.join(cwd, outcome.artifacts.stdout), "utf8"), /message_end/);
+		assert.equal(outcome.workerResult?.status, "candidate-complete");
+		assert.equal(outcome.modelUsage?.[0]?.inputTokens, 7);
+		assert.match(await readFile(path.join(cwd, outcome.artifacts.submission!), "utf8"), /candidate-complete/);
+		const contextArtifact = await readFile(path.join(cwd, outcome.artifacts.context!), "utf8");
+		assert.match(contextArtifact, /issueBaseCommit/);
+		assert.match(contextArtifact, /"blockedBy": \[\s*49/);
+		assert.match(contextArtifact, /"decision": "Use v3"/);
 		assert.match(await readFile(path.join(cwd, outcome.artifacts.stderr), "utf8"), /synthetic stderr/);
 		assert.equal((await exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd })).stdout.trim(), "");
 	} finally {
@@ -254,6 +255,40 @@ test("implementation workers preserve project PATH precedence and append configu
 	}
 });
 
+test("targeted patch workers use the narrow profile, medium thinking, model fallback, and structured submission", async () => {
+	assert.equal(selectAloopPatchModel({ available: (value) => value.includes("terra"), active: "active/model" }), "openai-codex/gpt-5.6-terra");
+	assert.equal(selectAloopPatchModel({ configured: "missing/model", available: () => false, active: "active/model" }), "active/model");
+	const cwd = await createRepository();
+	try {
+		const outcome = await runAloopPatchWorker({
+			cwd, epic: workerInput.epic, issue: workerInput.issue, correction: "Change only the failing assertion.",
+			projectWorkerResources: { extensions: ["missing-review-extension.ts"], tools: ["review_agents", "web_search"] },
+			launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "patch", PI_HARNESS_RESOURCES_ROOT: path.resolve("config/agent") }, modelRef: "active/model",
+		});
+		assert.equal(outcome.status, "completed");
+		assert.equal(outcome.workerResult?.status, "candidate-complete");
+		const artifact = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.result), "utf8"));
+		assert.ok(artifact.command.includes("active/model"));
+		assert.ok(artifact.command.includes("medium"));
+		assert.match(artifact.command.join(" "), /aloop-patch-runtime/);
+		assert.doesNotMatch(artifact.command[artifact.command.indexOf("--tools") + 1], /review_agents|github_issue|web_search|remote_|aloop_issue_context/);
+		assert.doesNotMatch(artifact.command.join(" "), /missing-review-extension/);
+	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("targeted patch spawn deadline is enforced at the process boundary", async () => {
+	const cwd = await createRepository();
+	try {
+		const outcome = await runAloopPatchWorker({
+			cwd, epic: workerInput.epic, issue: workerInput.issue, correction: "Change one assertion.",
+			launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "patch" }, spawnDeadlineMs: Date.now() - 1,
+		});
+		assert.equal(outcome.status, "worker-failed");
+		assert.match(outcome.summary, /spawn deadline/);
+		await assert.rejects(readFile(path.join(cwd, "worker-one.txt"), "utf8"));
+	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 test("launcher failures return a bounded outcome and finalized result artifact", async () => {
 	const cwd = await createRepository();
 	try {
@@ -269,7 +304,7 @@ test("launcher failures return a bounded outcome and finalized result artifact",
 	}
 });
 
-test("worker execution rejects no-commit and multiple-commit attempts", async () => {
+test("worker execution accepts explicit no-change and multiple-commit outcomes", async () => {
 	for (const mode of ["no-commit", "multiple-commits"]) {
 		const cwd = await createRepository();
 		try {
@@ -279,9 +314,29 @@ test("worker execution rejects no-commit and multiple-commit attempts", async ()
 				launcher: [process.execPath, fakeWorker],
 				env: { FAKE_ALOOP_MODE: mode },
 			});
-			assert.equal(outcome.status, "contract-violation");
-			assert.equal(outcome.contract.valid, false);
-			assert.match(outcome.contract.violations.join(" "), mode === "no-commit" ? /did not create/ : /2 commits/);
+			assert.equal(outcome.status, "completed");
+			assert.equal(outcome.contract.valid, true);
+			assert.equal(outcome.workerResult?.status, mode === "no-commit" ? "already-satisfied" : "candidate-complete");
+		} finally {
+			await rm(cwd, { recursive: true, force: true });
+		}
+	}
+});
+
+test("missing and unsuccessful submissions preserve reconstructable Git artifacts", async () => {
+	for (const mode of ["missing-submission", "dirty"]) {
+		const cwd = await createRepository();
+		try {
+			const outcome = await runAloopWorker({
+				...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: mode },
+			});
+			assert.equal(outcome.status, mode === "missing-submission" ? "missing-submission" : "completed");
+			assert.equal(outcome.contract.valid, true);
+			const untracked = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.untracked!), "utf8"));
+			if (mode === "dirty") {
+				assert.deepEqual(untracked, ["dirty.txt"]);
+				assert.equal(await readFile(path.join(cwd, outcome.artifacts.directory, "untracked/dirty.txt"), "utf8"), "preserve me\n");
+			}
 		} finally {
 			await rm(cwd, { recursive: true, force: true });
 		}
@@ -298,6 +353,33 @@ async function waitForExit(pid: number): Promise<void> {
 	}
 	assert.fail(`process ${pid} remained alive`);
 }
+
+test("cancelled full workers preserve dirty partial work and finalized artifacts", async () => {
+	const cwd = await createRepository();
+	const controller = new AbortController();
+	setTimeout(() => controller.abort(), 100).unref?.();
+	try {
+		const outcome = await runAloopWorker({
+			...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 5_000, signal: controller.signal,
+		});
+		assert.equal(outcome.status, "cancelled");
+		assert.deepEqual(JSON.parse(await readFile(path.join(cwd, outcome.artifacts.untracked!), "utf8")), ["timeout-partial.txt"]);
+		assert.equal(JSON.parse(await readFile(path.join(cwd, outcome.artifacts.result), "utf8")).status, "cancelled");
+	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("timed-out full workers preserve dirty partial work and reconstruction artifacts", async () => {
+	const cwd = await createRepository();
+	try {
+		const outcome = await runAloopWorker({
+			...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 250,
+		});
+		assert.equal(outcome.status, "timeout");
+		const untracked = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.untracked!), "utf8"));
+		assert.deepEqual(untracked, ["timeout-partial.txt"]);
+		assert.equal(await readFile(path.join(cwd, outcome.artifacts.directory, "untracked/timeout-partial.txt"), "utf8"), "preserve me\n");
+	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
 
 test("timeouts terminate the complete worker process group", async () => {
 	const cwd = await mkdtemp(path.join(tmpdir(), "aloop-timeout-test-"));

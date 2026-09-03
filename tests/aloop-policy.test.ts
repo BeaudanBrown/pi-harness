@@ -23,12 +23,14 @@ test("aloop policy models advisory feedback and phase-aware production integrati
 		workerFeedbackCommand: { argv: ["make", "test-fast"] },
 		productionIntegration: { frequency: "epic", command: { argv: ["make", "production"], timeoutMs: 5678 } },
 		workerResources: { extensions: [".pi/worker.ts"], tools: ["project_lookup"] },
+		patchWorkerModel: "openai-codex/gpt-5.6-terra",
 	}));
 	assert.equal(policy.canonicalCommand.timeoutMs, 1234);
 	assert.deepEqual(policy.workerFeedbackCommand?.argv, ["make", "test-fast"]);
 	assert.equal(policy.productionIntegration?.frequency, "epic");
 	assert.equal(policy.productionIntegration?.command.timeoutMs, 5678);
 	assert.deepEqual(policy.workerResources.tools, ["project_lookup"]);
+	assert.equal(policy.patchWorkerModel, "openai-codex/gpt-5.6-terra");
 });
 
 test("this repository's legacy policy is migrated to the argv schema", () => {
@@ -43,6 +45,7 @@ test("legacy shell strings and malformed command definitions fail closed", () =>
 	assert.throws(() => parseAloopVerificationPolicy(JSON.stringify({ canonicalCommand: { argv: [] } })), /non-empty string array/);
 	assert.throws(() => parseAloopVerificationPolicy(JSON.stringify({ canonicalCommand: { argv: ["true"] }, productionIntegration: { frequency: "sometimes", command: { argv: ["true"] } } })), /frequency/);
 	assert.throws(() => parseAloopVerificationPolicy(JSON.stringify({ canonicalCommand: { argv: ["true"], timeoutMs: 0 } })), /timeoutMs/);
+	assert.throws(() => parseAloopVerificationPolicy(JSON.stringify({ canonicalCommand: { argv: ["true"] }, patchWorkerModel: " " })), /patchWorkerModel/);
 });
 
 test("policy snapshots bind exact committed bytes and startup commit", () => {

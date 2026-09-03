@@ -11,7 +11,7 @@ const verificationPolicyDocument = JSON.stringify({
 	productionIntegration: { frequency: "issue", command: { argv: [process.execPath, "-e", "process.exit(0)"] } },
 });
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
-import { registerAloopExtension } from "../config/agent/extensions/aloop/index.js";
+import { registerAloopExtension, scanAttemptArtifacts } from "../config/agent/extensions/aloop/index.js";
 import {
 	assessAloopRunBudget,
 	authorizeHandoffPublication,
@@ -88,10 +88,10 @@ function comment(id: number, body: string, createdAt: string): IssueHandoff {
 }
 
 test("aloop invocations separate worker-launch resource bounds from issue retries", () => {
-	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 30, maxWorkerLaunches: 20 });
-	assert.deepEqual(parseAloopRunRequest("48 --max-minutes=12 --max-worker-launches 40"), { epic: 48, maxMinutes: 12, maxWorkerLaunches: 40 });
+	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 60, maxWorkerLaunches: 20 });
+	assert.deepEqual(parseAloopRunRequest("48 --max-minutes=12 --max-worker-launches 12"), { epic: 48, maxMinutes: 12, maxWorkerLaunches: 12 });
 	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 0"), /between 1 and 240/);
-	assert.throws(() => parseAloopRunRequest("#48 --max-worker-launches 101"), /between 1 and 100/);
+	assert.throws(() => parseAloopRunRequest("#48 --max-worker-launches 21"), /between 1 and 20/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-attempts 3"), /Unknown/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 5 --max-minutes 6"), /Duplicate/);
 	assert.deepEqual(assessAloopRunBudget({ deadlineMs: 2_000, maxWorkerLaunches: 2, workerLaunchesStarted: 1, settled: false }, 1_000), {
@@ -240,6 +240,22 @@ test("publication operation preserves exact bytes across dry-run, failure, and i
 	assert.ok(calls.every((call) => call.comment === exactComment), "every attempt must use the exact prepared bytes");
 });
 
+test("attempt recovery uses the latest durable non-null patch commit", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "aloop-patch-recovery-"));
+	try {
+		const directory = join(cwd, ".pi/tmp/aloop/issue-2-100-abcdef");
+		mkdirSync(directory, { recursive: true });
+		writeFileSync(join(directory, "result.json"), JSON.stringify({
+			status: "completed", commit: "a".repeat(40), artifacts: { directory: ".pi/tmp/aloop/issue-2-100-abcdef" },
+		}));
+		writeFileSync(join(directory, "patch-attempts.json"), JSON.stringify([
+			{ status: "completed", commit: "b".repeat(40) },
+			{ status: "timeout", commit: null },
+		]));
+		assert.equal((await scanAttemptArtifacts(cwd))[0]?.commit, "b".repeat(40));
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
+});
+
 test("aloop supervisor tools activate only for an active run and disappear after settlement", async () => {
 	const cwd = mkdtempSync(join(tmpdir(), "aloop-profile-"));
 	try {
@@ -302,6 +318,7 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		let publicationApplyCalls = 0;
 		let closeCalls = 0;
 		let diagnosisCalls = 0;
+		let patchCalls = 0;
 		let worktreeStatus = "";
 		let fakeHead = "a".repeat(40);
 		const pi = {
@@ -323,10 +340,24 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		registerAloopExtension(pi, {
 			retrieveEpicContext: async () => graph,
 			diagnoseCommand: async (_ctx, _params, result) => { diagnosisCalls += 1; return { summary: `diagnosed exit ${result.code}` }; },
+			runPatchWorker: async (input) => {
+				patchCalls += 1;
+				assert.match(input.correction, /assertion/);
+				assert.equal(input.modelRef, "active/model");
+				if (patchCalls === 1) fakeHead = "b".repeat(40);
+				const commit = patchCalls === 1 ? fakeHead : null;
+				return {
+					status: patchCalls === 1 ? "completed" : "timeout", summary: "patch", commit, workerResult: null,
+					contract: { valid: true, commit, violations: [] },
+					process: { exitCode: 0, signal: null, timedOut: false, cancelled: false, durationMs: 1 },
+					artifacts: { directory: ".pi/tmp/aloop/patch", prompt: "prompt", stdout: "stdout", stderr: "stderr", result: "result" },
+				};
+			},
 			runWorker: async (input) => {
 				workerIssues.push(input.issue.number);
 				workerDirections.push(input.supervisorApproach);
 				workerPriorContexts.push(input.priorHandoffs);
+				mkdirSync(join(cwd, ".pi/tmp/aloop/issue-2-1-abcdef"), { recursive: true });
 				return {
 					status: "completed",
 					summary: "attempt",
@@ -346,13 +377,26 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 			},
 			closeIssue: async () => { closeCalls += 1; return { closed: true }; },
 		});
-		const ctx = { cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined } as unknown as ExtensionContext;
+		const ctx = {
+			cwd, isIdle: () => true, hasUI: false, signal: new AbortController().signal, abort: () => undefined,
+			model: { provider: "active", id: "model" },
+			modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false },
+		} as unknown as ExtensionContext;
 		await commands.get("aloop")!.handler("#1 --max-minutes 5 --max-worker-launches 2", ctx);
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("too-early", { commit: fakeHead }, ctx.signal, undefined, ctx), /pending worker attempt/);
 		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "remediation", approach: "test wiring", materially_new_approach: true }, ctx.signal, undefined, ctx);
 		assert.deepEqual(workerIssues, [2]);
 		assert.deepEqual(workerDirections, ["test wiring"]);
 		assert.deepEqual(workerPriorContexts, [[parseAloopHandoffs([comment(1, priorFailure, "2026-09-01T00:00:00Z")])[0]]]);
+		const patched = await tools.get("aloop_apply_patch")!.execute("patch", { issue: 2, correction: "fix one assertion" }, ctx.signal, undefined, ctx);
+		assert.equal(patchCalls, 1);
+		assert.equal(patched.details?.fullWorkerLaunchesStarted, 1);
+		await tools.get("aloop_apply_patch")!.execute("patch-failed", { issue: 2, correction: "fix another assertion" }, ctx.signal, undefined, ctx);
+		assert.equal(patchCalls, 2);
+		assert.deepEqual(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/issue-2-1-abcdef/patch-attempts.json"), "utf8")), [
+			{ commit: "b".repeat(40), artifactDirectory: ".pi/tmp/aloop/patch", status: "completed" },
+			{ commit: null, artifactDirectory: ".pi/tmp/aloop/patch", status: "timeout" },
+		]);
 		worktreeStatus = "?? eventual-source.ts\n";
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("untracked", { commit: fakeHead }, ctx.signal, undefined, ctx), /clean worktree/);
 		worktreeStatus = "";

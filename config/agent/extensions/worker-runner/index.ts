@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveAgentProfile } from "../agent-profiles/core.js";
+import { recordNestedModelUsage } from "../agent-profiles/usage.js";
 import {
 	nextWorkerPresetSelection,
 	parseWorkerModelCommand,
@@ -220,6 +221,7 @@ async function askWorker(
 		if (diagnosisTimer) clearTimeout(diagnosisTimer);
 		signal?.removeEventListener("abort", abortWorker);
 		unsubscribe();
+		try { await recordNestedModelUsage(session.messages, "diagnostic"); } catch { /* Accounting must not replace the diagnostic result. */ }
 		session.dispose();
 	}
 }

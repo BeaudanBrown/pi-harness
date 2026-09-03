@@ -21,10 +21,10 @@ export type AloopAttemptHandoff = {
 	timestamp: string;
 };
 
-export const DEFAULT_ALOOP_MAX_MINUTES = 30;
+export const DEFAULT_ALOOP_MAX_MINUTES = 60;
 export const DEFAULT_ALOOP_MAX_WORKER_LAUNCHES = 20;
 export const MAX_ALOOP_MINUTES = 240;
-export const MAX_ALOOP_WORKER_LAUNCHES = 100;
+export const MAX_ALOOP_WORKER_LAUNCHES = 20;
 
 export type AloopRunRequest = {
 	epic: number;
@@ -102,7 +102,7 @@ function positiveBoundedInteger(value: string, option: string, maximum: number):
 export function parseAloopRunRequest(value: string): AloopRunRequest {
 	const tokens = value.trim().split(/\s+/).filter(Boolean);
 	const epicMatch = tokens.shift()?.match(/^#?(\d+)$/);
-	if (!epicMatch) throw new Error("Usage: /aloop #<epic> [--max-minutes <1-240>] [--max-worker-launches <1-100>]");
+	if (!epicMatch) throw new Error("Usage: /aloop #<epic> [--max-minutes <1-240>] [--max-worker-launches <1-20>]");
 	const epic = positiveBoundedInteger(epicMatch[1]!, "Epic number", Number.MAX_SAFE_INTEGER);
 	let maxMinutes = DEFAULT_ALOOP_MAX_MINUTES;
 	let maxWorkerLaunches = DEFAULT_ALOOP_MAX_WORKER_LAUNCHES;

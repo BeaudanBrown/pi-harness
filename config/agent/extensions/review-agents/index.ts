@@ -13,6 +13,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveAgentProfile } from "../agent-profiles/core.js";
+import { recordNestedModelUsage } from "../agent-profiles/usage.js";
 import {
 	buildReviewPrompt,
 	DEFAULT_REVIEW_MODEL,
@@ -213,6 +214,7 @@ async function askReviewer(
 		return { axis: task.axis, text: truncateResult(text) };
 	} finally {
 		signal?.removeEventListener("abort", abortReviewer);
+		try { await recordNestedModelUsage(session.messages, `review:${task.axis}`); } catch { /* Accounting must not replace the review result. */ }
 		session.dispose();
 	}
 }

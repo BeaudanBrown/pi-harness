@@ -33,11 +33,11 @@ loop database, queue file, or session state to restore.
    /aloop #<epic-number>
    ```
 
-   Each invocation defaults to a 30-minute hard deadline and at most 20 fresh
+   Each invocation defaults to a 60-minute implementation deadline and at most 20 fresh
    worker launches. Use `--max-minutes <1-240>` and
-   `--max-worker-launches <1-100>` to choose explicit resource bounds for that
+   `--max-worker-launches <1-20>` to choose explicit resource bounds for that
    invocation, for example
-   `/aloop #123 --max-minutes 120 --max-worker-launches 40`.
+   `/aloop #123 --max-minutes 120 --max-worker-launches 20`.
 
    Worker launches are not retry counts. Epic progress is reported as closed
    descendants out of total descendants. A new issue starts with no retry;
@@ -61,27 +61,44 @@ The current Pi session is the **supervisor**. It:
   necessary corrective issues; and
 - decides whether to accept, remediate, or stop for a human decision.
 
-A **worker** is a fresh, bounded Pi JSON-mode process with repository editing
-and shell tools but no harness extensions or skills. It inherits the
-supervisor's active model and runs at medium thinking. Its prompt receives the
-current supervisor approach as an authoritative, dedicated section. Prior
-attempts are decoded into bounded structured fields—approach, verification,
-acceptance assessment, discovered work, and required next action—rather than
-copying encoded GitHub handoff markers. It must not mutate GitHub, push, or
-fetch. Every attempt starts from a clean worktree and must finish with
-a clean worktree and exactly one new local commit without rewriting earlier
-history. The worker returns structured verification, acceptance-criteria,
-discovered-work, and next-action evidence. Outcomes are explicitly
-`implemented-and-verified`, `partial`, `verification-failed`, `blocked`, or
-`no-change`. An `implemented-and-verified` result must name the exact final
-commit, report verification evidence, and provide passing evidence for every
-acceptance criterion; it remains a claim, not acceptance. The supervisor must
-independently verify and review the repository change.
+A **worker** is a fresh, bounded Pi JSON-mode process using the declarative
+`aloop-implementation` profile. It inherits the supervisor's active model and
+runs at medium thinking. The generic prompt contains only the epic/child IDs
+and operating rules. `aloop_issue_context` exposes the immutable startup
+snapshot containing the issue bodies, relationships, decisions, issue base
+commit, and prior handoff state. The selected child remains the strict scope.
+Workers may use LSP, focused diagnostics, independent review, research,
+browser (through the packaged `playwright-browser` skill and `pi-playwright`
+CLI), diagram, architecture, Nix, and read-only GitHub tools, but cannot
+mutate GitHub, push, fetch, contact the operator, or run supervisor acceptance.
+
+Every attempt starts clean. Candidate-complete and already-satisfied outcomes
+must finish clean; incomplete, decision-required, environment-blocked,
+timeout, cancellation, process-failure, and missing-submission outcomes retain
+the exact Git state for supervisor settlement. Multiple coherent commits and
+no-change outcomes are valid. The terminating `aloop_submit_result` tool writes
+`candidate-complete`, `already-satisfied`, `incomplete`, `decision-required`,
+or `environment-blocked` evidence directly to the attempt directory. A missing
+submission adds reconstruction work but never discards commits or prevents the
+supervisor from accepting valid work. Worker submissions remain claims: the
+supervisor independently reviews and verifies the cumulative issue state.
+
+Targeted settlement corrections use a separate fresh `aloop-patch` process at
+medium thinking. It receives only the narrow correction, source/edit/LSP and
+focused diagnostic tools, commits coherent changes, and terminates through
+`aloop_submit_patch_result`. It has no review, web, GitHub, Matrix, browser,
+architecture, canonical-verification, or nested implementation-orchestration
+tools; `run_worker` remains available only for bounded command diagnosis. Patch launches
+are sequential supervisor settlement work and do not consume the full-worker
+time or 20-launch counters; they cannot be started to evade an expired
+implementation budget.
 
 Workers never run in parallel in one supervisor session. The supervisor must
 publish the current attempt's handoff before launching another worker. While a
-worker is active, the tool emits elapsed-time heartbeats and caps the worker at
-the smaller of its requested timeout and the invocation's remaining time.
+full worker is active, the tool emits elapsed-time heartbeats and caps that full
+worker at the smaller of its requested timeout and the invocation's remaining
+time. A targeted patch must start before the implementation deadline, but once
+started it is settlement work governed by its own command timeout.
 
 The whole supervisor turn is also bounded. Reaching either the hard deadline or
 the worker-launch cap stops that invocation; it never waits indefinitely or
@@ -116,7 +133,8 @@ requires model copy/paste of the encoded marker. A handoff records:
 Only a correctly encoded handoff on its matching issue counts. An accepted
 handoff must reference the receipt ID returned by `aloop_supervisor_verify`.
 The repository commits a `.aloop.json` policy containing a required
-`canonicalCommand`, an optional advisory `workerFeedbackCommand`, and optional
+`canonicalCommand`, an optional advisory `workerFeedbackCommand`, optional
+`patchWorkerModel` (defaulting to Terra when available, then the active model), and optional
 phase-aware `productionIntegration`. Every command is an explicit argv array,
 not an implicit shell string, and has a configurable timeout that defaults to 30
 minutes. The supervisor snapshots the committed policy when `/aloop` starts;
@@ -214,8 +232,13 @@ It contains:
 - `prompt.md` — the complete worker prompt;
 - `stdout.jsonl` — the complete Pi JSON event stream;
 - `stderr.log` — worker diagnostics;
-- `result.json` — process status, structured result, contract assessment, commit
-  evidence, and artifact paths.
+- `issue-context.json` — the immutable GitHub-backed startup snapshot;
+- `submission.json` — the optional structured result written by the terminating
+  submission tool;
+- `worktree.patch`, `staged.patch`, `untracked-files.json`, and `untracked/` —
+  reconstructable partial Git state, including timeout/cancellation work; and
+- `result.json` — process status, submission, contract assessment, mechanical
+  commit evidence, and artifact paths.
 
 The supervisor returns only bounded summaries to the main conversation. These
 local artifacts support diagnosis and interrupted-attempt recovery, but they do

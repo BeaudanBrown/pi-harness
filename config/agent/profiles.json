@@ -37,6 +37,7 @@
         "review-agents",
         "nix-runtime",
         "lsp",
+        "aloop-worker-runtime",
         "agent-profiles"
       ],
       "skills": ["harness", "matt-pocock"],
@@ -53,23 +54,24 @@
         "diagram_inventory", "diagram_render", "architecture_commands", "architecture_queries", "architecture_command", "architecture_query",
         "run_worker", "review_agents",
         "lsp_diagnostics", "lsp_hover", "lsp_definition", "lsp_references", "lsp_symbols", "lsp_rename", "lsp_code_actions", "lsp_completions",
-        "code_overview", "ast_search", "code_rewrite"
+        "code_overview", "ast_search", "code_rewrite",
+        "aloop_issue_context", "aloop_worker_feedback", "aloop_submit_result"
       ]
     },
     "aloop-patch": {
-      "extensions": ["worker-runner", "nix-runtime", "lsp", "agent-profiles"],
+      "extensions": ["worker-runner", "nix-runtime", "lsp", "aloop-patch-runtime", "agent-profiles"],
       "skills": ["harness", "matt-pocock"],
       "prompts": [],
       "themes": [],
       "contextFiles": true,
       "builtinTools": true,
-      "projectResourcePolicy": "aloop-opt-in",
+      "projectResourcePolicy": "none",
       "toolPolicy": "allowlist",
       "systemPrompt": "You are a targeted patch worker. Make only the narrow supervisor-requested correction in the current issue boundary, use focused checks and LSP as useful, commit coherent changes, and submit a structured patch result. Do not review, mutate GitHub, browse the web, contact the operator, run canonical verification, or start other agents.",
       "tools": [
         "read", "bash", "edit", "write", "grep", "find", "ls",
         "run_worker", "lsp_diagnostics", "lsp_hover", "lsp_definition", "lsp_references", "lsp_symbols", "lsp_rename", "lsp_code_actions", "lsp_completions",
-        "code_overview", "ast_search", "code_rewrite"
+        "code_overview", "ast_search", "code_rewrite", "aloop_submit_patch_result"
       ]
     },
     "review-worker": {

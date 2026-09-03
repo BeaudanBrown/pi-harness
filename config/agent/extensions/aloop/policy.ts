@@ -16,6 +16,7 @@ export type AloopVerificationPolicy = {
 		command: AloopCommandDefinition;
 	};
 	workerResources: { extensions: string[]; tools: string[] };
+	patchWorkerModel?: string;
 };
 
 export type AloopPolicySnapshot = {
@@ -41,6 +42,12 @@ function command(value: unknown, field: string): AloopCommandDefinition {
 		throw new Error(`.aloop.json ${field}.timeoutMs must be an integer between 1 and ${MAX_ALOOP_COMMAND_TIMEOUT_MS}.`);
 	}
 	return { argv: argv as string[], timeoutMs: Number(timeout) };
+}
+
+function optionalModel(value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || !value.trim()) throw new Error(".aloop.json patchWorkerModel must be a non-empty model reference.");
+	return value.trim();
 }
 
 function stringArray(value: unknown, field: string): string[] {
@@ -78,6 +85,7 @@ export function parseAloopVerificationPolicy(document: string): AloopVerificatio
 			extensions: stringArray(resources.extensions, "workerResources.extensions"),
 			tools: stringArray(resources.tools, "workerResources.tools"),
 		},
+		...(optionalModel(value.patchWorkerModel) ? { patchWorkerModel: optionalModel(value.patchWorkerModel) } : {}),
 	};
 }
 

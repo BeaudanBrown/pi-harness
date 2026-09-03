@@ -1,10 +1,11 @@
 import { spawn } from "node:child_process";
 import { constants, createWriteStream } from "node:fs";
-import { lstat, mkdir, open, realpath } from "node:fs/promises";
+import { cp, lstat, mkdir, open, readFile, realpath, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import * as path from "node:path";
 import { resolveAgentProfile, withProjectWorkerOptIn, type AgentProfile } from "../agent-profiles/core.js";
+import { collectSessionUsage, readNestedModelUsage, type NestedModelUsage } from "../agent-profiles/usage.js";
 
 const ALOOP_ROOT = ".pi/tmp/aloop";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -38,20 +39,23 @@ export type AloopWorkerInput = {
 	priorHandoffs?: AloopWorkerHandoffContext[];
 	projectWorkerResources?: { extensions: string[]; tools: string[] };
 	workerFeedbackCommand?: { argv: string[]; timeoutMs: number };
+	issueContext?: unknown;
+	issueBaseCommit?: string;
+	workerKind?: "implementation" | "patch";
+	patchDirection?: string;
 	launcher?: string[];
 	modelRef?: string;
 	timeoutMs?: number;
 	deadlineMs?: number;
+	spawnDeadlineMs?: number;
 	signal?: AbortSignal;
 	env?: NodeJS.ProcessEnv;
 };
 
-export type AloopWorkerResultStatus = "implemented-and-verified" | "partial" | "verification-failed" | "blocked" | "no-change";
+export type AloopWorkerResultStatus = "candidate-complete" | "already-satisfied" | "incomplete" | "decision-required" | "environment-blocked";
 
 export type AloopWorkerResult = {
 	status: AloopWorkerResultStatus;
-	/** Exact final commit against which the worker ran verification; null for unsuccessful/no-change outcomes. */
-	verifiedCommit: string | null;
 	summary: string;
 	verification: string[];
 	acceptanceCriteria: Array<{ criterion: string; satisfied: boolean; evidence: string }>;
@@ -66,13 +70,14 @@ export type AttemptContractAssessment = {
 };
 
 export type AloopAttemptOutcome = {
-	status: "completed" | "worker-failed" | "timeout" | "cancelled" | "contract-violation" | "invalid-result";
+	status: "completed" | "worker-failed" | "timeout" | "cancelled" | "contract-violation" | "missing-submission" | "invalid-result";
 	summary: string;
 	commit: string | null;
 	workerResult: AloopWorkerResult | null;
 	contract: AttemptContractAssessment;
 	process: { exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; cancelled: boolean; durationMs: number };
-	artifacts: { directory: string; prompt: string; stdout: string; stderr: string; result: string };
+	modelUsage?: NestedModelUsage[];
+	artifacts: { directory: string; prompt: string; stdout: string; stderr: string; result: string; submission?: string; context?: string; diff?: string; stagedDiff?: string; untracked?: string };
 };
 
 type ProcessResult = {
@@ -130,68 +135,20 @@ export async function prepareAloopArtifactDirectory(cwd: string, attemptId: stri
 	return directory;
 }
 
-function evidenceList(values: string[]): string {
-	return values.length > 0
-		? values.slice(0, 8).map((value) => `  - ${boundedText(value.trim(), 600)}`).join("\n")
-		: "  - None";
-}
-
-function formatWorkerHandoff(handoff: AloopWorkerHandoffContext, index: number): string {
-	return `### Prior attempt ${index + 1} (${handoff.attemptType}, ${handoff.successful ? "accepted" : "not accepted"})
-- Commit: ${handoff.commit ?? "none"}
-- Timestamp: ${handoff.timestamp}
-- Approach: ${boundedText(handoff.approach, 1_000)}
-- Verification:
-${evidenceList(handoff.verification)}
-- Supervisor acceptance assessment:
-${evidenceList(handoff.acceptanceCriteriaAssessment)}
-- Discovered work:
-${evidenceList(handoff.discoveredWork)}
-- Required next action: ${boundedText(handoff.nextAction, 1_200)}`;
-}
-
-export function buildAloopWorkerPrompt(input: Omit<AloopWorkerInput, "cwd" | "launcher" | "modelRef" | "timeoutMs" | "deadlineMs" | "signal" | "env">): string {
+export function buildAloopWorkerPrompt(input: Omit<AloopWorkerInput, "cwd" | "launcher" | "modelRef" | "timeoutMs" | "deadlineMs" | "spawnDeadlineMs" | "signal" | "env">): string {
 	positiveIssueNumber(input.epic.number, "epic.number");
 	positiveIssueNumber(input.issue.number, "issue.number");
-	if (!input.supervisorApproach.trim()) throw new Error("Aloop workers require an explicit supervisor approach.");
-	const handoffs = (input.priorHandoffs ?? []).slice(-5).map(formatWorkerHandoff);
-	return `You are a fresh implementation worker for one GitHub issue. Work only in the current repository and complete one ${input.attemptType} attempt.
+	if (input.workerKind === "patch") {
+		if (!input.patchDirection?.trim()) throw new Error("Targeted patch workers require a narrow correction.");
+		return `You are a fresh targeted patch worker for child issue #${input.issue.number}. Make only this correction:\n\n${boundedText(input.patchDirection, 4_000)}\n\nStay inside the issue boundary. Use source, LSP, and focused diagnostic tools as useful. Do not review, browse, access GitHub or Matrix, run canonical verification, or orchestrate other agents. Create one or more coherent local commits, then call aloop_submit_patch_result as your final action. Do not rely on final-message JSON.`;
+	}
+	return `You are a fresh issue-owning Pi worker for epic #${input.epic.number}, child issue #${input.issue.number}, attempt type ${input.attemptType}.
 
-Safety and ownership rules:
-- Do not use GitHub APIs, GitHub issue tools, or gh to mutate issues, comments, labels, relationships, or assignments. The supervisor owns GitHub.
-- Do not push or fetch. Make changes only in this clean local worktree.
-- Read and follow the repository guidance, including AGENTS.md and relevant docs.
-- Finish with a clean worktree and exactly one new local commit. Do not amend or rewrite commits that existed before this attempt.
-- ${input.workerFeedbackCommand ? `Use the optional advisory worker feedback command ${JSON.stringify(input.workerFeedbackCommand.argv)} with a ${input.workerFeedbackCommand.timeoutMs}ms timeout when useful. Do not run canonical acceptance or production integration.` : "Run focused checks appropriate to the issue. Canonical acceptance and production integration are supervisor-owned."}
-- Stay within the selected issue. Report newly discovered work instead of expanding scope.
+Call aloop_issue_context first and derive the issue body, relationships, decisions, base commit, and prior findings from that immutable startup snapshot. The selected child is the strict implementation boundary.
 
-Epic #${input.epic.number}: ${input.epic.title}
-${boundedText(input.epic.body, 4_000)}
+Read repository guidance. Implement the issue, use LSP and focused checks, request independent review, remediate findings you accept, and create one or more coherent local commits. Never push, fetch, mutate GitHub, contact the operator, run canonical acceptance, or broaden scope. Project worker feedback is advisory. If material ambiguity or an environment blocker prevents safe completion, stop instead of guessing.
 
-Selected issue #${input.issue.number}: ${input.issue.title}
-${boundedText(input.issue.body, 12_000)}
-
-## Current supervisor direction
-
-This is the authoritative approach for this attempt. Follow it directly and use prior attempts only as evidence explaining why this direction is required.
-
-${boundedText(input.supervisorApproach.trim(), 4_000)}
-
-## Structured prior attempt context
-
-${handoffs.length > 0 ? handoffs.join("\n\n") : "No prior attempts."}
-
-Your final assistant message must contain only one JSON object with this exact shape:
-{
-  "status": "implemented-and-verified" | "partial" | "verification-failed" | "blocked" | "no-change",
-  "verifiedCommit": "full SHA checked after the final commit, or null",
-  "summary": "concise implementation summary",
-  "verification": ["checks and outcomes"],
-  "acceptanceCriteria": [{"criterion": "criterion text", "satisfied": true, "evidence": "specific evidence"}],
-  "discoveredWork": ["newly discovered work, if any"],
-  "nextAction": "what the supervisor should do next"
-}
-Do not wrap the JSON in Markdown fences.`;
+Finish every outcome by calling aloop_submit_result as your final action. Use candidate-complete for committed clean work, already-satisfied when no change is needed, incomplete for unfinished work, decision-required for material ambiguity, or environment-blocked for an external blocker. Do not rely on final-message JSON.`;
 }
 
 export function buildAloopWorkerCommand(options: {
@@ -236,69 +193,51 @@ export function buildAloopWorkerCommand(options: {
 	];
 }
 
-function textFromAssistantMessage(message: any): string | null {
-	if (message?.role !== "assistant" || !Array.isArray(message.content)) return null;
-	const text = message.content
-		.filter((part: any) => part?.type === "text" && typeof part.text === "string")
-		.map((part: any) => part.text)
-		.join("\n")
-		.trim();
-	return text || null;
-}
-
 function isStringArray(value: unknown): value is string[] {
 	return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-export function parseAloopWorkerResult(jsonl: string): AloopWorkerResult {
-	let finalText: string | null = null;
-	for (const line of jsonl.split("\n")) {
-		if (!line.trim()) continue;
-		let record: any;
-		try {
-			record = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (record?.type === "message_end") finalText = textFromAssistantMessage(record.message) ?? finalText;
-	}
-	if (!finalText) throw new Error("Pi JSON stream did not contain a final assistant text message.");
+export function parseAloopWorkerResult(document: string): AloopWorkerResult {
 	let parsed: any;
-	try {
-		parsed = JSON.parse(finalText);
-	} catch {
-		throw new Error("Final assistant message was not a JSON object.");
+	try { parsed = JSON.parse(document); } catch { throw new Error("Aloop submission was not valid JSON."); }
+	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Aloop submission must be a JSON object.");
+	if (!["candidate-complete", "already-satisfied", "incomplete", "decision-required", "environment-blocked"].includes(parsed.status)) {
+		throw new Error("Aloop submission has an invalid status.");
 	}
-	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Worker result must be a JSON object.");
-	if (!["implemented-and-verified", "partial", "verification-failed", "blocked", "no-change"].includes(parsed.status)) throw new Error("Worker result has an invalid status.");
-	if (parsed.verifiedCommit !== null && (typeof parsed.verifiedCommit !== "string" || !/^[0-9a-f]{40,64}$/i.test(parsed.verifiedCommit))) throw new Error("Worker result verifiedCommit must be a full Git object ID or null.");
-	if (typeof parsed.summary !== "string" || typeof parsed.nextAction !== "string") throw new Error("Worker result requires summary and nextAction strings.");
-	if (!isStringArray(parsed.verification) || !isStringArray(parsed.discoveredWork)) throw new Error("Worker result verification and discoveredWork must be string arrays.");
+	if (typeof parsed.summary !== "string" || !parsed.summary.trim() || typeof parsed.nextAction !== "string" || !parsed.nextAction.trim()) {
+		throw new Error("Aloop submission requires non-empty summary and nextAction strings.");
+	}
+	if (!isStringArray(parsed.verification) || !isStringArray(parsed.discoveredWork)) throw new Error("Aloop submission verification and discoveredWork must be string arrays.");
 	if (!Array.isArray(parsed.acceptanceCriteria) || !parsed.acceptanceCriteria.every((criterion: any) =>
 		criterion && typeof criterion.criterion === "string" && typeof criterion.satisfied === "boolean" && typeof criterion.evidence === "string")) {
-		throw new Error("Worker result acceptanceCriteria is invalid.");
-	}
-	if (parsed.status === "implemented-and-verified") {
-		if (!parsed.verifiedCommit) throw new Error("implemented-and-verified requires verification bound to the final commit.");
-		if (parsed.verification.length === 0) throw new Error("implemented-and-verified requires verification evidence.");
-		if (parsed.acceptanceCriteria.length === 0 || parsed.acceptanceCriteria.some((criterion: any) => !criterion.satisfied || !criterion.evidence.trim())) {
-			throw new Error("implemented-and-verified requires passing evidence for every acceptance criterion.");
-		}
-	} else if (parsed.verifiedCommit !== null) {
-		throw new Error("Only implemented-and-verified may report a verified commit.");
+		throw new Error("Aloop submission acceptanceCriteria is invalid.");
 	}
 	return {
 		status: parsed.status,
-		verifiedCommit: parsed.verifiedCommit,
 		summary: boundedText(parsed.summary, 2_000),
 		verification: parsed.verification.slice(0, 20).map((item: string) => boundedText(item, 1_000)),
 		acceptanceCriteria: parsed.acceptanceCriteria.slice(0, 20).map((criterion: any) => ({
-			criterion: boundedText(criterion.criterion, 1_000),
-			satisfied: criterion.satisfied,
+			criterion: boundedText(criterion.criterion, 1_000), satisfied: criterion.satisfied,
 			evidence: boundedText(criterion.evidence, 2_000),
 		})),
 		discoveredWork: parsed.discoveredWork.slice(0, 20).map((item: string) => boundedText(item, 1_000)),
 		nextAction: boundedText(parsed.nextAction, 1_000),
+	};
+}
+
+export function parseAloopPatchResult(document: string): AloopWorkerResult {
+	let parsed: any;
+	try { parsed = JSON.parse(document); } catch { throw new Error("Aloop patch submission was not valid JSON."); }
+	if (!parsed || !["patched", "no-change", "incomplete", "environment-blocked"].includes(parsed.status)) {
+		throw new Error("Aloop patch submission has an invalid status.");
+	}
+	if (typeof parsed.summary !== "string" || !parsed.summary.trim() || typeof parsed.nextAction !== "string" || !parsed.nextAction.trim() || !isStringArray(parsed.verification)) {
+		throw new Error("Aloop patch submission is incomplete.");
+	}
+	return {
+		status: parsed.status === "patched" ? "candidate-complete" : parsed.status === "no-change" ? "already-satisfied" : parsed.status,
+		summary: boundedText(parsed.summary, 2_000), verification: parsed.verification.slice(0, 20),
+		acceptanceCriteria: [], discoveredWork: [], nextAction: boundedText(parsed.nextAction, 1_000),
 	};
 }
 
@@ -308,13 +247,17 @@ export function assessAttemptContract(input: {
 	commitCount: number;
 	beforeIsAncestor: boolean;
 	worktreeStatus: string;
+	workerStatus?: AloopWorkerResultStatus;
 }): AttemptContractAssessment {
 	const violations: string[] = [];
-	if (input.worktreeStatus.trim()) violations.push("Worktree is not clean after the attempt.");
 	if (!input.beforeIsAncestor) violations.push("The attempt rewrote or removed the starting commit.");
-	if (input.commitCount === 0 || input.afterHead === input.beforeHead) violations.push("The attempt did not create a commit.");
-	else if (input.commitCount !== 1) violations.push(`The attempt created ${input.commitCount} commits instead of exactly one.`);
-	return { valid: violations.length === 0, commit: violations.length === 0 ? input.afterHead : null, violations };
+	if ((input.workerStatus === "candidate-complete" || input.workerStatus === "already-satisfied") && input.worktreeStatus.trim()) {
+		violations.push("Successful candidate outcomes require a clean worktree.");
+	}
+	if (input.workerStatus === "candidate-complete" && (input.commitCount === 0 || input.afterHead === input.beforeHead)) {
+		violations.push("candidate-complete requires at least one new commit.");
+	}
+	return { valid: violations.length === 0, commit: input.beforeIsAncestor && input.afterHead !== input.beforeHead ? input.afterHead : null, violations };
 }
 
 async function terminateProcessGroup(pid: number, graceMs: number): Promise<void> {
@@ -342,6 +285,7 @@ export async function runIsolatedAloopProcess(options: {
 	stderrPath: string;
 	timeoutMs: number;
 	deadlineMs?: number;
+	spawnDeadlineMs?: number;
 	shutdownGraceMs?: number;
 	signal?: AbortSignal;
 	env?: NodeJS.ProcessEnv;
@@ -350,14 +294,19 @@ export async function runIsolatedAloopProcess(options: {
 	if (options.command.length === 0) throw new Error("Aloop worker command is empty.");
 	if (options.signal?.aborted) throw new Error("Aloop worker launch was cancelled before spawn.");
 	if (options.deadlineMs !== undefined && options.deadlineMs <= Date.now()) throw new Error("Aloop worker deadline expired before spawn.");
+	if (options.spawnDeadlineMs !== undefined && options.spawnDeadlineMs <= Date.now()) throw new Error("Aloop worker spawn deadline expired before setup.");
 	await mkdir(path.dirname(options.stdoutPath), { recursive: true });
 	const stdout = createWriteStream(options.stdoutPath, { flags: "wx", mode: 0o600 });
 	const stderr = createWriteStream(options.stderrPath, { flags: "wx", mode: 0o600 });
 	await Promise.all([once(stdout, "open"), once(stderr, "open")]);
 	const remainingMs = options.deadlineMs === undefined ? options.timeoutMs : Math.min(options.timeoutMs, options.deadlineMs - Date.now());
-	if (options.signal?.aborted || remainingMs <= 0) {
+	if (options.signal?.aborted || remainingMs <= 0 || (options.spawnDeadlineMs !== undefined && Date.now() >= options.spawnDeadlineMs)) {
 		await Promise.all([new Promise<void>((done) => stdout.end(done)), new Promise<void>((done) => stderr.end(done))]);
-		throw new Error(options.signal?.aborted ? "Aloop worker launch was cancelled before spawn." : "Aloop worker deadline expired before spawn.");
+		throw new Error(options.signal?.aborted
+			? "Aloop worker launch was cancelled before spawn."
+			: options.spawnDeadlineMs !== undefined && Date.now() >= options.spawnDeadlineMs
+				? "Aloop worker spawn deadline expired immediately before spawn."
+				: "Aloop worker deadline expired before spawn.");
 	}
 	const started = Date.now();
 	let stdoutTail = "";
@@ -500,8 +449,12 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	const initialStatus = await worktreeStatus(input.cwd, gitOptions);
 	if (initialStatus) throw new Error("Aloop worker refused to start because the worktree is dirty.");
 	const beforeHead = await git(input.cwd, ["rev-parse", "HEAD"], gitOptions);
-	const projectResources = await resolveProjectWorkerResources(input.cwd, input.projectWorkerResources);
-	const profile = withProjectWorkerOptIn(resolveAgentProfile("aloop-implementation"), { tools: projectResources.tools });
+	const profileName = input.workerKind === "patch" ? "aloop-patch" : "aloop-implementation";
+	const projectResources = input.workerKind === "patch"
+		? { extensions: [] as string[], tools: [] as string[] }
+		: await resolveProjectWorkerResources(input.cwd, input.projectWorkerResources);
+	const baseProfile = resolveAgentProfile(profileName);
+	const profile = input.workerKind === "patch" ? baseProfile : withProjectWorkerOptIn(baseProfile, { tools: projectResources.tools });
 	const prompt = buildAloopWorkerPrompt(input);
 	const attemptId = `issue-${input.issue.number}-${Date.now()}-${randomUUID().slice(0, 8)}`;
 	const directory = await prepareAloopArtifactDirectory(input.cwd, attemptId);
@@ -509,6 +462,16 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	const stdoutPath = resolveAloopArtifactPath(input.cwd, attemptId, "stdout.jsonl");
 	const stderrPath = resolveAloopArtifactPath(input.cwd, attemptId, "stderr.log");
 	const resultPath = resolveAloopArtifactPath(input.cwd, attemptId, "result.json");
+	const submissionPath = resolveAloopArtifactPath(input.cwd, attemptId, "submission.json");
+	const contextPath = resolveAloopArtifactPath(input.cwd, attemptId, "issue-context.json");
+	const diffPath = resolveAloopArtifactPath(input.cwd, attemptId, "worktree.patch");
+	const stagedDiffPath = resolveAloopArtifactPath(input.cwd, attemptId, "staged.patch");
+	const untrackedPath = resolveAloopArtifactPath(input.cwd, attemptId, "untracked-files.json");
+	const usagePath = resolveAloopArtifactPath(input.cwd, attemptId, "nested-usage.jsonl");
+	await writeFile(contextPath, `${JSON.stringify({
+		version: 1, epic: input.epic, selectedIssue: input.issue, attemptType: input.attemptType,
+		issueBaseCommit: input.issueBaseCommit ?? beforeHead, attemptStartCommit: beforeHead, priorHandoffs: input.priorHandoffs ?? [], snapshot: input.issueContext ?? null,
+	}, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
 	const noFollow = constants.O_NOFOLLOW ?? 0;
 	const promptFile = await open(promptPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
 	try {
@@ -523,8 +486,13 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 		const workerEnvironment: NodeJS.ProcessEnv = {
 			...input.env,
 			...(fallbackPath ? { PATH: `${inheritedPath ?? ""}:${fallbackPath}` } : {}),
-			PI_HARNESS_AGENT_PROFILE: "aloop-implementation",
+			PI_HARNESS_AGENT_PROFILE: profileName,
 			PI_HARNESS_PROJECT_WORKER_TOOLS: JSON.stringify(projectResources.tools),
+			PI_ALOOP_ISSUE_CONTEXT_PATH: contextPath,
+			PI_ALOOP_SUBMISSION_PATH: submissionPath,
+			PI_ALOOP_ATTEMPT_DIRECTORY: directory,
+			PI_ALOOP_WORKER_FEEDBACK_COMMAND: input.workerFeedbackCommand ? JSON.stringify(input.workerFeedbackCommand) : "",
+			PI_ALOOP_USAGE_LEDGER: usagePath,
 		};
 		const effectiveEnvironment: NodeJS.ProcessEnv = { ...process.env, ...workerEnvironment };
 		const command = buildAloopWorkerCommand({
@@ -543,6 +511,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	let launchError: string | null = null;
 	let processResult: ProcessResult;
 	try {
+		if (input.spawnDeadlineMs !== undefined && Date.now() >= input.spawnDeadlineMs) throw new Error("Aloop patch preflight crossed its spawn deadline; no worker process was started.");
 		processResult = await runIsolatedAloopProcess({
 			cwd: input.cwd,
 			command,
@@ -550,6 +519,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			stderrPath,
 			timeoutMs,
 			deadlineMs: input.deadlineMs === undefined ? undefined : input.deadlineMs - POSTFLIGHT_RESERVE_MS,
+			spawnDeadlineMs: input.spawnDeadlineMs,
 			signal: input.signal,
 			env: workerEnvironment,
 		});
@@ -564,32 +534,67 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			stdoutTail: "",
 		};
 	}
-	const afterHead = await git(input.cwd, ["rev-parse", "HEAD"], gitOptions);
-	const worktreeStatusAfter = await worktreeStatus(input.cwd, gitOptions);
-	const beforeIsAncestor = await isAncestor(input.cwd, beforeHead, afterHead, gitOptions);
-	const commitCount = beforeIsAncestor ? Number(await git(input.cwd, ["rev-list", "--count", `${beforeHead}..${afterHead}`], gitOptions)) : 0;
-	const contract = assessAttemptContract({ beforeHead, afterHead, commitCount, beforeIsAncestor, worktreeStatus: worktreeStatusAfter });
-	let workerResult: AloopWorkerResult | null = null;
-	let parseError: string | null = null;
-	if (!launchError) {
-		try {
-			workerResult = parseAloopWorkerResult(processResult.stdoutTail);
-			if (workerResult.status === "implemented-and-verified" && workerResult.verifiedCommit !== afterHead) {
-				throw new Error(`Worker verification is bound to ${workerResult.verifiedCommit}, not final commit ${afterHead}.`);
-			}
-		} catch (error) {
-			parseError = error instanceof Error ? error.message : String(error);
+	for (const logPath of [stdoutPath, stderrPath]) {
+		try { await writeFile(logPath, "", { encoding: "utf8", mode: 0o600, flag: "wx" }); } catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 		}
 	}
+	const settlementGitOptions: GitCommandOptions = {};
+	const afterHead = await git(input.cwd, ["rev-parse", "HEAD"], settlementGitOptions);
+	const worktreeStatusAfter = await worktreeStatus(input.cwd, settlementGitOptions);
+	const beforeIsAncestor = await isAncestor(input.cwd, beforeHead, afterHead, settlementGitOptions);
+	const commitCount = beforeIsAncestor ? Number(await git(input.cwd, ["rev-list", "--count", `${beforeHead}..${afterHead}`], settlementGitOptions)) : 0;
+	let workerResult: AloopWorkerResult | null = null;
+	let parseError: string | null = null;
+	try {
+		const submission = await readFile(submissionPath, "utf8");
+		workerResult = input.workerKind === "patch" ? parseAloopPatchResult(submission) : parseAloopWorkerResult(submission);
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") parseError = error instanceof Error ? error.message : String(error);
+	}
+	const contract = assessAttemptContract({
+		beforeHead, afterHead, commitCount, beforeIsAncestor, worktreeStatus: worktreeStatusAfter,
+		workerStatus: workerResult?.status,
+	});
+	const [diff, stagedDiff, untrackedRaw] = await Promise.all([
+		gitResult(input.cwd, ["diff", "--binary"], settlementGitOptions),
+		gitResult(input.cwd, ["diff", "--cached", "--binary"], settlementGitOptions),
+		gitResult(input.cwd, ["ls-files", "--others", "--exclude-standard", "-z"], settlementGitOptions),
+	]);
+	const untrackedFiles = untrackedRaw.stdout.split("\0").filter((value) => value && !value.startsWith(`${ALOOP_ROOT}/`));
+	await Promise.all([
+		writeFile(diffPath, diff.stdout, { encoding: "utf8", mode: 0o600, flag: "wx" }),
+		writeFile(stagedDiffPath, stagedDiff.stdout, { encoding: "utf8", mode: 0o600, flag: "wx" }),
+		writeFile(untrackedPath, `${JSON.stringify(untrackedFiles, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" }),
+	]);
+	if (untrackedFiles.length > 0) {
+		const copies = path.join(directory, "untracked");
+		await mkdir(copies, { recursive: true, mode: 0o700 });
+		for (const file of untrackedFiles) {
+			const target = path.join(copies, file);
+			await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
+			await cp(path.join(input.cwd, file), target, { recursive: true, force: false, dereference: false });
+		}
+	}
+	const submissionMissing = workerResult === null && parseError === null;
 	const status = processResult.timedOut ? "timeout"
 		: processResult.cancelled ? "cancelled"
 			: launchError ? "worker-failed"
 				: !contract.valid ? "contract-violation"
 					: processResult.exitCode !== 0 ? "worker-failed"
-						: parseError ? "invalid-result"
-							: "completed";
-	const fallback = contract.violations.join(" ") || `Worker exited with code ${processResult.exitCode ?? "unknown"}.`;
+						: submissionMissing ? "missing-submission"
+							: parseError ? "invalid-result"
+								: "completed";
+	const fallback = contract.violations.join(" ") || (submissionMissing ? "Worker exited without aloop_submit_result." : `Worker exited with code ${processResult.exitCode ?? "unknown"}.`);
 	const summary = boundedText(workerResult?.summary ?? launchError ?? parseError ?? fallback, MAX_SUMMARY_BYTES);
+	let stdoutDocument = "";
+	try { stdoutDocument = await readFile(stdoutPath, "utf8"); } catch (error) {
+		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+	}
+	const primaryMessages = stdoutDocument.split("\n").flatMap((line) => {
+		try { const record = JSON.parse(line); return record?.type === "message_end" ? [record.message] : []; } catch { return []; }
+	});
+	const modelUsage = [...collectSessionUsage(primaryMessages, input.workerKind === "patch" ? "patch" : "implementation"), ...await readNestedModelUsage(usagePath)];
 	const relative = (value: string) => path.relative(input.cwd, value);
 	const outcome: AloopAttemptOutcome = {
 		status,
@@ -604,12 +609,18 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			cancelled: processResult.cancelled,
 			durationMs: processResult.durationMs,
 		},
+		modelUsage,
 		artifacts: {
 			directory: relative(directory),
 			prompt: relative(promptPath),
 			stdout: relative(stdoutPath),
 			stderr: relative(stderrPath),
 			result: relative(resultPath),
+			submission: relative(submissionPath),
+			context: relative(contextPath),
+			diff: relative(diffPath),
+			stagedDiff: relative(stagedDiffPath),
+			untracked: relative(untrackedPath),
 		},
 	};
 	const [openedResult, currentResult] = await Promise.all([resultFile.stat(), lstat(resultPath)]);
@@ -624,4 +635,31 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	} finally {
 		await resultFile.close();
 	}
+}
+
+export const DEFAULT_ALOOP_PATCH_MODEL = "openai-codex/gpt-5.6-terra";
+
+export function selectAloopPatchModel(input: {
+	configured?: string;
+	active?: string;
+	available: (reference: string) => boolean;
+}): string | undefined {
+	const preferred = input.configured?.trim() || DEFAULT_ALOOP_PATCH_MODEL;
+	if (input.available(preferred)) return preferred;
+	return input.active?.trim() || undefined;
+}
+
+export type AloopPatchWorkerInput = Omit<AloopWorkerInput, "attemptType" | "supervisorApproach" | "workerKind" | "patchDirection"> & {
+	correction: string;
+};
+
+/** Targeted settlement work. Callers deliberately do not charge this against full-worker launch/time counters. */
+export function runAloopPatchWorker(input: AloopPatchWorkerInput): Promise<AloopAttemptOutcome> {
+	return runAloopWorker({
+		...input,
+		attemptType: "remediation",
+		supervisorApproach: "Targeted supervisor patch",
+		workerKind: "patch",
+		patchDirection: input.correction,
+	});
 }

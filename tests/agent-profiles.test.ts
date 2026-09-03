@@ -32,6 +32,7 @@ test("narrow worker profiles enforce explicit capability allowlists", () => {
 	}
 	const patch = resolveAgentProfile("aloop-patch");
 	assert.ok(patch.tools.includes("edit") && patch.tools.includes("lsp_diagnostics") && patch.tools.includes("run_worker"));
+	assert.ok(patch.tools.includes("aloop_submit_patch_result"));
 	assert.equal(patch.tools.includes("review_agents"), false);
 	assert.equal(patch.tools.some((tool) => tool.startsWith("github_")), false);
 	assert.equal(patch.tools.some((tool) => tool.startsWith("remote_")), false);
@@ -40,6 +41,9 @@ test("narrow worker profiles enforce explicit capability allowlists", () => {
 test("implementation, coordinator, local, and managed variants preserve their role boundaries", () => {
 	const implementation = resolveAgentProfile("aloop-implementation");
 	assert.ok(implementation.tools.includes("review_agents"));
+	assert.ok(implementation.tools.includes("aloop_issue_context"));
+	assert.ok(implementation.tools.includes("aloop_worker_feedback"));
+	assert.ok(implementation.tools.includes("aloop_submit_result"));
 	assert.deepEqual(implementation.tools.filter((tool) => tool.startsWith("github_")), ["github_issue_inspect", "github_issue_graph"]);
 	assert.equal(implementation.tools.includes("github_issue_mutate"), false);
 	assert.equal(implementation.tools.includes("remote_checkpoint"), false);
