@@ -419,7 +419,7 @@ Do not use `run_worker` for subjective code review. The dedicated `review_agents
 
 ## Code Review Agents
 
-The `review-agents` extension registers `review_agents` for the curated two-axis `code-review` skill. Diff mode captures one merge-base diff and commit list. Audit mode pins the current HEAD and supports Standards or Spec inspection when there is intentionally no diff, such as already-satisfied work. Both modes store bounded reports under `.pi/tmp/reviews/` and run the requested axes concurrently in isolated read-only Pi SDK sessions.
+The `review-agents` extension registers `review_agents` for the curated two-axis `code-review` skill. Diff mode captures one committed merge-base diff and commit list. Worktree mode uses a private temporary Git index to capture staged, unstaged, untracked, and binary content as one immutable synthetic commit without modifying source files; later source changes cannot alter that review. Audit mode pins the current HEAD when there is intentionally no diff. All modes store bounded reports under `.pi/tmp/reviews/` and run the requested axes concurrently in isolated read-only Pi SDK sessions.
 
 Review sessions use `openai-codex/gpt-5.6-terra` with low thinking. Set `PI_HARNESS_REVIEW_MODEL=provider/model` to override the model explicitly; unlike the diagnostic worker, review agents fail clearly when their configured model is unavailable or lacks authentication rather than silently falling back to a lower-quality model.
 
@@ -573,6 +573,8 @@ optional prioritization hint.
 Use `/skill:tdd` for bounded test-first work, `/skill:diagnosing-bugs` for hard
 bugs, `/skill:triage` for incoming requests, `/skill:wayfinder` for uncertain
 large efforts, and `/skill:handoff` before session transitions.
+
+Issue implementation follows the shared [one-pass workflow](docs/agents/implementation-workflow.md): deliberate relationship/domain/ADR preflight, acceptance-to-evidence and scope ownership, focused checks, one exhaustive pinned Standards/Spec review, batched remediation, then one canonical verification gate and applicable production builds. Crash-boundary analysis applies only to persistent state, retries, concurrency, or external side effects.
 
 The `github_issue_inspect`, `github_issue_mutate`, `github_issue_plan`,
 `github_issue_relationship`, and `github_issue_graph` tools provide a typed,

@@ -1,4 +1,9 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import * as path from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 import {
 	buildReviewPrompt,
@@ -9,6 +14,32 @@ import {
 	validateReviewRequest,
 	type ReviewTask,
 } from "../config/agent/extensions/review-agents/core.js";
+import {
+	captureWorktreeSnapshot,
+	MAX_REVIEW_DIFF_BYTES,
+	type GitRunner,
+} from "../config/agent/extensions/review-agents/snapshot.js";
+
+const execFileAsync = promisify(execFile);
+
+async function createRepository(t: test.TestContext): Promise<{ root: string; git: GitRunner; run: (args: string[]) => Promise<string> }> {
+	const root = await mkdtemp(path.join(tmpdir(), "review-agents-test-"));
+	t.after(async () => rm(root, { recursive: true, force: true }));
+	const run = async (args: string[]) => (await execFileAsync("git", args, { cwd: root, encoding: "utf8", maxBuffer: 32 * 1024 * 1024 })).stdout;
+	const git: GitRunner = async (args, cwd = root, indexPath) => (await execFileAsync("git", args, {
+		cwd,
+		encoding: "utf8",
+		maxBuffer: 32 * 1024 * 1024,
+		env: indexPath ? { ...process.env, GIT_INDEX_FILE: indexPath } : process.env,
+	})).stdout;
+	await run(["init", "--quiet"]);
+	await run(["config", "user.name", "Review Test"]);
+	await run(["config", "user.email", "review@example.invalid"]);
+	await writeFile(path.join(root, "tracked.txt"), "base\n");
+	await run(["add", "tracked.txt"]);
+	await run(["commit", "--quiet", "-m", "base"]);
+	return { root, git, run };
+}
 
 const tasks: ReviewTask[] = [
 	{ axis: "standards", instructions: "Check the repository standards." },
@@ -32,6 +63,7 @@ test("review model references preserve provider-qualified model IDs", () => {
 test("review requests allow one or two distinct axes", () => {
 	assert.doesNotThrow(() => validateReviewRequest("main", tasks));
 	assert.doesNotThrow(() => validateReviewRequest("main", [tasks[0]!]));
+	assert.doesNotThrow(() => validateReviewRequest("main", tasks, "worktree"));
 	assert.doesNotThrow(() => validateReviewRequest(undefined, tasks, "audit"));
 	assert.throws(() => validateReviewRequest("main", tasks, "audit"), /does not accept/);
 	assert.throws(() => validateReviewRequest(undefined, tasks), /requires.*fixed point/);
@@ -59,6 +91,23 @@ test("review prompts share pinned git context while keeping axis instructions se
 	assert.match(prompt, /diff\.patch/);
 	assert.match(prompt, /src\/example\.ts/);
 	assert.match(prompt, /Check the repository standards/);
+	assert.match(prompt, /severity \(critical, high, medium, or low\)/);
+	assert.match(prompt, /current issue, dependent issue, deployment-only, or justified deferral/);
+
+	const worktree = buildReviewPrompt(tasks[1]!, {
+		mode: "worktree",
+		fixedPoint: "main",
+		resolvedFixedPoint: "abc123",
+		resolvedHead: "def456",
+		resolvedSnapshot: "snapshot789",
+		diffPath: ".pi/tmp/reviews/worktree/diff.patch",
+		commitsPath: ".pi/tmp/reviews/worktree/commits.txt",
+		changedFiles: ["src/uncommitted.ts"],
+		repositoryPath: ".pi/tmp/reviews/worktree/repository",
+	});
+	assert.match(worktree, /Pinned uncommitted worktree context/);
+	assert.match(worktree, /snapshot789/);
+	assert.match(worktree, /mutable source worktree/);
 
 	const audit = buildReviewPrompt(tasks[1]!, {
 		mode: "audit",
@@ -88,4 +137,56 @@ test("review tasks start concurrently and preserve input order", async () => {
 	assert.deepEqual(started, ["standards", "spec"]);
 	release();
 	assert.deepEqual(await resultPromise, ["standards result", "spec result"]);
+});
+
+test("worktree snapshots preserve a clean committed diff", async (t) => {
+	const { root, git, run } = await createRepository(t);
+	const fixed = (await run(["rev-parse", "HEAD"])).trim();
+	await writeFile(path.join(root, "tracked.txt"), "committed\n");
+	await run(["commit", "-am", "committed change", "--quiet"]);
+
+	const snapshot = await captureWorktreeSnapshot(git, root, fixed);
+	assert.deepEqual(snapshot.changedFiles, ["tracked.txt"]);
+	assert.match(snapshot.diff, /\+committed/);
+	assert.equal((await run(["status", "--porcelain"])), "");
+});
+
+test("worktree snapshots combine staged, unstaged, and untracked files without changing source state", async (t) => {
+	const { root, git, run } = await createRepository(t);
+	const fixed = (await run(["rev-parse", "HEAD"])).trim();
+	await writeFile(path.join(root, "staged.txt"), "staged\n");
+	await run(["add", "staged.txt"]);
+	await writeFile(path.join(root, "tracked.txt"), "unstaged\n");
+	await writeFile(path.join(root, "untracked.txt"), "untracked\n");
+	const statusBefore = await run(["status", "--porcelain=v1"]);
+
+	const snapshot = await captureWorktreeSnapshot(git, root, fixed);
+	assert.deepEqual(snapshot.changedFiles.sort(), ["staged.txt", "tracked.txt", "untracked.txt"]);
+	assert.equal(await run(["show", `${snapshot.snapshotCommit}:staged.txt`]), "staged\n");
+	assert.equal(await run(["show", `${snapshot.snapshotCommit}:tracked.txt`]), "unstaged\n");
+	assert.equal(await run(["show", `${snapshot.snapshotCommit}:untracked.txt`]), "untracked\n");
+	assert.equal(await run(["status", "--porcelain=v1"]), statusBefore);
+});
+
+test("worktree snapshots retain binary bytes and remain stable when the source changes", async (t) => {
+	const { root, git, run } = await createRepository(t);
+	const fixed = (await run(["rev-parse", "HEAD"])).trim();
+	const original = Buffer.from([0, 1, 2, 255, 10]);
+	await writeFile(path.join(root, "image.bin"), original);
+
+	const snapshot = await captureWorktreeSnapshot(git, root, fixed);
+	await writeFile(path.join(root, "image.bin"), Buffer.from([9, 9, 9]));
+	const stored = await execFileAsync("git", ["show", `${snapshot.snapshotCommit}:image.bin`], { cwd: root, encoding: "buffer" });
+	assert.deepEqual(stored.stdout, original);
+	assert.deepEqual(await readFile(path.join(root, "image.bin")), Buffer.from([9, 9, 9]));
+});
+
+test("worktree snapshots reject oversized textual diffs without mutating the worktree", async (t) => {
+	const { root, git, run } = await createRepository(t);
+	const fixed = (await run(["rev-parse", "HEAD"])).trim();
+	await writeFile(path.join(root, "oversized.txt"), `changed-${"x".repeat(MAX_REVIEW_DIFF_BYTES + 1024)}\n`);
+	const statusBefore = await run(["status", "--porcelain=v1"]);
+
+	await assert.rejects(() => captureWorktreeSnapshot(git, root, fixed), /limit is/);
+	assert.equal(await run(["status", "--porcelain=v1"]), statusBefore);
 });

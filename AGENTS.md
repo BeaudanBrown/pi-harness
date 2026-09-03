@@ -37,6 +37,10 @@ Use the configured GitHub lifecycle labels. See `docs/agents/triage-labels.md`.
 
 Read project guidance and relevant documentation before work. See `docs/agents/domain.md`.
 
+### Issue implementation
+
+Use the preflight, acceptance-evidence, scope-ownership, one-pass review, and final verification ladder in `docs/agents/implementation-workflow.md`. Crash-boundary analysis is conditional on persistent state, retries, concurrency, or external side effects.
+
 ### Browser automation
 
 Use the `playwright-browser` skill and `pi-playwright` interface for stateful browser exploration. Prefer project adapters for application work and the harness fallback only for disposable exploration when no project Playwright setup exists.

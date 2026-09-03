@@ -24,6 +24,7 @@ import {
 	type ReviewContext,
 	type ReviewTask,
 } from "./core.js";
+import { captureWorktreeSnapshot } from "./snapshot.js";
 const REVIEW_ROOT = ".pi/tmp/reviews";
 const MAX_RESULT_BYTES = 24_000;
 
@@ -37,11 +38,11 @@ const ReviewTaskSchema = Type.Object({
 });
 
 const ReviewAgentsParams = Type.Object({
-	mode: Type.Optional(StringEnum(["diff", "audit"] as const, {
-		description: "Diff review (default) or whole-repository audit at the current HEAD.",
+	mode: Type.Optional(StringEnum(["diff", "worktree", "audit"] as const, {
+		description: "Committed diff review (default), pinned uncommitted worktree review, or whole-repository audit at the current HEAD.",
 	})),
 	fixed_point: Type.Optional(Type.String({
-		description: "Commit, branch, or tag used as the merge-base comparison point against HEAD. Required in diff mode and omitted in audit mode.",
+		description: "Commit, branch, or tag used as the comparison point. Required in diff and worktree modes and omitted in audit mode.",
 	})),
 	tasks: Type.Array(ReviewTaskSchema, {
 		description: "One or two independent Standards and Spec review tasks. Two tasks run concurrently.",
@@ -51,7 +52,7 @@ const ReviewAgentsParams = Type.Object({
 });
 
 type ReviewAgentsParamsType = {
-	mode?: "diff" | "audit";
+	mode?: "diff" | "worktree" | "audit";
 	fixed_point?: string;
 	tasks: ReviewTask[];
 };
@@ -114,9 +115,13 @@ function selectReviewModel(ctx: ExtensionContext) {
 	return model;
 }
 
-async function captureReviewContext(pi: ExtensionAPI, cwd: string, mode: "diff" | "audit", fixedPoint?: string): Promise<ReviewContext> {
-	const git = async (args: string[], commandCwd = cwd) => {
-		const result = await pi.exec("git", ["-c", "core.pager=cat", ...args], { cwd: commandCwd, timeout: 30_000 });
+async function captureReviewContext(pi: ExtensionAPI, cwd: string, mode: "diff" | "worktree" | "audit", fixedPoint?: string): Promise<ReviewContext> {
+	const git = async (args: string[], commandCwd = cwd, indexPath?: string) => {
+		const command = indexPath ? "sh" : "git";
+		const commandArgs = indexPath
+			? ["-c", 'export GIT_INDEX_FILE="$1"; shift; exec git -c core.pager=cat "$@"', "pi-review-index", indexPath, ...args]
+			: ["-c", "core.pager=cat", ...args];
+		const result = await pi.exec(command, commandArgs, { cwd: commandCwd, timeout: 30_000 });
 		if (result.code !== 0) {
 			throw new Error(result.stderr.trim() || `git ${args[0] ?? "command"} failed with exit code ${result.code}`);
 		}
@@ -133,10 +138,10 @@ async function captureReviewContext(pi: ExtensionAPI, cwd: string, mode: "diff" 
 		}
 		throw new Error("Could not allocate a unique review artifact directory.");
 	};
-	const createSnapshot = async (reviewDir: string, head: string) => {
+	const createSnapshot = async (reviewDir: string, source: string, revision: string) => {
 		const repository = path.join(reviewDir, "repository");
-		await git(["clone", "--quiet", "--shared", "--no-checkout", "--", cwd, repository]);
-		await git(["checkout", "--quiet", "--detach", head], repository);
+		await git(["clone", "--quiet", "--shared", "--no-checkout", "--", source, repository]);
+		await git(["checkout", "--quiet", "--detach", revision], repository);
 		return path.relative(cwd, repository);
 	};
 
@@ -147,10 +152,32 @@ async function captureReviewContext(pi: ExtensionAPI, cwd: string, mode: "diff" 
 			git(["status", "--short"]),
 		]);
 		const reviewDir = await createReviewDirectory(`audit-${resolvedHead.slice(0, 12)}`);
-		const repositoryPath = await createSnapshot(reviewDir, resolvedHead);
+		const repositoryPath = await createSnapshot(reviewDir, cwd, resolvedHead);
 		const auditAbsolutePath = path.join(reviewDir, "audit-context.txt");
 		await writeFile(auditAbsolutePath, `HEAD: ${resolvedHead}\nSource: immutable local clone at ${repositoryPath}\nOriginal worktree status (excluded from audit):\n${status || "(clean)\n"}\nTracked files:\n${trackedFiles}`, "utf8");
 		return { mode: "audit", resolvedHead, auditContextPath: path.relative(cwd, auditAbsolutePath), repositoryPath };
+	}
+	if (mode === "worktree") {
+		const captured = await captureWorktreeSnapshot(git, cwd, fixedPoint!);
+		const reviewDir = await createReviewDirectory(`worktree-${captured.snapshotCommit.slice(0, 12)}`);
+		const repositoryPath = await createSnapshot(reviewDir, captured.repositoryRoot, captured.snapshotCommit);
+		const diffAbsolutePath = path.join(reviewDir, "diff.patch");
+		const commitsAbsolutePath = path.join(reviewDir, "commits.txt");
+		await Promise.all([
+			writeFile(diffAbsolutePath, captured.diff, "utf8"),
+			writeFile(commitsAbsolutePath, captured.commits || "(no committed changes; snapshot contains worktree changes)\n", "utf8"),
+		]);
+		return {
+			mode: "worktree",
+			fixedPoint: fixedPoint!,
+			resolvedFixedPoint: captured.resolvedFixedPoint,
+			resolvedHead: captured.resolvedHead,
+			resolvedSnapshot: captured.snapshotCommit,
+			diffPath: path.relative(cwd, diffAbsolutePath),
+			commitsPath: path.relative(cwd, commitsAbsolutePath),
+			changedFiles: captured.changedFiles,
+			repositoryPath,
+		};
 	}
 	const [resolvedFixedPoint, resolvedHead] = await Promise.all([
 		git(["rev-parse", "--verify", `${fixedPoint!}^{commit}`]),
@@ -165,7 +192,7 @@ async function captureReviewContext(pi: ExtensionAPI, cwd: string, mode: "diff" 
 	if (!diff.trim()) throw new Error(`review_agents found no diff for ${comparison}.`);
 
 	const reviewDir = await createReviewDirectory(resolvedFixedPoint.trim().slice(0, 12));
-	const repositoryPath = await createSnapshot(reviewDir, resolvedHead.trim());
+	const repositoryPath = await createSnapshot(reviewDir, cwd, resolvedHead.trim());
 	const diffAbsolutePath = path.join(reviewDir, "diff.patch");
 	const commitsAbsolutePath = path.join(reviewDir, "commits.txt");
 	await Promise.all([
@@ -205,7 +232,7 @@ async function askReviewer(
 	const abortReviewer = () => void session.abort();
 	signal?.addEventListener("abort", abortReviewer, { once: true });
 	try {
-		const promptContext: ReviewContext = reviewContext.mode === "diff"
+		const promptContext: ReviewContext = reviewContext.mode !== "audit"
 			? { ...reviewContext, diffPath: path.resolve(ctx.cwd, reviewContext.diffPath), commitsPath: path.resolve(ctx.cwd, reviewContext.commitsPath), repositoryPath: path.resolve(ctx.cwd, reviewContext.repositoryPath) }
 			: { ...reviewContext, auditContextPath: path.resolve(ctx.cwd, reviewContext.auditContextPath), repositoryPath: path.resolve(ctx.cwd, reviewContext.repositoryPath) };
 		await session.prompt(buildReviewPrompt(task, promptContext));
@@ -223,11 +250,12 @@ export default function reviewAgentsExtension(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "review_agents",
 		label: "Review Agents",
-		description: "Run one or two isolated read-only Standards or Spec agents against a pinned Git diff or the current repository HEAD in audit mode.",
+		description: "Run one or two isolated read-only Standards or Spec agents against a pinned committed diff, one captured uncommitted worktree snapshot, or the current HEAD in audit mode.",
 		promptSnippet: "Delegate Standards and Spec code-review axes to isolated read-only review agents using review_agents.",
 		promptGuidelines: [
 			"Use review_agents for subjective code review instead of run_worker.",
-			"Call review_agents once with both Standards and Spec tasks when both axes are available so they run concurrently against the same pinned diff.",
+			"After focused and affected checks pass, call review_agents once with both Standards and Spec tasks so they exhaustively review the same pinned snapshot.",
+			"Require review_agents findings to state severity and ownership: current issue, dependent issue, deployment-only, or justified deferral.",
 		],
 		parameters: ReviewAgentsParams,
 		executionMode: "parallel",
@@ -235,12 +263,12 @@ export default function reviewAgentsExtension(pi: ExtensionAPI): void {
 			if (process.env.PI_AGENTGRAPH_MODE === "1") {
 				throw new Error("review_agents is disabled in AgentGraph restricted mode because its model runs are outside graph provenance.");
 			}
-			const mode: "diff" | "audit" = params.mode ?? "diff";
+			const mode: "diff" | "worktree" | "audit" = params.mode ?? "diff";
 			validateReviewRequest(params.fixed_point, params.tasks, mode);
 			const model = selectReviewModel(ctx);
 			const modelRef = `${model.provider}/${model.id}`;
 
-			onUpdate?.({ content: [{ type: "text", text: `Capturing ${mode} review context${params.fixed_point ? ` for ${params.fixed_point}` : ""}...` }], details: {} });
+			onUpdate?.({ content: [{ type: "text", text: `Capturing pinned ${mode} review context${params.fixed_point ? ` for ${params.fixed_point}` : ""}...` }], details: {} });
 			const reviewContext = await captureReviewContext(pi, ctx.cwd, mode, params.fixed_point);
 			let completed = 0;
 			const results = await runReviewTasks(params.tasks, async (task) => {
@@ -253,15 +281,15 @@ export default function reviewAgentsExtension(pi: ExtensionAPI): void {
 				return result;
 			});
 
-			const contextArtifact = reviewContext.mode === "diff" ? reviewContext.diffPath : reviewContext.auditContextPath;
+			const contextArtifact = reviewContext.mode !== "audit" ? reviewContext.diffPath : reviewContext.auditContextPath;
 			const reviewDir = path.dirname(path.resolve(ctx.cwd, contextArtifact));
 			await Promise.all(results.map((result) => writeFile(path.join(reviewDir, `${result.axis}.md`), `${result.text}\n`, "utf8")));
 			const text = [
 				`review_model: ${modelRef}`,
 				`thinking_level: ${REVIEW_THINKING_LEVEL}`,
 				`mode: ${mode}`,
-				reviewContext.mode === "diff" ? `diff: ${reviewContext.diffPath}` : `audit_context: ${reviewContext.auditContextPath}`,
-				reviewContext.mode === "diff" ? `commits: ${reviewContext.commitsPath}` : undefined,
+				reviewContext.mode !== "audit" ? `diff: ${reviewContext.diffPath}` : `audit_context: ${reviewContext.auditContextPath}`,
+				reviewContext.mode !== "audit" ? `commits: ${reviewContext.commitsPath}` : undefined,
 				`reports: ${path.relative(ctx.cwd, reviewDir)}`,
 				"",
 				...results.flatMap((result) => [`## ${result.axis === "standards" ? "Standards" : "Spec"}`, "", result.text, ""]),
@@ -273,7 +301,8 @@ export default function reviewAgentsExtension(pi: ExtensionAPI): void {
 					model: modelRef,
 					thinking_level: REVIEW_THINKING_LEVEL,
 					mode,
-					fixed_point: reviewContext.mode === "diff" ? reviewContext.resolvedFixedPoint : reviewContext.resolvedHead,
+					fixed_point: reviewContext.mode === "audit" ? reviewContext.resolvedHead : reviewContext.resolvedFixedPoint,
+					snapshot: reviewContext.mode === "worktree" ? reviewContext.resolvedSnapshot : undefined,
 					context: contextArtifact,
 					reports: path.relative(ctx.cwd, reviewDir),
 					axes: results.map((result) => result.axis),
