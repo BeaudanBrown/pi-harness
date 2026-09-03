@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { cp, mkdir, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import { StringEnum } from "@earendil-works/pi-ai";
 import {
@@ -159,25 +159,30 @@ async function captureReviewContext(pi: ExtensionAPI, cwd: string, mode: "diff" 
 	}
 	if (mode === "worktree") {
 		const captured = await captureWorktreeSnapshot(git, cwd, fixedPoint!);
-		const reviewDir = await createReviewDirectory(`worktree-${captured.snapshotCommit.slice(0, 12)}`);
-		const repositoryPath = await createSnapshot(reviewDir, captured.repositoryRoot, captured.snapshotCommit);
-		const diffAbsolutePath = path.join(reviewDir, "diff.patch");
-		const commitsAbsolutePath = path.join(reviewDir, "commits.txt");
-		await Promise.all([
-			writeFile(diffAbsolutePath, captured.diff, "utf8"),
-			writeFile(commitsAbsolutePath, captured.commits || "(no committed changes; snapshot contains worktree changes)\n", "utf8"),
-		]);
-		return {
-			mode: "worktree",
-			fixedPoint: fixedPoint!,
-			resolvedFixedPoint: captured.resolvedFixedPoint,
-			resolvedHead: captured.resolvedHead,
-			resolvedSnapshot: captured.snapshotCommit,
-			diffPath: path.relative(cwd, diffAbsolutePath),
-			commitsPath: path.relative(cwd, commitsAbsolutePath),
-			changedFiles: captured.changedFiles,
-			repositoryPath,
-		};
+		try {
+			const reviewDir = await createReviewDirectory(`worktree-${captured.snapshotCommit.slice(0, 12)}`);
+			const repositoryAbsolutePath = path.join(reviewDir, "repository");
+			await cp(captured.repositoryPath, repositoryAbsolutePath, { recursive: true, errorOnExist: true });
+			const diffAbsolutePath = path.join(reviewDir, "diff.patch");
+			const commitsAbsolutePath = path.join(reviewDir, "commits.txt");
+			await Promise.all([
+				writeFile(diffAbsolutePath, captured.diff, "utf8"),
+				writeFile(commitsAbsolutePath, captured.commits || "(no committed changes; snapshot contains worktree changes)\n", "utf8"),
+			]);
+			return {
+				mode: "worktree",
+				fixedPoint: fixedPoint!,
+				resolvedFixedPoint: captured.resolvedFixedPoint,
+				resolvedHead: captured.resolvedHead,
+				resolvedSnapshot: captured.snapshotCommit,
+				diffPath: path.relative(cwd, diffAbsolutePath),
+				commitsPath: path.relative(cwd, commitsAbsolutePath),
+				changedFiles: captured.changedFiles,
+				repositoryPath: path.relative(cwd, repositoryAbsolutePath),
+			};
+		} finally {
+			await captured.dispose();
+		}
 	}
 	const [resolvedFixedPoint, resolvedHead] = await Promise.all([
 		git(["rev-parse", "--verify", `${fixedPoint!}^{commit}`]),

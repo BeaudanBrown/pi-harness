@@ -146,6 +146,7 @@ test("worktree snapshots preserve a clean committed diff", async (t) => {
 	await run(["commit", "-am", "committed change", "--quiet"]);
 
 	const snapshot = await captureWorktreeSnapshot(git, root, fixed);
+	t.after(snapshot.dispose);
 	assert.deepEqual(snapshot.changedFiles, ["tracked.txt"]);
 	assert.match(snapshot.diff, /\+committed/);
 	assert.equal((await run(["status", "--porcelain"])), "");
@@ -159,13 +160,16 @@ test("worktree snapshots combine staged, unstaged, and untracked files without c
 	await writeFile(path.join(root, "tracked.txt"), "unstaged\n");
 	await writeFile(path.join(root, "untracked.txt"), "untracked\n");
 	const statusBefore = await run(["status", "--porcelain=v1"]);
+	const objectsBefore = await run(["count-objects", "-v"]);
 
 	const snapshot = await captureWorktreeSnapshot(git, root, fixed);
+	t.after(snapshot.dispose);
 	assert.deepEqual(snapshot.changedFiles.sort(), ["staged.txt", "tracked.txt", "untracked.txt"]);
-	assert.equal(await run(["show", `${snapshot.snapshotCommit}:staged.txt`]), "staged\n");
-	assert.equal(await run(["show", `${snapshot.snapshotCommit}:tracked.txt`]), "unstaged\n");
-	assert.equal(await run(["show", `${snapshot.snapshotCommit}:untracked.txt`]), "untracked\n");
+	assert.equal(await readFile(path.join(snapshot.repositoryPath, "staged.txt"), "utf8"), "staged\n");
+	assert.equal(await readFile(path.join(snapshot.repositoryPath, "tracked.txt"), "utf8"), "unstaged\n");
+	assert.equal(await readFile(path.join(snapshot.repositoryPath, "untracked.txt"), "utf8"), "untracked\n");
 	assert.equal(await run(["status", "--porcelain=v1"]), statusBefore);
+	assert.equal(await run(["count-objects", "-v"]), objectsBefore);
 });
 
 test("worktree snapshots retain binary bytes and remain stable when the source changes", async (t) => {
@@ -174,11 +178,13 @@ test("worktree snapshots retain binary bytes and remain stable when the source c
 	const original = Buffer.from([0, 1, 2, 255, 10]);
 	await writeFile(path.join(root, "image.bin"), original);
 
+	const objectsBefore = await run(["count-objects", "-v"]);
 	const snapshot = await captureWorktreeSnapshot(git, root, fixed);
+	t.after(snapshot.dispose);
 	await writeFile(path.join(root, "image.bin"), Buffer.from([9, 9, 9]));
-	const stored = await execFileAsync("git", ["show", `${snapshot.snapshotCommit}:image.bin`], { cwd: root, encoding: "buffer" });
-	assert.deepEqual(stored.stdout, original);
+	assert.deepEqual(await readFile(path.join(snapshot.repositoryPath, "image.bin")), original);
 	assert.deepEqual(await readFile(path.join(root, "image.bin")), Buffer.from([9, 9, 9]));
+	assert.equal(await run(["count-objects", "-v"]), objectsBefore);
 });
 
 test("worktree snapshots reject oversized textual diffs without mutating the worktree", async (t) => {
