@@ -19,14 +19,33 @@ export type AloopHandoffV3 = {
 	timestamp: string;
 };
 
+const MAX_HANDOFF_LIST_ITEMS = 3;
+const REDACTED_HANDOFF_VALUE = "[redacted]";
+
 function clipHandoffText(value: string, limit: number): string {
 	const points = Array.from(value);
 	return points.length <= limit ? value : `${points.slice(0, limit - 1).join("")}…`;
 }
 
+/** Removes local recovery plumbing before any caller-provided text reaches a GitHub handoff. */
+function redactHandoffText(value: string): string {
+	return value
+		.replace(/(?:~|\/)[^\s<>"']*?\/\.pi\/tmp(?:\/[^\s<>"']*)?|\b\.pi\/tmp(?:\/[^\s<>"']*)?/g, REDACTED_HANDOFF_VALUE)
+		.replace(/\bverify-[a-f0-9]{12}-\d+-[a-f0-9]{8}\b/gi, REDACTED_HANDOFF_VALUE)
+		.replace(/\bspool(?:\s+(?:id|identifier))?\s*(?:[:=]\s*|\s+)[a-f0-9]{24,64}\b/gi, `spool ${REDACTED_HANDOFF_VALUE}`)
+		.replace(/\b(?:spool|blob)-[a-z0-9][a-z0-9_-]{7,}\b/gi, REDACTED_HANDOFF_VALUE)
+		.replace(/(?:<!--\s*)?pi-aloop-recovery-authorization:v\d+:[a-z0-9_-]+(?:\s*-->)?/gi, REDACTED_HANDOFF_VALUE);
+}
+
 export function normalizeAloopHandoffV3(input: AloopHandoffV3): AloopHandoffV3 {
-	const list = (values: string[]) => values.slice(0, 3).map((value) => clipHandoffText(value, 100));
-	const verification = input.verification.map((value) => clipHandoffText(value, 100));
+	// An unsuccessful handoff is the durable complete state for the next worker.
+	// Refuse, rather than silently dropping, findings which exceed its bounded format.
+	if (input.outstandingFindings.length > MAX_HANDOFF_LIST_ITEMS) {
+		throw new Error(`Aloop v3 handoff supports at most ${MAX_HANDOFF_LIST_ITEMS} outstanding findings; consolidate them before finalizing.`);
+	}
+	const text = (value: string, limit: number) => clipHandoffText(redactHandoffText(value), limit);
+	const list = (values: string[]) => values.slice(0, MAX_HANDOFF_LIST_ITEMS).map((value) => text(value, 100));
+	const verification = input.verification.map((value) => text(value, 100));
 	const lastMatching = (pattern: RegExp) => [...verification].reverse().find((value) => pattern.test(value));
 	const required = [
 		lastMatching(/^(Independent review completed|Human review decision recorded) at [0-9a-f]{7,64}\.$/i),
@@ -34,7 +53,7 @@ export function normalizeAloopHandoffV3(input: AloopHandoffV3): AloopHandoffV3 {
 		lastMatching(/^Production integration passed at [0-9a-f]{7,64}\.$/i),
 	].filter((value): value is string => value !== undefined);
 	const advisory = verification.filter((value) => !required.includes(value)).slice(0, Math.max(0, 3 - required.length));
-	return { ...input, summary: clipHandoffText(input.summary, 300), outstandingFindings: list(input.outstandingFindings), decisions: list(input.decisions), verification: [...advisory, ...required], nextAction: clipHandoffText(input.nextAction, 300) };
+	return { ...input, summary: text(input.summary, 300), outstandingFindings: list(input.outstandingFindings), decisions: list(input.decisions), verification: [...advisory, ...required], nextAction: text(input.nextAction, 300) };
 }
 
 function visibleHandoffText(value: string): string {
@@ -74,9 +93,9 @@ export function parseAloopHandoffV3(body: string): AloopHandoffV3 | null {
 			&& outcomes.includes(value.outcome) && typeof value.summary === "string" && value.summary.trim()
 			&& strings(value.outstandingFindings) && strings(value.decisions) && strings(value.verification)
 			&& Array.from(value.summary).length <= 300
-			&& value.outstandingFindings.length <= 3 && value.outstandingFindings.every((item: string) => Array.from(item).length <= 100)
-			&& value.decisions.length <= 3 && value.decisions.every((item: string) => Array.from(item).length <= 100)
-			&& value.verification.length <= 3 && value.verification.every((item: string) => Array.from(item).length <= 100)
+			&& value.outstandingFindings.length <= MAX_HANDOFF_LIST_ITEMS && value.outstandingFindings.every((item: string) => Array.from(item).length <= 100)
+			&& value.decisions.length <= MAX_HANDOFF_LIST_ITEMS && value.decisions.every((item: string) => Array.from(item).length <= 100)
+			&& value.verification.length <= MAX_HANDOFF_LIST_ITEMS && value.verification.every((item: string) => Array.from(item).length <= 100)
 			&& typeof value.nextAction === "string" && value.nextAction.trim() && Array.from(value.nextAction).length <= 300
 			&& typeof value.attemptKey === "string" && /^[a-f0-9]{24}$/.test(value.attemptKey)
 			&& typeof value.timestamp === "string" && value.timestamp.length <= 64 && !Number.isNaN(Date.parse(value.timestamp));
