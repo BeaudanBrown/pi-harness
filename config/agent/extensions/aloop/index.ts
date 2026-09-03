@@ -9,7 +9,6 @@ import { balancedLogExcerpt, runDurableCommand, writeDurableResult } from "../wo
 import { snapshotAloopPolicy, type AloopCommandDefinition, type AloopPolicySnapshot } from "./policy.js";
 import {
 	acceptedOpenAloopIssues,
-	type AloopAcceptedRecoveryRecord,
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
 	closeAcceptedAloopIssue,
@@ -57,10 +56,11 @@ const LaunchWorkerParams = Type.Object({
 	timeout_ms: Type.Optional(Type.Number({ minimum: 1, maximum: 14_400_000 })),
 });
 
+const MAX_PATCH_TIMEOUT_MS = 20 * 60_000;
 const ApplyPatchParams = Type.Object({
 	issue: Type.Number({ minimum: 1, description: "Issue whose unsettled full attempt needs a narrow correction." }),
 	correction: Type.String({ minLength: 1, description: "Exact bounded correction for the targeted patch worker." }),
-	timeout_ms: Type.Optional(Type.Number({ minimum: 1, maximum: 14_400_000 })),
+	timeout_ms: Type.Optional(Type.Number({ minimum: 1, maximum: MAX_PATCH_TIMEOUT_MS })),
 });
 
 const SupervisorVerifyParams = Type.Object({
@@ -233,8 +233,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	const dryRunHandoffIds = new Set<string>();
 	const dryRunClosureIds = new Set<string>();
 	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
-	let acceptedRecoveryRecords = new Map<string, AloopAcceptedRecoveryRecord>();
 	let supervisorLogin: string | null = null;
+	const publishedAttemptKeys = new Set<string>();
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
 
 	function clearDeadlineTimer(): void {
@@ -255,8 +255,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		dryRunHandoffIds.clear();
 		dryRunClosureIds.clear();
 		issuedReceipts.clear();
-		acceptedRecoveryRecords.clear();
 		supervisorLogin = null;
+		publishedAttemptKeys.clear();
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
 	}
 
@@ -399,41 +399,14 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		} catch { return false; }
 	}
 
-	async function scanAcceptedRecoveryRecords(cwd: string): Promise<Map<string, AloopAcceptedRecoveryRecord>> {
-		const records = new Map<string, AloopAcceptedRecoveryRecord>();
-		const root = path.resolve(cwd, ".pi/tmp/aloop/finalizations");
-		let names: string[];
-		try { names = (await readdir(root)).filter((name) => /^[a-f0-9]{24}\.json$/.test(name)).sort(); }
-		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return records; throw error; }
-		for (const name of names) {
-			try {
-				const recordPath = path.join(root, name);
-				const status = await lstat(recordPath);
-				if (status.isSymbolicLink() || !status.isFile() || status.size > 100_000) continue;
-				const record = JSON.parse(await readFile(recordPath, "utf8"));
-				if (record?.version !== 1 || record?.attemptKey !== name.slice(0, -5) || !Number.isInteger(record?.issue)
-					|| typeof record?.head !== "string" || !/^[0-9a-f]{40}$/i.test(record.head)
-					|| typeof record?.commentSha256 !== "string" || !/^[a-f0-9]{64}$/i.test(record.commentSha256)) continue;
-				records.set(record.attemptKey, { issue: record.issue, head: record.head, commentSha256: record.commentSha256 });
-			} catch { /* Malformed local records never grant automatic closure authority. */ }
-		}
-		return records;
-	}
-
-	async function recoveryAuthorized(cwd: string, issue: number, handoff: { attemptKey: string; commitRange: string }, body: string): Promise<boolean> {
+	async function recoveryAuthorized(cwd: string, issue: number, handoff: { attemptKey: string; commitRange: string }, body: string, closureHead: string): Promise<boolean> {
 		try {
 			const record = JSON.parse(await readFile(path.resolve(cwd, ".pi/tmp/aloop/recovery-approvals", `${handoff.attemptKey}.json`), "utf8"));
 			return record?.version === 2 && record?.issue === issue && record?.attemptKey === handoff.attemptKey
-				&& record?.head === handoff.commitRange.split("..").at(-1)
+				&& record?.reviewedHead === handoff.commitRange.split("..").at(-1) && record?.closureHead === closureHead
 				&& record?.commentSha256 === createHash("sha256").update(body).digest("hex")
 				&& record?.approved === true && record?.approvedVia === "aloop-authorize-recovery command" && typeof record?.approvedAt === "string";
 		} catch { return false; }
-	}
-
-	function exactLocalRecovery(issue: number, handoff: { attemptKey: string; commitRange: string }, body: string): boolean {
-		const record = acceptedRecoveryRecords.get(handoff.attemptKey);
-		return record?.issue === issue && record.head === handoff.commitRange.split("..").at(-1)
-			&& record.commentSha256 === createHash("sha256").update(body).digest("hex");
 	}
 
 	function authenticatedSupervisorComment(author: string | null): boolean {
@@ -514,7 +487,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (history.code !== 0) throw new Error((history.stderr || history.stdout || "Could not inspect Git history.").trim());
 				startupTimeout();
 				const records = await scanAttemptArtifacts(ctx.cwd);
-				acceptedRecoveryRecords = await scanAcceptedRecoveryRecords(ctx.cwd);
 				const identity = await pi.exec("gh", ["api", "user", "--jq", ".login"], { cwd: ctx.cwd, timeout: startupTimeout(), signal: ctx.signal });
 				supervisorLogin = identity.code === 0 && /^[A-Za-z0-9-]{1,39}$/.test(identity.stdout.trim()) ? identity.stdout.trim() : null;
 				startupTimeout();
@@ -599,8 +571,13 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			});
 			const accepted = acceptedComment && parseAloopHandoffV3(acceptedComment.body);
 			if (!child || !accepted || !acceptedComment || child.state === "closed") throw new Error("No matching open accepted handoff requires recovery authorization.");
+			const [headResult, statusResult] = await Promise.all([
+				pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal: ctx.signal }),
+				pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd: ctx.cwd, timeout: 30_000, signal: ctx.signal }),
+			]);
+			if (headResult.code !== 0 || statusResult.code !== 0 || statusResult.stdout.trim()) throw new Error("Recovery authorization requires a clean current HEAD.");
 			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), {
-				version: 2, issue, attemptKey, head: accepted.commitRange.split("..").at(-1),
+				version: 2, issue, attemptKey, reviewedHead: accepted.commitRange.split("..").at(-1), closureHead: headResult.stdout.trim(),
 				commentSha256: createHash("sha256").update(acceptedComment.body).digest("hex"), approved: true,
 				approvedAt: new Date().toISOString(), approvedVia: "aloop-authorize-recovery command",
 			});
@@ -810,7 +787,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					cwd: ctx.cwd, epic: { number: epic.number, title: epic.title, body: epic.body },
 					issue: { number: issue.number, title: issue.title, body: issue.body }, correction: params.correction,
 					issueContext: context, issueBaseCommit: issueBaseCommits.get(issue.number), projectWorkerResources: policy.workerResources,
-					modelRef, timeoutMs: params.timeout_ms ?? 30 * 60_000, spawnDeadlineMs: runBudget.deadlineMs, signal,
+					modelRef, timeoutMs: Math.min(params.timeout_ms ?? MAX_PATCH_TIMEOUT_MS, MAX_PATCH_TIMEOUT_MS), spawnDeadlineMs: runBudget.deadlineMs, signal,
 				});
 				pending.patchArtifacts = [...(pending.patchArtifacts ?? []), { commit: outcome.commit, artifactDirectory: outcome.artifacts.directory, status: outcome.status }];
 				if (outcome.commit) pending.commit = outcome.commit;
@@ -855,18 +832,19 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 							return handoff?.issue === params.issue && handoff.attemptKey === settled.attemptKey && handoff.outcome === "accepted";
 						});
 						if (!settledComment) throw new Error("Accepted handoff comment is missing its durable GitHub body.");
-						const automaticProvenance = exactLocalRecovery(params.issue, settled, settledComment.body) || authenticatedSupervisorComment(settledComment.author);
-						const explicitAuthorization = await recoveryAuthorized(ctx.cwd, params.issue, settled, settledComment.body);
-						if (!automaticProvenance && !explicitAuthorization) {
-							throw new Error(`Accepted handoff lacks authenticated supervisor or verified local publication provenance; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
-						}
-						const expectedHead = settled.commitRange.split("..").at(-1);
+						const expectedHead = settled.commitRange.split("..").at(-1)!;
 						const [head, status] = await Promise.all([
 							pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal }),
 							pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd: ctx.cwd, timeout: 30_000, signal }),
 						]);
 						if (head.code !== 0 || status.code !== 0 || status.stdout.trim()) throw new Error("Recovery closure requires a clean current worktree.");
-						if (!explicitAuthorization && head.stdout.trim() !== expectedHead) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
+						const closureHead = head.stdout.trim();
+						const automaticProvenance = publishedAttemptKeys.has(settled.attemptKey) || authenticatedSupervisorComment(settledComment.author);
+						const explicitAuthorization = await recoveryAuthorized(ctx.cwd, params.issue, settled, settledComment.body, closureHead);
+						if (!automaticProvenance && !explicitAuthorization) {
+							throw new Error(`Accepted handoff lacks authenticated supervisor or verified local publication provenance; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
+						}
+						if (!explicitAuthorization && closureHead !== expectedHead) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
 						await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
 						issue.state = "closed";
 					}
@@ -917,17 +895,18 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
 				try {
 					await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
-					issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: handoff.timestamp, url: null });
-					if (params.outcome === "accepted") {
-						const recoveryRecord: AloopAcceptedRecoveryRecord = { issue: params.issue, head, commentSha256: createHash("sha256").update(body).digest("hex") };
-						await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/finalizations", `${attemptKey}.json`), { version: 1, attemptKey, ...recoveryRecord });
-						acceptedRecoveryRecords.set(attemptKey, recoveryRecord);
-					}
+					issue.recentHandoffs.push({ id: Date.now(), author: supervisorLogin, body, createdAt: handoff.timestamp, url: null });
 				} catch (error) {
 					const refreshed = await currentContext(ctx.cwd, signal, true);
 					const refreshedIssue = refreshed.issues.find((candidate) => candidate.number === params.issue);
-					if (!refreshedIssue?.recentHandoffs.some((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === attemptKey)) throw error;
+					const exactPublished = refreshedIssue?.recentHandoffs.find((comment) => comment.body === body);
+					if (!exactPublished) throw error;
+					issue.recentHandoffs.push(exactPublished);
 				}
+				publishedAttemptKeys.add(attemptKey);
+			}
+			if (params.outcome === "accepted") {
+				await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/finalizations", `${attemptKey}.json`), { version: 1, attemptKey, issue: params.issue, head, commentSha256: createHash("sha256").update(body).digest("hex") });
 			}
 			pendingHandoffs = pendingHandoffs.filter((candidate) => candidate !== pending);
 			if (params.outcome === "accepted" && issue.state !== "closed") {

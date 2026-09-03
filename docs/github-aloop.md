@@ -98,7 +98,8 @@ publish the current attempt's handoff before launching another worker. While a
 full worker is active, the tool emits elapsed-time heartbeats and caps that full
 worker at the smaller of its requested timeout and the invocation's remaining
 time. A targeted patch must start before the implementation deadline, but once
-started it is settlement work governed by its own command timeout.
+started it is settlement work governed by its own command timeout, hard-capped
+server-side at 20 minutes even if the tool caller requests longer.
 
 The whole supervisor turn is also bounded. Reaching either the hard deadline or
 the worker-launch cap stops that invocation; it never waits indefinitely or

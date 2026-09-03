@@ -375,9 +375,12 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 		fakeHead = "b".repeat(40);
 		await commands.get("aloop-authorize-recovery")!.handler(`2 ${attemptKey}`, ctx);
 		const authorization = JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), "utf8"));
-		assert.deepEqual({ issue: authorization.issue, attemptKey: authorization.attemptKey, head: authorization.head, commentSha256: authorization.commentSha256, approvedVia: authorization.approvedVia }, {
-			issue: 2, attemptKey, head: "a".repeat(40), commentSha256: createHash("sha256").update(accepted).digest("hex"), approvedVia: "aloop-authorize-recovery command",
+		assert.deepEqual({ issue: authorization.issue, attemptKey: authorization.attemptKey, reviewedHead: authorization.reviewedHead, closureHead: authorization.closureHead, commentSha256: authorization.commentSha256, approvedVia: authorization.approvedVia }, {
+			issue: 2, attemptKey, reviewedHead: "a".repeat(40), closureHead: "b".repeat(40), commentSha256: createHash("sha256").update(accepted).digest("hex"), approvedVia: "aloop-authorize-recovery command",
 		});
+		fakeHead = "c".repeat(40);
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx), /human authorization is required/);
+		fakeHead = "b".repeat(40);
 		const recovered = await tools.get("aloop_finish_attempt").execute("recover", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(recovered.details.idempotent, true);
 		assert.equal(closes, 1);
@@ -493,6 +496,7 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		let closeCalls = 0;
 		let diagnosisCalls = 0;
 		let patchCalls = 0;
+		const patchTimeouts: number[] = [];
 		let worktreeStatus = "";
 		let fakeHead = "a".repeat(40);
 		const pi = {
@@ -517,6 +521,7 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 			diagnoseCommand: async (_ctx, _params, result) => { diagnosisCalls += 1; return { summary: `diagnosed exit ${result.code}` }; },
 			runPatchWorker: async (input) => {
 				patchCalls += 1;
+				patchTimeouts.push(input.timeoutMs!);
 				assert.match(input.correction, /assertion/);
 				assert.equal(input.modelRef, "active/model");
 				if (patchCalls === 1) fakeHead = "b".repeat(40);
@@ -563,11 +568,12 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		assert.deepEqual(workerIssues, [2]);
 		assert.deepEqual(workerDirections, ["Derive the issue and implement it within the selected child boundary."]);
 		assert.deepEqual(workerPriorContexts, [[parseAloopHandoffs([comment(1, priorFailure, "2026-09-01T00:00:00Z")])[0]]]);
-		const patched = await tools.get("aloop_apply_patch")!.execute("patch", { issue: 2, correction: "fix one assertion" }, ctx.signal, undefined, ctx);
+		const patched = await tools.get("aloop_apply_patch")!.execute("patch", { issue: 2, correction: "fix one assertion", timeout_ms: 14_400_000 }, ctx.signal, undefined, ctx);
 		assert.equal(patchCalls, 1);
 		assert.equal(patched.details?.fullWorkerLaunchesStarted, 1);
 		await tools.get("aloop_apply_patch")!.execute("patch-failed", { issue: 2, correction: "fix another assertion" }, ctx.signal, undefined, ctx);
 		assert.equal(patchCalls, 2);
+		assert.deepEqual(patchTimeouts, [20 * 60_000, 20 * 60_000]);
 		const review = await tools.get("aloop_review_attempt")!.execute("review", { issue: 2 }, ctx.signal, undefined, ctx);
 		assert.deepEqual(review.details?.reports, ["standards", "spec"]);
 		assert.deepEqual(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/issue-2-1-abcdef/patch-attempts.json"), "utf8")), [
