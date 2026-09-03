@@ -173,7 +173,7 @@ let
   managedSessionTests = runCompiledTests {
     name = "pi-harness-managed-session-tests";
     selector = ''find ${testBuild}/build/tests -maxdepth 1 -type f -name 'managed-session-*.test.js' | sort'';
-    extraInputs = [ pkgs.direnv pkgs.tmux ];
+    extraInputs = [ pkgs.direnv pkgs.tmux pkgs.imagemagick ];
     nodeArgs = "--test-concurrency=1";
     environment = ''
       export PI_HARNESS_JQ=${lib.getExe pkgs.jq}
@@ -183,6 +183,7 @@ let
       export PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator}
       export PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid
       export PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock
+      export PI_MANAGED_SESSIONS_TEST_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}
       export PI_MANAGED_SESSIONS_TEST_TMUX=${pkgs.tmux}/bin/tmux
       export PI_MANAGED_TEST_LAUNCHER=${managedSessionLauncher}/bin/tmux_project
       export PI_MANAGED_TEST_COORDINATOR_PI=${managedSessionCoordinatorPi}/bin/pi

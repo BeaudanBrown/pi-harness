@@ -20,7 +20,7 @@ import {
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
-import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind } from "./client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind, type ReceivedImage } from "./client.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	CHECKPOINT_ENTRY_TYPE,
@@ -531,6 +531,41 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 		}
 
+		async function handleMedia(image: ReceivedImage, ctx: ExtensionContext): Promise<void> {
+			const previous = deliveries.get(image.deliveryId);
+			const media = { blobId: image.blobId, sha256: image.sha256, mimeType: image.mimeType, byteLength: image.byteLength,
+				width: image.width, height: image.height, chunkCount: Math.ceil(image.byteLength / (32 * 1024)) };
+			if (previous && (previous.matrixEventId !== image.matrixEventId || JSON.stringify(previous.media) !== JSON.stringify(media) ||
+				(previous.expandedText !== undefined && previous.expandedText !== image.caption))) {
+				throw new ManagedAdapterError("Conflicting duplicate media delivery", "invalid_delivery");
+			}
+			if (previous?.status === "persisted" || previous?.status === "completed" || previous?.status === "cancelled") { acknowledge(previous); return; }
+			if (inFlightDeliveries.has(image.deliveryId)) return;
+			const accepted: DeliveryMarker = previous ?? { version: MANAGED_SESSION_STATE_VERSION, deliveryId: image.deliveryId,
+				matrixEventId: image.matrixEventId, kind: "prompt", status: "accepted", media };
+			if (!previous) { recordDelivery(ctx, accepted); acknowledge(accepted); }
+			if (!ctx.model?.input.includes("image")) {
+				if (!client?.connected) throw new ManagedAdapterError("Managed media rejection requires the relay connection");
+				await client.rejectMedia(image.deliveryId, image.blobId, "unsupported_model");
+				const cancelled: DeliveryMarker = { ...accepted, status: "cancelled", expandedText: image.caption, media };
+				recordDelivery(ctx, cancelled); deliveries.set(cancelled.deliveryId, cancelled);
+				return;
+			}
+			inFlightDeliveries.add(image.deliveryId);
+			let provenanceRecorded = false;
+			const recordExpanded = (expandedText: string) => {
+				if (provenanceRecorded) return;
+				provenanceRecorded = true;
+				const expanded: DeliveryMarker = { ...accepted, status: previous ? "reinjecting" : "expanded", expandedText, media };
+				recordDelivery(ctx, expanded); pendingUserPersistence.push(expanded);
+			};
+			try {
+				pi.sendUserMessage([{ type: "text", text: image.caption }, { type: "image", data: image.data.toString("base64"), mimeType: image.mimeType }], {
+					...(ctx.isIdle() ? {} : { deliverAs: "followUp" as const }), expandPromptTemplates: false, onPromptExpanded: recordExpanded,
+				});
+			} catch (error) { inFlightDeliveries.delete(image.deliveryId); throw error; }
+		}
+
 		async function handleDelivery(envelope: ManagedSessionEnvelope, ctx: ExtensionContext): Promise<void> {
 			const payload = envelope.payload as {
 				deliveryId: string; matrixEventId: string; kind: "prompt" | "follow_up" | "steer" | "abort"; body?: string;
@@ -757,7 +792,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding,
-				onEnvelope: handleEnvelope,
+				onEnvelope: handleEnvelope, onMedia: (image) => handleMedia(image, ctx),
 				onDisconnect: () => {
 					if (client === next) setCheckpointActive(false);
 					setStatus(ctx);
@@ -880,7 +915,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					if (piEntryKey) {
 						persistExpanded(ctx, marker, piEntryKey);
 						if (!checkpointOrigins.has(marker.deliveryId)) persistedRecoveryPending.add(marker.deliveryId);
-					} else expandedRecoveryPending.add(marker.deliveryId);
+					} else if (!marker.media) expandedRecoveryPending.add(marker.deliveryId);
 				}
 			}
 			setStatus(ctx);

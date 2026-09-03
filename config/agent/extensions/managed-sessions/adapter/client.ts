@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { connect, type Socket } from "node:net";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
@@ -30,12 +30,18 @@ function messageId(prefix: string): string {
 	return `${prefix}-${randomUUID()}`;
 }
 
+export interface ReceivedImage {
+	deliveryId: string; matrixEventId: string; blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp";
+	byteLength: number; width: number; height: number; caption: string; data: Buffer;
+}
+
 export interface BoundAdapterOptions {
 	socketPath: string;
 	role: AdapterRole;
 	attachmentNonce: string;
 	binding: SessionBinding;
 	onEnvelope: (envelope: ManagedSessionEnvelope) => Promise<void> | void;
+	onMedia?: (image: ReceivedImage) => Promise<void> | void;
 	onDisconnect?: () => void;
 }
 
@@ -47,6 +53,7 @@ export class BoundAdapterClient {
 	#generation = 1;
 	#closing = false;
 	#inboundWork: Promise<void> = Promise.resolve();
+	#media = new Map<string, { descriptor: Omit<ReceivedImage, "data"> & { chunkCount: number }; chunks: Buffer[] }>();
 
 	constructor(protected readonly options: BoundAdapterOptions) {}
 
@@ -121,6 +128,14 @@ export class BoundAdapterClient {
 		});
 		if (result.type !== "self.result" || result.payload.operation !== "control.result" || result.payload.status !== "ok") {
 			throw new ManagedAdapterError("Relay did not confirm control result", "invalid_response");
+		}
+	}
+
+	async rejectMedia(deliveryId: string, blobId: string, reason: "unsupported_model" | "invalid_media"): Promise<void> {
+		const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("media-reject"),
+			conversationId: this.options.binding.conversationId, role: this.options.role, type: "media.reject", payload: { deliveryId, blobId, reason } });
+		if (result.type !== "media.result" || result.payload.deliveryId !== deliveryId || result.payload.blobId !== blobId || result.payload.status !== "rejected") {
+			throw new ManagedAdapterError("Relay did not confirm media rejection", "invalid_response");
 		}
 	}
 
@@ -248,16 +263,44 @@ export class BoundAdapterClient {
 				continue;
 			}
 			this.#inboundWork = this.#inboundWork
-				.then(() => this.options.onEnvelope(envelope))
+				.then(() => envelope.type === "media.begin" || envelope.type === "media.chunk" ? this.consumeMedia(envelope) : this.options.onEnvelope(envelope))
 				.then(() => undefined)
 				.catch(() => { this.#socket?.destroy(); });
 		}
+	}
+
+	private async consumeMedia(envelope: ManagedSessionEnvelope): Promise<void> {
+		if (!this.options.onMedia) throw new ManagedAdapterError("Media delivery is unavailable", "invalid_message");
+		if (envelope.type === "media.begin") {
+			const payload = envelope.payload as Omit<ReceivedImage, "data"> & { chunkCount: number };
+			if (this.#media.has(payload.deliveryId) || [...this.#media.values()].some((item) => item.descriptor.blobId === payload.blobId)) throw new ManagedAdapterError("Conflicting duplicate media transfer", "invalid_delivery");
+			this.#media.set(payload.deliveryId, { descriptor: { ...payload }, chunks: [] });
+			return;
+		}
+		const payload = envelope.payload as { deliveryId: string; blobId: string; index: number; data: string };
+		const transfer = this.#media.get(payload.deliveryId);
+		if (!transfer || transfer.descriptor.blobId !== payload.blobId || payload.index !== transfer.chunks.length || payload.index >= transfer.descriptor.chunkCount) {
+			throw new ManagedAdapterError("Media chunks were missing, duplicated, or out of order", "invalid_delivery");
+		}
+		transfer.chunks.push(Buffer.from(payload.data, "base64"));
+		if (transfer.chunks.length !== transfer.descriptor.chunkCount) return;
+		this.#media.delete(payload.deliveryId);
+		const data = Buffer.concat(transfer.chunks);
+		if (data.length !== transfer.descriptor.byteLength || createHash("sha256").update(data).digest("hex") !== transfer.descriptor.sha256) {
+			await this.rejectMedia(payload.deliveryId, payload.blobId, "invalid_media");
+			return;
+		}
+		await this.options.onMedia({ deliveryId: transfer.descriptor.deliveryId, matrixEventId: transfer.descriptor.matrixEventId,
+			blobId: transfer.descriptor.blobId, sha256: transfer.descriptor.sha256, mimeType: transfer.descriptor.mimeType,
+			byteLength: transfer.descriptor.byteLength, width: transfer.descriptor.width, height: transfer.descriptor.height,
+			caption: transfer.descriptor.caption, data });
 	}
 
 	private handleClose(): void {
 		this.#socket = undefined;
 		this.#attachmentId = undefined;
 		this.#buffer = Buffer.alloc(0);
+		this.#media.clear();
 		for (const pending of this.#pending.values()) {
 			clearTimeout(pending.timer);
 			pending.reject(new ManagedAdapterError("Relay connection closed"));

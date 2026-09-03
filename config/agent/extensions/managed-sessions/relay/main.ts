@@ -27,6 +27,8 @@ import { parseAloopLifecycleEvent } from "../aloop-lifecycle.js";
 import { ControlPollPublisher } from "./control-poll-publisher.js";
 import { redactManagedValue } from "./redaction.js";
 import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
+import { BlobSpool } from "./blob-spool.js";
+import { ManagedImageTransport } from "./image-media.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -64,6 +66,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	try {
 		await registry.load();
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
+		const media = new ManagedImageTransport(new BlobSpool(resolve(runtimeDirectory, "media-spool")), matrix,
+			environment.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER?.trim());
+		await media.initialize(registry.liveMediaBlobIds());
 		const authenticatedUserId = await matrix.whoami();
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
 		const controlPollPublisher = new ControlPollPublisher(registry, matrix);
@@ -89,7 +94,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await activityProjector.load();
 		const eventProjector = new RelayEventProjector(registry, matrix);
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "media.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -192,6 +197,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					}
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
 				}
+				if (envelope.type === "media.reject") {
+					const payload = envelope.payload as { deliveryId: string; blobId: string; reason: "unsupported_model" | "invalid_media" };
+					const input = registry.pendingInputs(attachment.conversationId).find((candidate) => candidate.deliveryId === payload.deliveryId && candidate.media?.blobId === payload.blobId);
+					if (!input) throw new RelayRegistryError("not_found", "Pending managed image was not found");
+					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, "cancelled");
+					await eventProjector.projectNotice(attachment.conversationId, `${payload.deliveryId}:media-rejected`, payload.reason === "unsupported_model"
+						? "The active model does not support image input. The image was not delivered; choose an image-capable model and resend it."
+						: "The managed image transfer failed validation and was not delivered.");
+					await media.consume(payload.blobId, registry.liveMediaBlobIds());
+					return response(attachment.conversationId, envelope.messageId, "media.result", { deliveryId: payload.deliveryId, blobId: payload.blobId, status: "rejected" });
+				}
 				if (envelope.type === "input.acknowledge") {
 					const payload = envelope.payload as { deliveryId: string; status: string; piEntryId?: string; completionKind?: string };
 					const input = registry.pendingInputs(attachment.conversationId).find((candidate) => candidate.deliveryId === payload.deliveryId);
@@ -200,6 +216,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						throw new RelayRegistryError("invalid_state", "Extension-command completion did not match a command delivery");
 					}
 					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId, payload.completionKind);
+					if (input?.media && (payload.status === "completed" || payload.status === "cancelled")) await media.consume(input.media.blobId, registry.liveMediaBlobIds());
 					if (command && command !== "aloop" && !command.startsWith("aloop-")) await eventProjector.projectNotice(attachment.conversationId, `${payload.deliveryId}:command`, `Command dispatched: /${command}`);
 					return response(attachment.conversationId, envelope.messageId, "input.result", {
 						deliveryId: payload.deliveryId, status: payload.status,
@@ -286,7 +303,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					"Managed conversation wake failed; queued input remains available for retry.");
 			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
-			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile());
+			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile(), media);
 			coordinatorRouter.start();
 			await hostLifecycle.reconcileGenerationTransitions();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);

@@ -722,6 +722,12 @@ export class RelayRegistry {
 		return structuredClone(this.runtimeConversation(conversationId).pendingInputs);
 	}
 
+	liveMediaBlobIds(): Set<string> {
+		return new Set(this.state.conversations.flatMap((conversation) => conversation.pendingInputs
+			.filter((input) => input.media && input.status !== "completed" && input.status !== "cancelled")
+			.map((input) => input.media!.blobId)));
+	}
+
 	async markInputDelivered(conversationId: string, deliveryId: string): Promise<void> {
 		await this.mutate(async () => {
 			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
@@ -890,7 +896,9 @@ export class RelayRegistry {
 		const existing = conversation.pendingInputs.find((candidate) => candidate.deliveryId === input.deliveryId || candidate.matrixEventId === input.matrixEventId);
 		if (existing) {
 			if (existing.deliveryId !== input.deliveryId || existing.matrixEventId !== input.matrixEventId || existing.kind !== input.kind ||
-				existing.body !== input.body) throw new RelayRegistryError("invalid_state", "Conflicting accepted Matrix input identity");
+				existing.body !== input.body || JSON.stringify(existing.media) !== JSON.stringify(input.media)) {
+				throw new RelayRegistryError("invalid_state", "Conflicting accepted Matrix input identity");
+			}
 			return false;
 		}
 		if (conversation.pendingInputs.length >= MAX_PENDING_INPUTS) throw new RelayRegistryError("capacity_reached", "Pending input capacity was reached");

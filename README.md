@@ -187,7 +187,7 @@ The separate `managed-session-relay` package exposes
 expose it while managed sessions are disabled. The relay owns a private bounded NDJSON Unix socket,
 strict adapter attachment authorization, atomically replaced host-local
 registry state, synchronized logical manifest access, restart reconciliation,
-and the relay-only Matrix HTTPS client. Matrix credentials remain private
+a bounded private content-addressed image spool, and the relay-only Matrix HTTPS and authenticated media client. Matrix credentials remain private
 fields of that process and are never accepted by or emitted over IPC.
 
 The executable requires `PI_MANAGED_SESSIONS_RUNTIME_DIR`,
@@ -264,7 +264,7 @@ one durable structured question, blocker, or issue-completion boundary, then
 hard-aborts the run until a new operator reply. Declared question options become
 single-select polls with durable opaque answer mappings; the first valid vote or
 an ordinary text fallback atomically retires the poll and resumes exactly once.
-Accepted input, persisted
+Authorized unencrypted Element X JPEG, PNG, and WebP events are size-, signature-, decode-, dimension-, and pixel-validated, normalized to one metadata-free frame, persisted under bounded blob quotas, and transferred through digest-verified IPC chunks. Captions and images enter Pi as one ordered user turn; captionless images use a neutral prompt. Models without image input support reject the whole delivery with a Matrix notice and cleanup, without a silent model switch or caption-only fallback. Accepted input and media, persisted
 unfinished work, checkpoint/final projection, launch failure, explicit
 cancellation, generation transition, and restart recovery all reuse stable identities so retries do
 not lose or duplicate operator turns. Generation changes durably create the new session and binding boundary before activation, invalidate the old attachment, carry forward selected model/thinking and placement metadata, and leave historical generations terminal-only.

@@ -1,3 +1,5 @@
+import { MAX_BLOB_BYTES } from "../v2-contracts.js";
+
 export interface ManagedMatrixConfig {
 	homeserver: string;
 	accessToken: string;
@@ -117,6 +119,46 @@ export class ManagedMatrixClient {
 	async eventSender(roomId: string, eventId: string, signal?: AbortSignal): Promise<string | undefined> {
 		this.assertManagedRoom(roomId); const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
 		return typeof response === "object" && response !== null && !Array.isArray(response) && typeof (response as JsonObject).sender === "string" ? String((response as JsonObject).sender) : undefined;
+	}
+	async downloadMedia(mxcUrl: string, declaredSize: number, signal?: AbortSignal): Promise<{ bytes: Buffer; mimeType?: string }> {
+		if (!Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > MAX_BLOB_BYTES) throw new ManagedMatrixError("invalid_response", "Matrix media declaration exceeded the size limit");
+		let parsed: URL;
+		try { parsed = new URL(mxcUrl); } catch { throw new ManagedMatrixError("invalid_response", "Matrix media URL is malformed"); }
+		const mediaId = parsed.pathname.slice(1);
+		if (parsed.protocol !== "mxc:" || !parsed.host || parsed.username || parsed.password || parsed.search || parsed.hash || !mediaId || mediaId.includes("/")) {
+			throw new ManagedMatrixError("invalid_response", "Matrix media URL is malformed");
+		}
+		const endpoint = `/_matrix/client/v1/media/download/${encodeURIComponent(parsed.host)}/${encodeURIComponent(mediaId)}`;
+		let last: ManagedMatrixError | undefined;
+		for (let attempt = 0; attempt < this.#retry.maxAttempts; attempt += 1) {
+			if (signal?.aborted) throw new ManagedMatrixError("cancelled", "Matrix request was cancelled");
+			try {
+				const response = await this.fetchImplementation(new URL(endpoint, this.homeserver), { method: "GET", redirect: "error",
+					headers: { Authorization: `Bearer ${this.#accessToken}` }, signal });
+				if (!response.ok) throw new ManagedMatrixError("http", `Matrix GET /_matrix/client/v1/media/download returned HTTP ${response.status}`,
+					response.status, response.status === 429 || response.status >= 500);
+				const length = Number(response.headers.get("content-length"));
+				if (Number.isFinite(length) && (length !== declaredSize || length > MAX_BLOB_BYTES)) throw new ManagedMatrixError("invalid_response", "Matrix media length disagreed with its declaration");
+				if (!response.body) throw new ManagedMatrixError("invalid_response", "Matrix media response had no body");
+				const chunks: Buffer[] = []; let total = 0; const reader = response.body.getReader();
+				while (true) {
+					const item = await reader.read(); if (item.done) break;
+					total += item.value.byteLength;
+					if (total > declaredSize || total > MAX_BLOB_BYTES) { await reader.cancel(); throw new ManagedMatrixError("invalid_response", "Matrix media stream exceeded its declaration"); }
+					chunks.push(Buffer.from(item.value));
+				}
+				if (total !== declaredSize) throw new ManagedMatrixError("invalid_response", "Matrix media stream was truncated");
+				return { bytes: Buffer.concat(chunks, total), mimeType: response.headers.get("content-type") ?? undefined };
+			} catch (error) {
+				if (error instanceof ManagedMatrixError) last = error;
+				else if (signal?.aborted || error instanceof Error && error.name === "AbortError") throw new ManagedMatrixError("cancelled", "Matrix request was cancelled");
+				else last = new ManagedMatrixError("network", "Matrix media download failed", undefined, true);
+				if (!last.retryable || attempt + 1 >= this.#retry.maxAttempts) throw last;
+				const delay = Math.min(this.#retry.maxDelayMs, this.#retry.baseDelayMs * (2 ** attempt));
+				await this.#retry.sleep(delay, signal);
+			}
+		}
+		throw last ?? new ManagedMatrixError("network", "Matrix media download failed", undefined, true);
 	}
 	async controlPollAnswer(roomId: string, eventId: string, answerId: string, signal?: AbortSignal): Promise<string | undefined> {
 		this.assertManagedRoom(roomId);

@@ -29,6 +29,15 @@ export const ChunkIdSchema = stableId("chunk");
 export const MatrixTransactionIdSchema = Type.String({ pattern: "^pi_[a-f0-9]{48}$" });
 export const GenerationIdSchema = stableId("generation");
 export const TransitionIdSchema = stableId("transition");
+const BlobIdSchema = stableId("blob");
+const MediaDigestSchema = Type.String({ pattern: "^[a-f0-9]{64}$" });
+const MediaMimeSchema = Type.Union([Type.Literal("image/jpeg"), Type.Literal("image/png"), Type.Literal("image/webp")]);
+const mediaDescriptor = {
+	blobId: BlobIdSchema, sha256: MediaDigestSchema, mimeType: MediaMimeSchema,
+	byteLength: Type.Integer({ minimum: 1, maximum: 25 * 1024 * 1024 }),
+	width: Type.Integer({ minimum: 1, maximum: 16_384 }), height: Type.Integer({ minimum: 1, maximum: 16_384 }),
+	chunkCount: Type.Integer({ minimum: 1, maximum: 800 }),
+};
 
 export const WorkspaceIdentitySchema = strictObject({
 	rootKey: identifier,
@@ -147,6 +156,10 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		piEntryId: Type.Optional(TranscriptEntryIdSchema),
 		completionKind: Type.Optional(Type.Literal("extension_command")),
 	}),
+	clientEnvelope(adapterRole, "media.reject", {
+		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema,
+		reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]),
+	}),
 	clientEnvelope(adapterRole, "transcript.offer", {
 		entryId: TranscriptEntryIdSchema,
 		piSessionId: identifier,
@@ -230,6 +243,17 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	relayEnvelope("input.result", {
 		deliveryId: DeliveryIdSchema,
 		status: Type.Union([Type.Literal("accepted"), Type.Literal("persisted"), Type.Literal("completed"), Type.Literal("cancelled")]),
+	}),
+	relayEnvelope("media.begin", {
+		deliveryId: DeliveryIdSchema, matrixEventId: boundedString(255), ...mediaDescriptor,
+		caption: boundedString(MAX_INPUT_TEXT_LENGTH),
+	}),
+	relayEnvelope("media.chunk", {
+		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema, index: Type.Integer({ minimum: 0, maximum: 799 }),
+		sha256: MediaDigestSchema, data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }),
+	}),
+	relayEnvelope("media.result", {
+		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema, status: Type.Literal("rejected"),
 	}),
 	relayEnvelope("transcript.acknowledge", {
 		entryId: TranscriptEntryIdSchema,
@@ -364,6 +388,7 @@ const pendingInput = strictObject({
 		Type.Literal("completed"),
 		Type.Literal("cancelled"),
 	]),
+	media: Type.Optional(strictObject(mediaDescriptor)),
 });
 const pendingControl = strictObject({
 	controlId: stableId("control"),
@@ -511,7 +536,8 @@ export interface HostRuntimeState {
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string };
 		matrixCursor: { status: "bootstrap" } | { status: "established"; since: string };
-		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string }>;
+		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string;
+			media?: { blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp"; byteLength: number; width: number; height: number; chunkCount: number } }>;
 		pendingControls: Array<{ controlId: string; matrixEventId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string }>;
 		completedControlIds: string[];
 		publishingControlPoll: null | {
@@ -597,6 +623,19 @@ function assertInputBody(kind: string, body: string | undefined): void {
 }
 
 function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
+	if (envelope.type === "media.chunk") {
+		const payload = envelope.payload as { data: string; sha256: string };
+		const decoded = Buffer.from(payload.data, "base64");
+		if (decoded.length < 1 || decoded.length > 32 * 1024 || decoded.toString("base64") !== payload.data || createHash("sha256").update(decoded).digest("hex") !== payload.sha256) {
+			throw new ManagedSessionContractError("malformed", "media chunk failed canonical base64, size, or digest validation");
+		}
+	}
+	if (envelope.type === "media.begin") {
+		const payload = envelope.payload as { byteLength: number; chunkCount: number; width: number; height: number };
+		if (Math.ceil(payload.byteLength / (32 * 1024)) !== payload.chunkCount || payload.width * payload.height > 40_000_000) {
+			throw new ManagedSessionContractError("malformed", "media descriptor failed chunk or pixel bounds");
+		}
+	}
 	if (envelope.type === "input.deliver") {
 		const payload = envelope.payload as { kind: string; body?: string };
 		assertInputBody(payload.kind, payload.body);
@@ -760,6 +799,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		}
 		const deliveries = new Set<string>();
 		const matrixEvents = new Set<string>();
+		const liveMediaBlobs = new Set<string>();
 		for (const input of conversation.pendingInputs) {
 			if (deliveries.has(input.deliveryId) || matrixEvents.has(input.matrixEventId)) {
 				throw new ManagedSessionContractError("conflict", `conflicting pending input in ${conversation.conversationId}`);
@@ -767,6 +807,15 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			deliveries.add(input.deliveryId);
 			matrixEvents.add(input.matrixEventId);
 			assertInputBody(input.kind, input.body);
+			if (input.media) {
+				if (input.kind !== "prompt" || Math.ceil(input.media.byteLength / (32 * 1024)) !== input.media.chunkCount || input.media.width * input.media.height > 40_000_000) {
+					throw new ManagedSessionContractError("invalid_state", `invalid pending media in ${conversation.conversationId}`);
+				}
+				if (input.status !== "completed" && input.status !== "cancelled" && liveMediaBlobs.has(input.media.blobId)) {
+					throw new ManagedSessionContractError("conflict", `duplicate live media in ${conversation.conversationId}`);
+				}
+				if (input.status !== "completed" && input.status !== "cancelled") liveMediaBlobs.add(input.media.blobId);
+			}
 		}
 		const controls = new Set<string>();
 		for (const control of conversation.pendingControls) {

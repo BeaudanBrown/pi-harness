@@ -58,6 +58,10 @@ export interface ManagedCheckpointMarker {
 	status: "offered" | "projected";
 }
 
+export interface DeliveryMediaMarker {
+	blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp"; byteLength: number; width: number; height: number; chunkCount: number;
+}
+
 export interface DeliveryMarker {
 	version: typeof MANAGED_SESSION_STATE_VERSION;
 	deliveryId: string;
@@ -67,6 +71,7 @@ export interface DeliveryMarker {
 	piEntryId?: string;
 	expandedText?: string;
 	completionKind?: "extension_command";
+	media?: DeliveryMediaMarker;
 }
 
 interface CustomEntry {
@@ -93,6 +98,16 @@ function isBinding(value: Record<string, unknown>): boolean {
 		(value.role === "ordinary_adapter" || value.role === "coordinator_adapter");
 }
 
+function isDeliveryMedia(value: unknown): value is DeliveryMediaMarker {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const media = value as Record<string, unknown>;
+	return Object.keys(media).sort().join(",") === "blobId,byteLength,chunkCount,height,mimeType,sha256,width" &&
+		typeof media.blobId === "string" && /^blob_[a-f0-9]{32}$/.test(media.blobId) && typeof media.sha256 === "string" && /^[a-f0-9]{64}$/.test(media.sha256) &&
+		["image/jpeg", "image/png", "image/webp"].includes(String(media.mimeType)) && Number.isSafeInteger(media.byteLength) && Number(media.byteLength) >= 1 && Number(media.byteLength) <= 25 * 1024 * 1024 &&
+		Number.isSafeInteger(media.width) && Number(media.width) >= 1 && Number(media.width) <= 16_384 && Number.isSafeInteger(media.height) && Number(media.height) >= 1 && Number(media.height) <= 16_384 &&
+		Number(media.width) * Number(media.height) <= 40_000_000 && Number.isSafeInteger(media.chunkCount) && Number(media.chunkCount) === Math.ceil(Number(media.byteLength) / (32 * 1024));
+}
+
 function isDelivery(value: Record<string, unknown>): boolean {
 	return value.version === MANAGED_SESSION_STATE_VERSION &&
 		typeof value.deliveryId === "string" && /^delivery_[a-f0-9]{32}$/.test(value.deliveryId) &&
@@ -102,6 +117,8 @@ function isDelivery(value: Record<string, unknown>): boolean {
 		(value.piEntryId === undefined || (typeof value.piEntryId === "string" && /^entry_[a-f0-9]{32}$/.test(value.piEntryId))) &&
 		(value.expandedText === undefined || typeof value.expandedText === "string") &&
 		(value.completionKind === undefined || value.completionKind === "extension_command") &&
+		(value.media === undefined || isDeliveryMedia(value.media)) &&
+		(value.media === undefined || value.kind === "prompt") &&
 		(!["expanded", "reinjecting", "persisted", "completed"].includes(String(value.status)) || typeof value.expandedText === "string") &&
 		(value.status !== "persisted" || typeof value.piEntryId === "string") &&
 		(value.status !== "completed" || typeof value.piEntryId === "string" || value.completionKind === "extension_command") &&

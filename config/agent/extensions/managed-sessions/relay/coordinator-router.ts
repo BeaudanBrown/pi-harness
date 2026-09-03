@@ -11,6 +11,7 @@ import { deriveControlId } from "../v2-contracts.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
+import { type MatrixImageEvent, ManagedImageTransport } from "./image-media.js";
 
 interface MatrixTextEvent {
 	eventId: string;
@@ -20,6 +21,7 @@ interface MatrixTextEvent {
 
 export type AuthorizedMatrixRoomEvent =
 	| ({ kind: "text" } & MatrixTextEvent)
+	| MatrixImageEvent
 	| { kind: "poll_response"; eventId: string; pollEventId: string; answerId: string };
 
 const MAX_TIMELINE_EVENTS = 512;
@@ -101,6 +103,21 @@ export function authorizedRoomEvents(response: unknown, roomId: string, operator
 				!relation || Object.keys(relation).length !== 2 || relation.rel_type !== "m.reference" || typeof relation.event_id !== "string" ||
 				relation.event_id.length < 1 || relation.event_id.length > 255) continue;
 			seen.add(event.event_id); result.push({ kind: "poll_response", eventId: event.event_id, pollEventId: relation.event_id, answerId: selections[0] });
+		} else if (event.type === "m.room.message" && content.msgtype === "m.image") {
+			const info = content.info;
+			const allowedContent = new Set(["msgtype", "body", "filename", "url", "info"]);
+			const allowedInfo = new Set(["mimetype", "size", "w", "h", "thumbnail_url", "thumbnail_info", "xyz.amorgan.blurhash", "org.matrix.msc2448.blurhash"]);
+			if (Object.keys(content).some((key) => !allowedContent.has(key)) || typeof content.url !== "string" || !content.url.startsWith("mxc://") ||
+				typeof content.body !== "string" || content.body.length < 1 || content.body.length > MAX_INPUT_TEXT_LENGTH ||
+				typeof info !== "object" || info === null || Array.isArray(info) || Object.keys(info as object).some((key) => !allowedInfo.has(key))) continue;
+			const imageInfo = info as Record<string, unknown>;
+			if (!["image/jpeg", "image/png", "image/webp"].includes(String(imageInfo.mimetype)) || !Number.isSafeInteger(imageInfo.size) ||
+				!Number.isSafeInteger(imageInfo.w) || !Number.isSafeInteger(imageInfo.h)) continue;
+			const filename = content.filename;
+			if (filename !== undefined && (typeof filename !== "string" || filename.length < 1 || filename.length > 1_024)) continue;
+			seen.add(event.event_id); result.push({ kind: "image", eventId: event.event_id, mxcUrl: content.url,
+				declaredMimeType: imageInfo.mimetype as MatrixImageEvent["declaredMimeType"], declaredSize: Number(imageInfo.size),
+				declaredWidth: Number(imageInfo.w), declaredHeight: Number(imageInfo.h), ...(filename ? { caption: content.body } : {}) });
 		} else if (event.type === "m.room.message" && content.msgtype === "m.text" && typeof content.body === "string" && content.body.length > 0 && content.body.length <= MAX_INPUT_TEXT_LENGTH) {
 			const relation = content["m.relates_to"];
 			let replyToEventId: string | undefined;
@@ -176,6 +193,7 @@ export class CoordinatorRouter {
 		private readonly diagnostic: (message: string) => void = () => undefined,
 		private readonly reconcileControlPollPublications: () => Promise<void> = async () => undefined,
 		private readonly reconcileCheckpointPollPublications: () => Promise<void> = async () => undefined,
+		private readonly media?: ManagedImageTransport,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -205,7 +223,9 @@ export class CoordinatorRouter {
 		for (const control of this.registry.pendingControls(conversationId)) this.server.sendToConversation(this.controlEnvelope(conversationId, control));
 		for (const input of this.registry.pendingInputs(conversationId)) {
 			if (input.status !== "accepted" && input.status !== "delivered") continue;
-			if (this.server.sendToConversation(this.deliveryEnvelope(conversationId, input))) await this.registry.markInputDelivered(conversationId, input.deliveryId);
+			const delivered = input.media ? await this.media?.deliver(this.server, conversationId, input) ?? false
+				: this.server.sendToConversation(this.deliveryEnvelope(conversationId, input));
+			if (delivered) await this.registry.markInputDelivered(conversationId, input.deliveryId);
 		}
 	}
 
@@ -228,6 +248,7 @@ export class CoordinatorRouter {
 						if (events.length > 0 && await this.matrix.memberJoined(manifest.roomId, this.matrix.operatorUserId, signal)) {
 							for (const event of events) {
 								if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
+								else if (event.kind === "image") await this.acceptImage(manifest, event, signal);
 								else await this.accept(manifest, event);
 							}
 						}
@@ -344,9 +365,31 @@ export class CoordinatorRouter {
 	private async deliverRecordedInput(manifest: ConversationManifest, input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
 		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
 		const state = this.registry.conversationState(manifest.conversationId);
-		if (this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, input))) {
-			await this.registry.markInputDelivered(manifest.conversationId, input.deliveryId);
-		} else if (state === "dormant") await this.registry.beginLaunch(manifest.conversationId);
+		const delivered = input.media ? await this.media?.deliver(this.server, manifest.conversationId, input) ?? false
+			: this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, input));
+		if (delivered) await this.registry.markInputDelivered(manifest.conversationId, input.deliveryId);
+		else if (state === "dormant") await this.registry.beginLaunch(manifest.conversationId);
+	}
+
+	private async acceptImage(manifest: ConversationManifest, event: MatrixImageEvent, signal: AbortSignal): Promise<void> {
+		if (!this.media || this.registry.hasGenerationBoundary(manifest.conversationId)) return;
+		const deliveryId = deriveDeliveryId(manifest.conversationId, event.eventId);
+		const existing = this.registry.pendingInputs(manifest.conversationId).find((input) => input.deliveryId === deliveryId || input.matrixEventId === event.eventId);
+		if (existing) { if (existing.media && existing.status !== "completed" && existing.status !== "cancelled") await this.deliverRecordedInput(manifest, existing); return; }
+		let acceptedImage: Awaited<ReturnType<ManagedImageTransport["accept"]>>["image"] | undefined;
+		try {
+			const accepted = await this.media.accept(manifest.conversationId, event, signal);
+			acceptedImage = accepted.image;
+			if (this.registry.pendingInputs(manifest.conversationId).some((input) => input.media?.blobId === accepted.image.blobId && input.status !== "completed" && input.status !== "cancelled")) {
+				throw new Error("Duplicate image content is already pending");
+			}
+			const input = { deliveryId, matrixEventId: event.eventId, kind: "prompt", body: accepted.prompt, media: accepted.image, status: "accepted" as const };
+			await this.registry.recordAcceptedInput(manifest.conversationId, input);
+			await this.deliverRecordedInput(manifest, input);
+		} catch (error) {
+			if (acceptedImage) await this.media.consume(acceptedImage.blobId, this.registry.liveMediaBlobIds()).catch(() => undefined);
+			await this.projectNotice(event.eventId, manifest, `Image rejected: ${error instanceof Error ? error.message : "media validation failed"}.`).catch(() => undefined);
+		}
 	}
 
 	private async accept(manifest: ConversationManifest, event: MatrixTextEvent): Promise<void> {

@@ -44,9 +44,14 @@ const poll = Type.Union([
 	envelope("ordinary_adapter", "poll.open", strict({ pollId: id("poll"), question: text(1_200), options: Type.Array(text(300), { minItems: 2, maxItems: 8 }) })),
 	envelope("relay", "poll.resolve", strict({ pollId: id("poll"), resolution: Type.Union([strict({ kind: Type.Literal("vote"), optionIndex: Type.Integer({ minimum: 0, maximum: 7 }) }), strict({ kind: Type.Literal("text"), body: text(16_000) })]) })),
 ]);
+const mediaDescriptor = { blobId: id("blob"), mimeType: Type.Union([Type.Literal("image/jpeg"), Type.Literal("image/png"), Type.Literal("image/webp")]),
+	byteLength: Type.Integer({ minimum: 1, maximum: MAX_BLOB_BYTES }), sha256: digest,
+	width: Type.Integer({ minimum: 1, maximum: 16_384 }), height: Type.Integer({ minimum: 1, maximum: 16_384 }), chunkCount: Type.Integer({ minimum: 1, maximum: 800 }) };
 const media = Type.Union([
-	envelope("relay", "media.begin", strict({ blobId: id("blob"), mediaType: Type.Union([Type.Literal("image")]), mimeType: text(128), byteLength: Type.Integer({ minimum: 1, maximum: MAX_BLOB_BYTES }), sha256: digest, caption: Type.Optional(text(16_000)), chunkCount: Type.Integer({ minimum: 1, maximum: 800 }) })),
-	envelope("relay", "media.chunk", strict({ blobId: id("blob"), index: Type.Integer({ minimum: 0, maximum: 799 }), data: Type.String({ minLength: 1, maxLength: 43_692 }) })),
+	envelope("relay", "media.begin", strict({ deliveryId: id("delivery"), matrixEventId: text(255), ...mediaDescriptor, caption: text(16_000) })),
+	envelope("relay", "media.chunk", strict({ deliveryId: id("delivery"), blobId: id("blob"), index: Type.Integer({ minimum: 0, maximum: 799 }), sha256: digest, data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }) })),
+	envelope("ordinary_adapter", "media.reject", strict({ deliveryId: id("delivery"), blobId: id("blob"), reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]) })),
+	envelope("coordinator_adapter", "media.reject", strict({ deliveryId: id("delivery"), blobId: id("blob"), reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]) })),
 	envelope("ordinary_adapter", "media.export", strict({ uploadId: id("upload"), workspaceArtifactId: text(128), mediaType: Type.Union([Type.Literal("image"), Type.Literal("audio"), Type.Literal("file")]) })),
 ]);
 const generation = Type.Union([
@@ -67,6 +72,17 @@ export function parseManagedSessionV2Envelope(value: unknown) {
 	if (envelope.type === "control.result" && envelope.payload.generation !== undefined &&
 		(envelope.role !== "ordinary_adapter" || envelope.payload.status !== "ok" || envelope.payload.options !== undefined)) {
 		throw new ManagedSessionContractError("malformed", "v2 generation metadata requires an accepted ordinary control result without options");
+	}
+	if (envelope.type === "media.begin") {
+		if (Math.ceil(Number(envelope.payload.byteLength) / MAX_MEDIA_CHUNK_BYTES) !== envelope.payload.chunkCount || Number(envelope.payload.width) * Number(envelope.payload.height) > 40_000_000) {
+			throw new ManagedSessionContractError("malformed", "v2 media descriptor failed chunk or pixel bounds");
+		}
+	}
+	if (envelope.type === "media.chunk") {
+		const data = Buffer.from(String(envelope.payload.data), "base64");
+		if (data.length < 1 || data.length > MAX_MEDIA_CHUNK_BYTES || data.toString("base64") !== envelope.payload.data || createHash("sha256").update(data).digest("hex") !== envelope.payload.sha256) {
+			throw new ManagedSessionContractError("malformed", "v2 media chunk failed canonical base64, size, or digest validation");
+		}
 	}
 	if (envelope.type === "activity.update") {
 		const tools = envelope.payload.tools as Array<{ name: string }> | undefined;

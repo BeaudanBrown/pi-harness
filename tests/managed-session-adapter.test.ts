@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -136,6 +137,8 @@ class FakeRelay {
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
+		} else if (envelope.type === "media.reject") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "media.result", payload: { deliveryId: envelope.payload.deliveryId, blobId: envelope.payload.blobId, status: "rejected" } }));
 		} else if (envelope.type === "control.result") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "control.result", status: "ok" } }));
 		} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
@@ -706,4 +709,58 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 	assert.equal(resumeTriggers, 1, "persisted unfinished delivery resumes without reinjecting its Pi user entry");
 	assert.equal(reinjectedExpanded, 1, "expanded-before-persistence crash is reinjected exactly once from its durable expansion");
 	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
+});
+
+test("managed images become one ordered text-plus-image turn and unsupported models reject without fallback", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const makeAdapter = async (imageCapable: boolean, adapterRole: "ordinary_adapter" | "coordinator_adapter" = "ordinary_adapter") => {
+		const adapterBinding = { ...binding, role: adapterRole };
+		const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, adapterBinding)];
+		let leaf = "binding"; let sequence = 0; const handlers = new Map<string, (...args: any[]) => any>(); const sent: unknown[] = [];
+		const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+			registerTool: () => undefined, getCommands: () => [], getActiveTools: () => [], setActiveTools: () => undefined,
+			appendEntry: (customType: string, data: unknown) => { const id = `media-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id; },
+			sendMessage: () => undefined,
+			sendUserMessage: (content: unknown, options: { onPromptExpanded?: (text: string) => void }) => { sent.push(content); options.onPromptExpanded?.("caption");
+				const id = `media-user-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content } }); leaf = id; },
+		} as unknown as ExtensionAPI;
+		createManagedSessionAdapterExtension(adapterRole, { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+		const ctx: any = { hasUI: false, isIdle: () => true, abort: () => undefined, shutdown: () => undefined,
+			model: { provider: "test", id: "model", input: imageCapable ? ["text", "image"] : ["text"], contextWindow: 10_000 },
+			getContextUsage: () => ({ tokens: 1 }), sessionManager: { getSessionId: () => sessionId, getBranch: () => branch,
+				getLeafId: () => leaf, getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
+		await handlers.get("session_start")!({ reason: "resume" }, ctx);
+		return { branch, handlers, ctx, sent };
+	};
+	const bytes = Buffer.from("normalized-image"); const sha256 = createHash("sha256").update(bytes).digest("hex");
+	const deliveryId = deriveDeliveryId(conversationId, "$image"); const blobId = `blob_${"a".repeat(32)}`;
+	const begin = () => ({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `begin-${Date.now()}`, conversationId, role: "relay" as const, type: "media.begin",
+		payload: { deliveryId, matrixEventId: "$image", blobId, sha256, mimeType: "image/png", byteLength: bytes.length, width: 1, height: 1, chunkCount: 1, caption: "caption" } });
+	const push = async () => {
+		relay.send(begin());
+		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `chunk-${Date.now()}`, conversationId, role: "relay", type: "media.chunk",
+			payload: { deliveryId, blobId, index: 0, sha256, data: bytes.toString("base64") } });
+		await new Promise((resolve) => setTimeout(resolve, 30));
+	};
+	const capable = await makeAdapter(true);
+	relay.send(begin()); relay.disconnect();
+	await new Promise((resolve) => setTimeout(resolve, 400));
+	await push();
+	assert.equal(capable.sent.length, 1);
+	assert.deepEqual(capable.sent[0], [{ type: "text", text: "caption" }, { type: "image", data: bytes.toString("base64"), mimeType: "image/png" }]);
+	await capable.handlers.get("agent_settled")!({}, capable.ctx);
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === deliveryId && frame.payload.status === "completed"));
+	await push();
+	assert.equal(capable.sent.length, 1, "replayed media after durable completion does not inject a duplicate Pi turn");
+	await capable.handlers.get("session_shutdown")!({ reason: "quit" }, capable.ctx);
+
+	const coordinator = await makeAdapter(true, "coordinator_adapter"); await push();
+	assert.equal(coordinator.sent.length, 1, "authorized coordinator-room images use the same ordered Pi image path");
+	await coordinator.handlers.get("session_shutdown")!({ reason: "quit" }, coordinator.ctx);
+
+	const unsupported = await makeAdapter(false); await push();
+	assert.equal(unsupported.sent.length, 0);
+	assert.ok(relay.frames.some((frame) => frame.type === "media.reject" && frame.payload.reason === "unsupported_model"));
+	await unsupported.handlers.get("session_shutdown")!({ reason: "quit" }, unsupported.ctx);
 });

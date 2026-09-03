@@ -4,6 +4,7 @@
   nodejs,
   typescript,
   piPackage,
+  imagemagick,
   runtimeShell,
 }:
 
@@ -62,6 +63,7 @@ stdenv.mkDerivation {
     #!${runtimeShell}
     export PI_MANAGED_SESSIONS_PEER_UID_HELPER="$out/libexec/pi-managed-session-peer-uid"
     export PI_MANAGED_SESSIONS_RELAY_LOCK_HELPER="$out/libexec/pi-managed-session-relay-lock"
+    export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER="${lib.getExe imagemagick}"
     exec ${lib.getExe nodejs} "$out/lib/managed-sessions/relay/main.js" "\$@"
     EOF
     chmod +x "$out/bin/pi-managed-session-relay"
