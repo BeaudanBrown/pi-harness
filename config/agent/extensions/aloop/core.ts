@@ -357,6 +357,27 @@ export function selectAloopLeaf(context: GitHubEpicContext, issueNumber: number)
 	return issue;
 }
 
+export type AloopAcceptedRecoveryRecord = { issue: number; head: string; commentSha256: string };
+
+export function acceptedOpenAloopIssues(context: GitHubEpicContext, recoveryRecords?: ReadonlyMap<string, AloopAcceptedRecoveryRecord>): number[] {
+	return context.issues
+		.filter((issue) => issue.number !== context.epic.number && issue.state === "open")
+		.filter((issue) => {
+			const latest = issue.recentHandoffs
+				.map((comment) => ({ handoff: parseAloopHandoffV3(comment.body), body: comment.body }))
+				.filter((entry): entry is { handoff: AloopHandoffV3; body: string } => entry.handoff?.issue === issue.number)
+				.at(-1);
+			if (latest?.handoff.outcome !== "accepted") return false;
+			if (!recoveryRecords) return true;
+			const record = recoveryRecords.get(latest.handoff.attemptKey);
+			return record?.issue === issue.number
+				&& record.head === latest.handoff.commitRange.split("..").at(-1)
+				&& record.commentSha256 === createHash("sha256").update(latest.body).digest("hex");
+		})
+		.map((issue) => issue.number)
+		.sort((left, right) => left - right);
+}
+
 export function findOutstandingAttempts(context: GitHubEpicContext, records: AloopAttemptRecord[]): AloopAttemptRecord[] {
 	const descendants = new Set(context.issues.filter((issue) => issue.number !== context.epic.number).map((issue) => issue.number));
 	const recorded = new Set(context.issues.flatMap((issue) => issue.recentHandoffs.flatMap((comment) => {
@@ -572,6 +593,9 @@ ${context.executableLeaves.map((number) => `#${number}`).join(", ") || "none"}
 Recent structured attempt handoffs:
 ${handoffLines.join("\n") || "- None"}
 
+Accepted handoffs awaiting child closure:
+${acceptedOpenAloopIssues(context).map((number) => `#${number}`).join(", ") || "- None"}
+
 Outstanding attempt artifacts without durable GitHub handoffs:
 ${outstandingAttempts.length > 0 ? outstandingAttempts.map((attempt) => `- #${attempt.issue} ${attempt.commit ?? "no-commit"} ${attempt.status}: ${attempt.artifactDirectory}`).join("\n") : "- None"}
 
@@ -582,13 +606,13 @@ Invocation resource budget:
 ${budget ? `- Hard deadline: ${new Date(budget.deadlineMs).toISOString()}\n- Maximum worker launches: ${budget.maxWorkerLaunches}` : "- Use the configured hard deadline and worker-launch cap."}
 
 Operating procedure:
-1. GitHub and Git are authoritative. Use aloop_context as the cached navigation view; request refresh only when external GitHub state may have changed.
+1. GitHub and Git are authoritative. Use aloop_context as the cached navigation view; request refresh only when external GitHub state may have changed. First recover any accepted handoff awaiting child closure by calling aloop_finish_attempt for that issue; never launch a duplicate worker for it.
 2. Select one open, unblocked descendant leaf and call aloop_launch_worker. Full workers are fresh and sequential; labels and assignments are advisory.
 3. For every returned or recovered attempt, call aloop_review_attempt. Use aloop_apply_patch for a narrow correction, a fresh full remediation worker for substantial work, or a trivial direct edit only when clearly safe. Review again after changes.
 4. Call aloop_finish_attempt exactly once for the full attempt. It owns canonical verification, v3 handoff publication, accepted-child closure, crash recovery, and next-frontier selection. Never call legacy receipt/spool/closure tools.
 5. If independent review is unavailable, canonical verification fails, or product/scope ambiguity needs a human, use aloop_checkpoint and stop. There is no semantic retry-count gate.
 6. Continue review, optional remediation, finalization, and next-child selection until worker bounds or a genuine decision boundary. The implementation deadline and 20-launch cap stop new full workers; supervisor settlement may continue.
-7. When all descendants are closed, call aloop_epic_completion with phase=prepare. Request explicit human approval, then call phase=apply with approved=true only for the unchanged prepared HEAD.
+7. When all descendants are closed, call aloop_epic_completion with phase=prepare and complete final review/acceptance evidence. Request explicit human approval, then call phase=apply only for the unchanged prepared HEAD.
 8. End with a concise report of completed children, commits, verification, deferred work, and the human-decision or epic-approval state.
 
 Do not push. Do not restore tk or create ticket files. Keep working in this supervisor turn until the epic is complete or a genuine human decision is required.`;

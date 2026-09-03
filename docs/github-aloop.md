@@ -139,8 +139,11 @@ startup-cached GitHub graph and accepts an explicit refresh; successful
 publication and closure update that snapshot in memory.
 
 `aloop_epic_completion` is two phase. `prepare` refreshes the graph, requires no
-open descendants or unsettled attempts, runs epic-frequency integration, and
-terminates at a human approval boundary. The operator records approval with
+open descendants or unsettled attempts, runs canonical verification plus any
+epic-frequency integration, and validates supplied independent descendant-review
+evidence from a fresh cumulative Standards/Spec review and evidence for every epic acceptance criterion before terminating at
+a human approval boundary. The durable preparation record retains that final
+evidence snapshot. The operator records approval with
 `/aloop-approve-epic <prepared-head>`; `apply` closes the parent only when that
 durable command attestation matches the unchanged prepared `HEAD`. Human
 checkpoint answers are similarly recorded with `/aloop-decision <issue>
@@ -176,8 +179,14 @@ On startup, aloop also scans local attempt results whose commits belong to the
 current branch. If it finds an attempt artifact with no matching durable GitHub
 handoff, it blocks another worker launch. Inspect the result and commit, run
 `aloop_review_attempt`, remediate if needed, then use `aloop_finish_attempt` to
-verify and publish the v3 handoff. Do not manufacture acceptance from a worker
-summary alone.
+verify and publish the v3 handoff. If an accepted v3 handoff is already published
+but its child remains open after an interrupted closure, aloop excludes that
+child from the worker frontier and requires `aloop_finish_attempt` to recover the
+closure before any new worker starts. Automatic recovery requires the marker to
+match a retained branch-local finalization record binding the issue, reviewed HEAD,
+and exact comment digest; a comment without that provenance
+stops at a human checkpoint rather than treating arbitrary issue text as closure
+authority. Do not manufacture acceptance from a worker summary alone.
 
 Common recovery cases:
 

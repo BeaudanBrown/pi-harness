@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -13,6 +14,7 @@ const verificationPolicyDocument = JSON.stringify({
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
 import { registerAloopExtension, scanAttemptArtifacts } from "../config/agent/extensions/aloop/index.js";
 import {
+	acceptedOpenAloopIssues,
 	assessAloopRunBudget,
 	authorizeHandoffPublication,
 	buildEpicReport,
@@ -190,6 +192,27 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 	assert.match(kickoff, /aloop_epic_completion/);
 });
 
+test("accepted v3 handoffs on open children are closure recoveries, not executable work", () => {
+	const accepted = formatAloopHandoffV3({
+		version: 3, issue: 2, issueBaseCommit: "a".repeat(40), commitRange: `${"a".repeat(40)}..${"b".repeat(40)}`,
+		outcome: "accepted", summary: "Done.", outstandingFindings: [], decisions: [], verification: ["passed"],
+		nextAction: "Close.", attemptKey: "c".repeat(24), timestamp: "2026-09-03T00:00:00Z",
+	});
+	const graph = context([issue({ number: 2, title: "Accepted but open", recentHandoffs: [comment(1, accepted, "2026-09-03T00:00:00Z")] })]);
+	assert.deepEqual(acceptedOpenAloopIssues(graph), [2]);
+	const recoveryRecords = new Map([["c".repeat(24), { issue: 2, head: "b".repeat(40), commentSha256: createHash("sha256").update(accepted).digest("hex") }]]);
+	assert.deepEqual(acceptedOpenAloopIssues(graph, recoveryRecords), [2]);
+	const forged = formatAloopHandoffV3({ ...parseAloopHandoffV3(accepted)!, summary: "forged" });
+	assert.deepEqual(acceptedOpenAloopIssues(context([issue({ number: 2, title: "Forged", recentHandoffs: [comment(1, forged, "2026-09-03T00:00:00Z")] })]), recoveryRecords), []);
+	const superseded = formatAloopHandoffV3({
+		...parseAloopHandoffV3(accepted)!, outcome: "rejected", attemptKey: "d".repeat(24), timestamp: "2026-09-03T00:01:00Z",
+	});
+	assert.deepEqual(acceptedOpenAloopIssues(context([issue({ number: 2, title: "Superseded", recentHandoffs: [comment(1, accepted, "2026-09-03T00:00:00Z"), comment(2, superseded, "2026-09-03T00:01:00Z")] })])), []);
+	const kickoff = buildSupervisorKickoff(graph, "history");
+	assert.match(kickoff, /Accepted handoffs awaiting child closure:\n#2/);
+	assert.match(kickoff, /never launch a duplicate worker/);
+});
+
 test("v3 handoffs show concise current state while hiding recoverable snapshot payload", () => {
 	const handoff = {
 		version: 3 as const, issue: 73, issueBaseCommit: "a".repeat(40), commitRange: `${"a".repeat(40)}..${"b".repeat(40)}`,
@@ -285,6 +308,7 @@ test("aloop supervisor tools activate only for an active run and disappear after
 		let kickoffCount = 0;
 		let retrievals = 0;
 		let aborts = 0;
+		let activeGraph = context([issue({ number: 2, title: "Leaf" })]);
 		const pi = {
 			registerTool: (tool: { name: string }) => { activeTools.push(tool.name); tools.set(tool.name, tool); },
 			registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => commands.set(name, command),
@@ -302,7 +326,7 @@ test("aloop supervisor tools activate only for an active run and disappear after
 						? { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" }
 						: { code: 0, stdout: "", stderr: "" },
 		} as unknown as ExtensionAPI;
-		registerAloopExtension(pi, { retrieveEpicContext: async () => { retrievals += 1; return context([issue({ number: 2, title: "Leaf" })]); } });
+		registerAloopExtension(pi, { retrieveEpicContext: async () => { retrievals += 1; return activeGraph; } });
 		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal,
 			abort: () => { aborts += 1; }, ui: { notify: () => undefined, setStatus: () => undefined } } as unknown as ExtensionContext;
 		for (const handler of events.get("session_start") ?? []) handler({ reason: "startup" }, ctx);
@@ -319,8 +343,28 @@ test("aloop supervisor tools activate only for an active run and disappear after
 		assert.equal(retrievals, 2);
 		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
 		assert.deepEqual(activeTools, ["read"]);
+		const artifactDirectory = ".pi/tmp/aloop/issue-2-100-abcdef";
+		const attemptKey = createHash("sha256").update(`2:${artifactDirectory}`).digest("hex").slice(0, 24);
+		const artifactPath = join(cwd, artifactDirectory);
+		mkdirSync(artifactPath, { recursive: true });
+		writeFileSync(join(artifactPath, "result.json"), JSON.stringify({ status: "completed", commit: "a".repeat(40), artifacts: { directory: artifactDirectory } }));
+		const accepted = formatAloopHandoffV3({
+			version: 3, issue: 2, issueBaseCommit: "a".repeat(40), commitRange: `${"a".repeat(40)}..${"a".repeat(40)}`,
+			outcome: "accepted", summary: "done", outstandingFindings: [], decisions: [], verification: ["passed"],
+			nextAction: "close", attemptKey, timestamp: "2026-09-03T00:00:00Z",
+		});
+		mkdirSync(join(cwd, ".pi/tmp/aloop/finalizations"), { recursive: true });
+		writeFileSync(join(cwd, `.pi/tmp/aloop/finalizations/${attemptKey}.json`), JSON.stringify({
+			version: 1, attemptKey, issue: 2, head: "a".repeat(40), commentSha256: createHash("sha256").update(accepted).digest("hex"),
+		}));
+		activeGraph = context([issue({ number: 2, title: "Leaf", recentHandoffs: [comment(1, accepted, "2026-09-03T00:00:00Z")] })]);
 		await commands.get("aloop")!.handler("#1", ctx);
 		assert.ok(activeTools.includes("aloop_launch_worker"));
+		const recoveryContext = await tools.get("aloop_context").execute("context", {}, ctx.signal, undefined, ctx);
+		assert.deepEqual(recoveryContext.details.closureRecoveries, [2]);
+		assert.deepEqual(recoveryContext.details.unverifiedAccepted, []);
+		assert.deepEqual(recoveryContext.details.frontier, []);
+		await assert.rejects(() => tools.get("aloop_launch_worker").execute("duplicate", { issue: 2 }, ctx.signal, undefined, ctx), /Accepted handoffs await child closure/);
 		await commands.get("aloop-abort")!.handler("", ctx);
 		assert.equal(aborts, 1);
 		assert.deepEqual(activeTools, ["read"]);
@@ -388,9 +432,19 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		const repeated = await tools.get("aloop_finish_attempt").execute("retry", params, ctx.signal, undefined, ctx);
 		assert.equal(repeated.details.idempotent, true);
 		assert.equal(closes, 1);
-		const prepared = await tools.get("aloop_epic_completion").execute("prepare", { phase: "prepare" }, ctx.signal, undefined, ctx);
+		await assert.rejects(() => tools.get("aloop_epic_completion").execute("missing-evidence", { phase: "prepare" }, ctx.signal, undefined, ctx), /requires acceptance_criteria evidence/);
+		const prepared = await tools.get("aloop_epic_completion").execute("prepare", {
+			phase: "prepare",
+			acceptance_criteria: [
+				{ criterion: "All children complete", satisfied: true, evidence: "#2 closed" },
+				{ criterion: "Verification passes", satisfied: true, evidence: "canonical passed" },
+			],
+		}, ctx.signal, undefined, ctx);
 		assert.equal(prepared.terminate, true);
-		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/epic-approval.json"), "utf8")).head, head);
+		const preparedRecord = JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/epic-approval.json"), "utf8"));
+		assert.equal(preparedRecord.version, 2);
+		assert.equal(preparedRecord.head, head);
+		assert.equal(preparedRecord.evidence.verification[0].check, "canonical");
 		await assert.rejects(() => tools.get("aloop_epic_completion").execute("unapproved", { phase: "apply" }, ctx.signal, undefined, ctx), /human \/aloop-approve-epic command/);
 		await commands.get("aloop-approve-epic").handler(head, ctx);
 		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/epic-approval.json"), "utf8")).approved, true);

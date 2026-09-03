@@ -8,6 +8,7 @@ import { runAloopPatchWorker, runAloopWorker, selectAloopPatchModel } from "../g
 import { balancedLogExcerpt, runDurableCommand, writeDurableResult } from "../worker-runner/command-execution.js";
 import { snapshotAloopPolicy, type AloopCommandDefinition, type AloopPolicySnapshot } from "./policy.js";
 import {
+	acceptedOpenAloopIssues,
 	assessAloopRunBudget,
 	buildSupervisorKickoff,
 	closeAcceptedAloopIssue,
@@ -25,6 +26,7 @@ import {
 	selectAloopLeaf,
 	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
+	type AloopAcceptedRecoveryRecord,
 	type AloopAttemptRecord,
 	type AloopRunBudget,
 	type ClosureEvidence,
@@ -92,22 +94,31 @@ const CloseAcceptedIssueParams = Type.Object({
 	dry_run: Type.Boolean({ description: "Must be true before closure is applied." }),
 });
 
+const VerificationEvidenceParams = Type.Array(Type.Object({
+	check: Type.String({ minLength: 1 }),
+	passed: Type.Boolean(),
+	evidence: Type.String(),
+}));
+const AcceptanceEvidenceParams = Type.Array(Type.Object({
+	criterion: Type.String({ minLength: 1 }),
+	satisfied: Type.Boolean(),
+	evidence: Type.String(),
+}));
+const DescendantReviewParams = Type.Array(Type.Object({
+	issue: Type.Number({ minimum: 1 }),
+	reviewed: Type.Boolean(),
+	evidence: Type.String(),
+}));
+
 const ClosureCheckParams = Type.Object({
-	verification: Type.Array(Type.Object({
-		check: Type.String({ minLength: 1 }),
-		passed: Type.Boolean(),
-		evidence: Type.String(),
-	})),
-	acceptance_criteria: Type.Array(Type.Object({
-		criterion: Type.String({ minLength: 1 }),
-		satisfied: Type.Boolean(),
-		evidence: Type.String(),
-	})),
-	descendant_reviews: Type.Array(Type.Object({
-		issue: Type.Number({ minimum: 1 }),
-		reviewed: Type.Boolean(),
-		evidence: Type.String(),
-	})),
+	verification: VerificationEvidenceParams,
+	acceptance_criteria: AcceptanceEvidenceParams,
+	descendant_reviews: DescendantReviewParams,
+});
+
+const EpicCompletionParams = Type.Object({
+	phase: Type.Union([Type.Literal("prepare"), Type.Literal("apply")]),
+	acceptance_criteria: Type.Optional(AcceptanceEvidenceParams),
 });
 
 function activeModelRef(ctx: ExtensionContext): string | undefined {
@@ -119,6 +130,27 @@ function registeredModel(ctx: ExtensionContext, reference: string): boolean {
 	if (slash <= 0 || slash === reference.length - 1) return false;
 	const model = ctx.modelRegistry.find(reference.slice(0, slash), reference.slice(slash + 1));
 	return model !== undefined && ctx.modelRegistry.hasConfiguredAuth(model);
+}
+
+async function scanAcceptedRecoveryRecords(cwd: string): Promise<Map<string, AloopAcceptedRecoveryRecord>> {
+	const records = new Map<string, AloopAcceptedRecoveryRecord>();
+	const root = path.resolve(cwd, ".pi/tmp/aloop/finalizations");
+	let names: string[];
+	try { names = (await readdir(root)).filter((name) => /^[a-f0-9]{24}\.json$/.test(name)).sort().slice(-200); }
+	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return records; throw error; }
+	for (const name of names) {
+		try {
+			const recordPath = path.join(root, name);
+			const status = await lstat(recordPath);
+			if (!status.isFile() || status.isSymbolicLink() || status.size > 20_000) continue;
+			const value = JSON.parse(await readFile(recordPath, "utf8"));
+			if (value?.version !== 1 || value?.attemptKey !== name.slice(0, -5) || !Number.isInteger(value?.issue)
+				|| typeof value?.head !== "string" || !/^[0-9a-f]{7,64}$/i.test(value.head)
+				|| typeof value?.commentSha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.commentSha256)) continue;
+			records.set(value.attemptKey, { issue: value.issue, head: value.head, commentSha256: value.commentSha256 });
+		} catch { /* Malformed recovery records never grant closure authority. */ }
+	}
+	return records;
 }
 
 export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRecord[]> {
@@ -214,6 +246,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	let activeEpic: number | null = null;
 	let pendingHandoffs: PendingHandoff[] = [];
 	const issueBaseCommits = new Map<number, string>();
+	const acceptedRecoveryRecords = new Map<string, AloopAcceptedRecoveryRecord>();
 	const attemptReviews = new Map<number, { base: string; head: string; available: boolean; details?: unknown; error?: string }>();
 	let workerRunning = false;
 	let runBudget: AloopRunBudget | null = null;
@@ -234,6 +267,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		activeEpic = null;
 		pendingHandoffs = [];
 		issueBaseCommits.clear();
+		acceptedRecoveryRecords.clear();
 		attemptReviews.clear();
 		workerRunning = false;
 		runBudget = null;
@@ -250,6 +284,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		activeEpic = epic;
 		pendingHandoffs = recovered;
 		issueBaseCommits.clear();
+		acceptedRecoveryRecords.clear();
 		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
 		deadlineTimer = setTimeout(() => {
 			if (!runBudget || runBudget.settled) return;
@@ -478,6 +513,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						}
 					} catch { /* Legacy attempts have no issue-context snapshot. */ }
 				}
+				for (const [attemptKey, record] of await scanAcceptedRecoveryRecords(ctx.cwd)) acceptedRecoveryRecords.set(attemptKey, record);
 				const outstanding = findOutstandingAttempts(context, branchRecords);
 				pendingHandoffs = outstanding;
 				pi.setSessionName(`aloop-${epic}`);
@@ -558,9 +594,12 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		async execute(_id, params: { refresh?: boolean }, signal, _onUpdate, ctx) {
 			const context = await currentContext(ctx.cwd, signal, params.refresh === true);
 			refreshPending(context);
-			const frontier = cachedFrontier(context);
-			const details = { epic: context.epic, issues: context.issues, frontier, pendingAttempts: pendingHandoffs, budget: runBudget };
-			return { content: [{ type: "text", text: `Epic #${context.epic.number}; frontier ${frontier.map((number) => `#${number}`).join(", ") || "none"}; pending ${pendingHandoffs.map((item) => `#${item.issue}`).join(", ") || "none"}.` }], details };
+			const acceptedOpen = acceptedOpenAloopIssues(context);
+			const closureRecoveries = acceptedOpenAloopIssues(context, acceptedRecoveryRecords);
+			const unverifiedAccepted = acceptedOpen.filter((number) => !closureRecoveries.includes(number));
+			const frontier = cachedFrontier(context).filter((number) => !acceptedOpen.includes(number));
+			const details = { epic: context.epic, issues: context.issues, frontier, closureRecoveries, unverifiedAccepted, pendingAttempts: pendingHandoffs, budget: runBudget };
+			return { content: [{ type: "text", text: `Epic #${context.epic.number}; frontier ${frontier.map((number) => `#${number}`).join(", ") || "none"}; accepted awaiting closure ${closureRecoveries.map((number) => `#${number}`).join(", ") || "none"}; accepted requiring human recovery ${unverifiedAccepted.map((number) => `#${number}`).join(", ") || "none"}; pending ${pendingHandoffs.map((item) => `#${item.issue}`).join(", ") || "none"}.` }], details };
 		},
 	});
 
@@ -584,6 +623,14 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (!budgetAssessment.allowed) throw new Error(budgetAssessment.reason);
 				let context = await currentContext(ctx.cwd, signal);
 				refreshPending(context);
+				const acceptedOpen = acceptedOpenAloopIssues(context);
+				if (acceptedOpen.length > 0) {
+					const recoverable = new Set(acceptedOpenAloopIssues(context, acceptedRecoveryRecords));
+					const action = acceptedOpen.every((number) => recoverable.has(number))
+						? "Recover them with aloop_finish_attempt before launching another worker."
+						: "At least one handoff lacks matching local attempt provenance; use aloop_checkpoint for human recovery before finalization.";
+					throw new Error(`Accepted handoffs await child closure for ${acceptedOpen.map((number) => `#${number}`).join(", ")}. ${action}`);
+				}
 				if (pendingHandoffs.length > 0) {
 					throw new Error(`Outstanding attempts have no durable structured handoff comments: ${pendingHandoffs.map((pending) => `#${pending.issue} (${pending.artifactDirectory})`).join(", ")}. Record them before another worker.`);
 				}
@@ -760,6 +807,19 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const settled = issue.recentHandoffs.map((comment) => parseAloopHandoffV3(comment.body)).filter((value) => value?.issue === params.issue).at(-1);
 				if (settled) {
 					if (settled.outcome === "accepted" && issue.state !== "closed") {
+						const settledComment = [...issue.recentHandoffs].reverse().find((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === settled.attemptKey);
+						const recovery = acceptedRecoveryRecords.get(settled.attemptKey);
+						const exactRecovery = settledComment !== undefined && recovery?.issue === issue.number
+							&& recovery.head === settled.commitRange.split("..").at(-1)
+							&& recovery.commentSha256 === createHash("sha256").update(settledComment.body).digest("hex");
+						if (!exactRecovery) {
+							const checkpoints = checkpointState(issue);
+							let humanAttested = false;
+							for (const marker of checkpoints.open) {
+								if (checkpoints.resolved.includes(marker) && await decisionAttested(ctx.cwd, marker)) humanAttested = true;
+							}
+							if (!humanAttested) throw new Error("Accepted handoff lacks matching local attempt provenance; a resolved human checkpoint is required before closure recovery.");
+						}
 						const expectedHead = settled.commitRange.split("..").at(-1);
 						const [head, status] = await Promise.all([
 							pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal }),
@@ -807,6 +867,9 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const attemptKey = createHash("sha256").update(`${params.issue}:${pending.artifactDirectory}`).digest("hex").slice(0, 24);
 			const handoff = { version: 3 as const, issue: params.issue, issueBaseCommit: base, commitRange: `${base}..${head}`, outcome: params.outcome, summary: params.summary, outstandingFindings: params.outstanding_findings, decisions: params.decisions, verification, nextAction: params.next_action, attemptKey, timestamp: new Date().toISOString() };
 			const body = formatAloopHandoffV3(handoff);
+			const recoveryRecord: AloopAcceptedRecoveryRecord = { issue: params.issue, head, commentSha256: createHash("sha256").update(body).digest("hex") };
+			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/finalizations", `${attemptKey}.json`), { version: 1, attemptKey, ...recoveryRecord });
+			acceptedRecoveryRecords.set(attemptKey, recoveryRecord);
 			const alreadyPublished = issue.recentHandoffs.some((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === attemptKey);
 			if (!alreadyPublished) {
 				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
@@ -857,10 +920,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	pi.registerTool({
 		name: "aloop_epic_completion",
 		label: "Aloop Epic Completion",
-		description: "Prepare epic evidence for human approval, then close the parent only after explicit approval.",
-		promptSnippet: "Use two-phase epic completion; preparation is a mandatory human approval boundary.",
-		parameters: Type.Object({ phase: Type.Union([Type.Literal("prepare"), Type.Literal("apply")]) }),
-		async execute(_id, params: { phase: "prepare" | "apply" }, signal, onUpdate, ctx) {
+		description: "Verify and prepare complete epic evidence for human approval, then close the parent only after explicit approval.",
+		promptSnippet: "Use two-phase epic completion; preparation requires final review and acceptance evidence and is a mandatory human approval boundary.",
+		parameters: EpicCompletionParams,
+		async execute(_id, params: { phase: "prepare" | "apply"; acceptance_criteria?: ClosureEvidence["acceptanceCriteria"] }, signal, onUpdate, ctx) {
 			const context = await currentContext(ctx.cwd, signal, true);
 			const open = context.issues.filter((issue) => issue.number !== context.epic.number && issue.state === "open");
 			let unresolvedDecisions = 0;
@@ -874,27 +937,59 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const head = headResult.stdout.trim();
 			const approvalPath = path.resolve(ctx.cwd, ".pi/tmp/aloop/epic-approval.json");
 			if (params.phase === "prepare") {
+				if (!params.acceptance_criteria) throw new Error("Epic preparation requires acceptance_criteria evidence.");
+				let epicReview: any;
+				try {
+					epicReview = await dependencies.runReview(pi, ctx, {
+						mode: "audit",
+						tasks: [
+							{ axis: "standards", instructions: `Review the completed cumulative epic #${context.epic.number} against repository standards. Report concrete defects only.` },
+							{ axis: "spec", instructions: `Review completed epic #${context.epic.number} against its goal and acceptance criteria. Report unmet criteria only.\n\n${context.issues.find((issue) => issue.number === context.epic.number)?.body.slice(0, 16_000) ?? ""}` },
+						],
+					}, signal, onUpdate);
+				} catch (error) {
+					const message = error instanceof Error ? error.message : String(error);
+					return { content: [{ type: "text", text: `Independent epic review unavailable: ${message}. A human decision is required before automatic closure.` }], details: { ready: false, reviewAvailable: false, error: message } };
+				}
 				const snapshot = activePolicy();
 				const policy = snapshot.policy;
 				await assertCleanHead(head, ctx, signal);
+				const canonical = await executeVerificationCommand("epic-canonical", policy.canonicalCommand, ctx, signal, onUpdate);
+				if (canonical.result.code !== 0 || canonical.result.timedOut || canonical.result.cancelled || canonical.result.spawnError) {
+					return { content: [{ type: "text", text: `Epic canonical verification failed: ${canonical.diagnosis?.summary ?? "see retained diagnostic logs"}` }], details: { ready: false, canonical } };
+				}
+				await assertCleanHead(head, ctx, signal);
+				const verification: ClosureEvidence["verification"] = [{ check: "canonical", passed: true, evidence: `Canonical command passed at ${head}.` }];
 				if (policy.productionIntegration?.frequency === "epic") {
 					const production = await executeVerificationCommand("epic-production-integration", policy.productionIntegration.command, ctx, signal, onUpdate);
-					if (production.result.code !== 0 || production.result.timedOut || production.result.cancelled || production.result.spawnError) return { content: [{ type: "text", text: `Epic production integration failed: ${production.diagnosis}` }], details: { ready: false, production } };
+					if (production.result.code !== 0 || production.result.timedOut || production.result.cancelled || production.result.spawnError) return { content: [{ type: "text", text: `Epic production integration failed: ${production.diagnosis?.summary ?? "see retained diagnostic logs"}` }], details: { ready: false, canonical, production } };
 					await assertCleanHead(head, ctx, signal);
+					verification.push({ check: "production integration", passed: true, evidence: `Epic production integration passed at ${head}.` });
 				}
-				await writeDurableResult(approvalPath, { version: 1, epic: context.epic.number, head, policySha256: snapshot.sha256, preparedAt: new Date().toISOString() });
-				return { content: [{ type: "text", text: `Epic #${context.epic.number} is ready at ${head}. Human approval is required: /aloop-approve-epic ${head}` }], details: { ready: true, epic: context.epic.number, head }, terminate: true };
+				const evidence: ClosureEvidence = {
+					verification,
+					acceptanceCriteria: params.acceptance_criteria,
+					descendantReviews: context.issues
+						.filter((issue) => issue.number !== context.epic.number)
+						.map((issue) => ({ issue: issue.number, reviewed: true, evidence: `Fresh independent cumulative epic review completed at ${head}.` })),
+				};
+				const gate = evaluateEpicClosure(context, evidence);
+				if (!gate.allowed) return { content: [{ type: "text", text: `Epic evidence is incomplete: ${gate.reasons.join(" ")}` }], details: { ready: false, gate, evidence } };
+				await writeDurableResult(approvalPath, { version: 2, epic: context.epic.number, head, policySha256: snapshot.sha256, evidence, preparedAt: new Date().toISOString() });
+				return { content: [{ type: "text", text: `Epic #${context.epic.number} passed fresh independent review and final verification at ${head}; all ${evidence.descendantReviews.length} descendants and ${evidence.acceptanceCriteria.length} epic criteria have evidence. Human approval is required: /aloop-approve-epic ${head}` }], details: { ready: true, epic: context.epic.number, head, evidence, review: epicReview.details }, terminate: true };
 			}
 			let durableApproval: any = null;
 			try { durableApproval = JSON.parse(await readFile(approvalPath, "utf8")); } catch { /* Missing preparation is rejected below. */ }
-			if (durableApproval?.approved !== true || durableApproval?.approvedVia !== "aloop-approve-epic command" || typeof durableApproval?.approvedAt !== "string" || durableApproval?.head !== head || durableApproval?.epic !== context.epic.number || durableApproval?.policySha256 !== activePolicy().sha256) {
+			if (durableApproval?.version !== 2 || durableApproval?.approved !== true || durableApproval?.approvedVia !== "aloop-approve-epic command" || typeof durableApproval?.approvedAt !== "string" || durableApproval?.head !== head || durableApproval?.epic !== context.epic.number || durableApproval?.policySha256 !== activePolicy().sha256) {
 				throw new Error("Epic apply requires the human /aloop-approve-epic command for the unchanged durably prepared HEAD.");
 			}
+			const gate = evaluateEpicClosure(context, durableApproval.evidence as ClosureEvidence);
+			if (!gate.allowed) throw new Error(`Prepared epic evidence is no longer sufficient: ${gate.reasons.join(" ")}`);
 			await assertCleanHead(head, ctx, signal);
 			await dependencies.closeIssue(ctx.cwd, context.epic.number, { signal });
 			context.epic.state = "closed";
 			try { await unlink(approvalPath); } catch { /* Closure is already durable remotely. */ }
-			return { content: [{ type: "text", text: `Closed epic #${context.epic.number} after explicit approval.` }], details: { closed: true, epic: context.epic.number, head } };
+			return { content: [{ type: "text", text: `Closed epic #${context.epic.number} after explicit approval of the final evidence.` }], details: { closed: true, epic: context.epic.number, head } };
 		},
 	});
 
