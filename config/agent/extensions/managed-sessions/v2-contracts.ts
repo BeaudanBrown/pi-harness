@@ -1,7 +1,8 @@
 import { createHash } from "node:crypto";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
-import { ManagedSessionContractError, parseConversationManifest, parseHostRuntimeState } from "./contracts.js";
+import { ManagedSessionContractError, deriveGenerationId, deriveGenerationTransitionId, parseConversationManifest, parsePersistenceBundle } from "./contracts.js";
+export { deriveGenerationId } from "./contracts.js";
 
 export const MANAGED_SESSION_V2_VERSION = "2.0.0" as const;
 export const MAX_MEDIA_CHUNK_BYTES = 32 * 1024;
@@ -36,7 +37,7 @@ const activity = Type.Union([
 const controlName = Type.Union(["help", "status", "model", "thinking", "compact", "new", "stop", "abort", "steer"].map((value) => Type.Literal(value)));
 const control = Type.Union([
 	envelope("relay", "control.deliver", strict({ controlId: id("control"), name: controlName, argument: Type.Optional(text(4_096)) })),
-	envelope("ordinary_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })) })),
+	envelope("ordinary_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), generation: Type.Optional(strict({ model: Type.Optional(text(256)), thinking: Type.Optional(text(32)) })) })),
 	envelope("coordinator_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })) })),
 ]);
 const poll = Type.Union([
@@ -54,15 +55,19 @@ const generation = Type.Union([
 ]);
 export const ManagedSessionV2EnvelopeSchema = Type.Union([activity, control, poll, media, generation]);
 
-export interface SessionGeneration { generationId: string; ordinal: number; piSessionId: string; bindingBoundaryEntryId: string; createdAt: string; }
+export interface SessionGeneration { generationId: string; ordinal: number; piSessionId: string; bindingBoundaryEntryId: string; createdAt: string; model?: string; thinking?: string; }
 export interface ConversationManifestV2 { schemaVersion: typeof MANAGED_SESSION_V2_VERSION; kind: "project" | "coordinator"; conversationId: string; ownerHostId: string; creationKey: string; concept: string; roomId: string; placement?: { rootKey: string; workspace: string; relativeCwd: string }; projectSpace?: string; hostSpace?: string; activeGenerationId: string; generations: SessionGeneration[]; createdAt: string; }
-const generationSchema = strict({ generationId, ordinal: Type.Integer({ minimum: 1 }), piSessionId: text(128), bindingBoundaryEntryId: id("entry"), createdAt: text(35) });
+const generationSchema = strict({ generationId, ordinal: Type.Integer({ minimum: 1 }), piSessionId: text(128), bindingBoundaryEntryId: id("entry"), createdAt: text(35), model: Type.Optional(text(256)), thinking: Type.Optional(text(32)) });
 export const ConversationManifestV2Schema = strict({ schemaVersion: Type.Literal(MANAGED_SESSION_V2_VERSION), kind: Type.Union([Type.Literal("project"), Type.Literal("coordinator")]), conversationId, ownerHostId: text(128), creationKey: text(128), concept: text(128), roomId: text(255), placement: Type.Optional(strict({ rootKey: text(128), workspace: text(128), relativeCwd: Type.String({ maxLength: 512 }) })), projectSpace: Type.Optional(text(255)), hostSpace: Type.Optional(text(255)), activeGenerationId: generationId, generations: Type.Array(generationSchema, { minItems: 1, maxItems: 256 }), createdAt: text(35) });
 
 function schemaError(schema: TSchema, value: unknown): never { const e = [...Errors(schema, value)][0]; throw new ManagedSessionContractError("malformed", `managed-session v2: ${e?.instancePath || "/"}: ${e?.message || "invalid value"}`); }
 export function parseManagedSessionV2Envelope(value: unknown) {
 	if (!Check(ManagedSessionV2EnvelopeSchema, value)) schemaError(ManagedSessionV2EnvelopeSchema, value);
-	const envelope = value as { type: string; payload: Record<string, unknown> };
+	const envelope = value as { role: string; type: string; payload: Record<string, unknown> };
+	if (envelope.type === "control.result" && envelope.payload.generation !== undefined &&
+		(envelope.role !== "ordinary_adapter" || envelope.payload.status !== "ok" || envelope.payload.options !== undefined)) {
+		throw new ManagedSessionContractError("malformed", "v2 generation metadata requires an accepted ordinary control result without options");
+	}
 	if (envelope.type === "activity.update") {
 		const tools = envelope.payload.tools as Array<{ name: string }> | undefined;
 		if (envelope.payload.state !== "tool" && tools !== undefined) throw new ManagedSessionContractError("malformed", "busy activity updates must omit tools");
@@ -78,17 +83,27 @@ export function parseManagedSessionV2Envelope(value: unknown) {
 	if (Buffer.byteLength(frame) > 64 * 1024) throw new ManagedSessionContractError("malformed", "managed-session v2 frame exceeds 65536 bytes");
 	return value;
 }
-export function parseConversationManifestV2(value: unknown): ConversationManifestV2 { if (!Check(ConversationManifestV2Schema, value)) schemaError(ConversationManifestV2Schema, value); const v = value as ConversationManifestV2; if (v.generations.map(g => g.ordinal).some((n, i) => n !== i + 1) || new Set(v.generations.map(g => g.generationId)).size !== v.generations.length || v.generations.at(-1)?.generationId !== v.activeGenerationId) throw new ManagedSessionContractError("invalid_state", "generation ordinals must be contiguous and only the newest generation may be active"); if ((v.kind === "project") !== (v.placement !== undefined)) throw new ManagedSessionContractError("invalid_state", "project placement and conversation kind disagree"); return v; }
+export function parseConversationManifestV2(value: unknown): ConversationManifestV2 { if (!Check(ConversationManifestV2Schema, value)) schemaError(ConversationManifestV2Schema, value); const v = value as ConversationManifestV2; if (v.generations.map(g => g.ordinal).some((n, i) => n !== i + 1) || v.generations.some(g => g.generationId !== deriveGenerationId(v.conversationId, g.ordinal)) || new Set(v.generations.map(g => g.generationId)).size !== v.generations.length || new Set(v.generations.map(g => g.piSessionId)).size !== v.generations.length || v.generations.at(-1)?.generationId !== v.activeGenerationId) throw new ManagedSessionContractError("invalid_state", "generation ordinals must be contiguous and only the newest generation may be active"); if ((v.kind === "project") !== (v.placement !== undefined)) throw new ManagedSessionContractError("invalid_state", "project placement and conversation kind disagree"); return v; }
 function digestParts(domain: string, parts: readonly (string | number)[]): string { const h = createHash("sha256"); h.update(`pi-managed-sessions:${domain}:v2\0`); for (const p of parts) { const s = String(p); h.update(`${Buffer.byteLength(s)}:`); h.update(s); } return h.digest("hex"); }
 function derive(domain: string, parts: readonly (string | number)[], prefix: string) { return `${prefix}_${digestParts(domain, parts).slice(0, 32)}`; }
-export const deriveGenerationId = (c: string, ordinal: number) => derive("generation", [c, ordinal], "generation");
 export const deriveActivityId = (g: string, span: string) => derive("activity", [g, span], "activity");
 export const deriveActivityTransactionId = (c: string, activityId: string, revision: number) => `pi_${digestParts("activity-transaction", [c, activityId, revision]).slice(0, 48)}`;
 export const derivePollId = (g: string, key: string) => derive("poll", [g, key], "poll");
 export const deriveControlId = (c: string, eventId: string) => derive("control", [c, eventId], "control");
 export const deriveBlobId = (c: string, sha256: string) => derive("blob", [c, sha256], "blob");
 export const deriveUploadId = (c: string, key: string) => derive("upload", [c, key], "upload");
-export const deriveTransitionId = (c: string, from: number, to: number) => derive("transition", [c, from, to], "transition");
+export const deriveTransitionId = deriveGenerationTransitionId;
 
-export function migrateV1Manifest(value: unknown): ConversationManifestV2 { const old = parseConversationManifest(value); const generationId = deriveGenerationId(old.conversationId, 1); return parseConversationManifestV2({ schemaVersion: MANAGED_SESSION_V2_VERSION, kind: old.kind, conversationId: old.conversationId, ownerHostId: old.ownerHostId, creationKey: old.creationKey, concept: old.concept, roomId: old.roomId, ...(old.placement ? { placement: old.placement } : {}), ...(old.projectSpace ? { projectSpace: old.projectSpace } : {}), ...(old.hostSpace ? { hostSpace: old.hostSpace } : {}), activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: old.piSessionId, bindingBoundaryEntryId: old.bindingBoundaryEntryId, createdAt: old.createdAt }], createdAt: old.createdAt }); }
-export function migrateV1Bundle(manifests: unknown[], runtime: unknown) { const oldRuntime = parseHostRuntimeState(runtime); const migrated = manifests.map(migrateV1Manifest); if (migrated.length !== oldRuntime.conversations.length || migrated.some(m => !oldRuntime.conversations.some(r => r.conversationId === m.conversationId))) throw new ManagedSessionContractError("conflict", "v1 migration requires an exact manifest/registry match"); return { manifests: migrated, runtime: { ...oldRuntime, schemaVersion: MANAGED_SESSION_V2_VERSION, conversations: oldRuntime.conversations.map(r => ({ ...r, activeGenerationId: migrated.find(m => m.conversationId === r.conversationId)!.activeGenerationId })) } }; }
+export function migrateV1Manifest(value: unknown): ConversationManifestV2 {
+	const old = parseConversationManifest(value); const generationId = old.activeGenerationId ?? deriveGenerationId(old.conversationId, 1);
+	const generations = old.generations ?? [{ generationId, ordinal: 1, piSessionId: old.piSessionId, bindingBoundaryEntryId: old.bindingBoundaryEntryId, createdAt: old.createdAt }];
+	return parseConversationManifestV2({ schemaVersion: MANAGED_SESSION_V2_VERSION, kind: old.kind, conversationId: old.conversationId, ownerHostId: old.ownerHostId,
+		creationKey: old.creationKey, concept: old.concept, roomId: old.roomId, ...(old.placement ? { placement: old.placement } : {}),
+		...(old.projectSpace ? { projectSpace: old.projectSpace } : {}), ...(old.hostSpace ? { hostSpace: old.hostSpace } : {}),
+		activeGenerationId: generationId, generations, createdAt: old.createdAt });
+}
+export function migrateV1Bundle(manifests: unknown[], runtime: unknown) {
+	const source = parsePersistenceBundle(manifests, runtime); const migrated = source.manifests.map(migrateV1Manifest);
+	return { manifests: migrated, runtime: { ...source.runtime, schemaVersion: MANAGED_SESSION_V2_VERSION,
+		conversations: source.runtime.conversations.map(r => ({ ...r, activeGenerationId: migrated.find(m => m.conversationId === r.conversationId)!.activeGenerationId })) } };
+}

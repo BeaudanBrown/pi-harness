@@ -9,8 +9,25 @@ import { migrateManagedSessionStoresV1ToV2 } from "../config/agent/extensions/ma
 const conversationId = deriveConversationId("host", "work");
 const old = { schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", conversationId, ownerHostId: "host", creationKey: "work", concept: "work", piSessionId: "session-1", roomId: "!room:example", placement: { rootKey: "projects", workspace: "repo", relativeCwd: "" }, bindingBoundaryEntryId: deriveTranscriptEntryId("session-1", "boundary"), createdAt: "2026-01-01T00:00:00.000Z" };
 test("v1 manifest migrates deterministically to generation one", () => { const a = migrateV1Manifest(old); const b = migrateV1Manifest(old); assert.deepEqual(a, b); assert.equal(a.roomId, old.roomId); assert.equal(a.generations[0]?.piSessionId, old.piSessionId); assert.equal(a.activeGenerationId, deriveGenerationId(conversationId, 1)); });
-test("generation manifest rejects old fields and impossible active generations", () => { const value = migrateV1Manifest(old); assert.throws(() => parseConversationManifestV2({ ...value, piSessionId: "legacy" })); assert.throws(() => parseConversationManifestV2({ ...value, activeGenerationId: deriveGenerationId(conversationId, 2) }), /newest/); });
+test("generation manifest rejects old fields and impossible active generations", () => { const value = migrateV1Manifest(old); assert.throws(() => parseConversationManifestV2({ ...value, piSessionId: "legacy" })); assert.throws(() => parseConversationManifestV2({ ...value, activeGenerationId: deriveGenerationId(conversationId, 2) }), /newest/); assert.throws(() => parseConversationManifestV2({ ...value, generations: [{ ...value.generations[0]!, generationId: deriveGenerationId(conversationId, 2) }] }), /generation/); assert.throws(() => parseConversationManifestV2({ ...value, activeGenerationId: deriveGenerationId(conversationId, 2), generations: [value.generations[0]!, { ...value.generations[0]!, ordinal: 2, generationId: deriveGenerationId(conversationId, 2) }] }), /generation/); });
+test("migration preserves append-only compatibility generations and selected runtime metadata", () => {
+	const secondSession = "session-2"; const activeGenerationId = deriveGenerationId(conversationId, 2);
+	const compatibility = { ...old, piSessionId: secondSession, bindingBoundaryEntryId: deriveTranscriptEntryId(secondSession, "boundary-2"), activeGenerationId,
+		generations: [{ generationId: deriveGenerationId(conversationId, 1), ordinal: 1, piSessionId: old.piSessionId, bindingBoundaryEntryId: old.bindingBoundaryEntryId, createdAt: old.createdAt },
+			{ generationId: activeGenerationId, ordinal: 2, piSessionId: secondSession, bindingBoundaryEntryId: deriveTranscriptEntryId(secondSession, "boundary-2"), createdAt: old.createdAt, model: "scoped/model", thinking: "high" }] };
+	const migrated = migrateV1Manifest(compatibility);
+	assert.deepEqual(migrated.generations, compatibility.generations); assert.equal(migrated.activeGenerationId, activeGenerationId);
+});
 test("v2 operations are role-strict and reject extra fields", () => { const value = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "m1", conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${"a".repeat(32)}`, name: "status" } }; assert.deepEqual(parseManagedSessionV2Envelope(value), value); assert.throws(() => parseManagedSessionV2Envelope({ ...value, role: "ordinary_adapter" })); assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, command: "pwd" } })); });
+test("v2 ordinary generation authorization metadata remains role-strict", () => {
+	const value = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "generation-control", conversationId, role: "ordinary_adapter", type: "control.result",
+		payload: { controlId: `control_${"c".repeat(32)}`, status: "ok", message: "authorized", generation: { model: "scoped/model", thinking: "high" } } };
+	assert.deepEqual(parseManagedSessionV2Envelope(value), value);
+	assert.throws(() => parseManagedSessionV2Envelope({ ...value, role: "coordinator_adapter" }));
+	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, status: "rejected" } }), /accepted ordinary/);
+	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, options: ["one"] } }), /without options/);
+});
+
 test("activity snapshots require collapsed names and balanced measured totals", () => {
 	const base = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "activity", conversationId, role: "ordinary_adapter", type: "activity.finalize" };
 	const payload = { activityId: `activity_${"a".repeat(32)}`, revision: 2, outcome: "completed", context: { usedTokens: 60, remainingTokens: 40, limitTokens: 100, deltaTokens: 10 }, run: { inputTokens: 10, outputTokens: 5, modelTurns: 1 }, tools: { total: 2, errors: 1, counts: [{ name: "read", count: 2 }] } };
@@ -20,7 +37,7 @@ test("activity snapshots require collapsed names and balanced measured totals", 
 	const update = { ...base, type: "activity.update", payload: { activityId: payload.activityId, revision: 1, state: "tool", tools: [{ name: "bash", state: "running", count: 1 }, { name: "bash", state: "completed", count: 1 }] } };
 	assert.throws(() => parseManagedSessionV2Envelope(update), /unique collapsed/);
 });
-test("bundle migration fails closed when registry is partial", () => { const runtime = { schemaVersion: MANAGED_SESSION_STATE_VERSION, hostId: "host", conversations: [] }; assert.throws(() => migrateV1Bundle([old], runtime), /exact manifest\/registry match/); });
+test("bundle migration fails closed when registry is partial", () => { const runtime = { schemaVersion: MANAGED_SESSION_STATE_VERSION, hostId: "host", conversations: [] }; assert.throws(() => migrateV1Bundle([old], runtime), /runtime conversations and synchronized manifests do not match exactly/); });
 
 test("store migration atomically commits deterministic v2 destinations and forbids downgrade", async () => {
 	const root = await mkdtemp(join(tmpdir(), "managed-v2-migration-"));

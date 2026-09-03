@@ -265,6 +265,9 @@ let
             project_prompt_args+=(--prompt-template "$candidate")
           done < <(${pkgs.findutils}/bin/find "$prompt_root" -mindepth 1 -maxdepth 1 -type f -name '*.md' -print0 | ${pkgs.coreutils}/bin/sort -z)
         done
+        generation_args=()
+        [[ -z "''${PI_MANAGED_SESSION_MODEL:-}" ]] || generation_args+=(--model "$PI_MANAGED_SESSION_MODEL")
+        [[ -z "''${PI_MANAGED_SESSION_THINKING:-}" ]] || generation_args+=(--thinking "$PI_MANAGED_SESSION_THINKING")
         exec ${managedRawPi}/bin/pi \
           --no-extensions \
           --no-skills \
@@ -277,6 +280,7 @@ let
           "''${project_prompt_args[@]}" \
           --session "$PI_MANAGED_PROJECT_SESSION_FILE" \
           --approve \
+          "''${generation_args[@]}" \
           "$@"
         ;;
       *)

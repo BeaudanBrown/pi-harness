@@ -6,8 +6,11 @@ import {
 	MAX_PENDING_CONTROLS,
 	MAX_PENDING_INPUTS,
 	MAX_PROJECTION_ENTRIES,
+	deriveGenerationId,
+	deriveGenerationTransitionId,
 	deriveMatrixTransactionId,
 	type ConversationManifest,
+	type SessionGeneration,
 	type HostRuntimeState,
 	type ManagedSessionEnvelope,
 	parseHostRuntimeState,
@@ -55,6 +58,7 @@ export interface AcceptedAttachment {
 	conversationId: string;
 	role: AdapterRole;
 	state: "active";
+	generation: number;
 }
 
 export class RelayRegistry {
@@ -441,6 +445,106 @@ export class RelayRegistry {
 		return [...this.manifests.values()].map((manifest) => structuredClone(manifest));
 	}
 
+	activeGeneration(manifest: ConversationManifest): SessionGeneration {
+		return manifest.generations?.at(-1) ?? {
+			generationId: deriveGenerationId(manifest.conversationId, 1), ordinal: 1, piSessionId: manifest.piSessionId,
+			bindingBoundaryEntryId: manifest.bindingBoundaryEntryId, createdAt: manifest.createdAt,
+		};
+	}
+
+	hasGenerationTransition(conversationId: string): boolean {
+		return this.runtimeConversation(conversationId).generationTransition != null;
+	}
+
+	hasGenerationBoundary(conversationId: string): boolean {
+		const conversation = this.runtimeConversation(conversationId);
+		return conversation.generationTransition != null || conversation.pendingControls.some((control) => control.name === "new" && control.argument === "--confirm");
+	}
+
+	isActiveGenerationAttached(conversationId: string): boolean {
+		const conversation = this.runtimeConversation(conversationId); const manifest = this.manifests.get(conversationId);
+		return Boolean(manifest && this.liveConnections.has(conversationId) && conversation.state === "active" && conversation.attachment?.sessionId === manifest.piSessionId);
+	}
+
+	generationTransitions(): Array<{ conversationId: string; transition: NonNullable<RuntimeConversation["generationTransition"]> }> {
+		return this.state.conversations.flatMap((conversation) => conversation.generationTransition ? [{ conversationId: conversation.conversationId, transition: structuredClone(conversation.generationTransition) }] : []);
+	}
+
+	async beginGenerationTransition(conversationId: string, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<NonNullable<RuntimeConversation["generationTransition"]>> {
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const manifest = this.manifests.get(conversationId);
+			if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Only project conversations support fresh generations");
+			if (conversation.generationTransition) {
+				if (conversation.generationTransition.sourceControlId !== sourceControlId) throw new RelayRegistryError("invalid_state", "Another generation transition is unresolved");
+				return structuredClone(conversation.generationTransition);
+			}
+			const active = this.activeGeneration(manifest); const ordinal = active.ordinal + 1;
+			const transition = { transitionId: deriveGenerationTransitionId(conversationId, active.ordinal, ordinal), sourceControlId, phase: "requested" as const,
+				fromGenerationId: active.generationId, toGenerationId: deriveGenerationId(conversationId, ordinal), ordinal, requestedAt: new Date().toISOString(), ...metadata };
+			conversation.generationTransition = transition;
+			return structuredClone(transition);
+		});
+	}
+
+	async recordGenerationSession(conversationId: string, transitionId: string, session: { sessionId: string; boundaryEntryId: string }): Promise<void> {
+		await this.mutate(async () => {
+			const transition = this.runtimeConversation(conversationId).generationTransition;
+			if (!transition || transition.transitionId !== transitionId) throw new RelayRegistryError("invalid_state", "Generation transition is unavailable");
+			if (transition.toPiSessionId && (transition.toPiSessionId !== session.sessionId || transition.toBindingBoundaryEntryId !== session.boundaryEntryId)) throw new RelayRegistryError("invalid_state", "Generation session identity changed during recovery");
+			transition.toPiSessionId = session.sessionId; transition.toBindingBoundaryEntryId = session.boundaryEntryId; transition.phase = "session_persisted"; delete transition.failure;
+		});
+	}
+
+	async activateGeneration(conversationId: string, transitionId: string): Promise<ConversationManifest> {
+		const current = this.manifests.get(conversationId);
+		const transition = this.runtimeConversation(conversationId).generationTransition;
+		if (!current || !transition || transition.transitionId !== transitionId || !transition.toPiSessionId || !transition.toBindingBoundaryEntryId) throw new RelayRegistryError("invalid_state", "Persisted generation is unavailable for activation");
+		let replacement = current;
+		if (current.activeGenerationId !== transition.toGenerationId) {
+			const history = current.generations ?? [this.activeGeneration(current)];
+			if (history.at(-1)?.generationId !== transition.fromGenerationId) throw new RelayRegistryError("invalid_state", "Generation activation no longer follows the active generation");
+			const generation: SessionGeneration = { generationId: transition.toGenerationId, ordinal: transition.ordinal, piSessionId: transition.toPiSessionId,
+				bindingBoundaryEntryId: transition.toBindingBoundaryEntryId, createdAt: new Date().toISOString(), ...(transition.model ? { model: transition.model } : {}), ...(transition.thinking ? { thinking: transition.thinking } : {}) };
+			replacement = { ...current, piSessionId: generation.piSessionId, bindingBoundaryEntryId: generation.bindingBoundaryEntryId,
+				activeGenerationId: generation.generationId, generations: [...history, generation] };
+			await this.manifestStore.write(replacement);
+		}
+		return this.mutate(async () => {
+			const live = this.runtimeConversation(conversationId).generationTransition;
+			if (!live || live.transitionId !== transitionId) throw new RelayRegistryError("invalid_state", "Generation transition changed during activation");
+			this.manifests.set(conversationId, replacement); this.liveConnections.delete(conversationId);
+			const runtime = this.runtimeConversation(conversationId); runtime.attachment = null; runtime.state = "starting"; live.phase = "activated"; delete live.failure;
+			return structuredClone(replacement);
+		});
+	}
+
+	async markGenerationAttached(conversationId: string, transitionId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId); const transition = conversation.generationTransition;
+			const manifest = this.manifests.get(conversationId);
+			if (!transition || transition.transitionId !== transitionId || !manifest || conversation.state !== "active" ||
+				conversation.attachment?.sessionId !== manifest.piSessionId) throw new RelayRegistryError("invalid_state", "Active generation attachment is unavailable");
+			transition.phase = "attached"; delete transition.failure;
+		});
+	}
+
+	async failGenerationTransition(conversationId: string, transitionId: string, error: unknown): Promise<void> {
+		await this.mutate(async () => {
+			const transition = this.runtimeConversation(conversationId).generationTransition;
+			if (!transition || transition.transitionId !== transitionId) return;
+			transition.phase = "failed"; transition.failure = { code: "generation_failed", message: redactManagedValue(error instanceof Error ? error.message : "Generation transition failed"), at: new Date().toISOString() };
+		});
+	}
+
+	async completeGenerationTransition(conversationId: string, transitionId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (conversation.generationTransition?.transitionId !== transitionId) throw new RelayRegistryError("invalid_state", "Generation transition changed before completion");
+			conversation.generationTransition = null;
+		});
+	}
+
 	listConversations(): Array<{ conversationId: string; concept: string; kind: "project" | "coordinator"; state: "starting" | "active" | "dormant" }> {
 		return [...this.manifests.values()].map((manifest) => ({
 			conversationId: manifest.conversationId, concept: manifest.concept, kind: manifest.kind,
@@ -738,7 +842,7 @@ export class RelayRegistry {
 			conversation.state = "active";
 			conversation.attachment = { attachmentId, sessionId: payload.sessionId, connectedAt: new Date().toISOString() };
 			this.liveConnections.set(manifest.conversationId, connectionId);
-			return { attachmentId, conversationId: manifest.conversationId, role, state: "active" };
+			return { attachmentId, conversationId: manifest.conversationId, role, state: "active", generation: this.activeGeneration(manifest).ordinal };
 		});
 	}
 

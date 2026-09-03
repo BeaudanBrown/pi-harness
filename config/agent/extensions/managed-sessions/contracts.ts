@@ -27,6 +27,8 @@ export const DeliveryIdSchema = stableId("delivery");
 export const TranscriptEntryIdSchema = stableId("entry");
 export const ChunkIdSchema = stableId("chunk");
 export const MatrixTransactionIdSchema = Type.String({ pattern: "^pi_[a-f0-9]{48}$" });
+export const GenerationIdSchema = stableId("generation");
+export const TransitionIdSchema = stableId("transition");
 
 export const WorkspaceIdentitySchema = strictObject({
 	rootKey: identifier,
@@ -176,6 +178,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]),
 		message: boundedString(4_096),
 		options: Type.Optional(Type.Array(boundedString(255), { minItems: 1, maxItems: 20 })),
+		generation: Type.Optional(strictObject({ model: Type.Optional(boundedString(256)), thinking: Type.Optional(boundedString(32)) })),
 	}),
 	clientEnvelope(adapterRole, "checkpoint.offer", {
 		checkpointId: identifier,
@@ -202,6 +205,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	}),
 	relayEnvelope("attachment.accepted", {
 		attachmentId: identifier,
+		generation: Type.Optional(Type.Integer({ minimum: 1 })),
 		state: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 	}),
 	relayEnvelope("control.deliver", {
@@ -282,7 +286,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	])),
 	relayEnvelope("termination.request", {
 		deliveryId: Type.Optional(DeliveryIdSchema),
-		reason: Type.Union([Type.Literal("stop"), Type.Literal("abort"), Type.Literal("bridge_delete")]),
+		reason: Type.Union([Type.Literal("stop"), Type.Literal("abort"), Type.Literal("bridge_delete"), Type.Literal("generation_change")]),
 	}),
 	relayEnvelope("error", {
 		code: Type.Union([
@@ -302,6 +306,15 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	}),
 ]);
 
+const sessionGeneration = strictObject({
+	generationId: GenerationIdSchema, ordinal: Type.Integer({ minimum: 1 }), piSessionId: identifier,
+	bindingBoundaryEntryId: TranscriptEntryIdSchema, createdAt: timestamp,
+	model: Type.Optional(boundedString(256)), thinking: Type.Optional(boundedString(32)),
+});
+const generationManifestFields = {
+	activeGenerationId: Type.Optional(GenerationIdSchema),
+	generations: Type.Optional(Type.Array(sessionGeneration, { minItems: 1, maxItems: 256 })),
+};
 const projectManifest = strictObject({
 	schemaVersion: Type.Literal(MANAGED_SESSION_STATE_VERSION),
 	kind: Type.Literal("project"),
@@ -315,6 +328,7 @@ const projectManifest = strictObject({
 	projectSpace: Type.Optional(boundedString(128)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
+	...generationManifestFields,
 });
 const coordinatorManifest = strictObject({
 	schemaVersion: Type.Literal(MANAGED_SESSION_STATE_VERSION),
@@ -328,6 +342,7 @@ const coordinatorManifest = strictObject({
 	hostSpace: Type.Optional(boundedString(255)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
+	...generationManifestFields,
 });
 export const ConversationManifestSchema = Type.Union([projectManifest, coordinatorManifest]);
 
@@ -444,12 +459,26 @@ const runtimeConversation = strictObject({
 		}),
 	),
 	lastLaunchError: Type.Optional(strictObject({ code: identifier, message: boundedString(500), at: timestamp })),
+	generationTransition: Type.Optional(nullable(strictObject({
+		transitionId: TransitionIdSchema, sourceControlId: stableId("control"), phase: Type.Union([
+			Type.Literal("requested"), Type.Literal("session_persisted"), Type.Literal("activated"), Type.Literal("attached"), Type.Literal("failed"),
+		]),
+		fromGenerationId: GenerationIdSchema, toGenerationId: GenerationIdSchema, ordinal: Type.Integer({ minimum: 2 }), requestedAt: timestamp,
+		model: Type.Optional(boundedString(256)), thinking: Type.Optional(boundedString(32)),
+		toPiSessionId: Type.Optional(identifier), toBindingBoundaryEntryId: Type.Optional(TranscriptEntryIdSchema),
+		failure: Type.Optional(strictObject({ code: identifier, message: boundedString(500), at: timestamp })),
+	}))),
 });
 export const HostRuntimeStateSchema = strictObject({
 	schemaVersion: Type.Literal(MANAGED_SESSION_STATE_VERSION),
 	hostId: identifier,
 	conversations: Type.Array(runtimeConversation, { maxItems: 4_096 }),
 });
+
+export interface SessionGeneration {
+	generationId: string; ordinal: number; piSessionId: string; bindingBoundaryEntryId: string; createdAt: string;
+	model?: string; thinking?: string;
+}
 
 export interface WorkspaceIdentity {
 	rootKey: string;
@@ -470,6 +499,8 @@ export interface ConversationManifest {
 	hostSpace?: string;
 	bindingBoundaryEntryId: string;
 	createdAt: string;
+	activeGenerationId?: string;
+	generations?: SessionGeneration[];
 }
 export interface HostRuntimeState {
 	schemaVersion: typeof MANAGED_SESSION_STATE_VERSION;
@@ -502,6 +533,11 @@ export interface HostRuntimeState {
 		}>;
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string };
 		lastLaunchError?: { code: string; message: string; at: string };
+		generationTransition?: null | {
+			transitionId: string; sourceControlId: string; phase: "requested" | "session_persisted" | "activated" | "attached" | "failed";
+			fromGenerationId: string; toGenerationId: string; ordinal: number; requestedAt: string; model?: string; thinking?: string;
+			toPiSessionId?: string; toBindingBoundaryEntryId?: string; failure?: { code: string; message: string; at: string };
+		};
 	}>;
 }
 export interface ManagedSessionEnvelope {
@@ -586,6 +622,12 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		if (payload.context && payload.context.usedTokens + payload.context.remainingTokens !== payload.context.limitTokens) throw new ManagedSessionContractError("malformed", "activity context must be balanced");
 		if (payload.tools && (payload.tools.errors > payload.tools.total || payload.tools.counts.reduce((sum, item) => sum + item.count, 0) !== payload.tools.total)) throw new ManagedSessionContractError("malformed", "activity tool totals must be balanced");
 	}
+	if (envelope.type === "control.result") {
+		const payload = envelope.payload as { status: string; options?: string[]; generation?: unknown };
+		if (payload.generation !== undefined && (envelope.role !== "ordinary_adapter" || payload.status !== "ok" || payload.options !== undefined)) {
+			throw new ManagedSessionContractError("malformed", "generation metadata is permitted only on an accepted ordinary control result");
+		}
+	}
 	if (envelope.type === "checkpoint.offer") {
 		const payload = envelope.payload as { checkpoint: { codeOrDiffRequested?: true; requestedCodeOrDiff?: string } };
 		if ((payload.checkpoint.codeOrDiffRequested === true) !== (payload.checkpoint.requestedCodeOrDiff !== undefined)) {
@@ -661,6 +703,19 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 	const manifest = value as ConversationManifest;
 	assertTimestamp(manifest.createdAt, "createdAt");
 	if (manifest.placement) assertWorkspaceIdentity(manifest.placement);
+	if ((manifest.activeGenerationId === undefined) !== (manifest.generations === undefined)) {
+		throw new ManagedSessionContractError("invalid_state", "active generation and generation history must appear together");
+	}
+	if (manifest.generations) {
+		const newest = manifest.generations.at(-1);
+		if (!newest || newest.generationId !== manifest.activeGenerationId || newest.piSessionId !== manifest.piSessionId ||
+			newest.bindingBoundaryEntryId !== manifest.bindingBoundaryEntryId || manifest.generations.some((generation, index) =>
+				generation.ordinal !== index + 1 || generation.generationId !== deriveGenerationId(manifest.conversationId, generation.ordinal)) ||
+			new Set(manifest.generations.map((generation) => generation.piSessionId)).size !== manifest.generations.length) {
+			throw new ManagedSessionContractError("invalid_state", "conversation generation history is not contiguous or active");
+		}
+		for (const generation of manifest.generations) assertTimestamp(generation.createdAt, "generation.createdAt");
+	}
 	return manifest;
 }
 
@@ -784,6 +839,18 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		}
 		if (conversation.attachment) assertTimestamp(conversation.attachment.connectedAt, "attachment.connectedAt");
 		if (conversation.lastLaunchError) assertTimestamp(conversation.lastLaunchError.at, "lastLaunchError.at");
+		if (conversation.generationTransition) {
+			const transition = conversation.generationTransition;
+			assertTimestamp(transition.requestedAt, "generationTransition.requestedAt");
+			if (transition.failure) assertTimestamp(transition.failure.at, "generationTransition.failure.at");
+			if (transition.transitionId !== deriveGenerationTransitionId(conversation.conversationId, transition.ordinal - 1, transition.ordinal) ||
+				transition.fromGenerationId !== deriveGenerationId(conversation.conversationId, transition.ordinal - 1) ||
+				transition.toGenerationId !== deriveGenerationId(conversation.conversationId, transition.ordinal) ||
+				(["session_persisted", "activated", "attached"].includes(transition.phase) && (!transition.toPiSessionId || !transition.toBindingBoundaryEntryId)) ||
+				(transition.phase === "failed") !== (transition.failure !== undefined)) {
+				throw new ManagedSessionContractError("invalid_state", `invalid generation transition in ${conversation.conversationId}`);
+			}
+		}
 		const entries = new Set<string>();
 		const checkpointOrigins = new Set<string>();
 		const chunks = new Set<string>();
@@ -832,15 +899,39 @@ export function parsePersistenceBundle(manifestValues: unknown[], runtimeValue: 
 		for (const [set, value, label] of [
 			[ids, manifest.conversationId, "conversation"],
 			[rooms, manifest.roomId, "room"],
-			[sessions, manifest.piSessionId, "Pi session"],
 			[creationKeys, manifest.creationKey, "creation key"],
 		] as const) {
 			if (set.has(value)) throw new ManagedSessionContractError("conflict", `duplicate ${label} identity ${value}`);
 			set.add(value);
 		}
+		for (const session of manifest.generations?.map((generation) => generation.piSessionId) ?? [manifest.piSessionId]) {
+			if (sessions.has(session)) throw new ManagedSessionContractError("conflict", `duplicate Pi session identity ${session}`);
+			sessions.add(session);
+		}
 	}
 	if (runtime.conversations.length !== manifests.length || runtime.conversations.some((item) => !ids.has(item.conversationId))) {
 		throw new ManagedSessionContractError("conflict", "runtime conversations and synchronized manifests do not match exactly");
+	}
+	for (const conversation of runtime.conversations) {
+		const manifest = manifests.find((candidate) => candidate.conversationId === conversation.conversationId)!;
+		const transition = conversation.generationTransition;
+		if (transition) {
+			const activeGenerationId = manifest.activeGenerationId ?? deriveGenerationId(manifest.conversationId, 1);
+			if (![transition.fromGenerationId, transition.toGenerationId].includes(activeGenerationId) ||
+				(["activated", "attached"].includes(transition.phase) && activeGenerationId !== transition.toGenerationId) ||
+				(transition.phase === "requested" && activeGenerationId !== transition.fromGenerationId) ||
+				(activeGenerationId === transition.toGenerationId && (manifest.piSessionId !== transition.toPiSessionId ||
+					manifest.bindingBoundaryEntryId !== transition.toBindingBoundaryEntryId))) {
+				throw new ManagedSessionContractError("conflict", `generation transition and manifest disagree for ${conversation.conversationId}`);
+			}
+		}
+		const transitionSourceSession = conversation.generationTransition && manifest.generations?.find((generation) =>
+			generation.generationId === conversation.generationTransition?.fromGenerationId)?.piSessionId;
+		if (conversation.attachment && conversation.attachment.sessionId !== manifest.piSessionId &&
+			!(conversation.generationTransition?.phase === "session_persisted" && manifest.activeGenerationId === conversation.generationTransition.toGenerationId &&
+				conversation.attachment.sessionId === transitionSourceSession)) {
+			throw new ManagedSessionContractError("conflict", `runtime attachment is not the active generation for ${conversation.conversationId}`);
+		}
 	}
 	return { manifests, runtime };
 }
@@ -873,6 +964,14 @@ export function deriveCheckpointPollIntentHash(intent: {
 	}
 	return hash.digest("hex");
 }
+
+function deriveV2(prefix: string, domain: string, parts: readonly (string | number)[]): string {
+	const hash = createHash("sha256"); hash.update(`pi-managed-sessions:${domain}:v2\0`, "utf8");
+	for (const part of parts) { const value = String(part); hash.update(`${Buffer.byteLength(value, "utf8")}:`, "utf8"); hash.update(value, "utf8"); }
+	return `${prefix}_${hash.digest("hex").slice(0, 32)}`;
+}
+export const deriveGenerationId = (conversationId: string, ordinal: number): string => deriveV2("generation", "generation", [conversationId, ordinal]);
+export const deriveGenerationTransitionId = (conversationId: string, from: number, to: number): string => deriveV2("transition", "generation-transition", [conversationId, from, to]);
 
 export const deriveConversationId = (hostId: string, creationKey: string): string =>
 	derive("conv", "conversation", [hostId, creationKey]);

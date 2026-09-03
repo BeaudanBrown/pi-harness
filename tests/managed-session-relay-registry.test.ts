@@ -10,6 +10,7 @@ import {
 	deriveChunkId,
 	deriveConversationId,
 	deriveDeliveryId,
+	deriveGenerationId,
 	deriveMatrixTransactionId,
 	deriveTranscriptEntryId,
 	type ConversationManifest,
@@ -96,6 +97,28 @@ test("registry enforces nonce, role, binding, and one live attachment per conver
 	await assert.rejects(() => registry.attach(attach(value, "ordinary_adapter"), "connection-2"), (error: unknown) => error instanceof RelayRegistryError && error.code === "attachment_conflict");
 	await registry.detach("connection-1", accepted, accepted.attachmentId);
 	assert.equal(registry.snapshot().conversations[0]?.state, "dormant");
+});
+
+test("generation transition phases and append-only history recover from each durable boundary", async () => {
+	const value = manifest(); const { root, store, registry } = await fixture([value]);
+	const controlId = `control_${"b".repeat(32)}`;
+	const requested = await registry.beginGenerationTransition(value.conversationId, controlId, { model: "scoped/model", thinking: "high" });
+	assert.equal(requested.ordinal, 2);
+	let restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	assert.equal(restarted.generationTransitions()[0]?.transition.phase, "requested");
+	const session = { sessionId: "session-work-generation-2", boundaryEntryId: deriveTranscriptEntryId("session-work-generation-2", "boundary-2") };
+	await restarted.recordGenerationSession(value.conversationId, requested.transitionId, session);
+	restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	assert.equal(restarted.generationTransitions()[0]?.transition.phase, "session_persisted");
+	const activated = await restarted.activateGeneration(value.conversationId, requested.transitionId);
+	assert.equal(activated.activeGenerationId, deriveGenerationId(value.conversationId, 2));
+	assert.deepEqual(activated.generations?.map((generation) => generation.piSessionId), [value.piSessionId, session.sessionId]);
+	restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	assert.equal(restarted.generationTransitions()[0]?.transition.phase, "activated", "manifest activation remains recoverable before process replacement");
+	await restarted.completeGenerationTransition(value.conversationId, requested.transitionId);
+	restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	assert.equal(restarted.generationTransitions().length, 0);
+	await assert.rejects(() => restarted.attach(attach(value, "ordinary_adapter"), "historical"), /active generation|manifest/);
 });
 
 test("adapter receipt acknowledgement is idempotent after relay socket delivery", async () => {

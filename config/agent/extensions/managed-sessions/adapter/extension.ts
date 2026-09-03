@@ -50,8 +50,8 @@ import {
 
 const CONTROL_RESULT_ENTRY_TYPE = "pi-managed-session-control-result";
 const CONTROL_EXECUTION_ENTRY_TYPE = "pi-managed-session-control-execution";
-type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[] };
-type StatefulControlName = "model" | "thinking" | "compact" | "stop";
+type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string } };
+type StatefulControlName = "model" | "thinking" | "compact" | "new" | "stop";
 type ControlExecution = { controlId: string; name: StatefulControlName; argument?: string; state: "started" };
 
 function hasExactKeys(value: Record<string, unknown>, required: readonly string[], optional: readonly string[] = []): boolean {
@@ -68,7 +68,7 @@ function isBoundedText(value: unknown, maxLength: number): value is string {
 function parseControlResult(value: unknown): ControlResult {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ManagedAdapterError("Malformed durable control result state");
 	const record = value as Record<string, unknown>;
-	if (!hasExactKeys(record, ["controlId", "status", "message"], ["options"]) ||
+	if (!hasExactKeys(record, ["controlId", "status", "message"], ["options", "generation"]) ||
 		typeof record.controlId !== "string" || !/^control_[a-f0-9]{32}$/.test(record.controlId) ||
 		(record.status !== "ok" && record.status !== "rejected") || !isBoundedText(record.message, 4_096)) {
 		throw new ManagedAdapterError("Malformed durable control result state");
@@ -81,7 +81,18 @@ function parseControlResult(value: unknown): ControlResult {
 		}
 		options = [...candidate] as string[];
 	}
-	return { controlId: record.controlId as string, status: record.status, message: record.message, ...(options ? { options } : {}) };
+	let generation: { model?: string; thinking?: string } | undefined;
+	if (Object.hasOwn(record, "generation")) {
+		const candidate = record.generation;
+		if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate) ||
+			!hasExactKeys(candidate as Record<string, unknown>, [], ["model", "thinking"]) ||
+			(Object.hasOwn(candidate, "model") && !isBoundedText((candidate as Record<string, unknown>).model, 256)) ||
+			(Object.hasOwn(candidate, "thinking") && !isBoundedText((candidate as Record<string, unknown>).thinking, 32))) {
+			throw new ManagedAdapterError("Malformed durable control result state");
+		}
+		generation = candidate as { model?: string; thinking?: string };
+	}
+	return { controlId: record.controlId as string, status: record.status, message: record.message, ...(options ? { options } : {}), ...(generation ? { generation } : {}) };
 }
 
 function parseControlExecution(value: unknown): ControlExecution {
@@ -89,7 +100,7 @@ function parseControlExecution(value: unknown): ControlExecution {
 	const record = value as Record<string, unknown>;
 	if (!hasExactKeys(record, ["controlId", "name", "state"], ["argument"]) ||
 		typeof record.controlId !== "string" || !/^control_[a-f0-9]{32}$/.test(record.controlId) ||
-		!(["model", "thinking", "compact", "stop"] as unknown[]).includes(record.name) || record.state !== "started" ||
+		!(["model", "thinking", "compact", "new", "stop"] as unknown[]).includes(record.name) || record.state !== "started" ||
 		(Object.hasOwn(record, "argument") && !isBoundedText(record.argument, 4_096))) {
 		throw new ManagedAdapterError("Malformed durable control execution state");
 	}
@@ -190,6 +201,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const persistedRecoveryPending = new Set<string>();
 		const expandedRecoveryPending = new Set<string>();
 		let activity: BusyActivity | undefined;
+		let selectedModel: string | undefined;
+		let selectedThinking: string | undefined;
 		const controlResults = new Map<string, ControlResult>();
 		const controlExecutions = new Map<string, ControlExecution>();
 		const recoveredControlExecutions = new Set<string>();
@@ -199,14 +212,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			pi.setActiveTools(active ? [...names, "remote_checkpoint"] : names);
 		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
-		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[]) => {
+		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string }) => {
 			let result = controlResults.get(controlId);
 			if (!result) {
-				result = { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}) };
+				result = { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}), ...(generation ? { generation } : {}) };
 				if (currentContext) appendMarker(pi, currentContext, CONTROL_RESULT_ENTRY_TYPE, result);
 				controlResults.set(controlId, result);
 			}
-			if (client?.connected) await client.controlResult(controlId, result.status, result.message, result.options);
+			if (client?.connected) await client.controlResult(controlId, result.status, result.message, result.options, result.generation);
 		};
 		const beginControlExecution = (ctx: ExtensionContext, controlId: string, name: StatefulControlName, argument?: string): ControlExecution => {
 			const existing = controlExecutions.get(controlId);
@@ -258,7 +271,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			span.revision += 1;
 			await client.updateActivity({
 				activityId: span.activityId, revision: span.revision, outcome: outcome ?? span.requestedOutcome ?? "completed", durationMs: Math.max(0, Date.now() - span.startedAt),
-				...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}), ...(ctx.thinkingLevel ? { thinking: ctx.thinkingLevel } : {}), generation: 1,
+				...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}), ...(ctx.thinkingLevel ? { thinking: ctx.thinkingLevel } : {}), generation: client?.generation ?? 1,
 				...(contextSnapshot ? { context: contextSnapshot } : {}), run: { inputTokens: span.inputTokens, outputTokens: span.outputTokens, modelTurns: span.modelTurns },
 				tools: { total: span.toolTotal, errors: span.toolErrors, counts: [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({ name, count })) }, compactions: span.compactions,
 			}, true);
@@ -594,13 +607,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		async function handleControl(envelope: ManagedSessionEnvelope, ctx: ExtensionContext): Promise<void> {
+			selectedModel ??= ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : undefined;
+			selectedThinking ??= ctx.thinkingLevel;
 			const payload = envelope.payload as { controlId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };
 			const previous = controlResults.get(payload.controlId);
 			if (previous) {
 				if (controlExecutions.get(payload.controlId)?.name === "stop" && recoveredControlExecutions.delete(payload.controlId)) {
 					await controlReply(previous.controlId, previous.status, previous.message, previous.options); ctx.abort(); ctx.shutdown(); return;
 				}
-				return client?.controlResult(previous.controlId, previous.status, previous.message, previous.options);
+				return client?.controlResult(previous.controlId, previous.status, previous.message, previous.options, previous.generation);
 			}
 			const recoveredExecution = controlExecutions.get(payload.controlId);
 			if (recoveredExecution && (recoveredExecution.name !== payload.name || recoveredExecution.argument !== payload.argument)) throw new ManagedAdapterError("Conflicting replay for durable control execution");
@@ -620,6 +635,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				const usage = ctx.getContextUsage();
 				return controlReply(payload.controlId, "ok", [
 					`State: ${ctx.isIdle() ? "idle" : "busy"}`,
+					`Generation: ${client?.generation ?? 1}`,
 					`Model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unavailable"}`,
 					`Thinking: ${ctx.thinkingLevel ?? "off"}`,
 					...(usage && ctx.model?.contextWindow ? [`Context: ${usage.tokens}/${ctx.model.contextWindow} tokens`] : []),
@@ -634,6 +650,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					if (!selected) return controlReply(payload.controlId, "rejected", "That exact model is not authenticated or is outside this session's scope.");
 					beginControlExecution(ctx, payload.controlId, "model", payload.argument);
 					if (!await pi.setModel(selected)) return controlReply(payload.controlId, "rejected", "Pi could not authenticate the selected model.");
+					selectedModel = argument;
 					return controlReply(payload.controlId, "ok", `Model changed to ${argument}.`);
 				}
 				const providers = new Set(models.map((model) => model.provider));
@@ -662,6 +679,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (!levels.includes(argument as typeof levels[number])) return controlReply(payload.controlId, "rejected", `Unsupported thinking level. Available: ${levels.join(", ")}.`);
 				beginControlExecution(ctx, payload.controlId, "thinking", payload.argument);
 				pi.setThinkingLevel(argument as Parameters<typeof pi.setThinkingLevel>[0]);
+				selectedThinking = argument;
 				return controlReply(payload.controlId, "ok", `Thinking changed to ${pi.getThinkingLevel()}.`);
 			}
 			if (payload.name === "compact") {
@@ -673,7 +691,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}, onError: (error) => { void controlReply(payload.controlId, "rejected", `Compaction failed: ${error.message}`); } });
 				return;
 			}
-			if (payload.name === "new") return controlReply(payload.controlId, "rejected", "Context reset requires the generation transition implemented by managed-session generation control; no session was changed.");
+			if (payload.name === "new") {
+				if (role !== "ordinary_adapter") return controlReply(payload.controlId, "rejected", "Fresh session generations are available only in project conversations.");
+				if (payload.argument !== "--confirm") return controlReply(payload.controlId, "rejected", "Context reset requires the exact confirmation `!new --confirm`; no session was changed.");
+				beginControlExecution(ctx, payload.controlId, "new", payload.argument);
+				return controlReply(payload.controlId, "ok", "Fresh session generation authorized; the room and previous Pi history will be preserved.", undefined, {
+					...(selectedModel ? { model: selectedModel } : {}), ...(selectedThinking ? { thinking: selectedThinking } : {}),
+				});
+			}
 			if (payload.name === "stop") {
 				beginControlExecution(ctx, payload.controlId, "stop", payload.argument);
 				recoveredControlExecutions.delete(payload.controlId);
@@ -700,7 +725,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					activeDeliveries.clear(); pendingUserPersistence.length = 0; persistedRecoveryPending.clear();
 				}
 				ctx.abort();
-				if (reason === "stop") ctx.shutdown();
+				if (reason === "stop" || reason === "generation_change") ctx.shutdown();
 				if (reason === "bridge_delete") {
 					appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId: binding.sessionId, reason: "bridge_delete" });
 					const detached = client;
@@ -867,7 +892,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const source = ctx.sessionManager.getLeafId();
 			if (!source) return;
 			const span: BusyActivity = {
-				activityId: deriveActivityId(deriveGenerationId(binding.conversationId, 1), source), revision: -1, startedAt: Date.now(),
+				activityId: deriveActivityId(deriveGenerationId(binding.conversationId, client?.generation ?? 1), source), revision: -1, startedAt: Date.now(),
 				startContext: ctx.getContextUsage()?.tokens ?? undefined, inputTokens: 0, outputTokens: 0, modelTurns: 0, toolTotal: 0, toolErrors: 0, compactions: 0,
 				toolCounts: new Map(), activeTools: new Map(), failedTools: new Set(), work: Promise.resolve(),
 			};

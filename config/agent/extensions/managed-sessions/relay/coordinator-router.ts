@@ -45,7 +45,8 @@ export function parseTypedRemoteControl(body: string): TypedRemoteControl | unde
 	if (!match || !CONTROL_NAMES.has(match[1]!)) return { name: "help" };
 	const name = match[1] as TypedRemoteControl["name"];
 	const argument = match[2]?.trim();
-	if (["help", "status", "new", "stop"].includes(name) && argument) return { name: "help" };
+	if (["help", "status", "stop"].includes(name) && argument) return { name: "help" };
+	if (name === "new" && argument && argument !== "--confirm") return { name: "help" };
 	if (argument && (argument.length > 4_096 || /[\u0000-\u001f\u007f]/.test(argument))) return { name: "help" };
 	return { name, ...(argument ? { argument } : {}) };
 }
@@ -195,6 +196,12 @@ export class CoordinatorRouter {
 	}
 
 	async attachmentReady(conversationId = this.manifest.conversationId): Promise<void> {
+		if (this.registry.hasGenerationBoundary(conversationId)) {
+			for (const control of this.registry.pendingControls(conversationId).filter((item) => item.name === "new" && item.argument === "--confirm")) {
+				this.server.sendToConversation(this.controlEnvelope(conversationId, control));
+			}
+			return;
+		}
 		for (const control of this.registry.pendingControls(conversationId)) this.server.sendToConversation(this.controlEnvelope(conversationId, control));
 		for (const input of this.registry.pendingInputs(conversationId)) {
 			if (input.status !== "accepted" && input.status !== "delivered") continue;
@@ -272,6 +279,18 @@ export class CoordinatorRouter {
 	}
 
 	private async dispatchControl(manifest: ConversationManifest, eventId: string, control: TypedRemoteControl): Promise<void> {
+		if (control.name === "new" && manifest.kind !== "project") {
+			await this.projectNotice(eventId, manifest, "Fresh session generations are available only in project conversations; the coordinator session was not changed.");
+			return;
+		}
+		if (control.name === "new" && control.argument !== "--confirm") {
+			await this.projectNotice(eventId, manifest, "Start a fresh Pi context with `!new --confirm`. The Matrix room and all previous Pi session files will be preserved.");
+			return;
+		}
+		if (this.registry.hasGenerationTransition(manifest.conversationId)) {
+			await this.projectNotice(eventId, manifest, "A fresh session generation is already transitioning; this control was not applied.");
+			return;
+		}
 		const state = this.registry.conversationState(manifest.conversationId);
 		if (state === "dormant" && (control.name === "help" || control.name === "status" || control.name === "stop")) {
 			const message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>."
@@ -323,6 +342,7 @@ export class CoordinatorRouter {
 	}
 
 	private async deliverRecordedInput(manifest: ConversationManifest, input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
+		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
 		const state = this.registry.conversationState(manifest.conversationId);
 		if (this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, input))) {
 			await this.registry.markInputDelivered(manifest.conversationId, input.deliveryId);
@@ -384,6 +404,7 @@ export class CoordinatorRouter {
 	}
 
 	private async ensureWake(manifest: ConversationManifest): Promise<void> {
+		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
 		if (this.registry.conversationState(manifest.conversationId) === "active") return;
 		const pending = this.registry.pendingInputs(manifest.conversationId)
 			.find((input) => input.status === "accepted" || input.status === "delivered" || input.status === "persisted");

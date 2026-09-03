@@ -102,12 +102,16 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		return Response.json({ event_id: "$ok" });
 	}, [coordinator.roomId, coordinator.hostSpace!]);
 	const launcher = join(root, "tmux_project");
-	await writeFile(launcher, `#!/bin/sh\nset -eu\nop="$2"\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nworkspace-resolve) cat >/dev/null; printf '{"rootKey":"projects","workspace":"alpha","relativeCwd":"","workspacePath":"${workspace}","cwd":"${workspace}"}\\n';;\nroot-ensure) cat >/dev/null; printf '{"sessionName":"alpha","workspacePath":"${workspace}"}\\n';;\nwindow-inspect) body=$(cat); conversation=$(printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).conversationId))'); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; body=$(cat); conversation=$(printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).conversationId))'); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"alpha","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"alpha","relativeCwd":"","role":"conversation"}\\n' "$conversation";;\nwindow-terminate) cat >/dev/null; printf '{"terminated":true}\\n';;\nbridge-clear) cat >/dev/null; printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
+	await writeFile(launcher, `#!/bin/sh\nset -eu\nop="$2"\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nworkspace-resolve) cat >/dev/null; printf '{"rootKey":"projects","workspace":"alpha","relativeCwd":"","workspacePath":"${workspace}","cwd":"${workspace}"}\\n';;\nroot-ensure) cat >/dev/null; printf '{"sessionName":"alpha","workspacePath":"${workspace}"}\\n';;\nwindow-inspect) body=$(cat); conversation=$(printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).conversationId))'); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; case "$PI_MANAGED_PROJECT_SESSION_FILE" in *generation-2.jsonl) test "$PI_MANAGED_SESSION_MODEL" = scoped/model; test "$PI_MANAGED_SESSION_THINKING" = high;; esac; body=$(cat); conversation=$(printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>process.stdout.write(JSON.parse(s).conversationId))'); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"alpha","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"alpha","relativeCwd":"","role":"conversation"}\\n' "$conversation";;\nwindow-terminate) cat >/dev/null; printf '{"terminated":true}\\n';;\nbridge-clear) cat >/dev/null; printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") });
 	await server.start(); t.after(async () => server.close());
+	let completionNoticeAttempts = 0;
 	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath,
-		registry, matrix, server, environment: { ...process.env, TEST_LAUNCH_RECORD: record, PI_MATRIX_ACCESS_TOKEN: "must-not-leak" } });
+		registry, matrix, server, environment: { ...process.env, TEST_LAUNCH_RECORD: record, PI_MATRIX_ACCESS_TOKEN: "must-not-leak" },
+		generationRetryMs: 10, projectNotice: async (sourceId) => {
+			if (sourceId.endsWith(":completed") && completionNoticeAttempts++ === 0) throw new Error("injected completion notice outage");
+		} });
 	assert.deepEqual(await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "workspace.list" })), {
 		operation: "workspace.list", workspaces: [{ rootKey: "projects", workspace: "alpha" }],
 	});
@@ -152,6 +156,39 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	assert.equal(delivered.conversationId, conversationId);
 	assert.equal(delivered.payload.body, "first real task", "authorized text routes directly without @host addressing");
 	await router.stop();
+
+	await writeFile(record, "", "utf8");
+	const generationAttaching = attachFromRecord(record, server, registry);
+	const oldManifest = registry.manifestByConversationId(conversationId)!;
+	const oldSessionText = await readFile(sessionFile, "utf8");
+	const generationTransition = lifecycle.requestNewGeneration(oldManifest, `control_${"a".repeat(32)}`,
+		{ model: "scoped/model", thinking: "high" });
+	const thirdSocket = await generationAttaching;
+	await assert.rejects(generationTransition, /completion notice outage/);
+	for (let attempt = 0; attempt < 100 && registry.generationTransitions().length > 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(completionNoticeAttempts, 2, "an attached generation retries a transient completion-notice outage without relay restart");
+	const generated = registry.manifestByConversationId(conversationId)!;
+	assert.equal(generated.roomId, oldManifest.roomId, "generation transition preserves the Matrix room");
+	assert.equal(generated.generations?.length, 2);
+	assert.equal(generated.generations?.[0]?.piSessionId, oldManifest.piSessionId, "the old Pi session remains terminal history");
+	assert.equal(generated.generations?.[1]?.piSessionId, generated.piSessionId);
+	assert.equal(generated.generations?.[1]?.model, "scoped/model");
+	assert.equal(generated.generations?.[1]?.thinking, "high");
+	assert.equal(await readFile(sessionFile, "utf8"), oldSessionText, "generation one is never rewritten");
+	const generationFile = join(sessions, conversationId, "generation-2.jsonl");
+	assert.equal((await readFile(generationFile, "utf8")).trim().split("\n").length, 2, "fresh generation contains only its header and binding boundary");
+	assert.equal(registry.generationTransitions().length, 0);
+	await assert.rejects(() => registry.attach({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "old-generation-reattach",
+		conversationId, role: "ordinary_adapter", type: "attachment.attach", payload: { sessionId: oldManifest.piSessionId,
+			attachmentNonce: "abcdefghijklmnopqrstuvwxyzABCDEF", bindingBoundaryEntryId: oldManifest.bindingBoundaryEntryId } }, "old-generation"), /active generation|manifest/);
+	const firstGenerationPrompt = { deliveryId: deriveDeliveryId(conversationId, "$generation-first"), matrixEventId: "$generation-first", kind: "prompt", body: "first fresh task", status: "accepted" as const };
+	await registry.recordAcceptedInput(conversationId, firstGenerationPrompt);
+	const deliveredFresh = readEnvelope(thirdSocket);
+	assert.equal(server.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "fresh-first", conversationId,
+		role: "relay", type: "input.deliver", payload: { deliveryId: firstGenerationPrompt.deliveryId, matrixEventId: firstGenerationPrompt.matrixEventId,
+			kind: "prompt", body: firstGenerationPrompt.body } }), true);
+	assert.equal((await deliveredFresh).payload.body, "first fresh task", "the next operator text is the new session's first prompt");
+	thirdSocket.destroy();
 
 	const beforeDelete = await readFile(sessionFile, "utf8");
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.delete", targetConversationId: conversationId, confirmed: true }));

@@ -208,7 +208,7 @@ export class ManagedSessionIpcServer {
 						role: "relay",
 						type: "attachment.accepted",
 						inReplyTo: envelope.messageId,
-						payload: { attachmentId: state.attachment.attachmentId, state: "active" },
+						payload: { attachmentId: state.attachment.attachmentId, state: "active", generation: state.attachment.generation },
 					});
 					await this.onAttachment?.(state.attachment);
 					continue;

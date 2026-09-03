@@ -5,6 +5,7 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
+	deriveGenerationId,
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
@@ -105,7 +106,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			onAttachment: async (attachment) => {
 				await activityProjector?.attachmentConnected(attachment.conversationId);
 				if (coordinatorRouter) await coordinatorRouter.attachmentReady(attachment.conversationId);
-				else for (const control of registry.pendingControls(attachment.conversationId)) {
+				else for (const control of registry.pendingControls(attachment.conversationId).filter((item) =>
+					!registry.hasGenerationBoundary(attachment.conversationId) || item.name === "new" && item.argument === "--confirm")) {
 					server!.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-control-${randomUUID()}`,
 						conversationId: attachment.conversationId, role: "relay", type: "control.deliver", payload: {
 							controlId: control.controlId, name: control.name, ...(control.argument ? { argument: control.argument } : {}),
@@ -133,6 +135,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					manifest = await registry.createProjectConversation(existing, payload.attachmentNonce);
 				} else {
 					const roomId = await matrix.createPrivateRoom(`pi · ${payload.concept}`);
+					const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
 					manifest = {
 						schemaVersion: MANAGED_SESSION_STATE_VERSION,
 						kind: "project",
@@ -144,7 +147,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						roomId,
 						placement: payload.placement,
 						bindingBoundaryEntryId: payload.bindingBoundaryEntryId,
-						createdAt: new Date().toISOString(),
+						createdAt, activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: payload.sessionId,
+							bindingBoundaryEntryId: payload.bindingBoundaryEntryId, createdAt }],
 					};
 					try {
 						manifest = await registry.createProjectConversation(manifest, payload.attachmentNonce);
@@ -159,14 +163,24 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			},
 			onEnvelope: async (envelope, attachment) => {
 				if (envelope.type === "control.result") {
-					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[] };
+					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string } };
 					const resultState = registry.controlResultState(attachment.conversationId, payload.controlId);
 					if (resultState === "unknown") throw new RelayRegistryError("not_found", "Pending managed control was not found");
 					if (resultState === "pending") {
 						const manifest = registry.manifestByConversationId(attachment.conversationId);
 						if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation is unavailable");
+						const source = registry.pendingControls(attachment.conversationId).find((control) => control.controlId === payload.controlId);
+						if (payload.generation) {
+							if (!source || source.name !== "new" || source.argument !== "--confirm" || payload.status !== "ok" || payload.options || !hostLifecycle) {
+								throw new RelayRegistryError("invalid_state", "Fresh generation result does not match an authorized confirmed control");
+							}
+							await registry.beginGenerationTransition(attachment.conversationId, payload.controlId, payload.generation);
+							await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
+							setImmediate(() => { void hostLifecycle!.requestNewGeneration(manifest, payload.controlId, payload.generation!).catch((error) =>
+								process.stderr.write(`pi-managed-session-relay: generation transition failed: ${redactManagedValue(error instanceof Error ? error.message : "unknown failure", environment)}\n`)); });
+							return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
+						}
 						if (payload.options?.length) {
-							const source = registry.pendingControls(attachment.conversationId).find((control) => control.controlId === payload.controlId);
 							if (!source || (source.name !== "model" && source.name !== "thinking")) {
 								throw new RelayRegistryError("invalid_state", "Managed control options require a model or thinking scope");
 							}
@@ -250,6 +264,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle = new HostLifecycle({
 				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
 				socketPath: server.socketPath, registry, matrix, server, environment,
+				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
+				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
 			});
 			const identity = coordinator;
 			coordinatorRouter = new CoordinatorRouter(identity.manifest, registry, matrix, server, async (manifest) => {
@@ -272,6 +288,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
 			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile());
 			coordinatorRouter.start();
+			await hostLifecycle.reconcileGenerationTransitions();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
 	} catch (error) {

@@ -399,7 +399,9 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	await send(5, "thinking", "off"); assert.equal(thinking, "off");
 	await send(6, "compact", "focus on controls"); assert.equal(compactFocus, "focus on controls");
 	assert.match(String(relay.frames.at(-1)?.payload.message), /90 -> 40/);
-	await send(7, "new"); assert.match(String(relay.frames.at(-1)?.payload.message), /generation transition/);
+	await send(7, "new"); assert.match(String(relay.frames.at(-1)?.payload.message), /!new --confirm/);
+	await send(11, "new", "--confirm");
+	assert.deepEqual(relay.frames.at(-1)?.payload.generation, { model: "scoped/model-1", thinking: "off" }, "confirmed reset carries only the selected model and thinking metadata");
 	assert.equal(promptCalls, 0, "internal controls never enter model-visible message APIs");
 	relay.disconnect();
 	await new Promise((resolve) => setTimeout(resolve, 30));

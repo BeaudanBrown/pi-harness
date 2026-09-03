@@ -100,6 +100,23 @@ test("relay persists controls before delivery and replays stable identities afte
 	assert.equal(restartedRegistry.controlResultState(manifest.conversationId, control.controlId), "completed", "lost acknowledgements remain idempotent");
 });
 
+test("confirmed generation control gates queued text before old-adapter attachment replay", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const control = { controlId: deriveControlId(manifest.conversationId, "$new-confirm"), matrixEventId: "$new-confirm", name: "new" as const, argument: "--confirm" };
+	await registry.recordPendingControl(manifest.conversationId, control);
+	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId: deriveDeliveryId(manifest.conversationId, "$after-new"), matrixEventId: "$after-new",
+		kind: "prompt", body: "must be first in the fresh generation", status: "accepted" });
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc-generation-gate") });
+	await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const router = new CoordinatorRouter(manifest, registry, new ManagedMatrixClient(config, async () => Response.json({ event_id: "$ok" }), [manifest.roomId]), server, async () => undefined);
+	const first = readMany(socket, 1); await router.attachmentReady(manifest.conversationId);
+	assert.equal((await first)[0]?.payload.controlId, control.controlId);
+	let unexpected = false; const observe = () => { unexpected = true; }; socket.once("data", observe);
+	await new Promise((resolve) => setTimeout(resolve, 50)); socket.off("data", observe);
+	assert.equal(unexpected, false, "queued text is withheld until the fresh generation activates");
+});
+
 test("control poll intent recovers an accepted PUT and a vote arriving before event-ID persistence", async () => {
 	const { root, registry, manifest } = await fixture();
 	const source = { controlId: deriveControlId(manifest.conversationId, "$uncertain-model"), matrixEventId: "$uncertain-model", name: "model" as const };
@@ -200,6 +217,9 @@ test("typed control parsing is strict, bounded, and isolates malformed commands 
 	assert.deepEqual(parseTypedRemoteControl("!compact focus on API state"), { name: "compact", argument: "focus on API state" });
 	assert.deepEqual(parseTypedRemoteControl("!unknown secret prompt"), { name: "help" });
 	assert.deepEqual(parseTypedRemoteControl("!status extra"), { name: "help" });
+	assert.deepEqual(parseTypedRemoteControl("!new"), { name: "new" });
+	assert.deepEqual(parseTypedRemoteControl("!new --confirm"), { name: "new", argument: "--confirm" });
+	assert.deepEqual(parseTypedRemoteControl("!new yes"), { name: "help" });
 	assert.deepEqual(parseTypedRemoteControl(`!model ${"x".repeat(4_097)}`), { name: "help" });
 	assert.equal(parseTypedRemoteControl("ordinary task"), undefined);
 	assert.equal(parseTypedRemoteControl("!abort"), undefined);

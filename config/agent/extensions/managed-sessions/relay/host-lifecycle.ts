@@ -5,6 +5,7 @@ import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
+	deriveGenerationId,
 	deriveTranscriptEntryId,
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
@@ -59,7 +60,7 @@ export function parseProjectWindow(result: Record<string, unknown>, manifest: Co
 	};
 }
 
-async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string): Promise<{ sessionId: string; boundaryEntryId: string }> {
+async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1): Promise<{ sessionId: string; boundaryEntryId: string }> {
 	const directory = await ensurePrivateDirectory(dirname(path));
 	try {
 		const info = await lstat(path);
@@ -73,7 +74,8 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 		const boundary = boundaries.length === 1 ? boundaries[0] : undefined;
 		const data = boundary?.data as Record<string, unknown> | undefined;
 		if (header?.type !== "session" || typeof header.id !== "string" || header.cwd !== cwd || typeof boundary?.id !== "string" ||
-			data?.version !== MANAGED_SESSION_STATE_VERSION || data.creationKey !== creationKey || data.concept !== concept || data.sessionId !== header.id) {
+			data?.version !== MANAGED_SESSION_STATE_VERSION || data.creationKey !== creationKey || data.concept !== concept || data.sessionId !== header.id ||
+			(ordinal > 1 && (data.ordinal !== ordinal || data.generationId !== deriveGenerationId(conversationId, ordinal)))) {
 			throw new RelayRegistryError("invalid_state", "Existing project Pi session does not match its durable binding identity");
 		}
 		if ((info.mode & 0o077) !== 0) await chmod(path, 0o600);
@@ -81,13 +83,13 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 	} catch (error) {
 		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
 	}
-	const sessionId = `managed-${conversationId.slice(5)}`;
-	const boundaryKey = `managed-boundary-${conversationId.slice(5)}`;
+	const sessionId = ordinal === 1 ? `managed-${conversationId.slice(5)}` : `managed-${conversationId.slice(5)}-g${ordinal}`;
+	const boundaryKey = ordinal === 1 ? `managed-boundary-${conversationId.slice(5)}` : `managed-boundary-${conversationId.slice(5)}-g${ordinal}`;
 	const now = new Date().toISOString();
 	const entries = [
 		{ type: "session", version: 3, id: sessionId, timestamp: now, cwd },
 		{ type: "custom", id: boundaryKey, parentId: null, timestamp: now, customType: "managed-session.binding-boundary",
-			data: { version: MANAGED_SESSION_STATE_VERSION, creationKey, concept, sessionId } },
+			data: { version: MANAGED_SESSION_STATE_VERSION, creationKey, concept, sessionId, ...(ordinal > 1 ? { ordinal, generationId: deriveGenerationId(conversationId, ordinal) } : {}) } },
 	];
 	const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
 	const file = await open(temporary, "wx", 0o600);
@@ -109,6 +111,7 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 
 export class HostLifecycle {
 	private readonly launches = new Map<string, Promise<void>>();
+	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
 
 	constructor(private readonly options: {
 		hostId: string;
@@ -119,6 +122,9 @@ export class HostLifecycle {
 		matrix: ManagedMatrixClient;
 		server: ManagedSessionIpcServer;
 		environment?: NodeJS.ProcessEnv;
+		projectNotice?: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void>;
+		generationReady?: (conversationId: string) => Promise<void>;
+		generationRetryMs?: number;
 	}) {
 		if (!isAbsolute(options.launcher)) throw new Error("Managed lifecycle launcher must be absolute");
 	}
@@ -144,6 +150,71 @@ export class HostLifecycle {
 	async wake(manifest: ConversationManifest): Promise<void> {
 		if (manifest.kind === "coordinator") throw new RelayRegistryError("permission_denied", "Coordinator wake uses its dedicated launcher");
 		await this.launchProject(manifest);
+	}
+
+	async requestNewGeneration(manifest: ConversationManifest, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<void> {
+		const transition = await this.options.registry.beginGenerationTransition(manifest.conversationId, sourceControlId, metadata);
+		try { await this.runGenerationTransition(manifest.conversationId, transition.transitionId, false); }
+		catch (error) { this.scheduleGenerationRetry(manifest.conversationId, transition.transitionId); throw error; }
+	}
+
+	async reconcileGenerationTransitions(): Promise<void> {
+		for (const item of this.options.registry.generationTransitions()) {
+			try { await this.runGenerationTransition(item.conversationId, item.transition.transitionId, true); }
+			catch { this.scheduleGenerationRetry(item.conversationId, item.transition.transitionId); }
+		}
+	}
+
+	private scheduleGenerationRetry(conversationId: string, transitionId: string): void {
+		if (this.generationRetries.has(conversationId)) return;
+		const timer = setTimeout(() => {
+			this.generationRetries.delete(conversationId);
+			void this.runGenerationTransition(conversationId, transitionId, true).catch(() => this.scheduleGenerationRetry(conversationId, transitionId));
+		}, this.options.generationRetryMs ?? 5_000);
+		timer.unref(); this.generationRetries.set(conversationId, timer);
+	}
+
+	private async runGenerationTransition(conversationId: string, transitionId: string, recovering: boolean): Promise<void> {
+		let manifest = this.projectManifest(conversationId);
+		let transition = this.options.registry.generationTransitions().find((item) => item.conversationId === conversationId)?.transition;
+		if (!transition || transition.transitionId !== transitionId) return;
+		try {
+			await this.options.projectNotice?.(`${transitionId}:${recovering ? "recovered" : "requested"}`, manifest, recovering
+				? `Recovering fresh Pi session generation ${transition.ordinal}; the Matrix room and prior sessions remain preserved.`
+				: `Fresh Pi session generation ${transition.ordinal} requested; preserving this room and all prior Pi sessions.`);
+			const resolved = await this.invoke("workspace-resolve", manifest.placement!);
+			if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical cwd");
+			const root = await this.invoke("root-ensure", manifest.placement!);
+			if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
+			const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, `generation-${transition.ordinal}.jsonl`);
+			if (manifest.activeGenerationId !== transition.toGenerationId || !this.options.registry.isActiveGenerationAttached(conversationId)) {
+				const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, manifest.creationKey, manifest.concept, transition.ordinal);
+				await this.options.registry.recordGenerationSession(conversationId, transitionId, session);
+				manifest = await this.options.registry.activateGeneration(conversationId, transitionId);
+				const persistedWindow = this.options.registry.managedWindow(conversationId);
+				const inspectedWindow = this.parseWindowInspection(await this.invoke("window-inspect", { conversationId }), manifest, root.sessionName);
+				if (persistedWindow && inspectedWindow && (persistedWindow.windowId !== inspectedWindow.windowId || persistedWindow.paneId !== inspectedWindow.paneId)) {
+					throw new RelayRegistryError("invalid_state", "Generation transition window identity changed before termination");
+				}
+				this.options.server.sendToConversation({ protocolVersion: "1.0.0", messageId: `relay-generation-${randomBytes(8).toString("hex")}`,
+					conversationId, role: "relay", type: "termination.request", payload: { reason: "generation_change" } });
+				if (inspectedWindow) await this.invoke("window-terminate", { conversationId, windowId: inspectedWindow.windowId, paneId: inspectedWindow.paneId });
+				await this.options.registry.setManagedWindow(conversationId, null);
+				await this.launchProject(manifest, randomBytes(32).toString("base64url"), sessionFile);
+			}
+			await this.options.registry.markGenerationAttached(conversationId, transitionId);
+			transition = this.options.registry.generationTransitions().find((item) => item.conversationId === conversationId)?.transition;
+			await this.options.projectNotice?.(`${transitionId}:completed`, manifest,
+				`Fresh Pi session generation ${transition?.ordinal ?? this.options.registry.activeGeneration(manifest).ordinal} is active. Your next message will be its first prompt.`);
+			await this.options.registry.completeGenerationTransition(conversationId, transitionId);
+			await this.options.generationReady?.(conversationId);
+		} catch (error) {
+			await this.options.registry.failGenerationTransition(conversationId, transitionId, error);
+			manifest = this.projectManifest(conversationId);
+			await this.options.projectNotice?.(`${transitionId}:failed`, manifest,
+				"Fresh Pi session generation failed to activate. The room and prior Pi session files remain preserved; recovery will retry deterministically.").catch(() => undefined);
+			throw error;
+		}
 	}
 
 	private async workspaceList(): Promise<Array<{ rootKey: string; workspace: string }>> {
@@ -191,10 +262,12 @@ export class HostLifecycle {
 			roomId = await this.options.matrix.createPrivateRoom(`pi · ${request.concept}`);
 			await this.options.matrix.addSpaceChild(projectSpace, roomId);
 			const nonce = randomBytes(32).toString("base64url");
+			const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
 			const manifest: ConversationManifest = {
 				schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", conversationId, ownerHostId: this.options.hostId,
 				creationKey: request.creationKey, concept: request.concept, piSessionId: session.sessionId, roomId,
-				placement: request.placement, projectSpace, bindingBoundaryEntryId: session.boundaryEntryId, createdAt: new Date().toISOString(),
+				placement: request.placement, projectSpace, bindingBoundaryEntryId: session.boundaryEntryId, createdAt,
+				activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: session.sessionId, bindingBoundaryEntryId: session.boundaryEntryId, createdAt }],
 			};
 			await this.options.registry.createProjectConversation(manifest, nonce);
 			registered = true;
@@ -265,12 +338,14 @@ export class HostLifecycle {
 	private async launchProjectOnce(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
 		if (manifest.kind !== "project" || !manifest.placement) throw new RelayRegistryError("invalid_state", "Project launch requires project placement");
 		const nonce = existingNonce ?? randomBytes(32).toString("base64url");
-		const sessionFile = existingSessionFile ?? join(resolve(this.options.projectSessionDirectory), manifest.conversationId, "session.jsonl");
+		const activeGeneration = this.options.registry.activeGeneration(manifest);
+		const sessionFile = existingSessionFile ?? join(resolve(this.options.projectSessionDirectory), manifest.conversationId,
+			activeGeneration.ordinal === 1 ? "session.jsonl" : `generation-${activeGeneration.ordinal}.jsonl`);
 		const resolved = await this.invoke("workspace-resolve", manifest.placement);
 		if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical cwd");
 		const root = await this.invoke("root-ensure", manifest.placement);
 		if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
-		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept);
+		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal);
 		if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {
 			throw new RelayRegistryError("invalid_state", "Project Pi session identity conflicts with the conversation manifest");
 		}
@@ -287,6 +362,8 @@ export class HostLifecycle {
 					PI_MANAGED_SESSION_CONVERSATION_ID: manifest.conversationId, PI_MANAGED_SESSION_CONCEPT: manifest.concept,
 					PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: manifest.bindingBoundaryEntryId,
 					PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
+					...(activeGeneration.model ? { PI_MANAGED_SESSION_MODEL: activeGeneration.model } : {}),
+					...(activeGeneration.thinking ? { PI_MANAGED_SESSION_THINKING: activeGeneration.thinking } : {}),
 				});
 				window = parseProjectWindow(result, manifest);
 			}
