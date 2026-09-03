@@ -26,7 +26,6 @@ import {
 	selectAloopLeaf,
 	validateAloopHandoffSpoolRecord,
 	validateSuccessfulHandoffEvidence,
-	type AloopAcceptedRecoveryRecord,
 	type AloopAttemptRecord,
 	type AloopRunBudget,
 	type ClosureEvidence,
@@ -132,27 +131,6 @@ function registeredModel(ctx: ExtensionContext, reference: string): boolean {
 	return model !== undefined && ctx.modelRegistry.hasConfiguredAuth(model);
 }
 
-async function scanAcceptedRecoveryRecords(cwd: string): Promise<Map<string, AloopAcceptedRecoveryRecord>> {
-	const records = new Map<string, AloopAcceptedRecoveryRecord>();
-	const root = path.resolve(cwd, ".pi/tmp/aloop/finalizations");
-	let names: string[];
-	try { names = (await readdir(root)).filter((name) => /^[a-f0-9]{24}\.json$/.test(name)).sort(); }
-	catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return records; throw error; }
-	for (const name of names) {
-		try {
-			const recordPath = path.join(root, name);
-			const status = await lstat(recordPath);
-			if (!status.isFile() || status.isSymbolicLink() || status.size > 20_000) continue;
-			const value = JSON.parse(await readFile(recordPath, "utf8"));
-			if (value?.version !== 1 || value?.attemptKey !== name.slice(0, -5) || !Number.isInteger(value?.issue)
-				|| typeof value?.head !== "string" || !/^[0-9a-f]{7,64}$/i.test(value.head)
-				|| typeof value?.commentSha256 !== "string" || !/^[a-f0-9]{64}$/.test(value.commentSha256)) continue;
-			records.set(value.attemptKey, { issue: value.issue, head: value.head, commentSha256: value.commentSha256 });
-		} catch { /* Malformed recovery records never grant closure authority. */ }
-	}
-	return records;
-}
-
 export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRecord[]> {
 	const root = path.resolve(cwd, ".pi/tmp/aloop");
 	let rootStatus;
@@ -246,7 +224,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	let activeEpic: number | null = null;
 	let pendingHandoffs: PendingHandoff[] = [];
 	const issueBaseCommits = new Map<number, string>();
-	const acceptedRecoveryRecords = new Map<string, AloopAcceptedRecoveryRecord>();
 	const attemptReviews = new Map<number, { base: string; head: string; available: boolean; details?: unknown; error?: string }>();
 	let workerRunning = false;
 	let runBudget: AloopRunBudget | null = null;
@@ -267,7 +244,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		activeEpic = null;
 		pendingHandoffs = [];
 		issueBaseCommits.clear();
-		acceptedRecoveryRecords.clear();
 		attemptReviews.clear();
 		workerRunning = false;
 		runBudget = null;
@@ -284,7 +260,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		activeEpic = epic;
 		pendingHandoffs = recovered;
 		issueBaseCommits.clear();
-		acceptedRecoveryRecords.clear();
 		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
 		deadlineTimer = setTimeout(() => {
 			if (!runBudget || runBudget.settled) return;
@@ -419,12 +394,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		} catch { return false; }
 	}
 
-	async function recoveryAuthorized(cwd: string, issue: number, attemptKey: string): Promise<boolean> {
-		try {
-			const record = JSON.parse(await readFile(path.resolve(cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), "utf8"));
-			return record?.version === 1 && record?.issue === issue && record?.attemptKey === attemptKey
-				&& record?.approved === true && record?.approvedVia === "aloop-authorize-recovery command" && typeof record?.approvedAt === "string";
-		} catch { return false; }
+	function recoveryAuthorized(issue: { recentHandoffs: Array<{ body: string }> }, attemptKey: string): boolean {
+		return issue.recentHandoffs.some((comment) => comment.body.includes(`<!-- pi-aloop-recovery:${attemptKey}:authorized -->`));
 	}
 
 	function checkpointState(issue: { recentHandoffs: Array<{ body: string }> }): { open: string[]; resolved: string[] } {
@@ -521,7 +492,6 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						}
 					} catch { /* Legacy attempts have no issue-context snapshot. */ }
 				}
-				for (const [attemptKey, record] of await scanAcceptedRecoveryRecords(ctx.cwd)) acceptedRecoveryRecords.set(attemptKey, record);
 				const outstanding = findOutstandingAttempts(context, branchRecords);
 				pendingHandoffs = outstanding;
 				pi.setSessionName(`aloop-${epic}`);
@@ -579,8 +549,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const context = await currentContext(ctx.cwd, ctx.signal);
 			const child = context.issues.find((candidate) => candidate.number === issue);
 			const accepted = child?.recentHandoffs.map((comment) => parseAloopHandoffV3(comment.body)).find((handoff) => handoff?.issue === issue && handoff.attemptKey === attemptKey && handoff.outcome === "accepted");
-			if (!accepted || child?.state === "closed") throw new Error("No matching open accepted handoff requires recovery authorization.");
-			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/recovery-approvals", `${attemptKey}.json`), { version: 1, issue, attemptKey, approved: true, approvedAt: new Date().toISOString(), approvedVia: "aloop-authorize-recovery command" });
+			if (!child || !accepted || child.state === "closed") throw new Error("No matching open accepted handoff requires recovery authorization.");
+			const body = `Aloop human recovery authorization recorded for accepted attempt ${attemptKey}.\n\n<!-- pi-aloop-recovery:${attemptKey}:authorized -->`;
+			await dependencies.publishComment(ctx.cwd, issue, body, false, { signal: ctx.signal });
+			await dependencies.publishComment(ctx.cwd, issue, body, true, { signal: ctx.signal });
+			child.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
 			if (ctx.hasUI) ctx.ui.notify(`Authorized closure recovery for #${issue} attempt ${attemptKey}.`, "info");
 		},
 	});
@@ -619,8 +592,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const context = await currentContext(ctx.cwd, signal, params.refresh === true);
 			refreshPending(context);
 			const acceptedOpen = acceptedOpenAloopIssues(context);
-			const closureRecoveries = acceptedOpenAloopIssues(context, acceptedRecoveryRecords);
-			const unverifiedAccepted = acceptedOpen.filter((number) => !closureRecoveries.includes(number));
+			const closureRecoveries = acceptedOpen;
+			const unverifiedAccepted: number[] = [];
 			const frontier = cachedFrontier(context).filter((number) => !acceptedOpen.includes(number));
 			const details = { epic: context.epic, issues: context.issues, frontier, closureRecoveries, unverifiedAccepted, pendingAttempts: pendingHandoffs, budget: runBudget };
 			return { content: [{ type: "text", text: `Epic #${context.epic.number}; frontier ${frontier.map((number) => `#${number}`).join(", ") || "none"}; accepted awaiting closure ${closureRecoveries.map((number) => `#${number}`).join(", ") || "none"}; accepted requiring human recovery ${unverifiedAccepted.map((number) => `#${number}`).join(", ") || "none"}; pending ${pendingHandoffs.map((item) => `#${item.issue}`).join(", ") || "none"}.` }], details };
@@ -649,11 +622,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				refreshPending(context);
 				const acceptedOpen = acceptedOpenAloopIssues(context);
 				if (acceptedOpen.length > 0) {
-					const recoverable = new Set(acceptedOpenAloopIssues(context, acceptedRecoveryRecords));
-					const action = acceptedOpen.every((number) => recoverable.has(number))
-						? "Recover them with aloop_finish_attempt before launching another worker."
-						: "At least one handoff lacks matching local attempt provenance; use aloop_checkpoint for human recovery before finalization.";
-					throw new Error(`Accepted handoffs await child closure for ${acceptedOpen.map((number) => `#${number}`).join(", ")}. ${action}`);
+					throw new Error(`Accepted handoffs await child closure for ${acceptedOpen.map((number) => `#${number}`).join(", ")}. Recover them with aloop_finish_attempt before launching another worker.`);
 				}
 				if (pendingHandoffs.length > 0) {
 					throw new Error(`Outstanding attempts have no durable structured handoff comments: ${pendingHandoffs.map((pending) => `#${pending.issue} (${pending.artifactDirectory})`).join(", ")}. Record them before another worker.`);
@@ -832,12 +801,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (settled) {
 					if (settled.outcome === "accepted" && issue.state !== "closed") {
 						const settledComment = [...issue.recentHandoffs].reverse().find((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === settled.attemptKey);
-						const recovery = acceptedRecoveryRecords.get(settled.attemptKey);
-						const exactRecovery = settledComment !== undefined && recovery?.issue === issue.number
-							&& recovery.head === settled.commitRange.split("..").at(-1)
-							&& recovery.commentSha256 === createHash("sha256").update(settledComment.body).digest("hex");
-						if (!exactRecovery && !(await recoveryAuthorized(ctx.cwd, params.issue, settled.attemptKey))) {
-							throw new Error(`Accepted handoff lacks matching local attempt provenance; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
+						if (!settledComment && !recoveryAuthorized(issue, settled.attemptKey)) {
+							throw new Error(`Accepted handoff lacks durable GitHub evidence; human authorization is required: /aloop-authorize-recovery ${params.issue} ${settled.attemptKey}`);
 						}
 						const expectedHead = settled.commitRange.split("..").at(-1);
 						const [head, status] = await Promise.all([
@@ -848,7 +813,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
 						issue.state = "closed";
 					}
-					return { content: [{ type: "text", text: `Attempt #${params.issue} was already settled as ${settled.outcome}.` }], details: { settled: true, idempotent: true, handoff: settled, frontier: cachedFrontier(context) } };
+					return { content: [{ type: "text", text: `Attempt #${params.issue} was already settled as ${settled.outcome}.` }], details: { settled: true, closed: settled.outcome === "accepted", idempotent: true, handoff: settled, frontier: cachedFrontier(context) } };
 				}
 				throw new Error("No unsettled full attempt exists for this issue.");
 			}
@@ -884,13 +849,14 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				}
 			}
 			const attemptKey = createHash("sha256").update(`${params.issue}:${pending.artifactDirectory}`).digest("hex").slice(0, 24);
-			const handoff = { version: 3 as const, issue: params.issue, issueBaseCommit: base, commitRange: `${base}..${head}`, outcome: params.outcome, summary: params.summary, outstandingFindings: params.outstanding_findings, decisions: params.decisions, verification, nextAction: params.next_action, attemptKey, timestamp: new Date().toISOString() };
-			const body = formatAloopHandoffV3(handoff);
-			const recoveryRecord: AloopAcceptedRecoveryRecord = { issue: params.issue, head, commentSha256: createHash("sha256").update(body).digest("hex") };
-			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/finalizations", `${attemptKey}.json`), { version: 1, attemptKey, ...recoveryRecord });
-			acceptedRecoveryRecords.set(attemptKey, recoveryRecord);
-			const alreadyPublished = issue.recentHandoffs.some((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === attemptKey);
-			if (!alreadyPublished) {
+			const publishedComment = [...issue.recentHandoffs].reverse().find((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === attemptKey);
+			const publishedHandoff = publishedComment && parseAloopHandoffV3(publishedComment.body);
+			if (publishedHandoff && (publishedHandoff.issue !== params.issue || publishedHandoff.commitRange !== `${base}..${head}` || publishedHandoff.outcome !== params.outcome)) {
+				throw new Error("Published handoff attempt key conflicts with the current finalization state.");
+			}
+			const handoff = publishedHandoff ?? { version: 3 as const, issue: params.issue, issueBaseCommit: base, commitRange: `${base}..${head}`, outcome: params.outcome, summary: params.summary, outstandingFindings: params.outstanding_findings, decisions: params.decisions, verification, nextAction: params.next_action, attemptKey, timestamp: new Date().toISOString() };
+			const body = publishedComment?.body ?? formatAloopHandoffV3(handoff);
+			if (!publishedComment) {
 				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
 				try {
 					await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
