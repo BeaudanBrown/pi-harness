@@ -140,9 +140,11 @@ publication and closure update that snapshot in memory.
 
 `aloop_epic_completion` is two phase. `prepare` refreshes the graph, requires no
 open descendants or unsettled attempts, runs canonical verification plus any
-epic-frequency integration, and validates supplied independent descendant-review
-evidence from a fresh cumulative Standards/Spec review and evidence for every epic acceptance criterion before terminating at
-a human approval boundary. The durable preparation record retains that final
+epic-frequency integration, and validates that a fresh cumulative Standards/Spec
+review was obtained together with supplied evidence for every descendant and
+epic acceptance criterion before terminating at a human approval boundary.
+Review findings remain evidence for supervisor and operator judgment, not a
+machine-parsed prose gate. The durable preparation record retains that final
 evidence snapshot. The operator records approval with
 `/aloop-approve-epic <prepared-head>`; `apply` closes the parent only when that
 durable command attestation matches the unchanged prepared `HEAD`. Human
@@ -185,8 +187,9 @@ child from the worker frontier and requires `aloop_finish_attempt` to recover th
 closure before any new worker starts. Automatic recovery requires the marker to
 match a retained branch-local finalization record binding the issue, reviewed HEAD,
 and exact comment digest; a comment without that provenance
-stops at a human checkpoint rather than treating arbitrary issue text as closure
-authority. Do not manufacture acceptance from a worker summary alone.
+stops at a recovery-specific human checkpoint bound to the accepted attempt,
+rather than allowing an unrelated decision or arbitrary issue text to become
+closure authority. Do not manufacture acceptance from a worker summary alone.
 
 Common recovery cases:
 

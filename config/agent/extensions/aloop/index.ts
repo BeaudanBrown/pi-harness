@@ -814,11 +814,12 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 							&& recovery.commentSha256 === createHash("sha256").update(settledComment.body).digest("hex");
 						if (!exactRecovery) {
 							const checkpoints = checkpointState(issue);
-							let humanAttested = false;
-							for (const marker of checkpoints.open) {
-								if (checkpoints.resolved.includes(marker) && await decisionAttested(ctx.cwd, marker)) humanAttested = true;
-							}
-							if (!humanAttested) throw new Error("Accepted handoff lacks matching local attempt provenance; a resolved human checkpoint is required before closure recovery.");
+							const recoveryDecision = `Authorize closure recovery for accepted aloop attempt ${settled.attemptKey} without matching local provenance.`;
+							const recoveryMarker = createHash("sha256").update(`${params.issue}:${recoveryDecision}`).digest("hex").slice(0, 20);
+							const humanAttested = checkpoints.open.includes(recoveryMarker)
+								&& checkpoints.resolved.includes(recoveryMarker)
+								&& await decisionAttested(ctx.cwd, recoveryMarker);
+							if (!humanAttested) throw new Error(`Accepted handoff lacks matching local attempt provenance; resolve a human checkpoint with this exact decision before closure recovery: ${recoveryDecision}`);
 						}
 						const expectedHead = settled.commitRange.split("..").at(-1);
 						const [head, status] = await Promise.all([
