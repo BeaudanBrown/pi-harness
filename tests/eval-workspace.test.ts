@@ -190,7 +190,7 @@ test("generated workspace trees cannot alias their hidden oracle", async () => {
 	const declaredHash = await hashPackReference(previewRoot, "workspace");
 	await mkdir(path.join(root, "generators"), { recursive: true });
 	const generatorPath = path.join(root, "generators", "alias-oracle.mjs");
-	await writeFile(generatorPath, `#!/usr/bin/env node
+	await writeFile(generatorPath, `#!${process.execPath}
 import { mkdir, symlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 const out = process.env.PI_EVAL_OUTPUT_ROOT;
@@ -220,7 +220,7 @@ test("generator failure retains stdout, stderr, and partial output evidence", as
 	const { root, runsRoot } = await syntheticPackCopy();
 	await mkdir(path.join(root, "generators"), { recursive: true });
 	const generatorPath = path.join(root, "generators", "fail.mjs");
-	await writeFile(generatorPath, `#!/usr/bin/env node
+	await writeFile(generatorPath, `#!${process.execPath}
 import { mkdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 await mkdir(process.env.PI_EVAL_OUTPUT_ROOT, { recursive: true });
@@ -287,7 +287,7 @@ test("a deterministic generator reproduces workspace and hidden oracle hashes", 
 	await writeFile(externalPath, "synthetic but undeclared external content\n");
 	await mkdir(path.join(root, "generators"), { recursive: true });
 	const generatorPath = path.join(root, "generators", "fabricate.mjs");
-	await writeFile(generatorPath, `#!/usr/bin/env node
+	await writeFile(generatorPath, `#!${process.execPath}
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 const out = process.env.PI_EVAL_OUTPUT_ROOT;

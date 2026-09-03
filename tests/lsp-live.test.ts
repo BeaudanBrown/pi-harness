@@ -4,7 +4,7 @@ import { promisify } from "node:util";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
 interface JsonRpcMessage {
@@ -55,7 +55,25 @@ async function compileExtensionModule(tempRoot: string, entryPoint: string): Pro
 		if (entry === ".package-lock.json") continue;
 		await symlink(join(extensionRoot, "node_modules", entry), join(nodeModules, entry)).catch(() => undefined);
 	}
-	await symlink(join(repoRoot, ".pi-types/node_modules/@earendil-works"), join(nodeModules, "@earendil-works")).catch(() => undefined);
+	const sdkScope = join(repoRoot, ".pi-types/node_modules/@earendil-works");
+	const compiledScope = join(nodeModules, "@earendil-works");
+	await mkdir(compiledScope, { recursive: true });
+	for (const entry of await readdir(sdkScope)) {
+		if (["pi-coding-agent", "pi-tui"].includes(entry)) continue;
+		await symlink(join(sdkScope, entry), join(compiledScope, entry)).catch(() => undefined);
+	}
+	const codingAgentShim = join(compiledScope, "pi-coding-agent");
+	await mkdir(codingAgentShim, { recursive: true });
+	await writeFile(join(codingAgentShim, "package.json"), JSON.stringify({ type: "module", exports: "./index.js" }));
+	await writeFile(join(codingAgentShim, "index.js"), `
+export const DEFAULT_MAX_LINES = 2000;
+export const DEFAULT_MAX_BYTES = 51200;
+export function truncateHead(text) { return { content: text, truncated: false }; }
+`);
+	const tuiShim = join(compiledScope, "pi-tui");
+	await mkdir(tuiShim, { recursive: true });
+	await writeFile(join(tuiShim, "package.json"), JSON.stringify({ type: "module", exports: "./index.js" }));
+	await writeFile(join(tuiShim, "index.js"), "export class Text {}\n");
 	await symlink(join(repoRoot, ".pi-types/node_modules/@types"), join(nodeModules, "@types")).catch(() => undefined);
 	return join(outDir, entryPoint.replace(/\.ts$/, ".js"));
 }
@@ -204,7 +222,7 @@ test("Haskell files use the project-local HLS wrapper by default", async () => {
 	assert.match(managerSource, /haskell: \{ command: "haskell-language-server-wrapper", args: \["--lsp"\] \}/);
 });
 
-test("Typebox-backed tool modules load from the packaged dependency closure", async () => {
+test("Typebox-backed tool modules load against the packaged extension dependencies", async () => {
 	await withTempDir(async (dir) => {
 		const symbolsModule = await compileExtensionModule(dir, "tools/symbols.ts");
 		const imported = await import(`file://${symbolsModule}`) as { createSymbolsTool?: unknown };

@@ -33,7 +33,7 @@ async function fixture() {
 	await writeFile(path.join(lockedRoot, "extensions", "index.ts"), "export const locked = 'synthetic';\n");
 	await writeFile(path.join(lockedRoot, "skills", "SKILL.md"), "# Synthetic locked skill\n");
 	const launcherPath = path.join(root, "candidate-launcher");
-	await writeFile(launcherPath, `#!/bin/sh\nPI_R_RESOURCE_ROOT=${JSON.stringify(candidateRoot)}\nPI_R_EXTENSION=${JSON.stringify(extensionPath)}\nPI_R_SKILL=${JSON.stringify(skillPath)}\nprintf '{"launcherId":"pi-r-local","resourceRoot":"%s","extensionPath":"%s","skillPath":"%s"}\\n' "$PI_R_RESOURCE_ROOT" "$PI_R_EXTENSION" "$PI_R_SKILL" > "$PI_EVAL_ATTESTATION_PATH"\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+	await writeFile(launcherPath, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nPI_R_RESOURCE_ROOT=${JSON.stringify(candidateRoot)}\nPI_R_EXTENSION=${JSON.stringify(extensionPath)}\nPI_R_SKILL=${JSON.stringify(skillPath)}\nprintf '{"launcherId":"pi-r-local","resourceRoot":"%s","extensionPath":"%s","skillPath":"%s"}\\n' "$PI_R_RESOURCE_ROOT" "$PI_R_EXTENSION" "$PI_R_SKILL" > "$PI_EVAL_ATTESTATION_PATH"\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
 	await chmod(launcherPath, 0o755);
 	const identityPath = path.join(root, "identity.json");
 	await writeFile(identityPath, `${JSON.stringify({

@@ -41,7 +41,7 @@ async function fakeLiveRuntime() {
 	await writeFile(extensionPath, "export const synthetic = true;\n");
 	await writeFile(skillPath, "# Synthetic skill\n");
 	const launcherPath = path.join(runtimeRoot, "pi-r-local");
-	await writeFile(launcherPath, `#!/bin/sh\nprintf '{"launcherId":"pi-r-local","resourceRoot":"%s","extensionPath":"%s","skillPath":"%s"}\\n' ${JSON.stringify(resourceRoot)} ${JSON.stringify(extensionPath)} ${JSON.stringify(skillPath)} > "$PI_EVAL_ATTESTATION_PATH"\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
+	await writeFile(launcherPath, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nprintf '{"launcherId":"pi-r-local","resourceRoot":"%s","extensionPath":"%s","skillPath":"%s"}\\n' ${JSON.stringify(resourceRoot)} ${JSON.stringify(extensionPath)} ${JSON.stringify(skillPath)} > "$PI_EVAL_ATTESTATION_PATH"\nexec ${JSON.stringify(process.execPath)} "$@"\n`);
 	await chmod(launcherPath, 0o755);
 	const identityManifestPath = path.join(runtimeRoot, "launcher-identity.json");
 	await writeFile(identityManifestPath, JSON.stringify({

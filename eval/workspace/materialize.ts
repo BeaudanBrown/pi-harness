@@ -377,6 +377,10 @@ function trustedBubblewrapExecutable(): string {
 	throw new Error("A trusted Nix-store Bubblewrap executable is required for synthetic generators");
 }
 
+function linuxUsrBinEnvBind(): string[] {
+	return existsSync("/usr/bin/env") ? ["--ro-bind", "/usr/bin/env", "/usr/bin/env"] : [];
+}
+
 export interface ConfinedWorkspaceCommandResult {
 	exitCode: number | null;
 	signal: NodeJS.Signals | null;
@@ -399,7 +403,7 @@ function confinedWorkspaceCommand(
 			args: [
 				"--die-with-parent", "--unshare-all", "--new-session",
 				"--ro-bind", "/nix/store", "/nix/store",
-				"--dir", "/usr", "--dir", "/usr/bin", "--ro-bind", "/usr/bin/env", "/usr/bin/env",
+				"--dir", "/usr", "--dir", "/usr/bin", ...linuxUsrBinEnvBind(),
 				"--ro-bind", workspaceRoot, "/workspace",
 				"--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",
 				"--chdir", "/workspace",
@@ -490,7 +494,7 @@ function generatorSandboxCommand(
 			args: [
 				"--die-with-parent", "--unshare-all", "--new-session",
 				"--ro-bind", "/nix/store", "/nix/store",
-				"--dir", "/usr", "--dir", "/usr/bin", "--ro-bind", "/usr/bin/env", "/usr/bin/env",
+				"--dir", "/usr", "--dir", "/usr/bin", ...linuxUsrBinEnvBind(),
 				"--ro-bind", packRoot, "/pack",
 				"--bind", outputRoot, "/output",
 				"--tmpfs", "/tmp", "--proc", "/proc", "--dev", "/dev",

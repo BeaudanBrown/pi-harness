@@ -117,7 +117,7 @@ test("coordinator launcher receives only fixed host configuration and records ex
 	await value.registry.createCoordinatorConversation(manifest);
 	await assert.rejects(() => value.registry.deleteConversation(conversationId), /cannot be deleted/);
 	const launcher = join(value.root, "launcher");
-	await writeFile(launcher, `#!/bin/sh\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	await launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
@@ -128,7 +128,7 @@ test("coordinator launcher receives only fixed host configuration and records ex
 	assert.deepEqual(runtime.managedWindow, { sessionName: "default", windowId: "@7", paneId: "%8" });
 	assert.match(runtime.attachmentNonceHash ?? "", /^[a-f0-9]{64}$/);
 	const firstNonceHash = runtime.attachmentNonceHash;
-	await writeFile(launcher, `#!/bin/sh\ncat >/dev/null\nprintf '{"conversationId":"${conversationId}","exists":true,"sessionName":"default","windowId":"@7","paneId":"%%8"}\\n'\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\ncat >/dev/null\nprintf '{"conversationId":"${conversationId}","exists":true,"sessionName":"default","windowId":"@7","paneId":"%%8"}\\n'\n`);
 	await chmod(launcher, 0o700);
 	await launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
@@ -136,7 +136,7 @@ test("coordinator launcher receives only fixed host configuration and records ex
 	});
 	assert.equal(value.registry.snapshot().conversations[0]!.attachmentNonceHash, firstNonceHash,
 		"reusing the same process preserves the nonce it can authenticate with");
-	await writeFile(launcher, `#!/bin/sh\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) cat >/dev/null; printf '{"conversationId":"conv_ffffffffffffffffffffffffffffffff","sessionName":"default","windowId":"@9","paneId":"%%9","role":"ordinary"}\\n';;\nesac\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) cat >/dev/null; printf '{"conversationId":"conv_ffffffffffffffffffffffffffffffff","sessionName":"default","windowId":"@9","paneId":"%%9","role":"ordinary"}\\n';;\nesac\n`);
 	await chmod(launcher, 0o700);
 	await assert.rejects(() => launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,

@@ -9,7 +9,8 @@ const resolver = path.resolve("bin/pi-playwright");
 
 async function makeExecutable(file: string, body: string): Promise<void> {
 	await mkdir(path.dirname(file), { recursive: true });
-	await writeFile(file, `#!/usr/bin/env bash\nset -euo pipefail\n${body}\n`, "utf8");
+	const shebang = process.env.PI_TEST_BASH ? `#!${process.env.PI_TEST_BASH}` : "#!/usr/bin/env bash";
+	await writeFile(file, `${shebang}\nset -euo pipefail\n${body}\n`, "utf8");
 	await chmod(file, 0o755);
 }
 

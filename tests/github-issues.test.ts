@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { chmod, cp, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -177,8 +177,10 @@ test("migration executor retries issues, resumes relationships, and gates cleanu
 	await writeFile(path.join(cwd, ".pi/tmp/tk-to-github/github-issue-plan.json"), JSON.stringify(plan));
 	const bin = path.join(cwd, "bin");
 	await mkdir(bin);
-	await cp("tests/fixtures/tk-migration/fake-gh.mjs", path.join(bin, "gh"));
-	await chmod(path.join(bin, "gh"), 0o755);
+	const fakeGh = path.join(bin, "gh");
+	const fakeGhSource = await readFile("tests/fixtures/tk-migration/fake-gh.mjs", "utf8");
+	await writeFile(fakeGh, fakeGhSource.replace("#!/usr/bin/env node", `#!${process.execPath}`));
+	await chmod(fakeGh, 0o755);
 	const statePath = path.join(cwd, "github-state.json");
 	const oldPath = process.env.PATH;
 	process.env.PATH = `${bin}:${oldPath}`;

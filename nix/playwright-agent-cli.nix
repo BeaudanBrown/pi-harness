@@ -4,6 +4,7 @@
   fetchFromGitHub,
   makeWrapper,
   chromium,
+  runtimeShell,
 }:
 
 buildNpmPackage rec {
@@ -34,7 +35,7 @@ buildNpmPackage rec {
           --unset PLAYWRIGHT_MCP_ALLOW_UNRESTRICTED_FILE_ACCESS
 
         cat > "$out/bin/playwright-cli-fallback" <<EOF
-    #!/usr/bin/env bash
+    #!${runtimeShell}
     set -euo pipefail
     cache_home="\''${XDG_CACHE_HOME:-\$HOME/.cache}"
     export PLAYWRIGHT_MCP_OUTPUT_DIR="\''${PLAYWRIGHT_MCP_OUTPUT_DIR:-\$cache_home/pi-harness/playwright/fallback}"
