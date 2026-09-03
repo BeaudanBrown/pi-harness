@@ -150,6 +150,18 @@ export class BoundAdapterClient {
 		return result;
 	}
 
+	async offerAloopNotice(payload: { scopeSessionId: string; lifecycleId: string; kind: string; epic: number; issue?: number; body: string; timestamp: string }): Promise<void> {
+		if (this.options.role !== "ordinary_adapter") return;
+		const result = await this.request({
+			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: messageId("aloop"), conversationId: this.options.binding.conversationId,
+			role: "ordinary_adapter", type: "aloop.notice", payload,
+		});
+		if (result.type !== "aloop.acknowledge" || result.payload.lifecycleId !== payload.lifecycleId || result.payload.status !== "projected") {
+			throw new ManagedAdapterError("Relay did not confirm aloop lifecycle projection", "invalid_response");
+		}
+	}
+
 	async selfStatus(): Promise<ManagedSessionEnvelope> {
 		return this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,

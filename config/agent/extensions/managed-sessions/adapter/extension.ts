@@ -1,6 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
+import {
+	ALOOP_LIFECYCLE_ENTRY_TYPE,
+	ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE,
+	cancelManagedAloop,
+	clearAloopLifecycle,
+	isAloopLifecycleActive,
+	parseAloopLifecycleEvent,
+	registerManagedAloopCheckpointDelegate,
+	subscribeAloopLifecycle,
+	type AloopLifecycleEvent,
+} from "../aloop-lifecycle.js";
 import { RemoteCheckpointSchema, renderRemoteCheckpoint, validateRemoteCheckpoint } from "../checkpoint.js";
 import { deriveActivityId, deriveGenerationId } from "../v2-contracts.js";
 import {
@@ -23,6 +34,7 @@ import {
 	type ProjectionMarker,
 	type SessionBinding,
 	findDeliveredUserEntry,
+	aloopPrivateAssistantEntryKeys,
 	hasBackfillDiagnostic,
 	hasProjectionCapacityDiagnostic,
 	planTranscriptBackfill,
@@ -169,6 +181,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let projectionRequestedContext: ExtensionContext | undefined;
 		let projectionRetryTimer: NodeJS.Timeout | undefined;
 		let projectionRetryAttempt = 0;
+		const aloopLifecycleEvents = new Map<string, AloopLifecycleEvent>();
+		const projectedAloopLifecycle = new Set<string>();
+		let aloopProjectionWork: Promise<void> = Promise.resolve();
 		const activeDeliveries = new Map<string, string>();
 		const pendingUserPersistence: DeliveryMarker[] = [];
 		const inFlightDeliveries = new Set<string>();
@@ -288,7 +303,39 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				execute: async (_id, params) => lifecycle({ operation: "conversation.delete", targetConversationId: params.conversationId, confirmed: params.confirm }) });
 		}
 
-		if (role === "ordinary_adapter") pi.registerTool({
+		const executeRemoteCheckpoint = async (toolCallId: string, params: unknown, ctx: ExtensionContext) => {
+			if (!binding || !client?.connected) throw new ManagedAdapterError("remote_checkpoint requires an active managed Matrix conversation");
+			for (const pending of [...pendingUserPersistence]) {
+				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), pending.deliveryId);
+				if (piEntryKey) {
+					pendingUserPersistence.splice(pendingUserPersistence.indexOf(pending), 1);
+					persistExpanded(ctx, pending, piEntryKey);
+				}
+			}
+			const originDeliveryId = [...activeDeliveries.keys()].at(-1);
+			if (!originDeliveryId) throw new ManagedAdapterError("remote_checkpoint requires an active Matrix delivery");
+			const checkpointInput = validateRemoteCheckpoint(params);
+			renderRemoteCheckpoint(checkpointInput);
+			const checkpoint = checkpointInput as unknown as Record<string, unknown>;
+			const checkpointId = `checkpoint-${createHash("sha256").update("pi-managed-sessions:checkpoint:v1\0").update(binding.conversationId).update("\0").update(originDeliveryId).update("\0").update(toolCallId).digest("hex").slice(0, 32)}`;
+			const offered = { version: MANAGED_SESSION_STATE_VERSION, checkpointId, originDeliveryId, checkpoint, status: "offered" as const };
+			appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, offered); checkpoints.set(checkpointId, offered);
+			try {
+				await client.offerCheckpoint({ checkpointId, originDeliveryId, checkpoint });
+				const projected = { ...offered, status: "projected" as const };
+				appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, projected); checkpoints.set(checkpointId, projected);
+				const previous = deliveries.get(originDeliveryId);
+				if (!previous?.piEntryId) throw new ManagedAdapterError("Checkpoint origin was not durably persisted");
+				const completed = { ...previous, status: "completed" as const };
+				recordDelivery(ctx, completed); activeDeliveries.delete(originDeliveryId); acknowledge(completed);
+				if (activity) activity.requestedOutcome = "checkpoint";
+				return { content: [{ type: "text" as const, text: "Remote checkpoint projected. The run is stopped pending new Matrix input." }],
+					details: { checkpointId, kind: checkpoint.kind, waiting: true } };
+			} finally { ctx.abort(); }
+		};
+		let unregisterAloopCheckpointDelegate: () => void = () => undefined;
+		if (role === "ordinary_adapter") {
+			pi.registerTool({
 			name: "remote_checkpoint",
 			label: "Remote Checkpoint",
 			description: "Send one durable question, blocker, or issue-completion boundary to this managed Matrix conversation and hard-stop the current run pending a new reply.",
@@ -299,37 +346,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				"Omit code and diffs unless the operator explicitly requested them.",
 			],
 			parameters: RemoteCheckpointSchema,
-			async execute(toolCallId, params, _signal, _onUpdate, ctx) {
-				if (!binding || !client?.connected) throw new ManagedAdapterError("remote_checkpoint requires an active managed Matrix conversation");
-				for (const pending of [...pendingUserPersistence]) {
-					const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), pending.deliveryId);
-					if (piEntryKey) {
-						pendingUserPersistence.splice(pendingUserPersistence.indexOf(pending), 1);
-						persistExpanded(ctx, pending, piEntryKey);
-					}
-				}
-				const originDeliveryId = [...activeDeliveries.keys()].at(-1);
-				if (!originDeliveryId) throw new ManagedAdapterError("remote_checkpoint requires an active Matrix delivery");
-				const checkpointInput = validateRemoteCheckpoint(params);
-				renderRemoteCheckpoint(checkpointInput);
-				const checkpoint = checkpointInput as unknown as Record<string, unknown>;
-				const checkpointId = `checkpoint-${createHash("sha256").update("pi-managed-sessions:checkpoint:v1\0").update(binding.conversationId).update("\0").update(originDeliveryId).update("\0").update(toolCallId).digest("hex").slice(0, 32)}`;
-				const offered = { version: MANAGED_SESSION_STATE_VERSION, checkpointId, originDeliveryId, checkpoint, status: "offered" as const };
-				appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, offered); checkpoints.set(checkpointId, offered);
-				try {
-					await client.offerCheckpoint({ checkpointId, originDeliveryId, checkpoint });
-					const projected = { ...offered, status: "projected" as const };
-					appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, projected); checkpoints.set(checkpointId, projected);
-					const previous = deliveries.get(originDeliveryId);
-					if (!previous?.piEntryId) throw new ManagedAdapterError("Checkpoint origin was not durably persisted");
-					const completed = { ...previous, status: "completed" as const };
-					recordDelivery(ctx, completed); activeDeliveries.delete(originDeliveryId); acknowledge(completed);
-					if (activity) activity.requestedOutcome = "checkpoint";
-					return { content: [{ type: "text" as const, text: "Remote checkpoint projected. The run is stopped pending new Matrix input." }],
-						details: { checkpointId, kind: checkpoint.kind, waiting: true } };
-				} finally { ctx.abort(); }
-			},
+			execute: (toolCallId, params, _signal, _onUpdate, ctx) => executeRemoteCheckpoint(toolCallId, params, ctx),
 		});
+		}
 
 		function setStatus(ctx: ExtensionContext): void {
 			if (!ctx.hasUI) return;
@@ -373,11 +392,46 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			});
 		}
 
+		function aloopLifecycleIsDurable(ctx: ExtensionContext, event: AloopLifecycleEvent): boolean {
+			return event.scopeSessionId === ctx.sessionManager.getSessionId() && ctx.sessionManager.getBranch().some((entry) => entry.type === "custom" && entry.customType === ALOOP_LIFECYCLE_ENTRY_TYPE && (() => {
+				const parsed = parseAloopLifecycleEvent(entry.data);
+				return parsed?.lifecycleId === event.lifecycleId && JSON.stringify(parsed) === JSON.stringify(event);
+			})());
+		}
+
+		async function projectAloopLifecycle(ctx: ExtensionContext): Promise<void> {
+			if (role !== "ordinary_adapter" || !binding || !client?.connected) return;
+			const projectionClient = client;
+			for (const event of aloopLifecycleEvents.values()) {
+				if (projectedAloopLifecycle.has(event.lifecycleId) || !aloopLifecycleIsDurable(ctx, event)) continue;
+				if (!projectionClient.connected || client !== projectionClient) return;
+				await projectionClient.offerAloopNotice({ scopeSessionId: event.scopeSessionId, lifecycleId: event.lifecycleId, kind: event.kind, epic: event.epic, ...(event.issue === undefined ? {} : { issue: event.issue }), body: event.body, timestamp: event.timestamp });
+				appendMarker(pi, ctx, ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE, { version: 1, lifecycleId: event.lifecycleId, status: "projected" });
+				projectedAloopLifecycle.add(event.lifecycleId);
+			}
+			const latest = [...aloopLifecycleEvents.values()].at(-1);
+			if (!activity && latest?.kind === "startup-failure") clearAloopLifecycle(ctx.sessionManager.getSessionId());
+		}
+
+		const unsubscribeAloopLifecycle = subscribeAloopLifecycle((event) => {
+			if (role !== "ordinary_adapter" || event.scopeSessionId !== currentContext?.sessionManager.getSessionId()) return;
+			if (!aloopLifecycleIsDurable(currentContext, event)) return;
+			aloopLifecycleEvents.set(event.lifecycleId, event);
+			const ctx = currentContext;
+			if (!ctx) return;
+			aloopProjectionWork = aloopProjectionWork.then(() => projectAloopLifecycle(ctx)).catch((error) => {
+				notify(ctx, error instanceof Error ? error.message : "Managed aloop lifecycle projection failed", "warning");
+				scheduleProjectionRetry(ctx);
+			});
+		});
+
 		async function projectEligibleEntries(ctx: ExtensionContext, localUsersOnly = false): Promise<void> {
 			if (!binding || !client?.connected) return;
 			const projectionBinding = binding;
 			const projectionClient = client;
-			const plan = planTranscriptBackfill(ctx.sessionManager.getBranch(), projectionBinding, deliveries, projections);
+			const branch = ctx.sessionManager.getBranch();
+			const privateAloopEntries = aloopPrivateAssistantEntryKeys(branch);
+			const plan = planTranscriptBackfill(branch, projectionBinding, deliveries, projections);
 			if (plan.excessiveCount !== undefined) {
 				if (!hasBackfillDiagnostic(ctx.sessionManager.getBranch(), projectionBinding, plan.excessiveCount)) {
 					appendMarker(pi, ctx, PROJECTION_DIAGNOSTIC_ENTRY_TYPE, {
@@ -390,6 +444,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 			for (const entry of plan.entries) {
 				if (localUsersOnly && entry.kind !== "local_user") continue;
+				if (entry.kind === "assistant_final" && (isAloopLifecycleActive(projectionBinding.sessionId) || privateAloopEntries.has(entry.piEntryKey))) {
+					recordProjectionMarker(ctx, { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
+						kind: entry.kind, status: "blocked", reason: "aloop_private" });
+					continue;
+				}
 				if (!projectionClient.connected || binding !== projectionBinding || client !== projectionClient) return;
 				let marker = projections.get(entry.entryId);
 				if (!transcriptOfferWithinFrame(entry, projectionBinding)) {
@@ -447,7 +506,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				while (projectionRequestedContext) {
 					const requestedContext = projectionRequestedContext;
 					projectionRequestedContext = undefined;
-					try { await projectEligibleEntries(requestedContext); }
+					try { await projectAloopLifecycle(requestedContext); await projectEligibleEntries(requestedContext); }
 					catch (error) { notify(requestedContext, error instanceof Error ? error.message : "Managed transcript projection failed", "error"); }
 				}
 			})().finally(() => { projectionRun = undefined; });
@@ -489,6 +548,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				acknowledge(accepted);
 			}
 			if (payload.kind === "abort") {
+				ctx.abort();
+				cancelManagedAloop(ctx.sessionManager.getSessionId());
 				if (activity) activity.requestedOutcome = "cancelled";
 				for (const deliveryId of new Set([...activeDeliveries.keys(), ...pendingUserPersistence.map((item) => item.deliveryId)])) {
 					const interrupted = deliveries.get(deliveryId);
@@ -497,7 +558,6 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					recordDelivery(ctx, cancellation); acknowledge(cancellation);
 				}
 				activeDeliveries.clear(); pendingUserPersistence.length = 0; persistedRecoveryPending.clear();
-				ctx.abort();
 				const cancelled = { ...accepted, status: "cancelled" as const };
 				recordDelivery(ctx, cancelled);
 				inFlightDeliveries.delete(cancelled.deliveryId);
@@ -718,6 +778,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 						{ deliverAs: "followUp", triggerTurn: true });
 				}
 				queueProjection(ctx);
+				aloopProjectionWork = aloopProjectionWork.then(() => projectAloopLifecycle(ctx));
+				await aloopProjectionWork;
 			} catch (error) {
 				await next.close("shutdown").catch(() => undefined);
 				if (client === next) client = undefined;
@@ -733,6 +795,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			setCheckpointActive(false);
 			currentContext = ctx;
 			const sessionId = ctx.sessionManager.getSessionId();
+			unregisterAloopCheckpointDelegate();
+			if (role === "ordinary_adapter") unregisterAloopCheckpointDelegate = registerManagedAloopCheckpointDelegate(sessionId, async (toolCallId, checkpoint) => { await executeRemoteCheckpoint(toolCallId, checkpoint, ctx); });
 			if (event.reason === "new" || event.reason === "fork") {
 				appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId, reason: event.reason });
 				binding = undefined;
@@ -761,6 +825,20 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 			projections = restoreProjections(ctx.sessionManager.getBranch());
 			checkpoints = restoreCheckpoints(ctx.sessionManager.getBranch());
+			aloopLifecycleEvents.clear(); projectedAloopLifecycle.clear();
+			for (const entry of ctx.sessionManager.getBranch()) {
+				if (entry.type !== "custom") continue;
+				if (entry.customType === ALOOP_LIFECYCLE_ENTRY_TYPE) {
+					const lifecycle = parseAloopLifecycleEvent(entry.data);
+					if (!lifecycle) throw new ManagedAdapterError("Malformed durable aloop lifecycle state");
+					if (lifecycle.scopeSessionId === sessionId) aloopLifecycleEvents.set(lifecycle.lifecycleId, lifecycle);
+				}
+				if (entry.customType === ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE) {
+					const value = entry.data as Record<string, unknown>;
+					if (value?.version !== 1 || typeof value.lifecycleId !== "string" || !/^aloop_[a-f0-9]{32}$/.test(value.lifecycleId) || value.status !== "projected" || Object.keys(value).some((key) => !["version", "lifecycleId", "status"].includes(key))) throw new ManagedAdapterError("Malformed durable aloop lifecycle projection state");
+					projectedAloopLifecycle.add(value.lifecycleId);
+				}
+			}
 			activeDeliveries.clear();
 			persistedRecoveryPending.clear();
 			expandedRecoveryPending.clear();
@@ -805,12 +883,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		});
 		pi.on("tool_execution_start", (event) => {
 			if (!activity) return;
-			const name = boundedToolName(activity, event.toolName); activity.activeTools.set(event.toolCallId, name); activity.toolTotal += 1;
+			const name = isAloopLifecycleActive(currentContext?.sessionManager.getSessionId() ?? "") ? "aloop" : boundedToolName(activity, event.toolName); activity.activeTools.set(event.toolCallId, name); activity.toolTotal += 1;
 			activity.toolCounts.set(name, (activity.toolCounts.get(name) ?? 0) + 1); sendActivityUpdate(activity);
 		});
 		pi.on("tool_execution_end", (event) => {
 			if (!activity) return;
-			const name = activity.activeTools.get(event.toolCallId) ?? boundedToolName(activity, event.toolName); activity.activeTools.delete(event.toolCallId);
+			const name = activity.activeTools.get(event.toolCallId) ?? (isAloopLifecycleActive(currentContext?.sessionManager.getSessionId() ?? "") ? "aloop" : boundedToolName(activity, event.toolName)); activity.activeTools.delete(event.toolCallId);
 			if (event.isError) { activity.toolErrors += 1; activity.failedTools.add(name); } sendActivityUpdate(activity);
 		});
 		pi.on("session_before_compact", () => { if (activity) sendActivityUpdate(activity, true, "compaction"); });
@@ -838,10 +916,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			try { await finalizeActivity(ctx); }
 			catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed activity finalization failed", "error"); return; }
 			await projectEligibleEntries(ctx);
+			await aloopProjectionWork;
+			clearAloopLifecycle(ctx.sessionManager.getSessionId());
 		});
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			stopped = true;
+			unsubscribeAloopLifecycle();
+			unregisterAloopCheckpointDelegate();
+			clearAloopLifecycle(ctx.sessionManager.getSessionId());
 			if (activity) await finalizeActivity(ctx, activity.requestedOutcome ?? "interrupted").catch(() => undefined);
 			if (reconnectTimer) clearTimeout(reconnectTimer);
 			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);

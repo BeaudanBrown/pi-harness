@@ -193,6 +193,22 @@ test("checkpoint schemas preserve the explicit requested-code boundary", () => {
 	}).type, "checkpoint.offer");
 });
 
+test("aloop lifecycle notices are ordinary-adapter-only and strictly bounded", () => {
+	const lifecycle = {
+		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "aloop-1", conversationId,
+		role: "ordinary_adapter", type: "aloop.notice",
+		payload: { scopeSessionId: "session-scope", lifecycleId: `aloop_${"a".repeat(32)}`, kind: "startup", epic: 53, issue: 66, body: "Aloop started.", timestamp: "2026-09-03T00:00:00.000Z" },
+	};
+	assert.equal(parseManagedSessionEnvelope(lifecycle).type, "aloop.notice");
+	assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, role: "coordinator_adapter" }), /managed-session envelope/);
+	assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, payload: { ...lifecycle.payload, body: "x".repeat(1_601) } }), /managed-session envelope/);
+	assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, payload: { ...lifecycle.payload, artifactDirectory: "/tmp/private" } }), /managed-session envelope/);
+	assert.equal(parseManagedSessionEnvelope({
+		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "aloop-ack", conversationId, role: "relay", type: "aloop.acknowledge",
+		inReplyTo: "aloop-1", payload: { lifecycleId: lifecycle.payload.lifecycleId, status: "projected" },
+	}).type, "aloop.acknowledge");
+});
+
 test("input and acknowledgement semantic constraints fail closed", () => {
 	const delivery = {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,

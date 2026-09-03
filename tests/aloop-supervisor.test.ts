@@ -14,6 +14,7 @@ const verificationPolicyDocument = JSON.stringify({
 });
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
 import { registerAloopExtension, scanAttemptArtifacts } from "../config/agent/extensions/aloop/index.js";
+import { ALOOP_LIFECYCLE_ENTRY_TYPE, cancelManagedAloop, createAloopLifecycleEvent, delegateManagedAloopCheckpoint, parseAloopLifecycleEvent, registerManagedAloopAbortDelegate, registerManagedAloopCheckpointDelegate, sanitizeAloopCheckpointText } from "../config/agent/extensions/managed-sessions/aloop-lifecycle.js";
 import {
 	acceptedOpenAloopIssues,
 	assessAloopRunBudget,
@@ -91,6 +92,29 @@ function legacyComment(value: AloopAttemptHandoff, version: "v1" | "v2" = "v1"):
 		: deflateRawSync(Buffer.from(JSON.stringify({ v: 2, i: value.issue, y: value.attemptType, c: value.commit, u: value.verificationReceiptId, s: value.successful, a: value.approach, n: value.materiallyNewApproach, q: value.verification, r: value.acceptanceCriteriaAssessment, d: value.discoveredWork, x: value.nextAction, p: value.artifactDirectory, t: value.timestamp }), "utf8"));
 	return `<!-- pi-aloop-handoff:${version}:${payload.toString("base64url")} -->`;
 }
+
+test("phone-safe aloop lifecycle summaries redact plumbing while preserving commands", () => {
+	const event = createAloopLifecycleEvent("checkpoint", 53, "Inspect /home/operator/.pi/tmp/x and verify-aaaaaaaaaaaa-1-bbbbbbbb <!-- pi-aloop-handoff:v3:secret -->; reply /aloop-decision 66 approve.", 66);
+	assert.match(event.body, /•/);
+	assert.match(event.body, /\/aloop-decision 66 approve/);
+	assert.doesNotMatch(event.body, /\/home|\.pi\/tmp|verify-|pi-aloop|secret/);
+	assert.deepEqual(parseAloopLifecycleEvent(event), event);
+	assert.equal(parseAloopLifecycleEvent({ ...event, body: "leak /tmp/secret" }), undefined);
+	assert.equal(sanitizeAloopCheckpointText("Inspect src/private/incident.md before choosing."), "Inspect • before choosing.");
+});
+
+test("managed aloop delegates are isolated by Pi session identity", async () => {
+	const calls: string[] = [];
+	const removeAbortA = registerManagedAloopAbortDelegate("session-a", () => calls.push("abort-a"));
+	const removeAbortB = registerManagedAloopAbortDelegate("session-b", () => calls.push("abort-b"));
+	const removeCheckpointA = registerManagedAloopCheckpointDelegate("session-a", async () => { calls.push("checkpoint-a"); });
+	const removeCheckpointB = registerManagedAloopCheckpointDelegate("session-b", async () => { calls.push("checkpoint-b"); });
+	assert.equal(cancelManagedAloop("session-a"), true);
+	assert.equal(await delegateManagedAloopCheckpoint("session-b", "call", { kind: "question" }), true);
+	assert.deepEqual(calls, ["abort-a", "checkpoint-b"]);
+	removeAbortA(); removeAbortB(); removeCheckpointA(); removeCheckpointB();
+	assert.equal(cancelManagedAloop("session-a"), false);
+});
 
 test("aloop invocations separate worker-launch resource bounds from issue retries", () => {
 	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 60, maxWorkerLaunches: 20 });
@@ -294,6 +318,7 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 		let closes = 0;
 		let fakeHead = "a".repeat(40);
 		let activeGraph = context([issue({ number: 2, title: "Leaf" })]);
+		const lifecycleEvents: unknown[] = [];
 		const pi = {
 			registerTool: (tool: { name: string }) => { activeTools.push(tool.name); tools.set(tool.name, tool); },
 			registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => commands.set(name, command),
@@ -302,7 +327,7 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 			setActiveTools: (tools: string[]) => { activeTools = tools; },
 			setSessionName: () => undefined,
 			sendUserMessage: () => { kickoffCount += 1; },
-			appendEntry: () => undefined,
+			appendEntry: (customType: string, data: unknown) => { if (customType === ALOOP_LIFECYCLE_ENTRY_TYPE) lifecycleEvents.push(data); },
 			exec: async (_command: string, args: string[]) => _command === "gh"
 				? { code: 0, stdout: "supervisor\n", stderr: "" }
 				: args[0] === "log"
@@ -318,12 +343,16 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 			closeIssue: async () => { closes += 1; return {}; },
 			publishComment: async () => ({ user: { login: "supervisor" } }),
 		});
-		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal,
+		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, sessionManager: { getSessionId: () => "test-session" },
 			abort: () => { aborts += 1; }, ui: { notify: () => undefined, setStatus: () => undefined } } as unknown as ExtensionContext;
 		for (const handler of events.get("session_start") ?? []) handler({ reason: "startup" }, ctx);
 		assert.deepEqual(activeTools, ["read"]);
 		await commands.get("aloop")!.handler("#1", ctx);
 		assert.equal(kickoffCount, 1);
+		const startup = parseAloopLifecycleEvent(lifecycleEvents[0]);
+		assert.equal(startup?.kind, "startup");
+		assert.match(startup?.body ?? "", /epic #1.*Selected child: #2.*60 minutes.*20 full-worker launches.*supervisor\/implementation:/);
+		assert.doesNotMatch(startup?.body ?? "", /\.pi\/tmp|receipt|spool|verify-/i);
 		assert.ok(activeTools.includes("aloop_launch_worker"));
 		assert.ok(activeTools.includes("aloop_context"));
 		assert.ok(activeTools.includes("aloop_finish_attempt"));
@@ -375,8 +404,10 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 		assert.equal(closes, 1);
 		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
 		assert.deepEqual(activeTools, ["read"], "successful authorized recovery clears its pending human boundary");
-		await commands.get("aloop-abort")!.handler("", ctx);
+		assert.equal(cancelManagedAloop("test-session"), true, "managed !abort reaches aloop even after earlier human-boundary settlement");
+		ctx.abort();
 		assert.equal(aborts, 1);
+		assert.ok(lifecycleEvents.map(parseAloopLifecycleEvent).some((event) => event?.kind === "cancelled"));
 		assert.deepEqual(activeTools, ["read"]);
 		for (const handler of events.get("session_shutdown") ?? []) handler({ reason: "reload" }, ctx);
 		assert.deepEqual(activeTools, ["read"]);
@@ -414,7 +445,7 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 			publishComment: async (_cwd, _issue, body, apply) => { published.push({ body, apply }); return apply ? { user: { login: "test-supervisor" } } : {}; },
 			closeIssue: async () => { closes += 1; if (closes === 1) throw new Error("interrupted closure"); return {}; },
 		});
-		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => undefined, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;
+		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => undefined, sessionManager: { getSessionId: () => "finish-session" }, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;
 		await commands.get("aloop").handler("#1", ctx);
 		await tools.get("aloop_launch_worker").execute("launch", { issue: 2 }, ctx.signal, undefined, ctx);
 		const params = { issue: 2, outcome: "accepted", summary: "Complete.", outstanding_findings: [], decisions: [], verification: ["reviewed"], next_action: "Continue." };

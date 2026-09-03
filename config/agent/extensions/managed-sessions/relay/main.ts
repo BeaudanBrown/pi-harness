@@ -22,6 +22,7 @@ import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { hostRelayLockPath, HostRelayLock } from "./relay-lock.js";
 import { TranscriptProjector } from "./transcript-projector.js";
 import { ActivityProjector } from "./activity-projector.js";
+import { parseAloopLifecycleEvent } from "../aloop-lifecycle.js";
 import { ControlPollPublisher } from "./control-poll-publisher.js";
 import { redactManagedValue } from "./redaction.js";
 import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
@@ -87,7 +88,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await activityProjector.load();
 		const eventProjector = new RelayEventProjector(registry, matrix);
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -185,7 +186,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						throw new RelayRegistryError("invalid_state", "Extension-command completion did not match a command delivery");
 					}
 					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId, payload.completionKind);
-					if (command) await eventProjector.projectNotice(attachment.conversationId, `${payload.deliveryId}:command`, `Command dispatched: /${command}`);
+					if (command && command !== "aloop" && !command.startsWith("aloop-")) await eventProjector.projectNotice(attachment.conversationId, `${payload.deliveryId}:command`, `Command dispatched: /${command}`);
 					return response(attachment.conversationId, envelope.messageId, "input.result", {
 						deliveryId: payload.deliveryId, status: payload.status,
 					});
@@ -207,6 +208,16 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					await eventProjector.projectCheckpoint(envelope);
 					return response(attachment.conversationId, envelope.messageId, "checkpoint.acknowledge", {
 						checkpointId: envelope.payload.checkpointId, status: "projected",
+					});
+				}
+				if (envelope.type === "aloop.notice") {
+					if (attachment.role !== "ordinary_adapter") throw new RelayRegistryError("permission_denied", "Aloop lifecycle projection requires an ordinary managed adapter");
+					const lifecycle = parseAloopLifecycleEvent({ version: 1, ...envelope.payload });
+					const lifecycleManifest = registry.manifestByConversationId(attachment.conversationId);
+					if (!lifecycle || !lifecycleManifest || lifecycle.scopeSessionId !== lifecycleManifest.piSessionId) throw new RelayRegistryError("invalid_state", "Aloop lifecycle notice failed scope or privacy validation");
+					await eventProjector.projectNotice(attachment.conversationId, `aloop:${lifecycle.lifecycleId}`, lifecycle.body);
+					return response(attachment.conversationId, envelope.messageId, "aloop.acknowledge", {
+						lifecycleId: envelope.payload.lifecycleId, status: "projected",
 					});
 				}
 				if (envelope.type === "lifecycle.request") {

@@ -20,6 +20,7 @@ stdenv.mkDerivation {
     cp config/agent/extensions/managed-sessions/contracts.ts source/managed-sessions/contracts.ts
     cp config/agent/extensions/managed-sessions/v2-contracts.ts source/managed-sessions/v2-contracts.ts
     cp config/agent/extensions/managed-sessions/checkpoint.ts source/managed-sessions/checkpoint.ts
+    cp config/agent/extensions/managed-sessions/aloop-lifecycle.ts source/managed-sessions/aloop-lifecycle.ts
     cp -R config/agent/extensions/managed-sessions/relay source/managed-sessions/relay
     cat > tsconfig.json <<EOF
     {

@@ -189,6 +189,11 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		bindingBoundaryEntryId: TranscriptEntryIdSchema,
 		placement: WorkspaceIdentitySchema,
 	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "aloop.notice", {
+		scopeSessionId: identifier, lifecycleId: stableId("aloop"),
+		kind: Type.Union([Type.Literal("startup"), Type.Literal("startup-failure"), Type.Literal("attempt-settled"), Type.Literal("checkpoint"), Type.Literal("bounded-stop"), Type.Literal("cancelled"), Type.Literal("epic-ready"), Type.Literal("recovery")]),
+		epic: Type.Integer({ minimum: 1 }), issue: Type.Optional(Type.Integer({ minimum: 1 })), body: boundedString(1_600), timestamp,
+	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.status", {}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.delete", { confirmed: Type.Literal(true) }),
 	clientEnvelope(Type.Literal("coordinator_adapter"), "lifecycle.request", {
@@ -233,6 +238,9 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		activityId: stableId("activity"),
 		revision: Type.Integer({ minimum: 0 }),
 		status: Type.Union([Type.Literal("updated"), Type.Literal("finalized")]),
+	}),
+	relayEnvelope("aloop.acknowledge", {
+		lifecycleId: stableId("aloop"), status: Type.Literal("projected"),
 	}),
 	relayEnvelopeWithPayload("self.result", Type.Union([
 		strictObject({ operation: Type.Literal("self.bind"), status: Type.Literal("ok"), boundConversationId: ConversationIdSchema }),

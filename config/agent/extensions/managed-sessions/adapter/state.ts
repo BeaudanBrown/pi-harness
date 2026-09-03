@@ -1,3 +1,4 @@
+import { ALOOP_LIFECYCLE_ENTRY_TYPE, parseAloopLifecycleEvent } from "../aloop-lifecycle.js";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MANAGED_SESSION_STATE_VERSION,
@@ -39,7 +40,7 @@ export interface ProjectionMarker {
 	piEntryKey: string;
 	kind: "local_user" | "assistant_final";
 	status: "offered" | "projected" | "blocked";
-	reason?: "oversized" | "backfill_limit";
+	reason?: "oversized" | "backfill_limit" | "aloop_private";
 }
 
 export interface EligibleTranscriptEntry {
@@ -211,7 +212,7 @@ export function restoreProjections(entries: readonly unknown[]): Map<string, Pro
 			!/^entry_[a-f0-9]{32}$/.test(value.entryId) || typeof value.piEntryKey !== "string" ||
 			(value.kind !== "local_user" && value.kind !== "assistant_final") ||
 			!(["offered", "projected", "blocked"] as unknown[]).includes(value.status) ||
-			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit")) continue;
+			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit" && value.reason !== "aloop_private")) continue;
 		const marker = value as unknown as ProjectionMarker;
 		const previous = projections.get(marker.entryId);
 		if (previous && (previous.piEntryKey !== marker.piEntryKey || previous.kind !== marker.kind ||
@@ -234,6 +235,32 @@ function textContent(content: unknown, allowThinking: boolean): string | undefin
 		else if (!(allowThinking && value.type === "thinking")) return undefined;
 	}
 	return text.join("");
+}
+
+export function aloopPrivateAssistantEntryKeys(entries: readonly unknown[]): Set<string> {
+	const privateEntries = new Set<string>();
+	let privateScope = false;
+	let terminal = false;
+	for (const value of entries) {
+		const lifecycle = customData(value, ALOOP_LIFECYCLE_ENTRY_TYPE);
+		if (lifecycle) {
+			const event = parseAloopLifecycleEvent(lifecycle.data);
+			if (!event) continue;
+			privateScope = true;
+			terminal = event.kind !== "startup" && event.kind !== "recovery" && event.kind !== "checkpoint";
+			continue;
+		}
+		const delivery = customData(value, DELIVERY_ENTRY_TYPE);
+		if (delivery?.data.status === "accepted" && privateScope && terminal) {
+			privateScope = false;
+			terminal = false;
+			continue;
+		}
+		if (!privateScope || typeof value !== "object" || value === null) continue;
+		const entry = value as { type?: unknown; id?: unknown; message?: unknown };
+		if (entry.type === "message" && typeof entry.id === "string" && typeof entry.message === "object" && entry.message !== null && (entry.message as { role?: unknown }).role === "assistant") privateEntries.add(entry.id);
+	}
+	return privateEntries;
 }
 
 export function eligibleTranscriptEntries(

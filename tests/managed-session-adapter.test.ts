@@ -25,6 +25,7 @@ import {
 	PROJECTION_ENTRY_TYPE,
 	UNBOUND_ENTRY_TYPE,
 	eligibleTranscriptEntries,
+	aloopPrivateAssistantEntryKeys,
 	findDeliveredUserEntry,
 	hasBackfillDiagnostic,
 	hasProjectionCapacityDiagnostic,
@@ -37,6 +38,14 @@ import {
 	type SessionBinding,
 } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import {
+	ALOOP_LIFECYCLE_ENTRY_TYPE,
+	ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE,
+	createAloopLifecycleEvent,
+	delegateManagedAloopCheckpoint,
+	publishAloopLifecycleEvent,
+	registerManagedAloopAbortDelegate,
+} from "../config/agent/extensions/managed-sessions/aloop-lifecycle.js";
 
 const conversationId = deriveConversationId("host", "work");
 const sessionId = "session-work";
@@ -133,6 +142,8 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
 		} else if (envelope.type === "checkpoint.offer") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
+		} else if (envelope.type === "aloop.notice") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "aloop.acknowledge", payload: { lifecycleId: envelope.payload.lifecycleId, status: "projected" } }));
 		} else if (envelope.type === "transcript.offer") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
 		} else if (envelope.type === "self.status") {
@@ -570,6 +581,69 @@ test("activity lifecycle is one redacted busy span across parallel tools, retrie
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
+test("durable aloop lifecycle scope protects persisted finals across restart", () => {
+	const start = createAloopLifecycleEvent("startup", 53, "Aloop started for epic #53.", 66);
+	const checkpoint = createAloopLifecycleEvent("checkpoint", 53, "Aloop needs a decision.", 66);
+	const stop = createAloopLifecycleEvent("bounded-stop", 53, "Aloop settled.", 66);
+	const decisionDelivery = { version: MANAGED_SESSION_STATE_VERSION, deliveryId: deriveDeliveryId(conversationId, "$decision"), matrixEventId: "$decision", kind: "prompt", status: "accepted" };
+	const nextDelivery = { version: MANAGED_SESSION_STATE_VERSION, deliveryId: deriveDeliveryId(conversationId, "$next"), matrixEventId: "$next", kind: "prompt", status: "accepted" };
+	const branch = [custom("start", ALOOP_LIFECYCLE_ENTRY_TYPE, start),
+		{ type: "message", id: "private-before-crash", message: { role: "assistant", content: "secret", stopReason: "stop" } },
+		custom("checkpoint", ALOOP_LIFECYCLE_ENTRY_TYPE, checkpoint), custom("decision-delivery", DELIVERY_ENTRY_TYPE, decisionDelivery),
+		{ type: "message", id: "private-decision-continuation", message: { role: "assistant", content: "continue aloop", stopReason: "stop" } },
+		custom("stop", ALOOP_LIFECYCLE_ENTRY_TYPE, stop), custom("next-delivery", DELIVERY_ENTRY_TYPE, nextDelivery),
+		{ type: "message", id: "ordinary-after", message: { role: "assistant", content: "public", stopReason: "stop" } }];
+	assert.deepEqual([...aloopPrivateAssistantEntryKeys(branch)], ["private-before-crash", "private-decision-continuation"]);
+});
+
+test("managed aloop projects only durable lifecycle summaries and hides routine internals", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
+	let leaf = "binding"; let sequence = 0;
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const api = {
+		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [],
+		appendEntry: (customType: string, data: unknown) => { const id = `aloop-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id; },
+		sendUserMessage: () => undefined, sendMessage: () => undefined,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => true, abort: () => undefined, shutdown: () => undefined,
+		model: { provider: "provider", id: "supervisor", contextWindow: 100 }, getContextUsage: () => ({ tokens: 10 }),
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
+			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	await handlers.get("agent_start")!({}, ctx);
+	const lifecycle = createAloopLifecycleEvent("startup", 53, "Aloop started for #53. Selected child: #66. Shared budget: 60 minutes and 20 launches.", 66, sessionId);
+	api.appendEntry(ALOOP_LIFECYCLE_ENTRY_TYPE, lifecycle);
+	publishAloopLifecycleEvent(lifecycle);
+	publishAloopLifecycleEvent(createAloopLifecycleEvent("startup", 99, "Foreign aloop.", 100, "foreign-session"));
+	publishAloopLifecycleEvent(createAloopLifecycleEvent("recovery", 53, "Undurable event must not project.", 66, sessionId));
+	handlers.get("tool_execution_start")!({ toolCallId: "worker", toolName: "aloop_launch_worker" });
+	handlers.get("tool_execution_end")!({ toolCallId: "worker", toolName: "aloop_launch_worker", isError: false });
+	handlers.get("tool_execution_start")!({ toolCallId: "review", toolName: "review_agents" });
+	handlers.get("tool_execution_end")!({ toolCallId: "review", toolName: "review_agents", isError: false });
+	branch.push({ type: "message", id: "private-final", parentId: leaf, message: { role: "assistant", content: "Worker log /tmp/private and receipt verify-secret", stopReason: "stop" } }); leaf = "private-final";
+	await handlers.get("agent_settled")!({}, ctx);
+	const notices = relay.frames.filter((frame) => frame.type === "aloop.notice");
+	assert.equal(notices.length, 1); assert.equal(notices[0]?.payload.body, lifecycle.body);
+	assert.equal(relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "assistant_final").length, 0);
+	const finalActivity = relay.frames.filter((frame) => frame.type === "activity.finalize").at(-1)!;
+	assert.deepEqual((finalActivity.payload.tools as any).counts, [{ name: "aloop", count: 2 }]);
+	assert.doesNotMatch(JSON.stringify(relay.frames), /private-final|\/tmp\/private|verify-secret|review_agents|aloop_launch_worker/);
+	assert.ok(branch.some((entry) => entry.customType === ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE && entry.data.lifecycleId === lifecycle.lifecycleId));
+	assert.ok(branch.some((entry) => entry.customType === PROJECTION_ENTRY_TYPE && entry.data.reason === "aloop_private"));
+	const abortOrder: string[] = [];
+	ctx.abort = () => abortOrder.push("signal-abort");
+	const unregisterAbort = registerManagedAloopAbortDelegate(sessionId, () => abortOrder.push("aloop-deactivate"));
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "managed-abort", conversationId, role: "relay", type: "input.deliver",
+		payload: { deliveryId: deriveDeliveryId(conversationId, "$managed-abort"), matrixEventId: "$managed-abort", kind: "abort" } });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.deepEqual(abortOrder, ["signal-abort", "aloop-deactivate"]);
+	unregisterAbort();
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
 test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoint boundaries", async (t) => {
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
@@ -598,9 +672,9 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 		await new Promise((resolve) => setTimeout(resolve, 30));
 	};
 	await send("$idle", "prompt", "idle task");
-	const checkpoint = tools.get("remote_checkpoint");
-	const checkpointResult = await checkpoint.execute("tool-call-stable", { kind: "question", decision: "Approve?" }, undefined, undefined, ctx);
-	assert.equal(checkpointResult.details.waiting, true); assert.equal(aborts, 1);
+	assert.ok(tools.has("remote_checkpoint"));
+	const delegated = await delegateManagedAloopCheckpoint(sessionId, "tool-call-stable", { kind: "question", decision: "Approve?" });
+	assert.equal(delegated, true); assert.equal(aborts, 1);
 	assert.equal(relay.frames.filter((frame) => frame.type === "checkpoint.offer").length, 1);
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "completed"));
