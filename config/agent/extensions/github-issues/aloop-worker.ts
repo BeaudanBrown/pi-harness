@@ -518,10 +518,16 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	}
 	const resultFile = await open(resultPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
 	try {
-	const workerEnvironment = { ...input.env, PI_HARNESS_AGENT_PROFILE: "aloop-implementation",
-		PI_HARNESS_PROJECT_WORKER_TOOLS: JSON.stringify(projectResources.tools) };
-	const effectiveEnvironment: NodeJS.ProcessEnv = { ...process.env, ...workerEnvironment };
-	const command = buildAloopWorkerCommand({
+		const fallbackPath = process.env.PI_HARNESS_LSP_FALLBACK_PATH?.trim();
+		const inheritedPath = input.env?.PATH ?? process.env.PATH;
+		const workerEnvironment: NodeJS.ProcessEnv = {
+			...input.env,
+			...(fallbackPath ? { PATH: `${inheritedPath ?? ""}:${fallbackPath}` } : {}),
+			PI_HARNESS_AGENT_PROFILE: "aloop-implementation",
+			PI_HARNESS_PROJECT_WORKER_TOOLS: JSON.stringify(projectResources.tools),
+		};
+		const effectiveEnvironment: NodeJS.ProcessEnv = { ...process.env, ...workerEnvironment };
+		const command = buildAloopWorkerCommand({
 		launcher: input.launcher ?? defaultLauncher(), prompt, modelRef: input.modelRef, profile,
 		resourceRoots: {
 			harness: effectiveEnvironment.PI_HARNESS_RESOURCES_ROOT,

@@ -638,9 +638,13 @@ Use Pi's built-in session commands for conversation state:
   or tree-sitter when semantic setup is unavailable.
 - Project-local language servers shadow harness fallbacks because the NixOS
   wrapper appends fallback LSP packages after the caller's existing `PATH`.
-  Dependencies, SDKs, generated files, and project configs remain owned by the
-  repository being edited; the harness reports those failures rather than
-  installing packages or inventing language-specific setup.
+  The same ordering is preserved for managed project launches and inherited by
+  full aloop implementation workers. Coordinator, review, and diagnostic
+  profiles have no LSP extension or process-execution tool surface; `pi-local`
+  additionally strips inherited fallback entries from `PATH`. Dependencies,
+  SDKs, generated files, and project configs remain owned by the repository
+  being edited; the harness reports those failures rather than installing
+  packages or inventing language-specific setup.
 - `docs/lsp-current-behavior.md` records the packaged Pi LSP behavior, fixed
   reliability boundaries, known remaining failure modes, and the boundary
   between harness fixes and project-owned language-server configuration.

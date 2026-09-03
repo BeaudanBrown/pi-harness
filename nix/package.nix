@@ -27,12 +27,11 @@
 let
   profileDocument = piHarnessResources.agentProfiles;
   engineeringProfile = profileDocument.profiles."engineering-full";
-  localHarnessExtensionIds = builtins.filter
-    (name: name != "pi-r" && name != "agentgraph")
-    engineeringProfile.extensions;
-  engineeringExtensionArgs = lib.concatMapStringsSep "\n"
-    (name: ''--extension "${piHarnessResources}/share/pi-harness/agent/extensions/${name}/index.ts"'')
-    localHarnessExtensionIds;
+  engineeringExtensionArgs = lib.concatMapStringsSep "\n" (name:
+    if name == "pi-r" || name == "agentgraph" then ""
+    else if name == "lsp" then ""
+    else ''--extension "${piHarnessResources}/share/pi-harness/agent/extensions/${name}/index.ts"''
+  ) engineeringProfile.extensions;
   engineeringSkillArgs = lib.concatMapStringsSep "\n" (name:
     if name == "harness" then ''--skill "${piHarnessResources}/share/pi-harness/agent/skills"''
     else if name == "matt-pocock" then ''--skill "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"''
@@ -92,7 +91,27 @@ set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
 export PI_HARNESS_RESOURCES_ROOT="${piHarnessResources}/share/pi-harness/agent"
 export PI_HARNESS_MATT_SKILLS_ROOT="${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"
-${lib.optionalString (piLspExtension != null) ''export PI_HARNESS_LSP_EXTENSION="${piLspExtension}/share/pi-lsp-extension/src/index.ts"''}
+${lib.optionalString (piLspExtension != null) ''
+if [[ "\''${PI_HARNESS_LSP_ENABLED:-0}" == 1 ]]; then
+  export PI_HARNESS_LSP_EXTENSION="${piLspExtension}/share/pi-lsp-extension/src/index.ts"
+else
+  if [[ -n "\''${PI_HARNESS_LSP_FALLBACK_PATH:-}" ]]; then
+    IFS=: read -r -a pi_path_parts <<< "\''${PATH:-}"
+    IFS=: read -r -a pi_lsp_parts <<< "\''${PI_HARNESS_LSP_FALLBACK_PATH}"
+    pi_clean_path=()
+    for pi_path_part in "\''${pi_path_parts[@]}"; do
+      pi_keep_path=1
+      for pi_lsp_part in "\''${pi_lsp_parts[@]}"; do
+        if [[ "\$pi_path_part" == "\$pi_lsp_part" ]]; then pi_keep_path=0; break; fi
+      done
+      if [[ "\$pi_keep_path" == 1 ]]; then pi_clean_path+=("\$pi_path_part"); fi
+    done
+    PATH="\$(IFS=:; printf '%s' "\''${pi_clean_path[*]}")"
+    export PATH
+  fi
+  unset PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH
+fi
+''}
 export PI_R_RESOURCE_ROOT="${piRPackage.resourcePaths.root}"
 export PI_R_TREE_SITTER="${piRPackage.resourcePaths.parser}"
 export PI_R_TREE_SITTER_R="${piRPackage.resourcePaths.parserGrammar}"
@@ -192,6 +211,21 @@ export PI_R_NIXPKGS_PIN_PATH="${piRPackage.resourcePaths.nixpkgsPin}"
 export PI_R_SCOUT_PI="${lib.getExe piPackage}"
 export PI_R_SCOUT_EXTENSION="${piRPackage.resourcePaths.scoutExtension}"
 export PI_HARNESS_AGENT_PROFILE="pi-local"
+if [[ -n "\''${PI_HARNESS_LSP_FALLBACK_PATH:-}" ]]; then
+  IFS=: read -r -a pi_path_parts <<< "\''${PATH:-}"
+  IFS=: read -r -a pi_lsp_parts <<< "\''${PI_HARNESS_LSP_FALLBACK_PATH}"
+  pi_clean_path=()
+  for pi_path_part in "\''${pi_path_parts[@]}"; do
+    pi_keep_path=1
+    for pi_lsp_part in "\''${pi_lsp_parts[@]}"; do
+      if [[ "\$pi_path_part" == "\$pi_lsp_part" ]]; then pi_keep_path=0; break; fi
+    done
+    if [[ "\$pi_keep_path" == 1 ]]; then pi_clean_path+=("\$pi_path_part"); fi
+  done
+  PATH="\$(IFS=:; printf '%s' "\''${pi_clean_path[*]}")"
+  export PATH
+fi
+unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH
 unset PI_R_TEST_TREE_SITTER PI_R_TEST_TREE_SITTER_R PI_R_TEST_TREE_SITTER_QUERY PI_R_TEST_BASE_RSCRIPT PI_R_TEST_RESOURCE_ROOT
 if [[ -n "\''${PI_EVAL_ATTESTATION_PATH:-}" ]]; then
   umask 077

@@ -52,6 +52,7 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 	assert.equal(coordinator.builtinTools, false);
 	assert.ok(coordinator.tools.length > 0 && coordinator.tools.every((tool) => tool.startsWith("remote_")));
 	assert.equal(coordinator.tools.includes("remote_checkpoint"), false);
+	assert.equal(coordinator.extensions.includes("lsp"), false);
 
 	const local = resolveAgentProfile("pi-local");
 	assert.equal(local.contextFiles, false);
@@ -61,8 +62,9 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 	const full = resolveAgentProfile("engineering-full");
 	const managed = resolveAgentProfile("managed-project");
 	assert.equal(managed.toolPolicy, full.toolPolicy);
+	assert.ok(full.extensions.includes("lsp"));
 	assert.deepEqual(managed.extensions, full.extensions.filter((name) => !["pi-r", "agentgraph", "tmux-cursor-focus", "sesh"].includes(name)));
-	for (const extension of ["web-search", "github-issues", "aloop", "diagram-tools", "worker-runner", "review-agents", "nix-runtime"]) {
+	for (const extension of ["web-search", "github-issues", "aloop", "diagram-tools", "worker-runner", "review-agents", "nix-runtime", "lsp"]) {
 		assert.ok(managed.extensions.includes(extension), `managed project retains ${extension}`);
 	}
 	assert.deepEqual(managed.skills, ["harness", "matt-pocock"]);

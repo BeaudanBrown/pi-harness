@@ -107,7 +107,7 @@
         };
         developmentProfile = piHarnessResources.agentProfiles.profiles."engineering-full";
         developmentHarnessExtensionIds = builtins.filter
-          (name: name != "pi-r" && name != "agentgraph")
+          (name: name != "pi-r" && name != "agentgraph" && name != "lsp")
           developmentProfile.extensions;
         developmentExtensionArgs = lib.concatMapStringsSep " \\\n"
           (name: ''--extension "$PWD/config/agent/extensions/${name}/index.ts"'')
@@ -229,6 +229,7 @@
               services.pi-harness = {
                 enable = true;
                 package = piHarnessPackage;
+                lsp.enable = true;
                 managedSessions = {
                   enable = true;
                   user = "operator";
@@ -244,6 +245,27 @@
             }
           ];
         };
+        lspDisabledModuleTest = lib.evalModules {
+          specialArgs = { inherit pkgs; };
+          modules = [
+            {
+              options = {
+                assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
+                environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
+                users.users = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+                systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
+              };
+            }
+            ./nix/module.nix
+            { services.pi-harness = { enable = true; package = piHarnessPackage; lsp.enable = false; }; }
+          ];
+        };
+        lspDisabledPiWrapper = builtins.elemAt lspDisabledModuleTest.config.environment.systemPackages 0;
+        managedLspDisabledModuleTest = managedSessionModuleTest.extendModules {
+          modules = [ { services.pi-harness.lsp.enable = lib.mkForce false; } ];
+        };
+        managedLspDisabledService = managedLspDisabledModuleTest.config.systemd.user.services.pi-managed-session-relay;
+        managedLspDisabledCoordinatorPi = builtins.elemAt managedLspDisabledService.path 1;
         managedSessionService = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-relay;
         managedSessionPiWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 0;
         managedSessionStatusWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 1;
@@ -663,6 +685,8 @@
             grep -F 'PI_R_VALUE_SUMMARY_SCRIPT' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi >/dev/null
             grep -F 'PI_R_NIXPKGS_PIN_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' ${piHarnessPackage}/bin/pi-r-local >/dev/null
+            grep -F 'pi_clean_path' ${piHarnessPackage}/bin/pi-r-local >/dev/null
             grep -F 'expandPromptTemplates: options?.expandPromptTemplates ?? false' \
               ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/agent-session.js >/dev/null
             grep -F 'expandPromptTemplates?: boolean' \
@@ -703,9 +727,35 @@
             fi
             grep -F '${piHarnessResources.managedSessionExtensions.ordinary}' ${managedSessionPiWrapper}/bin/pi >/dev/null
             grep -F 'PI_MANAGED_SESSIONS_SOCKET' ${managedSessionPiWrapper}/bin/pi >/dev/null
+            grep -F 'PI_HARNESS_LSP_ENABLED:-0' ${lspDisabledPiWrapper}/bin/pi >/dev/null
+            grep -F 'pi_clean_path' ${managedLspDisabledCoordinatorPi}/bin/pi >/dev/null
+            if grep -F -- '--extension "${piLspExtension}/share/pi-lsp-extension/src/index.ts"' ${lspDisabledPiWrapper}/bin/pi >/dev/null; then exit 1; fi
+            disabled_lsp_probe=$(mktemp -d)
+            cat > "$disabled_lsp_probe/extension.ts" <<'EOF'
+            import { writeFileSync } from "node:fs";
+            export default function (pi: any): void {
+              pi.on("session_start", () => writeFileSync(process.env.PROBE_RESULT!, JSON.stringify({
+                path: process.env.PATH,
+                extension: process.env.PI_HARNESS_LSP_EXTENSION,
+                fallback: process.env.PI_HARNESS_LSP_FALLBACK_PATH,
+              })));
+            }
+            EOF
+            printf '%s\n' '{"type":"get_state"}' | env \
+              PATH="/forbidden-lsp:$PATH" \
+              PI_HARNESS_LSP_EXTENSION="/forbidden-lsp/extension.ts" \
+              PI_HARNESS_LSP_FALLBACK_PATH="/forbidden-lsp" \
+              PROBE_RESULT="$disabled_lsp_probe/result" \
+              timeout 10 ${lspDisabledPiWrapper}/bin/pi --mode rpc --no-session \
+                --no-extensions --extension "$disabled_lsp_probe/extension.ts" >/dev/null
+            jq -e '(.path | split(":") | index("/forbidden-lsp") | not) and (.extension == null) and (.fallback == null)' \
+              "$disabled_lsp_probe/result" >/dev/null
+            rm -rf "$disabled_lsp_probe"
             grep -F 'PI_HARNESS_AGENT_PROFILE="managed-project"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
             project_case="$(${pkgs.coreutils}/bin/mktemp)"
+            disabled_project_case="$(${pkgs.coreutils}/bin/mktemp)"
             awk '/project\)/ { capture=1 } capture { print } /trusted launch role is required/ { exit }' ${managedSessionCoordinatorPi}/bin/pi > "$project_case"
+            awk '/project\)/ { capture=1 } capture { print } /trusted launch role is required/ { exit }' ${managedLspDisabledCoordinatorPi}/bin/pi > "$disabled_project_case"
             coordinator_binary=$(grep -Eo '/nix/store/[^ ]+-pi-managed-coordinator/bin/pi-managed-coordinator' ${managedSessionCoordinatorPi}/bin/pi | head -1)
             test -x "$coordinator_binary"
             grep -F -- '--no-extensions' "$coordinator_binary" >/dev/null
@@ -714,6 +764,8 @@
             grep -F -- '--no-themes' "$coordinator_binary" >/dev/null
             grep -F -- '--no-context-files' "$coordinator_binary" >/dev/null
             grep -F -- '--no-builtin-tools' "$coordinator_binary" >/dev/null
+            grep -F -- 'pi_clean_path' "$coordinator_binary" >/dev/null
+            grep -F -- 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$coordinator_binary" >/dev/null
             grep -F -- '--no-extensions' "$project_case" >/dev/null
             grep -F -- '--no-skills' "$project_case" >/dev/null
             grep -F -- '--no-prompt-templates' "$project_case" >/dev/null
@@ -725,6 +777,10 @@
             grep -F -- 'project_config_roots=' "$project_case" >/dev/null
             grep -F -- '/bin/pwd -P' "$project_case" >/dev/null
             grep -F -- 'resource_key=' "$project_case" >/dev/null
+            grep -F -- 'PI_HARNESS_LSP_FALLBACK_PATH' "$project_case" >/dev/null
+            grep -F -- 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$disabled_project_case" >/dev/null
+            if grep -F -- '${piLspExtension}/share/pi-lsp-extension/src/index.ts' "$disabled_project_case" >/dev/null; then exit 1; fi
+            grep -F -- 'export PATH=' "$project_case" >/dev/null
             if grep -F -- '--no-context-files' "$project_case" >/dev/null; then exit 1; fi
             if grep -F -- '--no-builtin-tools' "$project_case" >/dev/null; then exit 1; fi
             if grep -F '/run/secrets/pi-managed-session.env' ${managedSessionPiWrapper}/bin/pi >/dev/null; then
@@ -772,6 +828,8 @@
             grep -F "export AGENTGRAPH_PI_RESOURCES=\"\$agentgraph_root\"" ${piHarnessPackage}/bin/pi >/dev/null
             grep -F '${ticketPackage}/bin' ${migrateTkApp}/bin/pi-migrate-tk >/dev/null
             test -f ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/index.ts
+            grep -F -- '${piLspExtension}/share/pi-lsp-extension/src/index.ts' ${managedSessionPiWrapper}/bin/pi >/dev/null
+            grep -F -- '${piLspExtension}/share/pi-lsp-extension/src/index.ts' "$project_case" >/dev/null
             grep -F '".nix": "nix"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null
             grep -F '"dockerfile": "dockerfile"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null
             grep -F '".hs": "haskell"' ${piHarnessPackage.piLspExtension}/share/pi-lsp-extension/src/shared/language-map.ts >/dev/null

@@ -53,7 +53,7 @@ let
       extensions = map
         (name: "${drv}/share/pi-harness/agent/extensions/${name}/index.ts")
         (builtins.filter
-          (name: name != "pi-r" && name != "agentgraph")
+          (name: name != "pi-r" && name != "agentgraph" && name != "lsp")
           profileDocument.profiles."engineering-full".extensions);
       skills = lib.optional (builtins.elem "harness" profileDocument.profiles."engineering-full".skills) "${drv}/share/pi-harness/agent/skills";
       prompts = lib.optional (builtins.elem "harness" profileDocument.profiles."engineering-full".prompts) "${drv}/share/pi-harness/agent/prompts";

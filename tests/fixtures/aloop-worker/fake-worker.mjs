@@ -15,6 +15,7 @@ if (mode === "timeout") {
 		execFileSync("git", ["commit", "-m", `fake ${name}`]);
 	};
 	if (mode === "success" || mode === "multiple-commits" || mode === "replace-result") commit("worker-one.txt", "one\n");
+	if (mode === "environment") commit("worker-environment.json", `${JSON.stringify({ path: process.env.PATH, argv: process.argv.slice(2) }, null, 2)}\n`);
 	if (mode === "multiple-commits") commit("worker-two.txt", "two\n");
 	if (mode === "replace-result") {
 		const attempts = readdirSync(".pi/tmp/aloop").sort();

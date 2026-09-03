@@ -232,6 +232,28 @@ test("worker execution records a clean one-commit attempt and complete artifacts
 	}
 });
 
+test("implementation workers preserve project PATH precedence and append configured LSP fallbacks", async () => {
+	const cwd = await createRepository();
+	const previous = process.env.PI_HARNESS_LSP_FALLBACK_PATH;
+	process.env.PI_HARNESS_LSP_FALLBACK_PATH = "/harness/lsp-fallback/bin";
+	try {
+		const projectPath = `/project/dev-shell/bin:${process.env.PATH}`;
+		const outcome = await runAloopWorker({
+			...workerInput,
+			cwd,
+			launcher: [process.execPath, fakeWorker],
+			env: { FAKE_ALOOP_MODE: "environment", PATH: projectPath },
+		});
+		assert.equal(outcome.status, "completed");
+		const environment = JSON.parse(await readFile(path.join(cwd, "worker-environment.json"), "utf8"));
+		assert.equal(environment.path, `${projectPath}:/harness/lsp-fallback/bin`);
+	} finally {
+		if (previous === undefined) delete process.env.PI_HARNESS_LSP_FALLBACK_PATH;
+		else process.env.PI_HARNESS_LSP_FALLBACK_PATH = previous;
+		await rm(cwd, { recursive: true, force: true });
+	}
+});
+
 test("launcher failures return a bounded outcome and finalized result artifact", async () => {
 	const cwd = await createRepository();
 	try {

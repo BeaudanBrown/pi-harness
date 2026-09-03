@@ -187,8 +187,11 @@ test("packaged lifecycle launches real Pi through direnv and projects its final 
 	await mkdir(join(workspace, ".pi/extensions"), { recursive: true });
 	await mkdir(join(workspace, ".pi/skills/project-probe"), { recursive: true });
 	await mkdir(join(workspace, ".pi/prompts"), { recursive: true });
+	await mkdir(join(workspace, "project-bin"), { recursive: true });
 	await mkdir(home, { recursive: true });
-	await writeFile(join(workspace, ".envrc"), "export PROJECT_PROBE=present\n");
+	await writeFile(join(workspace, "project-bin/typescript-language-server"), "#!/bin/sh\nprintf 'project-language-server'\n");
+	await chmod(join(workspace, "project-bin/typescript-language-server"), 0o700);
+	await writeFile(join(workspace, ".envrc"), "export PROJECT_PROBE=present\nexport PATH=\"$PWD/project-bin:$PATH\"\n");
 	await writeFile(join(workspace, ".pi/skills/project-probe/SKILL.md"), "---\nname: project-probe\ndescription: PROJECT_SKILL_DISCOVERED\n---\n\n# Probe\n");
 	await writeFile(join(workspace, ".pi/prompts/project-probe.md"), "---\ndescription: project prompt probe\n---\nPROJECT_PROMPT_EXPANDED\n");
 	await writeFile(launcherExtension, "export default function () {}\n");
@@ -196,6 +199,7 @@ test("packaged lifecycle launches real Pi through direnv and projects its final 
 	await writeFile(projectExtension, `
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { AssistantMessageEventStream } from "@mariozechner/pi-ai";
+import { execFileSync } from "node:child_process";
 export default function (pi: ExtensionAPI) {
   pi.registerProvider("coordinator-probe", {
     baseUrl: "https://probe.invalid", apiKey: "test", api: "coordinator-probe-api",
@@ -206,6 +210,8 @@ export default function (pi: ExtensionAPI) {
       queueMicrotask(() => {
         const evidence = JSON.stringify(context);
         const ready = process.env.PROJECT_PROBE === "present"
+          && execFileSync("typescript-language-server", ["--probe"], { encoding: "utf8" }) === "project-language-server"
+          && execFileSync("nil", ["--version"], { encoding: "utf8" }).length > 0
           && evidence.includes("PROJECT_PROMPT_EXPANDED")
           && evidence.includes("PROJECT_SKILL_DISCOVERED")
           && evidence.includes("architecture-diagrams");
