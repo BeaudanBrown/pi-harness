@@ -147,6 +147,7 @@ export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRec
 		.sort((left, right) => left.name.localeCompare(right.name))
 		.slice(-200);
 	const records: AloopAttemptRecord[] = [];
+	const patchArtifactDirectories = new Set<string>();
 	for (const entry of entries) {
 		const match = entry.name.match(/^issue-(\d+)-/);
 		if (!match) continue;
@@ -165,7 +166,10 @@ export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRec
 				if (!patchStatus.isSymbolicLink() && patchStatus.isFile() && patchStatus.size <= 1_000_000) {
 					const patches = JSON.parse(await readFile(patchPath, "utf8"));
 					if (Array.isArray(patches)) {
-						for (const patch of patches) if (typeof patch?.commit === "string" && /^[0-9a-f]{7,64}$/i.test(patch.commit)) commit = patch.commit;
+						for (const patch of patches) {
+							if (typeof patch?.artifactDirectory === "string") patchArtifactDirectories.add(patch.artifactDirectory);
+							if (typeof patch?.commit === "string" && /^[0-9a-f]{7,64}$/i.test(patch.commit)) commit = patch.commit;
+						}
 					}
 				}
 			} catch (error) {
@@ -176,7 +180,7 @@ export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRec
 			// Ignore incomplete or malformed attempt artifacts; they carry no recoverable structured outcome.
 		}
 	}
-	return records;
+	return records.filter((record) => !patchArtifactDirectories.has(record.artifactDirectory));
 }
 
 function handoffWasRecorded(context: Awaited<ReturnType<typeof retrieveCurrentRepositoryEpicContext>>, pending: PendingHandoff): boolean {

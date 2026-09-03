@@ -289,11 +289,17 @@ test("attempt recovery uses the latest durable non-null patch commit", async () 
 		writeFileSync(join(directory, "result.json"), JSON.stringify({
 			status: "completed", commit: "a".repeat(40), artifacts: { directory: ".pi/tmp/aloop/issue-2-100-abcdef" },
 		}));
+		const patchArtifactDirectory = ".pi/tmp/aloop/issue-2-101-fedcba";
+		const patchDirectory = join(cwd, patchArtifactDirectory);
+		mkdirSync(patchDirectory, { recursive: true });
+		writeFileSync(join(patchDirectory, "result.json"), JSON.stringify({ status: "completed", commit: "b".repeat(40), artifacts: { directory: patchArtifactDirectory } }));
 		writeFileSync(join(directory, "patch-attempts.json"), JSON.stringify([
-			{ status: "completed", commit: "b".repeat(40) },
+			{ status: "completed", commit: "b".repeat(40), artifactDirectory: patchArtifactDirectory },
 			{ status: "timeout", commit: null },
 		]));
-		assert.equal((await scanAttemptArtifacts(cwd))[0]?.commit, "b".repeat(40));
+		const records = await scanAttemptArtifacts(cwd);
+		assert.equal(records.length, 1);
+		assert.equal(records[0]?.commit, "b".repeat(40));
 	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
