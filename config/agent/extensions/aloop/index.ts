@@ -818,7 +818,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						]);
 						if (head.code !== 0 || status.code !== 0 || status.stdout.trim()) throw new Error("Recovery closure requires a clean current worktree.");
 						const closureHead = head.stdout.trim();
-						const validated = validatedAcceptedCurrentStateHandoff(issue, closureHead);
+						const validated = validatedAcceptedCurrentStateHandoff(issue, closureHead, supervisorLogin);
 						if (!validated || validated.handoff.attemptKey !== settled.attemptKey || validated.body !== settledComment.body) {
 							throw new Error("Recovery closure requires the latest accepted v3 handoff with no findings and durable review and canonical verification evidence bound to the clean current HEAD.");
 						}
@@ -879,8 +879,19 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (publishedHandoff && (publishedHandoff.issue !== params.issue || publishedHandoff.commitRange !== `${base}..${head}` || publishedHandoff.outcome !== params.outcome)) {
 				throw new Error("Published handoff attempt key conflicts with the current finalization state.");
 			}
+			if (publishedHandoff?.outcome === "accepted") {
+				const validated = validatedAcceptedCurrentStateHandoff(issue, head, supervisorLogin);
+				if (!validated || validated.body !== publishedComment?.body) throw new Error("Published accepted handoff is not the latest fully reviewed and verified current-state snapshot.");
+			}
 			const handoff = publishedHandoff ?? { version: 3 as const, issue: params.issue, issueBaseCommit: base, commitRange: `${base}..${head}`, outcome: params.outcome, summary: params.summary, outstandingFindings: params.outstanding_findings, decisions: params.decisions, verification, nextAction: params.next_action, attemptKey, timestamp: new Date().toISOString() };
 			const body = publishedComment?.body ?? formatAloopHandoffV3(handoff);
+			if (params.outcome === "accepted") {
+				const durable = parseAloopHandoffV3(body);
+				const durableHead = durable?.commitRange.split("..").at(-1);
+				const hasReview = durable?.verification.some((item) => item === `Independent review completed at ${durableHead}.` || item === `Human review decision recorded at ${durableHead}.`) ?? false;
+				const hasCanonical = durable?.verification.some((item) => item === `Canonical command passed at ${durableHead}.`) ?? false;
+				if (!durable || durable.outstandingFindings.length > 0 || !hasReview || !hasCanonical) throw new Error("Accepted handoff normalization must retain review and canonical verification bound to HEAD.");
+			}
 			if (!publishedComment) {
 				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
 				try {

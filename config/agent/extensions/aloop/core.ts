@@ -25,8 +25,16 @@ function clipHandoffText(value: string, limit: number): string {
 }
 
 export function normalizeAloopHandoffV3(input: AloopHandoffV3): AloopHandoffV3 {
-	const list = (values: string[]) => values.slice(0, 4).map((value) => clipHandoffText(value, 200));
-	return { ...input, summary: clipHandoffText(input.summary, 1_000), outstandingFindings: list(input.outstandingFindings), decisions: list(input.decisions), verification: list(input.verification), nextAction: clipHandoffText(input.nextAction, 1_000) };
+	const list = (values: string[]) => values.slice(0, 3).map((value) => clipHandoffText(value, 100));
+	const verification = input.verification.map((value) => clipHandoffText(value, 100));
+	const lastMatching = (pattern: RegExp) => [...verification].reverse().find((value) => pattern.test(value));
+	const required = [
+		lastMatching(/^(Independent review completed|Human review decision recorded) at [0-9a-f]{7,64}\.$/i),
+		lastMatching(/^Canonical command passed at [0-9a-f]{7,64}\.$/i),
+		lastMatching(/^Production integration passed at [0-9a-f]{7,64}\.$/i),
+	].filter((value): value is string => value !== undefined);
+	const advisory = verification.filter((value) => !required.includes(value)).slice(0, Math.max(0, 3 - required.length));
+	return { ...input, summary: clipHandoffText(input.summary, 300), outstandingFindings: list(input.outstandingFindings), decisions: list(input.decisions), verification: [...advisory, ...required], nextAction: clipHandoffText(input.nextAction, 300) };
 }
 
 function visibleHandoffText(value: string): string {
@@ -34,15 +42,24 @@ function visibleHandoffText(value: string): string {
 }
 
 export function formatAloopHandoffV3(input: AloopHandoffV3): string {
+	if (input.version !== 3 || !["accepted", "incomplete", "decision-required", "environment-blocked", "rejected"].includes(input.outcome)
+		|| !Number.isInteger(input.issue) || input.issue <= 0 || !/^[0-9a-f]{7,64}$/i.test(input.issueBaseCommit)
+		|| !/^[0-9a-f]{7,64}\.\.[0-9a-f]{7,64}$/i.test(input.commitRange) || input.commitRange.split("..", 1)[0] !== input.issueBaseCommit
+		|| !/^[a-f0-9]{24}$/.test(input.attemptKey) || input.timestamp.length > 64 || Number.isNaN(Date.parse(input.timestamp))) {
+		throw new Error("Invalid fixed fields in aloop v3 handoff.");
+	}
 	const handoff = normalizeAloopHandoffV3(input);
 	const payload = Buffer.from(JSON.stringify(handoff), "utf8").toString("base64url");
 	const lines = handoff.outcome === "accepted"
 		? [`Aloop accepted ${handoff.commitRange}.`, handoff.summary, `Outstanding: ${handoff.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Verification: ${handoff.verification.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`]
 		: [`Aloop attempt settled as ${handoff.outcome}.`, handoff.summary, `Outstanding: ${handoff.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`];
-	return `${lines.map(visibleHandoffText).join("\n\n")}\n\n${HANDOFF_V3_PREFIX}${payload} -->`;
+	const body = `${lines.map(visibleHandoffText).join("\n\n")}\n\n${HANDOFF_V3_PREFIX}${payload} -->`;
+	if (Buffer.byteLength(body) > 19_000) throw new Error("Aloop v3 handoff exceeds the safe GitHub retrieval bound.");
+	return body;
 }
 
 export function parseAloopHandoffV3(body: string): AloopHandoffV3 | null {
+	if (Buffer.byteLength(body) > 20_000) return null;
 	const encodedPayloads = [...body.matchAll(/<!-- pi-aloop-handoff:v3:([A-Za-z0-9_-]+) -->/g)].map((match) => match[1]!).reverse();
 	for (const encoded of encodedPayloads) try {
 		const value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
@@ -56,9 +73,13 @@ export function parseAloopHandoffV3(body: string): AloopHandoffV3 | null {
 			&& value.commitRange.split("..", 1)[0] === value.issueBaseCommit
 			&& outcomes.includes(value.outcome) && typeof value.summary === "string" && value.summary.trim()
 			&& strings(value.outstandingFindings) && strings(value.decisions) && strings(value.verification)
-			&& typeof value.nextAction === "string" && value.nextAction.trim()
+			&& Array.from(value.summary).length <= 300
+			&& value.outstandingFindings.length <= 3 && value.outstandingFindings.every((item: string) => Array.from(item).length <= 100)
+			&& value.decisions.length <= 3 && value.decisions.every((item: string) => Array.from(item).length <= 100)
+			&& value.verification.length <= 3 && value.verification.every((item: string) => Array.from(item).length <= 100)
+			&& typeof value.nextAction === "string" && value.nextAction.trim() && Array.from(value.nextAction).length <= 300
 			&& typeof value.attemptKey === "string" && /^[a-f0-9]{24}$/.test(value.attemptKey)
-			&& typeof value.timestamp === "string" && !Number.isNaN(Date.parse(value.timestamp));
+			&& typeof value.timestamp === "string" && value.timestamp.length <= 64 && !Number.isNaN(Date.parse(value.timestamp));
 		if (valid) return value as AloopHandoffV3;
 	} catch { /* Continue to an earlier marker only when a later candidate is invalid. */ }
 	return null;
@@ -264,19 +285,29 @@ export function latestCurrentStateHandoff(issue: Pick<EpicIssueContext, "number"
 }
 
 /** Validates the single current v3 state used by both recovery and epic closure evidence. */
-export function validatedAcceptedCurrentStateHandoff(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, expectedHead?: string): CurrentStateHandoff | null {
+export function validatedAcceptedCurrentStateHandoff(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, expectedHead?: string, trustedAuthor?: string | null): CurrentStateHandoff | null {
 	const current = latestCurrentStateHandoff(issue);
 	if (!current || current.handoff.outcome !== "accepted" || current.handoff.outstandingFindings.length !== 0) return null;
 	const head = current.handoff.commitRange.split("..").at(-1)!;
 	if (expectedHead !== undefined && head !== expectedHead) return null;
-	const reviewed = current.handoff.verification.some((item) => item === `Independent review completed at ${head}.` || item === `Human review decision recorded at ${head}.`);
+	const independentReview = current.handoff.verification.some((item) => item === `Independent review completed at ${head}.`);
+	const reviewOpen = new Map<string, string | null>();
+	const reviewResolved = new Map<string, string | null>();
+	for (const comment of issue.recentHandoffs) {
+		const open = comment.body.match(/pi-aloop-review-decision:([a-f0-9]{20}):([a-f0-9]{7,64}):open/);
+		if (open?.[2] === head) reviewOpen.set(open[1]!, comment.author);
+		const resolved = comment.body.match(/pi-aloop-review-decision:([a-f0-9]{20}):([a-f0-9]{7,64}):resolved/);
+		if (resolved?.[2] === head) reviewResolved.set(resolved[1]!, comment.author);
+	}
+	const humanReview = trustedAuthor !== null && trustedAuthor !== undefined && [...reviewOpen].some(([marker, author]) => author === trustedAuthor && reviewResolved.get(marker) === trustedAuthor);
+	const reviewed = independentReview || humanReview;
 	const verified = current.handoff.verification.some((item) => item === `Canonical command passed at ${head}.`);
 	return reviewed && verified ? current : null;
 }
 
 export function validatedChildReviewEvidence(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, trustedAuthor: string | null): string | null {
 	if (!trustedAuthor) return null;
-	const current = validatedAcceptedCurrentStateHandoff(issue);
+	const current = validatedAcceptedCurrentStateHandoff(issue, undefined, trustedAuthor);
 	if (!current || current.author !== trustedAuthor) return null;
 	const head = current.handoff.commitRange.split("..").at(-1)!;
 	return `Accepted v3 handoff ${current.url ?? "recorded on GitHub"} binds review and canonical verification to ${head}.`;

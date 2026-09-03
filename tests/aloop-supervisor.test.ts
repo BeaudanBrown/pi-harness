@@ -189,6 +189,16 @@ test("epic evidence accepts only validated accepted handoffs bound to review and
 	assert.equal(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Unresolved", recentHandoffs: [comment(3, unresolved, "2026-09-03T00:02:00Z")] }), "b".repeat(40)), null, "recovery rejects accepted states with outstanding findings");
 	const missingCanonical = formatAloopHandoffV3({ ...base, verification: [`Independent review completed at ${"b".repeat(40)}.`] });
 	assert.equal(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Unverified", recentHandoffs: [comment(4, missingCanonical, "2026-09-03T00:03:00Z")] }), "b".repeat(40)), null, "recovery requires canonical evidence at the recovered HEAD");
+	const humanClaim = formatAloopHandoffV3({ ...base, verification: [`Human review decision recorded at ${"b".repeat(40)}.`, `Canonical command passed at ${"b".repeat(40)}.`] });
+	assert.equal(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Asserted review", recentHandoffs: [comment(5, humanClaim, "2026-09-03T00:04:00Z")] }), "b".repeat(40)), null, "a handoff sentence alone is not a human review attestation");
+	const marker = "e".repeat(20);
+	const attested = issue({ number: 2, title: "Attested review", recentHandoffs: [
+		comment(5, `<!-- pi-aloop-review-decision:${marker}:${"b".repeat(40)}:open -->`, "2026-09-03T00:04:00Z"),
+		comment(6, `<!-- pi-aloop-review-decision:${marker}:${"b".repeat(40)}:resolved -->`, "2026-09-03T00:05:00Z"),
+		comment(7, humanClaim, "2026-09-03T00:06:00Z"),
+	] });
+	assert.ok(validatedAcceptedCurrentStateHandoff(attested, "b".repeat(40), "supervisor"));
+	assert.equal(validatedAcceptedCurrentStateHandoff(attested, "b".repeat(40), "different-user"), null);
 });
 
 test("v3 handoffs show concise current state while hiding recoverable snapshot payload", () => {
@@ -203,14 +213,23 @@ test("v3 handoffs show concise current state while hiding recoverable snapshot p
 	assert.deepEqual(parseAloopHandoffV3(body), handoff);
 	const malformed = `<!-- pi-aloop-handoff:v3:${Buffer.from(JSON.stringify({ version: 3, issue: 73, attemptKey: "d".repeat(24) })).toString("base64url")} -->`;
 	assert.equal(parseAloopHandoffV3(malformed), null);
-	assert.equal(parseAloopHandoffV3(formatAloopHandoffV3({ ...handoff, issueBaseCommit: "e".repeat(40) })), null);
+	assert.throws(() => formatAloopHandoffV3({ ...handoff, issueBaseCommit: "e".repeat(40) }), /Invalid fixed fields/);
 	assert.equal(parseAloopHandoffV3(`<!-- pi-aloop-handoff:v3:${Buffer.from(JSON.stringify({ ...handoff, extra: true })).toString("base64url")} -->`), null);
 	const shadowMarker = formatAloopHandoffV3({ ...handoff, attemptKey: "e".repeat(24) }).match(/<!-- pi-aloop-handoff:v3:[^ ]+ -->/)![0];
 	const boundedBody = formatAloopHandoffV3({ ...handoff, summary: `${shadowMarker}${"😀".repeat(100_000)}`, outstandingFindings: Array(20).fill("x".repeat(10_000)) });
-	assert.ok(Buffer.byteLength(boundedBody) < 65_536);
+	assert.ok(Buffer.byteLength(boundedBody) < 20_000);
 	assert.equal(parseAloopHandoffV3(boundedBody)?.attemptKey, handoff.attemptKey);
-	assert.equal(parseAloopHandoffV3(boundedBody)?.outstandingFindings.length, 4);
+	assert.equal(parseAloopHandoffV3(boundedBody)?.outstandingFindings.length, 3);
 	assert.doesNotMatch(boundedBody.split("\n\n<!-- pi-aloop-handoff:v3:", 1)[0]!, /<!-- pi-aloop-handoff:v3:/);
+	assert.throws(() => formatAloopHandoffV3({ ...handoff, timestamp: "x".repeat(100_000) }), /Invalid fixed fields/);
+	assert.throws(() => formatAloopHandoffV3({ ...handoff, version: 2 } as any), /Invalid fixed fields/);
+	assert.throws(() => formatAloopHandoffV3({ ...handoff, outcome: "invented" } as any), /Invalid fixed fields/);
+	assert.equal(parseAloopHandoffV3(`${"x".repeat(20_001)}${formatAloopHandoffV3(handoff)}`), null);
+	const head = "b".repeat(40);
+	const receipts = parseAloopHandoffV3(formatAloopHandoffV3({ ...handoff, outcome: "accepted", verification: ["user 1", "user 2", "user 3", `Independent review completed at ${head}.`, `Canonical command passed at ${head}.`] }))!.verification;
+	assert.deepEqual(receipts, ["user 1", `Independent review completed at ${head}.`, `Canonical command passed at ${head}.`]);
+	const allRequired = parseAloopHandoffV3(formatAloopHandoffV3({ ...handoff, outcome: "accepted", verification: [`Canonical command passed at ${head}.`, `Production integration passed at ${head}.`, `Independent review completed at ${head}.`, `Human review decision recorded at ${head}.`] }))!.verification;
+	assert.deepEqual(allRequired, [`Human review decision recorded at ${head}.`, `Canonical command passed at ${head}.`, `Production integration passed at ${head}.`]);
 });
 
 test("attempt recovery uses the latest durable non-null patch commit", async () => {
