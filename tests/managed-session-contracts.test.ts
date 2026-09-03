@@ -142,6 +142,8 @@ test("role and operation combinations enforce capabilities", () => {
 	assert.equal(parseManagedSessionEnvelope(lifecycle).type, "lifecycle.request");
 	const projectCreate = { ...lifecycle, payload: { request: { operation: "project.create", creationKey: "create-1", rootKey: "projects", workspace: "new-project", concept: "new project" } } };
 	assert.equal(parseManagedSessionEnvelope(projectCreate).type, "lifecycle.request");
+	assert.throws(() => parseManagedSessionEnvelope({ ...projectCreate, payload: { request: { ...projectCreate.payload.request, projectSpace: "caller-selected" } } }),
+		"coordinators cannot select grouping through display names or Matrix Space IDs");
 	for (const request of [
 		{ ...projectCreate.payload.request, workspace: "nested/project" },
 		{ ...projectCreate.payload.request, workspace: "../escape" },
@@ -249,6 +251,16 @@ test("input and acknowledgement semantic constraints fail closed", () => {
 		payload: { deliveryId, status: "persisted" },
 	};
 	assert.throws(() => parseManagedSessionEnvelope(acknowledgement), /requires piEntryId/);
+});
+
+test("stable project grouping metadata is strict, atomic, and optional before explicit reconciliation", () => {
+	const legacy = manifest(); assert.deepEqual(parseConversationManifest(legacy), legacy);
+	const grouped = { ...legacy, projectKey: `project_${"a".repeat(32)}`, projectDisplayName: "main-project", checkoutDisplayName: "feature-worktree" };
+	assert.deepEqual(parseConversationManifest(grouped), grouped);
+	assert.throws(() => parseConversationManifest({ ...legacy, projectKey: grouped.projectKey }), /stable project identity/);
+	assert.throws(() => parseConversationManifest({ ...grouped, projectKey: "project_bad" }));
+	const { placement: _placement, ...withoutPlacement } = grouped;
+	assert.throws(() => parseConversationManifest({ ...withoutPlacement, kind: "coordinator", hostSpace: "!host:example.com" }), /conversation manifest|stable project identity/);
 });
 
 test("portable manifests reject unknown versions, fields, and unsafe workspace identities", () => {

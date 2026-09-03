@@ -301,22 +301,20 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				description: "Inspect one managed conversation lifecycle state.", parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }) }, { additionalProperties: false }),
 				execute: async (_id, params) => lifecycle({ operation: "conversation.status", targetConversationId: params.conversationId }) });
 			pi.registerTool({ name: "remote_project_create", label: "Create Managed Project",
-				description: "Create exactly one new immediate-child local Git repository on main, then start an empty managed conversation. This never scaffolds files, creates a remote, publishes to GitHub, or transfers coordinator discussion.",
+				description: "Create exactly one new immediate-child local Git repository on main, then start an empty managed conversation in its host-resolved project Space. This never scaffolds files, creates a remote, publishes to GitHub, or transfers coordinator discussion.",
 				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }),
-					projectSpace: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })), concept: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
+					concept: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
 				execute: async (_toolCallId, params) => lifecycle({ operation: "project.create",
 					creationKey: deriveProjectCreationKey(params.rootKey, params.workspace),
-					rootKey: params.rootKey, workspace: params.workspace, concept: params.concept,
-					...(params.projectSpace ? { projectSpace: params.projectSpace } : {}) }) });
+					rootKey: params.rootKey, workspace: params.workspace, concept: params.concept }) });
 			pi.registerTool({ name: "remote_session_start", label: "Start Managed Conversation",
-				description: "Create an idle managed Pi conversation in an existing depth-one workspace. Do not include an objective or task context; the first Matrix message is the first task.",
+				description: "Create an idle managed Pi conversation in an existing depth-one checkout. The host groups linked Git worktrees by common-directory identity. Do not include an objective or task context; the first Matrix message is the first task.",
 				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }),
-					relativeCwd: Type.Optional(Type.String({ maxLength: 512 })), projectSpace: Type.Optional(Type.String({ minLength: 1, maxLength: 128 })),
+					relativeCwd: Type.Optional(Type.String({ maxLength: 512 })),
 					concept: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
 				execute: async (toolCallId, params) => lifecycle({ operation: "conversation.start",
 					creationKey: `coordinator-${createHash("sha256").update("pi-managed-sessions:coordinator-tool-call:v1\0").update(toolCallId).digest("hex").slice(0, 32)}`,
-					concept: params.concept, placement: { rootKey: params.rootKey, workspace: params.workspace, relativeCwd: params.relativeCwd ?? "" },
-					...(params.projectSpace ? { projectSpace: params.projectSpace } : {}) }) });
+					concept: params.concept, placement: { rootKey: params.rootKey, workspace: params.workspace, relativeCwd: params.relativeCwd ?? "" } }) });
 			for (const operation of ["resume", "stop"] as const) pi.registerTool({
 				name: `remote_session_${operation}`, label: `${operation === "resume" ? "Resume" : "Stop"} Managed Conversation`,
 				description: `${operation === "resume" ? "Resume the same persisted Pi session in a new managed window" : "Terminate only the exact managed Pi window and leave the conversation dormant"}.`,

@@ -116,6 +116,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				if (coordinatorRouter) await coordinatorRouter.attachmentReady(attachment.conversationId);
 				else for (const control of registry.pendingControls(attachment.conversationId).filter((item) =>
 					!registry.hasGenerationBoundary(attachment.conversationId) || item.name === "new" && item.argument === "--confirm")) {
+					await activityProjector?.beginOperationFeedback(attachment.conversationId, control.controlId);
 					server!.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-control-${randomUUID()}`,
 						conversationId: attachment.conversationId, role: "relay", type: "control.deliver", payload: {
 							controlId: control.controlId, name: control.name, ...(control.argument ? { argument: control.argument } : {}),
@@ -142,7 +143,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					}
 					manifest = await registry.createProjectConversation(existing, payload.attachmentNonce);
 				} else {
-					const roomId = await matrix.createPrivateRoom(`pi · ${payload.concept}`);
+					const resolved = await hostLifecycle?.resolveWorkspaceIdentity(payload.placement);
+					const grouped = resolved ? await hostLifecycle!.provisionConversationMatrix(conversationId, payload.concept, resolved) : undefined;
+					const roomId = grouped?.roomId ?? await matrix.createPrivateRoom(`pi · ${payload.concept}`);
 					const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
 					manifest = {
 						schemaVersion: MANAGED_SESSION_STATE_VERSION,
@@ -153,17 +156,13 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						concept: payload.concept,
 						piSessionId: payload.sessionId,
 						roomId,
-						placement: payload.placement,
+						placement: payload.placement, ...(resolved && grouped ? { projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName,
+							checkoutDisplayName: resolved.checkoutDisplayName, projectSpace: grouped.projectSpace } : {}),
 						bindingBoundaryEntryId: payload.bindingBoundaryEntryId,
 						createdAt, activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: payload.sessionId,
 							bindingBoundaryEntryId: payload.bindingBoundaryEntryId, createdAt }],
 					};
-					try {
-						manifest = await registry.createProjectConversation(manifest, payload.attachmentNonce);
-					} catch (error) {
-						await matrix.leaveRoom(roomId).catch(() => undefined);
-						throw error;
-					}
+					manifest = await registry.createProjectConversation(manifest, payload.attachmentNonce);
 				}
 				return response(manifest.conversationId, envelope.messageId, "self.result", {
 					operation: "self.bind", status: "ok", boundConversationId: manifest.conversationId,
@@ -184,6 +183,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 							}
 							await registry.beginGenerationTransition(attachment.conversationId, payload.controlId, payload.generation);
 							await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
+							await activityProjector!.endOperationFeedback(attachment.conversationId, payload.controlId);
 							setImmediate(() => { void hostLifecycle!.requestNewGeneration(manifest, payload.controlId, payload.generation!).catch((error) =>
 								process.stderr.write(`pi-managed-session-relay: generation transition failed: ${redactManagedValue(error instanceof Error ? error.message : "unknown failure", environment)}\n`)); });
 							return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
@@ -198,6 +198,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, payload.message);
 						await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
 					}
+					await activityProjector!.endOperationFeedback(attachment.conversationId, payload.controlId);
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
 				}
 				if (envelope.type === "artifact.begin") {
@@ -230,6 +231,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						throw new RelayRegistryError("invalid_state", "Extension-command completion did not match a command delivery");
 					}
 					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId, payload.completionKind);
+					if (command && (payload.status === "completed" || payload.status === "cancelled")) await activityProjector!.endOperationFeedback(attachment.conversationId, payload.deliveryId);
 					if (input?.media && (payload.status === "completed" || payload.status === "cancelled")) await media.consume(input.media.blobId, registry.liveMediaBlobIds());
 					if (command && command !== "aloop" && !command.startsWith("aloop-")) await eventProjector.projectNotice(attachment.conversationId, `${payload.deliveryId}:command`, `Command dispatched: /${command}`);
 					return response(attachment.conversationId, envelope.messageId, "input.result", {
@@ -289,7 +291,6 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				return undefined;
 			},
 		});
-		await server.start();
 		if (coordinator) {
 			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(runtimeDirectory, "project-sessions");
 			hostLifecycle = new HostLifecycle({
@@ -297,7 +298,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				socketPath: server.socketPath, registry, matrix, server, environment,
 				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
+				endOperationFeedback: (conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId),
 			});
+		}
+		await server.start();
+		if (coordinator) {
 			const identity = coordinator;
 			coordinatorRouter = new CoordinatorRouter(identity.manifest, registry, matrix, server, async (manifest) => {
 				try {
@@ -317,9 +322,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					"Managed conversation wake failed; queued input remains available for retry.");
 			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
-			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile(), media);
+			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile(), media,
+			(conversationId, operationId) => activityProjector!.beginOperationFeedback(conversationId, operationId),
+			(conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId));
 			coordinatorRouter.start();
-			await hostLifecycle.reconcileGenerationTransitions();
+			await hostLifecycle!.reconcileGenerationTransitions();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
 	} catch (error) {

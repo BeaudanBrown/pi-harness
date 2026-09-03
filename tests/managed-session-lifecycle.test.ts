@@ -30,13 +30,42 @@ test("packaged project-create launcher confines creation, initializes only local
 		input: `${JSON.stringify(request)}\n`, encoding: "utf8", env,
 	})) as Record<string, unknown>;
 	const request = { creationKey: "create-safe", resumeExisting: false, rootKey: "projects", workspace: "safe-project" };
-	assert.deepEqual(invoke(request), { rootKey: "projects", workspace: "safe-project", relativeCwd: "", workspacePath: join(workspaceRoot, "safe-project"), cwd: join(workspaceRoot, "safe-project") });
-	const created = join(workspaceRoot, "safe-project");
+	const createdResult = invoke(request); const created = join(workspaceRoot, "safe-project");
+	assert.deepEqual({ ...createdResult, projectKey: undefined }, { rootKey: "projects", workspace: "safe-project", relativeCwd: "", workspacePath: created, cwd: created,
+		projectKey: undefined, projectDisplayName: "safe-project", checkoutDisplayName: "safe-project" });
+	assert.match(String(createdResult.projectKey), /^project_[a-f0-9]{32}$/);
 	assert.deepEqual(await readdir(created), [".git"], "creation adds no scaffold, task, or control file outside Git metadata");
 	assert.equal(execFileSync("git", ["-C", created, "symbolic-ref", "--short", "HEAD"], { encoding: "utf8" }).trim(), "main");
 	assert.equal(execFileSync("git", ["-C", created, "remote"], { encoding: "utf8" }).trim(), "");
 	assert.equal(execFileSync("git", ["-C", created, "config", "--local", "--get", "pi-managed.creationKey"], { encoding: "utf8" }).trim(), request.creationKey);
 	assert.deepEqual(invoke({ ...request, resumeExisting: true }), invoke({ ...request, resumeExisting: true }), "matching completed retries are idempotent");
+	const resolveWorkspace = (rootPath: string, workspace: string) => JSON.parse(execFileSync(launcher, ["managed", "workspace-resolve"], {
+		input: `${JSON.stringify({ rootKey: "projects", workspace, relativeCwd: "" })}\n`, encoding: "utf8",
+		env: { ...env, PI_MANAGED_TEST_WORKSPACE_ROOT: rootPath },
+	})) as Record<string, unknown>;
+	const mainCheckout = join(workspaceRoot, "group-main"); await mkdir(mainCheckout);
+	execFileSync("git", ["-C", mainCheckout, "init", "-b", "main"]); execFileSync("git", ["-C", mainCheckout, "config", "user.email", "test@example.com"]);
+	execFileSync("git", ["-C", mainCheckout, "config", "user.name", "Test"]); execFileSync("git", ["-C", mainCheckout, "commit", "--allow-empty", "-m", "root"]);
+	execFileSync("git", ["-C", mainCheckout, "worktree", "add", join(workspaceRoot, "group-linked"), "-b", "linked"]);
+	const rootIdentity = resolveWorkspace(workspaceRoot, "group-main"); const linkedIdentity = resolveWorkspace(workspaceRoot, "group-linked");
+	assert.equal(rootIdentity.projectKey, linkedIdentity.projectKey); assert.equal(rootIdentity.projectDisplayName, "group-main");
+	assert.equal(linkedIdentity.projectDisplayName, "group-main"); assert.equal(linkedIdentity.checkoutDisplayName, "group-linked");
+	const otherRoot = join(root, "other-roots"); const sameDisplay = join(otherRoot, "group-main"); await mkdir(sameDisplay, { recursive: true });
+	execFileSync("git", ["-C", sameDisplay, "init", "-b", "main"]);
+	assert.notEqual(resolveWorkspace(otherRoot, "group-main").projectKey, rootIdentity.projectKey, "display-name equality cannot merge foreign repositories");
+	const plain = join(workspaceRoot, "plain"); await mkdir(plain);
+	assert.deepEqual(resolveWorkspace(workspaceRoot, "plain"), resolveWorkspace(workspaceRoot, "plain"), "non-Git fallback identity is stable");
+	const malformed = join(workspaceRoot, "malformed"); await mkdir(join(malformed, ".git"), { recursive: true });
+	assert.throws(() => resolveWorkspace(workspaceRoot, "malformed"), "malformed direct Git metadata fails closed");
+	const markerLink = join(workspaceRoot, "marker-link"); await mkdir(markerLink); await symlink(join(mainCheckout, ".git"), join(markerLink, ".git"));
+	assert.throws(() => resolveWorkspace(workspaceRoot, "marker-link"), "symlinked Git metadata fails closed");
+	const externalMain = join(root, "external-main"); await mkdir(externalMain); execFileSync("git", ["-C", externalMain, "init", "-b", "main"]);
+	execFileSync("git", ["-C", externalMain, "config", "user.email", "test@example.com"]); execFileSync("git", ["-C", externalMain, "config", "user.name", "Test"]);
+	execFileSync("git", ["-C", externalMain, "commit", "--allow-empty", "-m", "root"]); execFileSync("git", ["-C", externalMain, "worktree", "add", join(workspaceRoot, "foreign-linked"), "-b", "foreign"]);
+	assert.throws(() => resolveWorkspace(workspaceRoot, "foreign-linked"), "a linked worktree whose common repository is outside the configured root fails closed");
+	await chmod(join(mainCheckout, ".git"), 0o000);
+	assert.throws(() => resolveWorkspace(workspaceRoot, "group-linked"), "an inaccessible common directory fails closed");
+	await chmod(join(mainCheckout, ".git"), 0o700);
 
 	await mkdir(join(workspaceRoot, "occupied")); await writeFile(join(workspaceRoot, "occupied", "keep.txt"), "keep");
 	assert.throws(() => invoke({ ...request, workspace: "occupied" })); assert.equal(await readFile(join(workspaceRoot, "occupied", "keep.txt"), "utf8"), "keep");
@@ -134,7 +163,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const root = await mkdtemp(join(tmpdir(), "pi-lifecycle-"));
 	const runtime = join(root, "runtime"); const manifests = join(root, "manifests"); const sessions = join(root, "sessions");
 	const workspaceRoot = join(root, "workspaces"); const workspace = join(workspaceRoot, "alpha"); const record = join(root, "launch.json");
-	await mkdir(workspace, { recursive: true });
+	await mkdir(join(workspaceRoot, "alpha-worktree"), { recursive: true }); await mkdir(workspace, { recursive: true });
 	const registry = new RelayRegistry(hostId, runtime, new ConversationManifestStore(manifests));
 	await registry.load();
 	const coordinatorId = deriveConversationId(hostId, "coordinator");
@@ -145,14 +174,15 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	await registry.createCoordinatorConversation(coordinator);
 	await registry.setMatrixCursor(coordinatorId, "lifecycle-test-cursor");
 	const matrixCalls: string[] = [];
-	let roomIndex = 0; let syncIndex = 0; let failCreatedSpaceLink = true;
+	let roomIndex = 0; let syncIndex = 0; const failSpaceLinks = new Set(["!room1:example.com", "!room3:example.com"]);
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
 		const path = new URL(String(input)).pathname; matrixCalls.push(`${init?.method ?? "GET"} ${path}`);
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
-			...(decodeURIComponent(path).includes("!room3:example.com") ? { type: "m.space" } : {}) });
-		if (path.includes("/state/m.space.child/") && decodeURIComponent(path).includes("!room3:example.com") && failCreatedSpaceLink) {
-			failCreatedSpaceLink = false; return new Response("injected outage", { status: 503 });
+			...(["!room1:example.com", "!room3:example.com"].some((room) => decodeURIComponent(path).includes(room)) ? { type: "m.space" } : {}) });
+		if (path.includes("/state/m.space.child/")) {
+			const child = [...failSpaceLinks].find((room) => decodeURIComponent(path).includes(room));
+			if (child) { failSpaceLinks.delete(child); return new Response("injected outage", { status: 503 }); }
 		}
 		if (path.endsWith("/sync")) {
 			syncIndex += 1;
@@ -164,14 +194,14 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		if (path.endsWith("/createRoom")) {
 			assert.ok((await stat(sessions)).isDirectory(), "project Pi session directory exists before Matrix binding");
 			const body = JSON.parse(String(init?.body)) as { room_alias_name?: string };
-			if (body.room_alias_name === `pi-${createdProjectId.slice(5)}-space`) assert.ok(await stat(join(sessions, createdProjectId, "session.jsonl")),
+			if (body.room_alias_name === `pi-${"b".repeat(32)}-space`) assert.ok(await stat(join(sessions, createdProjectId, "session.jsonl")),
 				"the exact empty Pi session is durable before project-create starts Matrix binding");
-			roomIndex += 1; return Response.json({ room_id: roomIndex === 1 ? "!project:example.com" : `!room${roomIndex}:example.com` });
+			roomIndex += 1; return Response.json({ room_id: `!room${roomIndex}:example.com` });
 		}
 		return Response.json({ event_id: "$ok" });
 	}, [coordinator.roomId, coordinator.hostSpace!], { maxAttempts: 1 });
 	const launcher = join(root, "tmux_project");
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nproject-create) name=$(field workspace); test ! -e "${workspaceRoot}/$name" || test "$(field resumeExisting)" = true; mkdir -p "${workspaceRoot}/$name"; mkdir -p "${workspaceRoot}/$name/.git"; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s"}\\n' "$name" "$name" "$name";;\nworkspace-resolve) name=$(field workspace); printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s"}\\n' "$name" "$name" "$name";;\nroot-ensure) name=$(field workspace); printf '{"sessionName":"%s","workspacePath":"${workspaceRoot}/%s"}\\n' "$name" "$name";;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; case "$PI_MANAGED_PROJECT_SESSION_FILE" in *generation-2.jsonl) test "$PI_MANAGED_SESSION_MODEL" = scoped/model; test "$PI_MANAGED_SESSION_THINKING" = high;; esac; conversation=$(field conversationId); name=$(field placement.workspace); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"%s","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"%s","relativeCwd":"","role":"conversation"}\\n' "$conversation" "$name" "$name";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nproject-create) name=$(field workspace); test ! -e "${workspaceRoot}/$name" || test "$(field resumeExisting)" = true; mkdir -p "${workspaceRoot}/$name"; mkdir -p "${workspaceRoot}/$name/.git"; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","projectDisplayName":"%s","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$name" "$name";;\nworkspace-resolve) name=$(field workspace); if test "$name" = beta; then key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; project=beta; else key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; project=alpha; fi; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_%s","projectDisplayName":"%s","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$key" "$project" "$name";;\nroot-ensure) name=$(field workspace); printf '{"sessionName":"%s","workspacePath":"${workspaceRoot}/%s"}\\n' "$name" "$name";;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; case "$PI_MANAGED_PROJECT_SESSION_FILE" in *generation-2.jsonl) test "$PI_MANAGED_SESSION_MODEL" = scoped/model; test "$PI_MANAGED_SESSION_THINKING" = high;; esac; conversation=$(field conversationId); name=$(field placement.workspace); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"%s","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"%s","relativeCwd":"","role":"conversation"}\\n' "$conversation" "$name" "$name";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") });
 	await server.start(); t.after(async () => server.close());
@@ -186,22 +216,34 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	});
 	const creationKey = "coordinator-project-one";
 	const conversationId = deriveConversationId(hostId, creationKey);
+	const startRequest = { operation: "conversation.start", creationKey, concept: "alpha work",
+		placement: { rootKey: "projects", workspace: "alpha", relativeCwd: "" } };
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, startRequest)), /Matrix PUT/);
+	const interruptedBinding = JSON.parse(await readFile(join(sessions, conversationId, "matrix-provisioning.json"), "utf8"));
+	assert.deepEqual({ projectKey: interruptedBinding.projectKey, projectSpaceId: interruptedBinding.projectSpaceId,
+		hostSpaceLinked: interruptedBinding.hostSpaceLinked, roomId: interruptedBinding.roomId },
+		{ projectKey: `project_${"a".repeat(32)}`, projectSpaceId: "!room1:example.com", hostSpaceLinked: undefined, roomId: undefined });
 	const attaching = attachFromRecord(record, server, registry);
-	const started = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.start", creationKey,
-		concept: "alpha work", placement: { rootKey: "projects", workspace: "alpha", relativeCwd: "" } }));
+	const started = await lifecycle.request(lifecycleEnvelope(coordinatorId, startRequest));
 	const firstSocket = await attaching;
 	assert.equal(started.conversationState, "active");
 	const manifest = registry.manifestByConversationId(conversationId)!;
 	const sessionFile = join(sessions, conversationId, "session.jsonl");
 	const sessionText = await readFile(sessionFile, "utf8");
 	assert.equal(sessionText.trim().split("\n").length, 2, "no objective or orientation is injected before the first Matrix task");
-	assert.equal(manifest.projectSpace, "!project:example.com");
+	assert.equal(manifest.projectSpace, "!room1:example.com");
+	const durableBinding = JSON.parse(await readFile(join(sessions, conversationId, "matrix-provisioning.json"), "utf8"));
+	assert.deepEqual({ projectSpaceId: durableBinding.projectSpaceId, hostSpaceLinked: durableBinding.hostSpaceLinked,
+		roomId: durableBinding.roomId, roomLinked: durableBinding.roomLinked },
+		{ projectSpaceId: "!room1:example.com", hostSpaceLinked: true, roomId: "!room2:example.com", roomLinked: true });
+	assert.deepEqual({ key: manifest.projectKey, project: manifest.projectDisplayName, checkout: manifest.checkoutDisplayName },
+		{ key: `project_${"a".repeat(32)}`, project: "alpha", checkout: "alpha" });
 	assert.ok(matrixCalls.some((call) => call.includes("m.space.child")));
 	assert.equal(registry.listConversations().filter((item) => item.conversationId === conversationId).length, 1);
 
 	await writeFile(record, "", "utf8");
 	const projectCreateRequest = { operation: "project.create", creationKey: projectCreationKey,
-		rootKey: "projects", workspace: "beta", concept: "beta project", projectSpace: "Beta Space" };
+		rootKey: "projects", workspace: "beta", concept: "beta project" };
 	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, projectCreateRequest)), /Matrix PUT/);
 	const interruptedCreation = JSON.parse(await readFile(join(sessions, createdProjectId, "project-creation.json"), "utf8"));
 	assert.deepEqual({ sessionPersisted: interruptedCreation.sessionPersisted, projectSpaceId: interruptedCreation.projectSpaceId,
@@ -217,9 +259,11 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		"new project session is empty except for its binding boundary");
 	assert.ok(await stat(join(workspaceRoot, "beta", ".git")), "the host launcher initialized the requested project before binding");
 	const durableCreation = JSON.parse(await readFile(join(sessions, createdProjectId, "project-creation.json"), "utf8"));
-	assert.deepEqual({ sessionPersisted: durableCreation.sessionPersisted, projectSpaceId: durableCreation.projectSpaceId,
-		hostSpaceLinked: durableCreation.hostSpaceLinked, roomId: durableCreation.roomId, roomLinked: durableCreation.roomLinked },
-		{ sessionPersisted: true, projectSpaceId: "!room3:example.com", hostSpaceLinked: true, roomId: "!room4:example.com", roomLinked: true },
+	assert.deepEqual({ sessionPersisted: durableCreation.sessionPersisted, projectKey: durableCreation.projectKey,
+		projectDisplayName: durableCreation.projectDisplayName, checkoutDisplayName: durableCreation.checkoutDisplayName,
+		projectSpaceId: durableCreation.projectSpaceId, hostSpaceLinked: durableCreation.hostSpaceLinked, roomId: durableCreation.roomId, roomLinked: durableCreation.roomLinked },
+		{ sessionPersisted: true, projectKey: `project_${"b".repeat(32)}`, projectDisplayName: "beta", checkoutDisplayName: "beta",
+			projectSpaceId: "!room3:example.com", hostSpaceLinked: true, roomId: "!room4:example.com", roomLinked: true },
 		"every project-create side-effect boundary is durable before the next boundary");
 	assert.deepEqual(await lifecycle.request(lifecycleEnvelope(coordinatorId, projectCreateRequest)), created,
 		"the durable creation key makes a completed project-create retry idempotent");
@@ -228,11 +272,31 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const secondConversationId = deriveConversationId(hostId, "coordinator-project-two");
 	const attachingSecond = attachFromRecord(record, server, registry);
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.start", creationKey: "coordinator-project-two",
-		concept: "alpha review", placement: { rootKey: "projects", workspace: "alpha", relativeCwd: "" } }));
+		concept: "alpha review", placement: { rootKey: "projects", workspace: "alpha-worktree", relativeCwd: "" } }));
 	const independentSocket = await attachingSecond;
 	assert.equal(registry.listConversations().filter((item) => item.kind === "project" && item.state === "active").length, 3,
 		"multiple independent conversations may remain active in one workspace");
 	assert.notEqual(registry.manifestByConversationId(secondConversationId)?.piSessionId, manifest.piSessionId);
+	assert.equal(registry.manifestByConversationId(secondConversationId)?.projectSpace, manifest.projectSpace,
+		"root checkout and linked worktree conversations share the stable project Space");
+	assert.equal(registry.manifestByConversationId(secondConversationId)?.checkoutDisplayName, "alpha-worktree");
+	const restartedRegistry = new RelayRegistry(hostId, runtime, new ConversationManifestStore(manifests)); await restartedRegistry.load();
+	const restartCreates: Array<Record<string, unknown>> = [];
+	const restartedMatrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("/createRoom")) { restartCreates.push(JSON.parse(String(init?.body))); return Response.json({ room_id: "!restart-room:example.com" }); }
+		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId });
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		return Response.json({ event_id: "$ok" });
+	}, restartedRegistry.managedRoomIds());
+	const restartedLifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath,
+		registry: restartedRegistry, matrix: restartedMatrix, server, environment: {} });
+	const restartBinding = await restartedLifecycle.provisionConversationMatrix(deriveConversationId(hostId, "restart-room"), "restart room",
+		{ rootKey: "projects", workspace: "alpha-worktree", relativeCwd: "", workspacePath: join(workspaceRoot, "alpha-worktree"), cwd: join(workspaceRoot, "alpha-worktree"),
+			projectKey: `project_${"a".repeat(32)}`, projectDisplayName: "alpha", checkoutDisplayName: "alpha-worktree" });
+	assert.equal(restartBinding.projectSpace, manifest.projectSpace); assert.equal(restartCreates.length, 1);
+	assert.deepEqual((restartCreates[0]?.creation_content as Record<string, unknown>).type, undefined,
+		"restart reuses the persisted stable Space and creates only the distinct conversation room");
 
 	setTimeout(() => firstSocket.destroy(), 25);
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.stop", targetConversationId: conversationId }));
@@ -375,6 +439,9 @@ export default function (pi: ExtensionAPI) {
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/createRoom")) { roomIndex += 1; return Response.json({ room_id: roomIndex === 1 ? "!project:example.com" : "!task:example.com" }); }
+		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
+			...(decodeURIComponent(path).includes("!project:example.com") ? { type: "m.space" } : {}) });
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/send/m.room.message/")) {
 			const body = JSON.parse(String(init?.body)) as { body: string };
 			if (body.body === "direnv project answer") resolveFinal();

@@ -115,6 +115,41 @@
             request=$(cat)
             : "''${PI_MANAGED_TEST_TMUX_SOCKET:?}"
             format='#{window_id}|#{pane_id}'
+            derive_project_key() {
+              local domain="$1" first="$2" second="$3"
+              { printf 'pi-managed-sessions:%s:v1\0' "$domain"
+                for part in "$first" "$second"; do printf '%s:' "$(printf '%s' "$part" | wc -c)"; printf '%s' "$part"; done
+              } | sha256sum | cut -c1-32
+            }
+            resolve_project_identity() {
+              checkout_display="$workspace"
+              local marker="$workspace_path/.git" common_raw common main_raw main output
+              if [[ -e "$marker" || -L "$marker" ]]; then
+                [[ ! -L "$marker" && ( -d "$marker" || -f "$marker" ) && $(stat -c %u "$marker") == $(id -u) ]]
+                [[ $(git -C "$workspace_path" rev-parse --is-inside-work-tree 2>/dev/null) == true ]]
+                [[ $(realpath -e "$(git -C "$workspace_path" rev-parse --show-toplevel 2>/dev/null)") == "$workspace_path" ]]
+                common_raw=$(git -C "$workspace_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
+                [[ -n "$common_raw" && ''${#common_raw} -le 4096 && "$common_raw" != *$'\n'* ]]
+                common=$(realpath -e "$common_raw")
+                [[ -d "$common" && ! -L "$common" && $(stat -c %u "$common") == $(id -u) ]]
+                output=$(git --git-dir="$common" worktree list --porcelain 2>/dev/null)
+                [[ -n "$output" && ''${#output} -le 65536 ]]
+                main_raw=$(awk '/^worktree / { print substr($0, 10); exit }' <<<"$output")
+                [[ -n "$main_raw" && "$main_raw" != *$'\n'* ]]
+                main=$(realpath -e "$main_raw")
+                [[ -d "$main" && ! -L "$main" && $(stat -c %u "$main") == $(id -u) && $(dirname "$main") == "$configured_root" ]]
+                [[ $(realpath -e "$main/.git") == "$common" && -d "$main/.git" && ! -L "$main/.git" && $(stat -c %u "$main/.git") == $(id -u) ]]
+                project_key="project_$(derive_project_key project-git "$root_key" "$common")"
+                project_display=$(basename "$main")
+              else
+                if git -C "$workspace_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then return 1; fi
+                project_key="project_$(derive_project_key project-workspace "$root_key" "$workspace")"
+                project_display="$workspace"
+              fi
+              [[ "$project_key" =~ ^project_[a-f0-9]{32}$ ]]
+              jq -en --arg project "$project_display" --arg checkout "$checkout_display" '
+                [$project,$checkout] | all(type == "string" and length >= 1 and length <= 128 and (test("[\u0000-\u001f\u007f/]") | not))' >/dev/null
+            }
             case "$operation" in
               workspace-list)
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
@@ -160,8 +195,10 @@
                 fi
                 [[ $(realpath "$(git -C "$workspace_path" rev-parse --show-toplevel)") == "$workspace_path" ]]
                 [[ $(git -C "$workspace_path" symbolic-ref --short HEAD) == main ]]
+                resolve_project_identity
                 jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg workspacePath "$workspace_path" \
-                  '{rootKey:$rootKey,workspace:$workspace,relativeCwd:"",workspacePath:$workspacePath,cwd:$workspacePath}'
+                  --arg projectKey "$project_key" --arg projectDisplayName "$project_display" --arg checkoutDisplayName "$checkout_display" \
+                  '{rootKey:$rootKey,workspace:$workspace,relativeCwd:"",workspacePath:$workspacePath,cwd:$workspacePath,projectKey:$projectKey,projectDisplayName:$projectDisplayName,checkoutDisplayName:$checkoutDisplayName}'
                 ;;
               workspace-resolve|root-ensure)
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
@@ -169,7 +206,10 @@
                 workspace=$(jq -er '.workspace' <<<"$request")
                 relative_cwd=$(jq -er '.relativeCwd' <<<"$request")
                 [[ "$root_key" == projects && "$workspace" != */* && "$workspace" != .* && "$relative_cwd" != /* && "$relative_cwd" != *..* ]]
-                workspace_path=$(realpath "$PI_MANAGED_TEST_WORKSPACE_ROOT/$workspace")
+                configured_root=$(realpath "$PI_MANAGED_TEST_WORKSPACE_ROOT")
+                [[ -d "$configured_root" && ! -L "$PI_MANAGED_TEST_WORKSPACE_ROOT" ]]
+                workspace_path=$(realpath "$configured_root/$workspace")
+                [[ -d "$workspace_path" && ! -L "$configured_root/$workspace" && $(dirname "$workspace_path") == "$configured_root" && $(stat -c %u "$workspace_path") == $(id -u) ]]
                 cwd=$(realpath "$workspace_path/''${relative_cwd:-.}")
                 [[ "$cwd" == "$workspace_path" || "$cwd" == "$workspace_path/"* ]]
                 if [[ "$operation" == root-ensure ]]; then
@@ -178,8 +218,10 @@
                   fi
                   jq -cn --arg sessionName "$workspace" --arg workspacePath "$workspace_path" '{sessionName:$sessionName,workspacePath:$workspacePath}'
                 else
+                  resolve_project_identity
                   jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg relativeCwd "$relative_cwd" \
-                    --arg workspacePath "$workspace_path" --arg cwd "$cwd" '{rootKey:$rootKey,workspace:$workspace,relativeCwd:$relativeCwd,workspacePath:$workspacePath,cwd:$cwd}'
+                    --arg workspacePath "$workspace_path" --arg cwd "$cwd" --arg projectKey "$project_key" --arg projectDisplayName "$project_display" --arg checkoutDisplayName "$checkout_display" \
+                    '{rootKey:$rootKey,workspace:$workspace,relativeCwd:$relativeCwd,workspacePath:$workspacePath,cwd:$cwd,projectKey:$projectKey,projectDisplayName:$projectDisplayName,checkoutDisplayName:$checkoutDisplayName}'
                 fi
                 ;;
               window-inspect)

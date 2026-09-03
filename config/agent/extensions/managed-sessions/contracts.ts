@@ -90,14 +90,12 @@ const lifecycleArguments = Type.Union([
 		rootKey: identifier,
 		workspace: boundedString(128),
 		concept: boundedString(128),
-		projectSpace: Type.Optional(boundedString(128)),
 	}),
 	strictObject({
 		operation: Type.Literal("conversation.start"),
 		creationKey: identifier,
 		concept: boundedString(128),
 		placement: WorkspaceIdentitySchema,
-		projectSpace: Type.Optional(boundedString(128)),
 	}),
 	strictObject({ operation: Type.Literal("conversation.resume"), targetConversationId: ConversationIdSchema }),
 	strictObject({ operation: Type.Literal("conversation.stop"), targetConversationId: ConversationIdSchema }),
@@ -371,6 +369,7 @@ const generationManifestFields = {
 	activeGenerationId: Type.Optional(GenerationIdSchema),
 	generations: Type.Optional(Type.Array(sessionGeneration, { minItems: 1, maxItems: 256 })),
 };
+const ProjectKeySchema = Type.String({ pattern: "^project_[a-f0-9]{32}$" });
 const projectManifest = strictObject({
 	schemaVersion: Type.Literal(MANAGED_SESSION_STATE_VERSION),
 	kind: Type.Literal("project"),
@@ -381,7 +380,10 @@ const projectManifest = strictObject({
 	piSessionId: identifier,
 	roomId: boundedString(255),
 	placement: WorkspaceIdentitySchema,
-	projectSpace: Type.Optional(boundedString(128)),
+	projectKey: Type.Optional(ProjectKeySchema),
+	projectDisplayName: Type.Optional(boundedString(128)),
+	checkoutDisplayName: Type.Optional(boundedString(128)),
+	projectSpace: Type.Optional(boundedString(255)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
 	...generationManifestFields,
@@ -563,6 +565,9 @@ export interface ConversationManifest {
 	piSessionId: string;
 	roomId: string;
 	placement?: WorkspaceIdentity;
+	projectKey?: string;
+	projectDisplayName?: string;
+	checkoutDisplayName?: string;
 	projectSpace?: string;
 	hostSpace?: string;
 	bindingBoundaryEntryId: string;
@@ -791,6 +796,12 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 	const manifest = value as ConversationManifest;
 	assertTimestamp(manifest.createdAt, "createdAt");
 	if (manifest.placement) assertWorkspaceIdentity(manifest.placement);
+	const projectIdentityFields = [manifest.projectKey, manifest.projectDisplayName, manifest.checkoutDisplayName];
+	if (manifest.kind === "coordinator" && projectIdentityFields.some((field) => field !== undefined) ||
+		manifest.kind === "project" && projectIdentityFields.some((field) => field !== undefined) &&
+			(projectIdentityFields.some((field) => field === undefined) || projectIdentityFields.slice(1).some((field) => /[\u0000-\u001f\u007f/]/.test(field ?? "")))) {
+		throw new ManagedSessionContractError("invalid_state", "stable project identity fields must appear together on project manifests only");
+	}
 	if ((manifest.activeGenerationId === undefined) !== (manifest.generations === undefined)) {
 		throw new ManagedSessionContractError("invalid_state", "active generation and generation history must appear together");
 	}

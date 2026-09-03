@@ -247,14 +247,18 @@ replaced against that same session and host Space.
 
 The coordinator-only profile exposes typed workspace, local-project creation,
 and conversation list/status/start/resume/stop/delete tools. Project creation
-accepts only a configured root, safe absent immediate-child name, optional
-project Space name, and immutable concept. The trusted launcher creates no
+accepts only a configured root, safe absent immediate-child name, and immutable
+concept. The trusted launcher creates no
 scaffold or remote: it initializes local Git on `main`, records a durable retry
 identity, and preserves partial repositories for explicit retry. Stable private
 Matrix aliases and durable provisioning phases prevent uncertain retries from
 duplicating project Spaces or rooms. Starting a
 project conversation accepts only a named root, immediate-child workspace, safe
-relative cwd, optional project Space name, and immutable concept. The relay resolves placement
+relative cwd, and immutable concept. The trusted launcher resolves Git common-directory
+identity so a main checkout and its linked worktrees share one deterministic private
+project Space while retaining distinct checkout room names; non-Git workspaces use
+a stable immediate-child fallback. Existing rooms remain untouched until the explicit
+reconciliation workflow. The relay resolves placement
 through the fixed launcher, durably creates the Pi session and binding boundary
 before Matrix rooms, and launches the ordinary adapter through the trusted
 `direnv exec`/Pi dispatch. No objective or orientation is lifecycle metadata:
@@ -266,7 +270,7 @@ Stop terminates only the exact managed window, while confirmed bridge deletion
 leaves the Pi session, process/window, workspace, and project files intact.
 
 Managed room controls retain Pi's established control semantics while using
-host-owned room routing: ordinary text is an idle prompt or busy follow-up; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new --confirm` creates a fresh generation while preserving the room and prior Pi session files. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
+host-owned room routing: ordinary text is an idle prompt or busy follow-up; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. Adapter-executed controls and slash commands hold reference-counted Matrix typing feedback until durable completion without cancelling typing for concurrent model activity. State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new --confirm` creates a fresh generation while preserving the room and prior Pi session files. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
 queued during wake cancels that wake input. The `remote_checkpoint` tool emits
 one durable structured question, blocker, or issue-completion boundary, then
 hard-aborts the run until a new operator reply. Declared question options become

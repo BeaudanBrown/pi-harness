@@ -545,6 +545,51 @@ test("first valid checkpoint vote resumes once with exact option text and retire
 	assert.equal(pollEnds.length, 1);
 });
 
+test("router starts ephemeral feedback for adapter controls and slash commands", async (t) => {
+	const { root, registry, manifest } = await fixture(); let syncCount = 0; const feedback: string[] = []; const ended: string[] = [];
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/sync")) { syncCount += 1; if (syncCount === 1) return Response.json(sync([event("$compact-feedback", "!compact focus"), event("$command-feedback", "/name grouped"), event("$abort-feedback", "!abort")]));
+			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true })); }
+		return Response.json({ event_id: "$ok" });
+	}, [manifest.roomId]);
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "feedback-ipc") }); await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+		async (_conversationId, operationId) => { feedback.push(operationId); }, async (_conversationId, operationId) => { ended.push(operationId); });
+	const delivered = readMany(socket, 2); router.start(); await delivered; await new Promise((resolve) => setTimeout(resolve, 20)); await router.stop();
+	const commandId = deriveDeliveryId(manifest.conversationId, "$command-feedback");
+	assert.deepEqual(feedback.sort(), [deriveControlId(manifest.conversationId, "$compact-feedback"), commandId].sort());
+	assert.deepEqual(ended, [commandId], "durable abort cancellation releases slash-command typing feedback");
+});
+
+test("control-poll selections acquire the same adapter-operation typing feedback", async (t) => {
+	const { root, registry, manifest } = await fixture(); const source = { controlId: deriveControlId(manifest.conversationId, "$model-source"), matrixEventId: "$model-source", name: "model" as const };
+	await registry.recordPendingControl(manifest.conversationId, source);
+	await registry.registerActiveControlPoll(manifest.conversationId, { pollEventId: "$model-poll", sourceControlId: source.controlId, scope: "model",
+		options: [{ answerId: "pi-control-0", command: "!model scoped/model" }] });
+	await registry.acknowledgeControlResult(manifest.conversationId, source.controlId);
+	let syncCount = 0; const feedback: string[] = [];
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.includes("/event/")) return Response.json({ sender: config.botUserId, type: "m.poll.start", content: { "m.poll": {
+			kind: "m.disclosed", max_selections: 1, answers: [{ "m.id": "pi-control-0", "m.text": [{ body: "!model scoped/model" }] }] } } });
+		if (path.includes("/m.poll.end/")) return Response.json({ event_id: "$closed" });
+		if (path.endsWith("/sync")) { syncCount += 1; if (syncCount === 1) return Response.json(sync([{ event_id: "$model-vote", origin_server_ts: Date.now(), sender: config.operatorUserId,
+			type: "m.poll.response", content: { "m.selections": ["pi-control-0"], "m.relates_to": { rel_type: "m.reference", event_id: "$model-poll" } } }]));
+			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true })); }
+		return Response.json({ event_id: "$ok" });
+	}, [manifest.roomId]);
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "poll-feedback-ipc") }); await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+		async (_conversationId, operationId) => { feedback.push(operationId); });
+	const delivered = readMany(socket, 1); router.start(); const [control] = await delivered; await router.stop();
+	assert.equal(control.payload.name, "model"); assert.deepEqual(feedback, [deriveControlId(manifest.conversationId, "$model-vote")]);
+});
+
 test("ordinary checkpoint text closes the poll and bypasses configured options exactly once", async (t) => {
 	const { root, registry, manifest } = await fixture();
 	const originId = deriveDeliveryId(manifest.conversationId, "$text-origin");

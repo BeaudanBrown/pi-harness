@@ -194,6 +194,8 @@ export class CoordinatorRouter {
 		private readonly reconcileControlPollPublications: () => Promise<void> = async () => undefined,
 		private readonly reconcileCheckpointPollPublications: () => Promise<void> = async () => undefined,
 		private readonly media?: ManagedImageTransport,
+		private readonly beginOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
+		private readonly endOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -216,13 +218,17 @@ export class CoordinatorRouter {
 	async attachmentReady(conversationId = this.manifest.conversationId): Promise<void> {
 		if (this.registry.hasGenerationBoundary(conversationId)) {
 			for (const control of this.registry.pendingControls(conversationId).filter((item) => item.name === "new" && item.argument === "--confirm")) {
+				await this.beginOperationFeedback(conversationId, control.controlId);
 				this.server.sendToConversation(this.controlEnvelope(conversationId, control));
 			}
 			return;
 		}
-		for (const control of this.registry.pendingControls(conversationId)) this.server.sendToConversation(this.controlEnvelope(conversationId, control));
+		for (const control of this.registry.pendingControls(conversationId)) {
+			await this.beginOperationFeedback(conversationId, control.controlId); this.server.sendToConversation(this.controlEnvelope(conversationId, control));
+		}
 		for (const input of this.registry.pendingInputs(conversationId)) {
 			if (input.status !== "accepted" && input.status !== "delivered") continue;
+			if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(conversationId, input.deliveryId);
 			const delivered = input.media ? await this.media?.deliver(this.server, conversationId, input) ?? false
 				: this.server.sendToConversation(this.deliveryEnvelope(conversationId, input));
 			if (delivered) await this.registry.markInputDelivered(conversationId, input.deliveryId);
@@ -294,6 +300,7 @@ export class CoordinatorRouter {
 		const pending = { controlId: deriveControlId(manifest.conversationId, event.eventId), matrixEventId: event.eventId,
 			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
 		if (!await this.registry.acceptActiveControlPollResponse(manifest.conversationId, event.pollEventId, event.answerId, offered, pending)) return;
+		await this.beginOperationFeedback(manifest.conversationId, pending.controlId);
 		await this.matrix.endPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, event.pollEventId, 0), event.pollEventId,
 			"Selection accepted", signal, "stable").catch((error) => this.diagnostic(error instanceof Error ? error.message : "Matrix control poll closure failed"));
 		await this.deliverRecordedControl(manifest, event.eventId, pending);
@@ -321,6 +328,7 @@ export class CoordinatorRouter {
 		const pending = { controlId: deriveControlId(manifest.conversationId, eventId), matrixEventId: eventId,
 			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
 		await this.registry.recordPendingControl(manifest.conversationId, pending);
+		await this.beginOperationFeedback(manifest.conversationId, pending.controlId);
 		await this.deliverRecordedControl(manifest, eventId, pending);
 	}
 
@@ -429,18 +437,24 @@ export class CoordinatorRouter {
 		await this.registry.recordAcceptedInput(manifest.conversationId, {
 			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
 		});
+		if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(manifest.conversationId, deliveryId);
 		const recordedState = this.registry.conversationState(manifest.conversationId);
 		if (recordedState === "starting" && input.kind === "abort") {
 			if (this.launching.has(manifest.conversationId)) {
 				await this.registry.cancelPendingInputsExcept(manifest.conversationId, deliveryId);
+				await this.endCancelledCommandFeedback(manifest.conversationId);
 				return;
 			}
 			await this.registry.cancelPendingInputs(manifest.conversationId);
+			await this.endCancelledCommandFeedback(manifest.conversationId);
 			await this.registry.failLaunch(manifest.conversationId);
 			await this.projectNotice(event.eventId, manifest, "No active run to abort; managed conversation remains dormant.");
 			return;
 		}
-		if (recordedState === "active" && input.kind === "abort") await this.registry.cancelPendingInputs(manifest.conversationId);
+		if (recordedState === "active" && input.kind === "abort") {
+			await this.registry.cancelPendingInputs(manifest.conversationId);
+			await this.endCancelledCommandFeedback(manifest.conversationId);
+		}
 		await this.deliverRecordedInput(manifest, {
 			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
 		});
@@ -477,6 +491,12 @@ export class CoordinatorRouter {
 			this.launching.set(manifest.conversationId, launch);
 		}
 		// Wake runs independently so later Matrix controls can cancel or steer queued input while attachment is pending.
+	}
+
+	private async endCancelledCommandFeedback(conversationId: string): Promise<void> {
+		for (const input of this.registry.pendingInputs(conversationId)) if (input.status === "cancelled" && input.kind === "prompt" && input.body?.startsWith("/")) {
+			await this.endOperationFeedback(conversationId, input.deliveryId);
+		}
 	}
 
 	private deliveryEnvelope(conversationId: string, input: { deliveryId: string; matrixEventId: string; kind: string; body?: string }): ManagedSessionEnvelope {

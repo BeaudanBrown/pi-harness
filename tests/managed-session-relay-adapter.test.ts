@@ -127,10 +127,14 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		"/_matrix/client/v3/account/whoami",
 		"/_matrix/client/v3/createRoom",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, transcript.entryId, 0)}`,
+		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`,
+		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 	]);
+	assert.deepEqual(requests.filter((request) => request.path.includes("/typing/")).map((request) => JSON.parse(request.body ?? "{}").typing), [true, false],
+		"replayed adapter-executed controls expose bounded typing feedback through durable completion");
 	assert.ok(requests.every((request) => request.authorization === "Bearer test-token-never-in-ipc"));
 	const sent = requests.find((request) => request.path.includes("/send/"));
 	const sentContent = JSON.parse(sent?.body ?? "{}") as { body?: string; formatted_body?: string };

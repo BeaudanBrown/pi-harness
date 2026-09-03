@@ -61,6 +61,7 @@ export class ActivityProjector {
 	private state: ActivityState = { schemaVersion: ACTIVITY_STATE_VERSION, activities: [] };
 	private operation: Promise<void> = Promise.resolve();
 	private readonly typing = new Map<string, NodeJS.Timeout>();
+	private readonly operationLeases = new Map<string, Set<string>>();
 	private readonly interruptions = new Map<string, NodeJS.Timeout>();
 	private readonly typingRefreshMs: number;
 	private readonly interruptionGraceMs: number;
@@ -98,18 +99,36 @@ export class ActivityProjector {
 			}
 			item.revision = payload.revision; item.payload = payload; item.finalized = envelope.type === "activity.finalize";
 			await this.file.write(this.state);
-			if (item.finalized) await this.stopTyping(envelope.conversationId, manifest.roomId); else await this.startTyping(envelope.conversationId, manifest.roomId);
+			if (item.finalized && !this.hasOperationLease(envelope.conversationId)) void this.stopTyping(envelope.conversationId, manifest.roomId).catch(() => undefined);
+			else void this.startTyping(envelope.conversationId, manifest.roomId).catch(() => undefined);
 			return item.finalized ? "finalized" : "updated";
 		});
 	}
 	hasUnfinalized(conversationId: string): boolean { return this.state.activities.some((item) => item.conversationId === conversationId && !item.finalized); }
+	async beginOperationFeedback(conversationId: string, operationId: string): Promise<void> {
+		return this.serialize(async () => {
+			const manifest = this.registry.manifestByConversationId(conversationId);
+			if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+			const leases = this.operationLeases.get(conversationId) ?? new Set<string>(); leases.add(operationId); this.operationLeases.set(conversationId, leases);
+			void this.startTyping(conversationId, manifest.roomId).catch(() => undefined);
+		});
+	}
+	async endOperationFeedback(conversationId: string, operationId: string): Promise<void> {
+		return this.serialize(async () => {
+			const leases = this.operationLeases.get(conversationId); const existed = leases?.delete(operationId) ?? false;
+			if (!existed) return;
+			if (leases?.size === 0) this.operationLeases.delete(conversationId);
+			if (this.hasOperationLease(conversationId) || this.hasUnfinalized(conversationId)) return;
+			const manifest = this.registry.manifestByConversationId(conversationId); if (manifest) void this.stopTyping(conversationId, manifest.roomId).catch(() => undefined);
+		});
+	}
 	async attachmentConnected(conversationId: string): Promise<void> {
 		const interruption = this.interruptions.get(conversationId);
 		if (interruption) clearTimeout(interruption);
 		this.interruptions.delete(conversationId);
-		if (!this.hasUnfinalized(conversationId)) return;
+		if (!this.hasUnfinalized(conversationId) && !this.hasOperationLease(conversationId)) return;
 		const manifest = this.registry.manifestByConversationId(conversationId);
-		if (manifest) await this.startTyping(conversationId, manifest.roomId);
+		if (manifest) void this.startTyping(conversationId, manifest.roomId).catch(() => undefined);
 	}
 	attachmentDisconnected(conversationId: string): void {
 		if (this.interruptions.has(conversationId)) return;
@@ -121,11 +140,13 @@ export class ActivityProjector {
 		if (!item) return;
 		await this.project({ protocolVersion: "1.0.0", messageId: "relay-interrupt", conversationId, role: "ordinary_adapter", type: "activity.finalize", payload: { ...item.payload, revision: item.revision + 1, outcome: "interrupted" } });
 	}
-	async close(): Promise<void> { for (const timer of this.typing.values()) clearInterval(timer); for (const timer of this.interruptions.values()) clearTimeout(timer); this.typing.clear(); this.interruptions.clear(); }
+	async close(): Promise<void> { for (const timer of this.typing.values()) clearInterval(timer); for (const timer of this.interruptions.values()) clearTimeout(timer); this.typing.clear(); this.operationLeases.clear(); this.interruptions.clear(); }
+	private hasOperationLease(conversationId: string): boolean { return (this.operationLeases.get(conversationId)?.size ?? 0) > 0; }
 	private async startTyping(conversationId: string, roomId: string): Promise<void> {
+		if (!this.typing.has(conversationId)) {
+			const timer = setInterval(() => void this.matrix.setTyping(roomId, true).catch(() => undefined), this.typingRefreshMs); timer.unref(); this.typing.set(conversationId, timer);
+		}
 		await this.matrix.setTyping(roomId, true);
-		if (this.typing.has(conversationId)) return;
-		const timer = setInterval(() => void this.matrix.setTyping(roomId, true).catch(() => undefined), this.typingRefreshMs); timer.unref(); this.typing.set(conversationId, timer);
 	}
 	private async stopTyping(conversationId: string, roomId: string): Promise<void> { const timer = this.typing.get(conversationId); if (timer) clearInterval(timer); this.typing.delete(conversationId); await this.matrix.setTyping(roomId, false); }
 	private serialize<T>(work: () => Promise<T>): Promise<T> { const result = this.operation.then(work, work); this.operation = result.then(() => undefined, () => undefined); return result; }

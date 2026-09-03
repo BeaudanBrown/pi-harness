@@ -50,6 +50,40 @@ test("activity projector edits one stable card, balances the final snapshot, and
 	await projector.close(); await rm(root, { recursive: true, force: true });
 });
 
+test("command feedback leases keep typing active across compaction and concurrent model activity", async () => {
+	const root = await mkdtemp(join(tmpdir(), "managed-operation-feedback-")); const typing: boolean[] = [];
+	const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
+		const path = String(input); if (path.includes("/typing/")) typing.push(Boolean(JSON.parse(String(init?.body)).typing));
+		return new Response(JSON.stringify(path.includes("/send/") ? { event_id: "$activity" } : {}), { status: 200 });
+	};
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" }, fetcher as typeof fetch, [roomId]);
+	const registry = { manifestByConversationId: () => ({ conversationId, roomId }) } as unknown as RelayRegistry;
+	const projector = new ActivityProjector(root, registry, matrix); await projector.load();
+	await projector.beginOperationFeedback(conversationId, `control_${"a".repeat(32)}`);
+	assert.equal(typing.at(-1), true, "remote compaction/control feedback starts typing without a model span");
+	await projector.project(envelope("activity.update", { activityId, revision: 0, state: "busy" }));
+	await projector.endOperationFeedback(conversationId, `control_${"a".repeat(32)}`);
+	assert.equal(typing.at(-1), true, "one operation completing cannot cancel concurrent model activity");
+	await projector.beginOperationFeedback(conversationId, `delivery_${"b".repeat(32)}`);
+	await projector.project(envelope("activity.finalize", { activityId, revision: 1, outcome: "completed" }));
+	assert.equal(typing.at(-1), true, "a model span completing cannot cancel concurrent slash-command feedback");
+	await projector.endOperationFeedback(conversationId, `delivery_${"b".repeat(32)}`);
+	assert.equal(typing.at(-1), false);
+	await projector.close(); await rm(root, { recursive: true, force: true });
+});
+
+test("typing endpoint failures never gate durable operation feedback", async () => {
+	const root = await mkdtemp(join(tmpdir(), "managed-feedback-outage-")); let calls = 0;
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
+		async () => { calls += 1; return new Response("outage", { status: 503 }); }, [roomId], { maxAttempts: 1 });
+	const registry = { manifestByConversationId: () => ({ conversationId, roomId }) } as unknown as RelayRegistry;
+	const projector = new ActivityProjector(root, registry, matrix); await projector.load();
+	await projector.beginOperationFeedback(conversationId, `control_${"c".repeat(32)}`);
+	await projector.endOperationFeedback(conversationId, `control_${"c".repeat(32)}`);
+	assert.equal(calls, 2, "best-effort typing attempts do not reject durable control delivery or completion");
+	await projector.close(); await rm(root, { recursive: true, force: true });
+});
+
 test("activity creation retries the same stable Matrix transaction after an uncertain send", async () => {
 	const root = await mkdtemp(join(tmpdir(), "managed-activity-uncertain-"));
 	const sendPaths: string[] = []; let fail = true;
