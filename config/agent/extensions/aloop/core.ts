@@ -19,20 +19,32 @@ export type AloopHandoffV3 = {
 	timestamp: string;
 };
 
+function clipHandoffText(value: string, limit: number): string {
+	const points = Array.from(value);
+	return points.length <= limit ? value : `${points.slice(0, limit - 1).join("")}…`;
+}
+
+export function normalizeAloopHandoffV3(input: AloopHandoffV3): AloopHandoffV3 {
+	const list = (values: string[]) => values.slice(0, 4).map((value) => clipHandoffText(value, 200));
+	return { ...input, summary: clipHandoffText(input.summary, 1_000), outstandingFindings: list(input.outstandingFindings), decisions: list(input.decisions), verification: list(input.verification), nextAction: clipHandoffText(input.nextAction, 1_000) };
+}
+
+function visibleHandoffText(value: string): string {
+	return value.replaceAll("<!--", "&lt;!--").replaceAll("-->", "--&gt;");
+}
+
 export function formatAloopHandoffV3(input: AloopHandoffV3): string {
-	const payload = Buffer.from(JSON.stringify(input), "utf8").toString("base64url");
-	const lines = input.outcome === "accepted"
-		? [`Aloop accepted ${input.commitRange}.`, input.summary, `Outstanding: ${input.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${input.decisions.join("; ") || "none"}.`, `Verification: ${input.verification.join("; ") || "none"}.`, `Next: ${input.nextAction}`]
-		: [`Aloop attempt settled as ${input.outcome}.`, input.summary, `Outstanding: ${input.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${input.decisions.join("; ") || "none"}.`, `Next: ${input.nextAction}`];
-	return `${lines.join("\n\n")}\n\n${HANDOFF_V3_PREFIX}${payload} -->`;
+	const handoff = normalizeAloopHandoffV3(input);
+	const payload = Buffer.from(JSON.stringify(handoff), "utf8").toString("base64url");
+	const lines = handoff.outcome === "accepted"
+		? [`Aloop accepted ${handoff.commitRange}.`, handoff.summary, `Outstanding: ${handoff.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Verification: ${handoff.verification.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`]
+		: [`Aloop attempt settled as ${handoff.outcome}.`, handoff.summary, `Outstanding: ${handoff.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${handoff.decisions.join("; ") || "none"}.`, `Next: ${handoff.nextAction}`];
+	return `${lines.map(visibleHandoffText).join("\n\n")}\n\n${HANDOFF_V3_PREFIX}${payload} -->`;
 }
 
 export function parseAloopHandoffV3(body: string): AloopHandoffV3 | null {
-	const start = body.indexOf(HANDOFF_V3_PREFIX);
-	if (start < 0) return null;
-	const encoded = body.slice(start + HANDOFF_V3_PREFIX.length).split(" -->", 1)[0]?.trim();
-	if (!encoded) return null;
-	try {
+	const encodedPayloads = [...body.matchAll(/<!-- pi-aloop-handoff:v3:([A-Za-z0-9_-]+) -->/g)].map((match) => match[1]!).reverse();
+	for (const encoded of encodedPayloads) try {
 		const value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
 		const strings = (items: unknown) => Array.isArray(items) && items.every((item) => typeof item === "string");
 		const outcomes = ["accepted", "incomplete", "decision-required", "environment-blocked", "rejected"];
@@ -47,8 +59,9 @@ export function parseAloopHandoffV3(body: string): AloopHandoffV3 | null {
 			&& typeof value.nextAction === "string" && value.nextAction.trim()
 			&& typeof value.attemptKey === "string" && /^[a-f0-9]{24}$/.test(value.attemptKey)
 			&& typeof value.timestamp === "string" && !Number.isNaN(Date.parse(value.timestamp));
-		return valid ? value as AloopHandoffV3 : null;
-	} catch { return null; }
+		if (valid) return value as AloopHandoffV3;
+	} catch { /* Continue to an earlier marker only when a later candidate is invalid. */ }
+	return null;
 }
 
 export type AloopAttemptHandoff = {

@@ -205,6 +205,12 @@ test("v3 handoffs show concise current state while hiding recoverable snapshot p
 	assert.equal(parseAloopHandoffV3(malformed), null);
 	assert.equal(parseAloopHandoffV3(formatAloopHandoffV3({ ...handoff, issueBaseCommit: "e".repeat(40) })), null);
 	assert.equal(parseAloopHandoffV3(`<!-- pi-aloop-handoff:v3:${Buffer.from(JSON.stringify({ ...handoff, extra: true })).toString("base64url")} -->`), null);
+	const shadowMarker = formatAloopHandoffV3({ ...handoff, attemptKey: "e".repeat(24) }).match(/<!-- pi-aloop-handoff:v3:[^ ]+ -->/)![0];
+	const boundedBody = formatAloopHandoffV3({ ...handoff, summary: `${shadowMarker}${"😀".repeat(100_000)}`, outstandingFindings: Array(20).fill("x".repeat(10_000)) });
+	assert.ok(Buffer.byteLength(boundedBody) < 65_536);
+	assert.equal(parseAloopHandoffV3(boundedBody)?.attemptKey, handoff.attemptKey);
+	assert.equal(parseAloopHandoffV3(boundedBody)?.outstandingFindings.length, 4);
+	assert.doesNotMatch(boundedBody.split("\n\n<!-- pi-aloop-handoff:v3:", 1)[0]!, /<!-- pi-aloop-handoff:v3:/);
 });
 
 test("attempt recovery uses the latest durable non-null patch commit", async () => {
