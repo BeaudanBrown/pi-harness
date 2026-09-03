@@ -395,6 +395,8 @@ test("aloop recovery requires trusted provenance and accepts an exact human auth
 		const recovered = await tools.get("aloop_finish_attempt").execute("recover", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(recovered.details.idempotent, true);
 		assert.equal(closes, 1);
+		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
+		assert.deepEqual(activeTools, ["read"], "successful authorized recovery clears its pending human boundary");
 		await commands.get("aloop-abort")!.handler("", ctx);
 		assert.equal(aborts, 1);
 		assert.deepEqual(activeTools, ["read"]);

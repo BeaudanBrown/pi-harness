@@ -865,6 +865,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						if (!explicitAuthorization && closureHead !== expectedHead) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
 						await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
 						issue.state = "closed";
+						pendingHumanBoundaries.delete(`recovery:${settled.attemptKey}`);
 					}
 					return { content: [{ type: "text", text: `Attempt #${params.issue} was already settled as ${settled.outcome}.` }], details: { settled: true, closed: settled.outcome === "accepted", idempotent: true, handoff: settled, frontier: cachedFrontier(context) } };
 				}
