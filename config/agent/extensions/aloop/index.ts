@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { lstat, mkdir, readdir, readFile, writeFile } from "node:fs/promises";
-import { randomBytes } from "node:crypto";
+import { lstat, mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
 import { closeCurrentRepositoryIssue, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
@@ -13,9 +13,10 @@ import {
 	closeAcceptedAloopIssue,
 	createAloopHandoffSpoolRecord,
 	evaluateEpicClosure,
-	evaluateRetryBoundary,
 	findOutstandingAttempts,
 	formatAloopHandoff,
+	formatAloopHandoffV3,
+	parseAloopHandoffV3,
 	nextIssueRetryNumber,
 	parseAloopHandoffs,
 	parseAloopRunRequest,
@@ -29,7 +30,9 @@ import {
 	type ClosureEvidence,
 } from "./core.js";
 
-const TOOL_NAMES = ["aloop_launch_worker", "aloop_apply_patch", "aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_publish_handoff", "aloop_close_accepted_issue", "aloop_check_closure"];
+const LEGACY_TOOL_NAMES = ["aloop_supervisor_verify", "aloop_prepare_handoff", "aloop_publish_handoff", "aloop_close_accepted_issue", "aloop_check_closure"];
+const TOOL_NAMES = ["aloop_context", "aloop_abort", "aloop_launch_worker", "aloop_review_attempt", "aloop_apply_patch", "aloop_finish_attempt", "aloop_checkpoint", "aloop_epic_completion"];
+const ALL_ALOOP_TOOLS = [...TOOL_NAMES, ...LEGACY_TOOL_NAMES];
 const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
@@ -48,9 +51,7 @@ type PendingHandoff = {
 
 const LaunchWorkerParams = Type.Object({
 	issue: Type.Number({ minimum: 1, description: "Selected open, unblocked descendant leaf issue number." }),
-	attempt_type: Type.String({ description: "implementation or remediation" }),
-	approach: Type.String({ minLength: 1, description: "Concise description of this attempt's approach." }),
-	materially_new_approach: Type.Optional(Type.Boolean({ description: "True only when this differs materially from prior unsuccessful approaches." })),
+	attempt_type: Type.Optional(Type.Union([Type.Literal("implementation"), Type.Literal("remediation")])),
 	timeout_ms: Type.Optional(Type.Number({ minimum: 1, maximum: 14_400_000 })),
 });
 
@@ -177,12 +178,24 @@ function handoffWasRecorded(context: Awaited<ReturnType<typeof retrieveCurrentRe
 	);
 }
 
+async function invokeReviewAgents(pi: ExtensionAPI, ctx: ExtensionContext, params: any, signal?: AbortSignal, onUpdate?: (value: any) => void): Promise<any> {
+	let reviewTool: any;
+	const reviewApi = Object.create(pi) as ExtensionAPI;
+	reviewApi.registerTool = (tool: any) => { if (tool.name === "review_agents") reviewTool = tool; };
+	const reviewModule: any = await import("../review-agents/index.js");
+	const extension = reviewModule.default?.default ?? reviewModule.default;
+	extension(reviewApi);
+	if (!reviewTool) throw new Error("Could not initialize independent review.");
+	return await reviewTool.execute("aloop-review", params, signal, onUpdate, ctx);
+}
+
 export type AloopExtensionDependencies = {
 	closeIssue: typeof closeCurrentRepositoryIssue;
 	publishComment: typeof publishExactIssueComment;
 	retrieveEpicContext: typeof retrieveCurrentRepositoryEpicContext;
 	runWorker: typeof runAloopWorker;
 	runPatchWorker: typeof runAloopPatchWorker;
+	runReview: typeof invokeReviewAgents;
 	diagnoseCommand: (ctx: ExtensionContext, params: { name: string; command: string[]; task: string }, result: Awaited<ReturnType<typeof runDurableCommand>>, excerpt: string, signal?: AbortSignal) => Promise<{ summary: string; modelRef?: string; error?: string }>;
 };
 
@@ -192,6 +205,7 @@ const defaultDependencies: AloopExtensionDependencies = {
 	retrieveEpicContext: retrieveCurrentRepositoryEpicContext,
 	runWorker: runAloopWorker,
 	runPatchWorker: runAloopPatchWorker,
+	runReview: invokeReviewAgents,
 	diagnoseCommand: async (...args) => (await import("../worker-runner/index.js")).diagnoseCommandResult(...args),
 };
 
@@ -200,9 +214,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	let activeEpic: number | null = null;
 	let pendingHandoffs: PendingHandoff[] = [];
 	const issueBaseCommits = new Map<number, string>();
+	const attemptReviews = new Map<number, { base: string; head: string; available: boolean; details?: unknown; error?: string }>();
 	let workerRunning = false;
 	let runBudget: AloopRunBudget | null = null;
 	let policySnapshot: AloopPolicySnapshot | null = null;
+	let cachedContext: Awaited<ReturnType<typeof retrieveCurrentRepositoryEpicContext>> | null = null;
 	const dryRunHandoffIds = new Set<string>();
 	const dryRunClosureIds = new Set<string>();
 	const issuedReceipts = new Map<string, { document: string; issue: number; commit: string; artifactDirectory: string }>();
@@ -218,13 +234,15 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		activeEpic = null;
 		pendingHandoffs = [];
 		issueBaseCommits.clear();
+		attemptReviews.clear();
 		workerRunning = false;
 		runBudget = null;
 		policySnapshot = null;
+		cachedContext = null;
 		dryRunHandoffIds.clear();
 		dryRunClosureIds.clear();
 		issuedReceipts.clear();
-		pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
+		pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
 	}
 
 	function activate(epic: number, ctx: ExtensionContext, recovered: PendingHandoff[], maxMinutes: number, maxWorkerLaunches: number): AloopRunBudget {
@@ -235,8 +253,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
 		deadlineTimer = setTimeout(() => {
 			if (!runBudget || runBudget.settled) return;
-			runBudget.settled = true;
-			pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
+			pi.setActiveTools(pi.getActiveTools().filter((name) => name !== "aloop_launch_worker" && name !== "aloop_apply_patch"));
 			if (ctx.hasUI) {
 				ctx.ui.notify(`Aloop #${epic} reached its ${maxMinutes}-minute limit. Run /aloop again to resume.`, "warning");
 				ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic} time limit reached`);
@@ -248,14 +265,12 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		return runBudget;
 	}
 
-	async function currentContext(cwd: string, signal?: AbortSignal) {
+	async function currentContext(cwd: string, signal?: AbortSignal, refresh = false) {
 		if (activeEpic === null || !runBudget) throw new Error("Run /aloop #<epic> before using aloop supervisor tools.");
-		return await dependencies.retrieveEpicContext(cwd, activeEpic, undefined, {
-			commentLimit: MAX_COMMENT_LIMIT,
-			commentBodyLimit: MAX_COMMENT_BODY,
-			signal,
-			deadlineMs: runBudget.deadlineMs,
+		if (!cachedContext || refresh) cachedContext = await dependencies.retrieveEpicContext(cwd, activeEpic, undefined, {
+			commentLimit: MAX_COMMENT_LIMIT, commentBodyLimit: MAX_COMMENT_BODY, signal,
 		});
+		return cachedContext;
 	}
 
 	async function loadCommittedPolicy(cwd: string, signal?: AbortSignal): Promise<AloopPolicySnapshot> {
@@ -273,6 +288,16 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		return policySnapshot;
 	}
 
+	async function assertCleanHead(expectedHead: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<void> {
+		const [head, status] = await Promise.all([
+			pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal }),
+			pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd: ctx.cwd, timeout: 30_000, signal }),
+		]);
+		if (head.code !== 0 || head.stdout.trim() !== expectedHead || status.code !== 0 || status.stdout.trim()) {
+			throw new Error(`Verification changed the expected clean HEAD ${expectedHead}; attempt remains unsettled.`);
+		}
+	}
+
 	async function executeVerificationCommand(
 		label: string,
 		definition: AloopCommandDefinition,
@@ -280,10 +305,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		signal?: AbortSignal,
 		onUpdate?: (value: any) => void,
 	) {
-		const assessment = runBudget ? assessAloopRunBudget(runBudget, Date.now()) : undefined;
-		if (assessment && !assessment.allowed) throw new Error(assessment.reason);
-		const remaining = assessment?.remainingMs ?? definition.timeoutMs;
-		const timeoutMs = Math.max(1, Math.min(definition.timeoutMs, remaining));
+		const timeoutMs = definition.timeoutMs;
 		const root = path.resolve(ctx.cwd, ".pi/tmp/aloop/verification");
 		await mkdir(root, { recursive: true, mode: 0o700 });
 		let directory = "";
@@ -347,12 +369,34 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		if (!runBudget || runBudget.settled) return;
 		runBudget.settled = true;
 		clearDeadlineTimer();
-		pi.setActiveTools(pi.getActiveTools().filter((name) => !TOOL_NAMES.includes(name)));
+		pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
 		if (ctx.hasUI && activeEpic !== null) ctx.ui.setStatus(STATUS_KEY, `aloop: #${activeEpic} settled · rerun to continue`);
 	});
 
 	function refreshPending(context: Awaited<ReturnType<typeof retrieveCurrentRepositoryEpicContext>>): void {
 		pendingHandoffs = pendingHandoffs.filter((pending) => !handoffWasRecorded(context, pending));
+	}
+
+	async function decisionAttested(cwd: string, marker: string): Promise<boolean> {
+		try {
+			const record = JSON.parse(await readFile(path.resolve(cwd, ".pi/tmp/aloop/decisions", `${marker}.json`), "utf8"));
+			return record?.version === 1 && record?.marker === marker && record?.approvedVia === "aloop-decision command" && typeof record?.decision === "string" && typeof record?.approvedAt === "string";
+		} catch { return false; }
+	}
+
+	function checkpointState(issue: { recentHandoffs: Array<{ body: string }> }): { open: string[]; resolved: string[] } {
+		const open = issue.recentHandoffs.flatMap((comment) => comment.body.match(/pi-aloop-decision:([a-f0-9]{20}):open/)?.[1] ?? []);
+		const resolved = issue.recentHandoffs.flatMap((comment) => comment.body.match(/pi-aloop-decision:([a-f0-9]{20}):resolved/)?.[1] ?? []);
+		return { open, resolved };
+	}
+
+	function cachedFrontier(context: Awaited<ReturnType<typeof retrieveCurrentRepositoryEpicContext>>): number[] {
+		return context.issues
+			.filter((issue) => issue.number !== context.epic.number && issue.state === "open")
+			.filter((issue) => !issue.children.some((child) => context.issues.find((candidate) => candidate.number === child)?.state === "open"))
+			.filter((issue) => issue.blockers.every((blocker) => context.issues.find((candidate) => candidate.number === blocker.number)?.state === "closed"))
+			.sort((left, right) => Number(!left.labels.includes("ready-for-agent")) - Number(!right.labels.includes("ready-for-agent")) || left.number - right.number)
+			.map((issue) => issue.number);
 	}
 
 	pi.registerCommand("aloop", {
@@ -393,6 +437,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 				throw error;
 			}
+			cachedContext = context;
 			if (context.epic.state !== "open") {
 				deactivate();
 				ctx.ui.notify(`Epic #${epic} is not open.`, "warning");
@@ -446,6 +491,79 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
+	pi.registerCommand("aloop-approve-epic", {
+		description: "Human approval for the durably prepared epic HEAD: /aloop-approve-epic <commit>",
+		handler: async (args, ctx) => {
+			if (!activeEpic || !policySnapshot) throw new Error("No active aloop epic is awaiting approval.");
+			const approvalPath = path.resolve(ctx.cwd, ".pi/tmp/aloop/epic-approval.json");
+			const prepared = JSON.parse(await readFile(approvalPath, "utf8"));
+			if (args.trim() !== prepared.head || prepared.epic !== activeEpic || prepared.policySha256 !== policySnapshot.sha256) throw new Error("Approval must name the exact durably prepared HEAD.");
+			await writeDurableResult(approvalPath, { ...prepared, approved: true, approvedAt: new Date().toISOString(), approvedVia: "aloop-approve-epic command" });
+			if (ctx.hasUI) ctx.ui.notify(`Approved epic #${activeEpic} at ${prepared.head}.`, "info");
+		},
+	});
+
+	pi.registerCommand("aloop-decision", {
+		description: "Record a human decision for a child: /aloop-decision <issue> <decision>",
+		handler: async (args, ctx) => {
+			const match = args.trim().match(/^#?(\d+)\s+(.+)$/s);
+			if (!match) throw new Error("Usage: /aloop-decision <issue> <decision>");
+			const issueNumber = Number(match[1]);
+			const decision = match[2]!.trim();
+			const context = await currentContext(ctx.cwd, ctx.signal);
+			const issue = context.issues.find((candidate) => candidate.number === issueNumber);
+			if (!issue) throw new Error("Decision issue is not in the active epic.");
+			const state = checkpointState(issue);
+			const openMarker = [...state.open].reverse().find((marker) => !state.resolved.includes(marker));
+			if (!openMarker) throw new Error("No open aloop checkpoint exists for this issue.");
+			const body = `Aloop human decision recorded: ${decision}\n\n<!-- pi-aloop-decision:${openMarker}:resolved -->`;
+			await writeDurableResult(path.resolve(ctx.cwd, ".pi/tmp/aloop/decisions", `${openMarker}.json`), { version: 1, marker: openMarker, issue: issueNumber, decision, approvedAt: new Date().toISOString(), approvedVia: "aloop-decision command" });
+			await dependencies.publishComment(ctx.cwd, issueNumber, body, false, { signal: ctx.signal });
+			await dependencies.publishComment(ctx.cwd, issueNumber, body, true, { signal: ctx.signal });
+			issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
+			if (ctx.hasUI) ctx.ui.notify(`Recorded decision for #${issueNumber}.`, "info");
+		},
+	});
+
+	pi.registerCommand("aloop-abort", {
+		description: "Abort the active aloop invocation and preserve durable recovery state.",
+		handler: async (_args, ctx) => {
+			ctx.abort();
+			deactivate();
+			pi.appendEntry("aloop-abort", { timestamp: new Date().toISOString(), reason: "explicit command" });
+			if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, "aloop: aborted; recovery state preserved");
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_abort",
+		label: "Aloop Abort",
+		description: "Immediately abort active work and prevent further aloop effects while preserving recovery artifacts.",
+		promptSnippet: "Abort the aloop invocation when explicitly requested.",
+		parameters: Type.Object({ reason: Type.String({ minLength: 1 }) }),
+		async execute(_id, params: { reason: string }, _signal, _onUpdate, ctx) {
+			pi.appendEntry("aloop-abort", { timestamp: new Date().toISOString(), reason: params.reason });
+			ctx.abort();
+			deactivate();
+			return { content: [{ type: "text", text: `Aloop aborted: ${params.reason}. Durable attempt state was preserved.` }], details: { aborted: true }, terminate: true };
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_context",
+		label: "Aloop Context",
+		description: "Return the active cached epic graph, pending attempt state, budget, and next frontier; optionally refresh GitHub once explicitly.",
+		promptSnippet: "Use aloop_context for supervisor navigation and explicit refresh.",
+		parameters: Type.Object({ refresh: Type.Optional(Type.Boolean()) }),
+		async execute(_id, params: { refresh?: boolean }, signal, _onUpdate, ctx) {
+			const context = await currentContext(ctx.cwd, signal, params.refresh === true);
+			refreshPending(context);
+			const frontier = cachedFrontier(context);
+			const details = { epic: context.epic, issues: context.issues, frontier, pendingAttempts: pendingHandoffs, budget: runBudget };
+			return { content: [{ type: "text", text: `Epic #${context.epic.number}; frontier ${frontier.map((number) => `#${number}`).join(", ") || "none"}; pending ${pendingHandoffs.map((item) => `#${item.issue}`).join(", ") || "none"}.` }], details };
+		},
+	});
+
 	pi.registerTool({
 		name: "aloop_launch_worker",
 		label: "Aloop Launch Worker",
@@ -453,14 +571,14 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		promptSnippet: "Launch one fresh aloop implementation worker and return bounded artifact-backed attempt evidence.",
 		promptGuidelines: [
 			"Use aloop_launch_worker only for one executable descendant leaf at a time after /aloop activation.",
-			"After every aloop_launch_worker result, independently assess evidence and publish a durable handoff before launching another worker.",
+			"After every aloop_launch_worker result, call aloop_review_attempt, remediate as needed, then settle it through aloop_finish_attempt before launching another worker.",
 		],
 		parameters: LaunchWorkerParams,
-		async execute(_id, params: { issue: number; attempt_type: string; approach: string; materially_new_approach?: boolean; timeout_ms?: number }, signal, onUpdate, ctx) {
+		async execute(_id, params: { issue: number; attempt_type?: "implementation" | "remediation"; timeout_ms?: number }, signal, onUpdate, ctx) {
 			if (workerRunning) throw new Error("An aloop worker is already running; workers must remain sequential.");
 			workerRunning = true;
 			try {
-				if (params.attempt_type !== "implementation" && params.attempt_type !== "remediation") throw new Error("attempt_type must be implementation or remediation.");
+				const attemptType = params.attempt_type ?? "implementation";
 				if (!runBudget) throw new Error("Run /aloop #<epic> before launching a worker.");
 				const budgetAssessment = assessAloopRunBudget(runBudget, Date.now());
 				if (!budgetAssessment.allowed) throw new Error(budgetAssessment.reason);
@@ -471,14 +589,13 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				}
 				const issue = selectAloopLeaf(context, params.issue);
 				const handoffs = parseAloopHandoffs(issue.recentHandoffs).filter((handoff) => handoff.issue === issue.number);
-				const retry = evaluateRetryBoundary(handoffs, params.materially_new_approach === true);
-				if (!retry.allowed) throw new Error(retry.reason);
 				const epic = context.issues.find((candidate) => candidate.number === context.epic.number)!;
 				const launchBudget = assessAloopRunBudget(runBudget, Date.now());
 				if (!launchBudget.allowed) throw new Error(launchBudget.reason);
 				runBudget.workerLaunchesStarted += 1;
+				attemptReviews.delete(issue.number);
 				const workerLaunchNumber = runBudget.workerLaunchesStarted;
-				const retryNumber = nextIssueRetryNumber(handoffs, params.attempt_type);
+				const retryNumber = nextIssueRetryNumber(handoffs, attemptType);
 				const descendants = context.issues.filter((candidate) => candidate.number !== context.epic.number);
 				const closedDescendants = descendants.filter((candidate) => candidate.state === "closed").length;
 				const startedAt = Date.now();
@@ -489,7 +606,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				}
 				const workerTimeoutMs = Math.min(params.timeout_ms ?? 30 * 60_000, launchBudget.remainingMs);
 				const finalLaunchNotice = workerLaunchNumber === runBudget.maxWorkerLaunches ? " This is the final permitted worker launch for this invocation." : "";
-				const issueRunLabel = params.attempt_type === "remediation" ? `remediation retry ${retryNumber}` : "initial implementation";
+				const issueRunLabel = attemptType === "remediation" ? `remediation retry ${retryNumber}` : "initial implementation";
 				if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, `aloop: #${epic.number} · children ${closedDescendants}/${descendants.length} · launches ${workerLaunchNumber}/${runBudget.maxWorkerLaunches} · ${issueRunLabel}`);
 				const progress = () => onUpdate?.({
 					content: [{ type: "text", text: `Aloop worker launch ${workerLaunchNumber}/${runBudget!.maxWorkerLaunches} for #${issue.number} (${issueRunLabel}); epic children ${closedDescendants}/${descendants.length} closed (${Math.floor((Date.now() - startedAt) / 1_000)}s elapsed; ${Math.ceil((runBudget!.deadlineMs - Date.now()) / 60_000)}m remaining; hard timeout ${Math.ceil(workerTimeoutMs / 60_000)}m).${finalLaunchNotice}` }],
@@ -503,8 +620,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					const policy = activePolicy().policy;
 					outcome = await dependencies.runWorker({
 						cwd: ctx.cwd,
-						attemptType: params.attempt_type,
-						supervisorApproach: params.approach,
+						attemptType,
+						supervisorApproach: "Derive the issue and implement it within the selected child boundary.",
 						epic: { number: epic.number, title: epic.title, body: epic.body },
 						issue: { number: issue.number, title: issue.title, body: issue.body },
 						priorHandoffs: handoffs,
@@ -529,11 +646,46 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					`Summary: ${outcome.summary}`,
 					`Artifacts: ${outcome.artifacts.directory}`,
 					`Structured result: ${outcome.artifacts.result}`,
-					"Next required action: independently assess the issue acceptance criteria, call aloop_prepare_handoff, publish its ID with aloop_publish_handoff (dry-run then apply), and only then close/remediate/continue.",
+					"Next required action: call aloop_review_attempt, remediate findings as needed, then call aloop_finish_attempt.",
 				].join("\n");
 				return { content: [{ type: "text", text }], details: outcome };
 			} finally {
 				workerRunning = false;
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_review_attempt",
+		label: "Aloop Review Attempt",
+		description: "Run fresh Standards and Spec reviewers against the cumulative selected-issue state.",
+		promptSnippet: "Review the cumulative issue state independently before finalization.",
+		parameters: Type.Object({ issue: Type.Number({ minimum: 1 }) }),
+		async execute(_id, params: { issue: number }, signal, onUpdate, ctx) {
+			const pending = pendingHandoffs.find((candidate) => candidate.issue === params.issue);
+			if (!pending) throw new Error("Aloop review requires an unsettled full attempt.");
+			const context = await currentContext(ctx.cwd, signal);
+			const issue = context.issues.find((candidate) => candidate.number === params.issue);
+			if (!issue) throw new Error("Issue is not in the active epic.");
+			const headResult = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal });
+			if (headResult.code !== 0) throw new Error((headResult.stderr || "Could not resolve HEAD.").trim());
+			const head = headResult.stdout.trim();
+			const base = issueBaseCommits.get(params.issue) ?? head;
+			try {
+				const mode = base === head ? "audit" : "diff";
+				const result = await dependencies.runReview(pi, ctx, {
+					mode, ...(mode === "diff" ? { fixed_point: base } : {}),
+					tasks: [
+						{ axis: "standards", instructions: `Review cumulative work for issue #${issue.number} against repository standards. Report concrete defects only.` },
+						{ axis: "spec", instructions: `Review cumulative work for issue #${issue.number}: ${issue.title}.\n\nEpic context:\n${(context.issues.find((candidate) => candidate.number === context.epic.number)?.body ?? "").slice(0, 12_000)}\n\nSelected issue specification and acceptance criteria:\n${issue.body.slice(0, 16_000)}\n\nReport unmet criteria only.` },
+					],
+				}, signal, onUpdate);
+				attemptReviews.set(params.issue, { base, head, available: true, details: result.details });
+				return result;
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				attemptReviews.set(params.issue, { base, head, available: false, error: message });
+				return { content: [{ type: "text", text: `Independent review unavailable: ${message}. A human checkpoint is required before automatic closure.` }], details: { available: false, base, head, error: message } };
 			}
 		},
 	});
@@ -553,7 +705,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (!pending) throw new Error("Targeted patches require an unsettled full attempt for the same issue.");
 			workerRunning = true;
 			try {
-				const context = await dependencies.retrieveEpicContext(ctx.cwd, activeEpic, undefined, { commentLimit: MAX_COMMENT_LIMIT, commentBodyLimit: MAX_COMMENT_BODY, signal });
+				const context = await currentContext(ctx.cwd, signal);
 				const epic = context.issues.find((candidate) => candidate.number === activeEpic);
 				const issue = context.issues.find((candidate) => candidate.number === params.issue);
 				if (!epic || !issue) throw new Error("The patch issue is not in the active epic snapshot.");
@@ -582,6 +734,167 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					details: { ...outcome, fullWorkerLaunchesStarted: runBudget.workerLaunchesStarted },
 				};
 			} finally { workerRunning = false; }
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_finish_attempt",
+		label: "Aloop Finish Attempt",
+		description: "Settle one full attempt: verify accepted work, publish one v3 handoff, close accepted children, and return the next frontier.",
+		promptSnippet: "Finalize the reviewed attempt with hidden idempotent verification/publication/closure plumbing.",
+		parameters: Type.Object({
+			issue: Type.Number({ minimum: 1 }),
+			outcome: Type.Union([Type.Literal("accepted"), Type.Literal("incomplete"), Type.Literal("decision-required"), Type.Literal("environment-blocked"), Type.Literal("rejected")]),
+			summary: Type.String({ minLength: 1 }),
+			outstanding_findings: Type.Array(Type.String()),
+			decisions: Type.Array(Type.String()),
+			verification: Type.Array(Type.String()),
+			next_action: Type.String({ minLength: 1 }),
+		}),
+		async execute(_id, params: { issue: number; outcome: "accepted" | "incomplete" | "decision-required" | "environment-blocked" | "rejected"; summary: string; outstanding_findings: string[]; decisions: string[]; verification: string[]; next_action: string }, signal, onUpdate, ctx) {
+			const context = await currentContext(ctx.cwd, signal);
+			const issue = context.issues.find((candidate) => candidate.number === params.issue);
+			if (!issue) throw new Error("Issue is not in the active epic.");
+			const pending = pendingHandoffs.find((candidate) => candidate.issue === params.issue);
+			if (!pending) {
+				const settled = issue.recentHandoffs.map((comment) => parseAloopHandoffV3(comment.body)).filter((value) => value?.issue === params.issue).at(-1);
+				if (settled) {
+					if (settled.outcome === "accepted" && issue.state !== "closed") {
+						const expectedHead = settled.commitRange.split("..").at(-1);
+						const [head, status] = await Promise.all([
+							pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal }),
+							pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd: ctx.cwd, timeout: 30_000, signal }),
+						]);
+						if (head.code !== 0 || head.stdout.trim() !== expectedHead || status.code !== 0 || status.stdout.trim()) throw new Error("Published accepted handoff no longer matches the clean current HEAD.");
+						await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
+						issue.state = "closed";
+					}
+					return { content: [{ type: "text", text: `Attempt #${params.issue} was already settled as ${settled.outcome}.` }], details: { settled: true, idempotent: true, handoff: settled, frontier: cachedFrontier(context) } };
+				}
+				throw new Error("No unsettled full attempt exists for this issue.");
+			}
+			const headResult = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal });
+			const statusResult = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all", "--", ".", ":(exclude).pi/tmp/aloop"], { cwd: ctx.cwd, timeout: 30_000, signal });
+			if (headResult.code !== 0 || statusResult.code !== 0) throw new Error("Could not inspect final attempt state.");
+			const head = headResult.stdout.trim();
+			const base = issueBaseCommits.get(params.issue) ?? head;
+			const review = attemptReviews.get(params.issue);
+			const verification = [...params.verification];
+			const checkpoints = checkpointState(issue);
+			const attestedResolutions = new Set<string>();
+			for (const marker of checkpoints.open) if (checkpoints.resolved.includes(marker) && await decisionAttested(ctx.cwd, marker)) attestedResolutions.add(marker);
+			const hasResolvedCheckpoint = checkpoints.open.some((marker) => attestedResolutions.has(marker));
+			if (checkpoints.open.some((marker) => !attestedResolutions.has(marker))) throw new Error("Attempt finalization is blocked by an unresolved or unattested human checkpoint.");
+			if (params.outcome === "accepted") {
+				if (statusResult.stdout.trim()) throw new Error("Accepted finalization requires a clean worktree.");
+				if ((!review || review.head !== head || !review.available) && !hasResolvedCheckpoint) throw new Error("Accepted finalization requires fresh independent review at the current HEAD; unavailable review requires a resolved human checkpoint.");
+				const policy = activePolicy().policy;
+				const canonical = await executeVerificationCommand("canonical", policy.canonicalCommand, ctx, signal, onUpdate);
+				if (canonical.result.code !== 0 || canonical.result.timedOut || canonical.result.cancelled || canonical.result.spawnError) {
+					return { content: [{ type: "text", text: `Canonical verification failed. Attempt remains unsettled. ${canonical.diagnosis}` }], details: { settled: false, canonical } };
+				}
+				await assertCleanHead(head, ctx, signal);
+				verification.push(`Canonical command passed at ${head}.`);
+				if (policy.productionIntegration?.frequency === "issue") {
+					const production = await executeVerificationCommand("production-integration", policy.productionIntegration.command, ctx, signal, onUpdate);
+					if (production.result.code !== 0 || production.result.timedOut || production.result.cancelled || production.result.spawnError) {
+						return { content: [{ type: "text", text: `Production integration failed. Attempt remains unsettled. ${production.diagnosis}` }], details: { settled: false, canonical, production } };
+					}
+					await assertCleanHead(head, ctx, signal);
+					verification.push(`Production integration passed at ${head}.`);
+				}
+			}
+			const attemptKey = createHash("sha256").update(`${params.issue}:${pending.artifactDirectory}`).digest("hex").slice(0, 24);
+			const handoff = { version: 3 as const, issue: params.issue, issueBaseCommit: base, commitRange: `${base}..${head}`, outcome: params.outcome, summary: params.summary, outstandingFindings: params.outstanding_findings, decisions: params.decisions, verification, nextAction: params.next_action, attemptKey, timestamp: new Date().toISOString() };
+			const body = formatAloopHandoffV3(handoff);
+			const alreadyPublished = issue.recentHandoffs.some((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === attemptKey);
+			if (!alreadyPublished) {
+				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
+				try {
+					await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
+					issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: handoff.timestamp, url: null });
+				} catch (error) {
+					const refreshed = await currentContext(ctx.cwd, signal, true);
+					const refreshedIssue = refreshed.issues.find((candidate) => candidate.number === params.issue);
+					if (!refreshedIssue?.recentHandoffs.some((comment) => parseAloopHandoffV3(comment.body)?.attemptKey === attemptKey)) throw error;
+				}
+			}
+			pendingHandoffs = pendingHandoffs.filter((candidate) => candidate !== pending);
+			if (params.outcome === "accepted" && issue.state !== "closed") {
+				await dependencies.closeIssue(ctx.cwd, params.issue, { signal });
+				issue.state = "closed";
+				const cachedIssue = cachedContext?.issues.find((candidate) => candidate.number === params.issue);
+				if (cachedIssue) cachedIssue.state = "closed";
+			}
+			const frontier = cachedFrontier(context);
+			return { content: [{ type: "text", text: `Attempt #${params.issue} settled as ${params.outcome}.${params.outcome === "accepted" ? " Child closed." : ""} Next frontier: ${frontier.map((number) => `#${number}`).join(", ") || "none"}.` }], details: { settled: true, closed: params.outcome === "accepted", handoff, frontier } };
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_checkpoint",
+		label: "Aloop Checkpoint",
+		description: "Create or resolve a transport-neutral human decision boundary and record it on the child issue.",
+		promptSnippet: "Stop for a durable human decision when supervisor judgment cannot proceed safely.",
+		parameters: Type.Object({
+			issue: Type.Number({ minimum: 1 }), decision: Type.String({ minLength: 1 }), options: Type.Array(Type.String()),
+		}),
+		async execute(_id, params: { issue: number; decision: string; options: string[] }, signal, _onUpdate, ctx) {
+			const context = await currentContext(ctx.cwd, signal);
+			const issue = context.issues.find((candidate) => candidate.number === params.issue);
+			if (!issue) throw new Error("Checkpoint issue is not in the active epic.");
+			const marker = createHash("sha256").update(`${params.issue}:${params.decision}`).digest("hex").slice(0, 20);
+			const body = `Aloop needs a human decision: ${params.decision}\n\n${params.options.map((option) => `- ${option}`).join("\n")}\n\nReply with \`/aloop-decision ${params.issue} <decision>\`.\n\n<!-- pi-aloop-decision:${marker}:open -->`;
+			if (!issue.recentHandoffs.some((comment) => comment.body.includes(`pi-aloop-decision:${marker}:open`))) {
+				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
+				await dependencies.publishComment(ctx.cwd, params.issue, body, true, { signal });
+				issue.recentHandoffs.push({ id: Date.now(), author: null, body, createdAt: new Date().toISOString(), url: null });
+			}
+			return { content: [{ type: "text", text: `Human decision required for #${params.issue}: ${params.decision}. Reply with /aloop-decision ${params.issue} <decision>.` }], details: { checkpoint: true, resolved: false, marker }, terminate: true };
+		},
+	});
+
+	pi.registerTool({
+		name: "aloop_epic_completion",
+		label: "Aloop Epic Completion",
+		description: "Prepare epic evidence for human approval, then close the parent only after explicit approval.",
+		promptSnippet: "Use two-phase epic completion; preparation is a mandatory human approval boundary.",
+		parameters: Type.Object({ phase: Type.Union([Type.Literal("prepare"), Type.Literal("apply")]) }),
+		async execute(_id, params: { phase: "prepare" | "apply" }, signal, onUpdate, ctx) {
+			const context = await currentContext(ctx.cwd, signal, true);
+			const open = context.issues.filter((issue) => issue.number !== context.epic.number && issue.state === "open");
+			let unresolvedDecisions = 0;
+			for (const child of context.issues.filter((issue) => issue.number !== context.epic.number)) {
+				const state = checkpointState(child);
+				for (const marker of state.open) if (!state.resolved.includes(marker) || !(await decisionAttested(ctx.cwd, marker))) unresolvedDecisions += 1;
+			}
+			if (open.length || pendingHandoffs.length || unresolvedDecisions) throw new Error(`Epic completion is blocked by ${open.length} open descendants, ${pendingHandoffs.length} unsettled attempts, and ${unresolvedDecisions} unresolved decisions.`);
+			const headResult = await pi.exec("git", ["rev-parse", "HEAD"], { cwd: ctx.cwd, timeout: 30_000, signal });
+			if (headResult.code !== 0) throw new Error("Could not resolve epic HEAD.");
+			const head = headResult.stdout.trim();
+			const approvalPath = path.resolve(ctx.cwd, ".pi/tmp/aloop/epic-approval.json");
+			if (params.phase === "prepare") {
+				const snapshot = activePolicy();
+				const policy = snapshot.policy;
+				await assertCleanHead(head, ctx, signal);
+				if (policy.productionIntegration?.frequency === "epic") {
+					const production = await executeVerificationCommand("epic-production-integration", policy.productionIntegration.command, ctx, signal, onUpdate);
+					if (production.result.code !== 0 || production.result.timedOut || production.result.cancelled || production.result.spawnError) return { content: [{ type: "text", text: `Epic production integration failed: ${production.diagnosis}` }], details: { ready: false, production } };
+					await assertCleanHead(head, ctx, signal);
+				}
+				await writeDurableResult(approvalPath, { version: 1, epic: context.epic.number, head, policySha256: snapshot.sha256, preparedAt: new Date().toISOString() });
+				return { content: [{ type: "text", text: `Epic #${context.epic.number} is ready at ${head}. Human approval is required: /aloop-approve-epic ${head}` }], details: { ready: true, epic: context.epic.number, head }, terminate: true };
+			}
+			let durableApproval: any = null;
+			try { durableApproval = JSON.parse(await readFile(approvalPath, "utf8")); } catch { /* Missing preparation is rejected below. */ }
+			if (durableApproval?.approved !== true || durableApproval?.approvedVia !== "aloop-approve-epic command" || typeof durableApproval?.approvedAt !== "string" || durableApproval?.head !== head || durableApproval?.epic !== context.epic.number || durableApproval?.policySha256 !== activePolicy().sha256) {
+				throw new Error("Epic apply requires the human /aloop-approve-epic command for the unchanged durably prepared HEAD.");
+			}
+			await assertCleanHead(head, ctx, signal);
+			await dependencies.closeIssue(ctx.cwd, context.epic.number, { signal });
+			context.epic.state = "closed";
+			try { await unlink(approvalPath); } catch { /* Closure is already durable remotely. */ }
+			return { content: [{ type: "text", text: `Closed epic #${context.epic.number} after explicit approval.` }], details: { closed: true, epic: context.epic.number, head } };
 		},
 	});
 
@@ -786,7 +1099,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		promptGuidelines: ["Use only after aloop_publish_handoff applies the exact prepared bytes. Always dry-run before apply; never use generic issue closure for accepted aloop attempts."],
 		parameters: CloseAcceptedIssueParams,
 		async execute(_id, params: { issue: number; handoff_id: string; verification_receipt_id: string; dry_run: boolean }, signal, _onUpdate, ctx) {
-			const context = await currentContext(ctx.cwd, signal);
+			const context = await currentContext(ctx.cwd, signal, true);
 			const issue = context.issues.find((candidate) => candidate.number === params.issue);
 			if (!issue) throw new Error(`Issue #${params.issue} is absent from the active epic context.`);
 			if (issue.state === "closed") {

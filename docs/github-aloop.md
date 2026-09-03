@@ -114,62 +114,37 @@ restart.
 
 ## Durable handoffs and issue closure
 
-After every attempt, including unsuccessful and contract-violating attempts,
-the supervisor prepares a structured handoff. Preparation stores the exact
-comment bytes in the private local spool and returns a short handoff ID. The
-supervisor passes only that ID to `aloop_publish_handoff`, first with
-`dry_run=true` and then with `dry_run=false`; publication is idempotent and never
-requires model copy/paste of the encoded marker. A handoff records:
+`aloop_review_attempt` resolves the cumulative issue base and current `HEAD`,
+then runs fresh Standards and Spec agents. Review prose informs supervisor
+judgment; it is not machine-parsed. If review is unavailable,
+`aloop_finish_attempt` refuses automatic acceptance and the supervisor uses
+`aloop_checkpoint` to create a durable human boundary.
 
-- implementation or remediation attempt type;
-- commit, or the absence of a valid commit;
-- the supervisor verification receipt ID for accepted attempts;
-- supervisor acceptance result and approach;
-- whether the approach was materially new;
-- verification and acceptance-criteria assessment;
-- discovered work and the next action; and
-- the local attempt artifact directory.
+`aloop_finish_attempt` hides verification receipts, local spool IDs, exact
+publication bytes, and closure ordering. For accepted work it requires a clean
+unchanged reviewed `HEAD`, runs the startup policy's canonical and applicable
+production commands, publishes one concise v3 current-state handoff, closes the
+child, updates the cached graph, and returns the next frontier. Canonical or
+production failure cannot be overridden autonomously and leaves the attempt
+unsettled with durable logs and diagnosis. Unsuccessful finalization publishes
+one complete current-state snapshot for the next fresh worker. V3 comments show
+only useful outcome, findings, decisions, verification, and next action; an
+HTML marker carries hidden idempotent recovery state. Readers retain minimal
+v1/v2 compatibility, but writers emit only v3.
 
-Only a correctly encoded handoff on its matching issue counts. An accepted
-handoff must reference the receipt ID returned by `aloop_supervisor_verify`.
-The repository commits a `.aloop.json` policy containing a required
-`canonicalCommand`, an optional advisory `workerFeedbackCommand`, optional
-`patchWorkerModel` (defaulting to Terra when available, then the active model), and optional
-phase-aware `productionIntegration`. Every command is an explicit argv array,
-not an implicit shell string, and has a configurable timeout that defaults to 30
-minutes. The supervisor snapshots the committed policy when `/aloop` starts;
-later worktree edits cannot replace the invocation's gates. It executes commands
-serially, preserves full logs and machine-readable results, and requests bounded
-read-only diagnosis on failure without letting that diagnosis determine pass or
-fail. Issue-frequency production integration runs with child acceptance;
-epic-frequency integration runs at the epic closure gate.
-Verification is permitted only after a matching pending worker attempt has
-returned its commit. Preparation accepts only immutable receipt bytes bound to
-the exact issue, artifact, commit tree, and policy hash. A matching successful
-receipt can be reused after restart. Receipt validation confirms that HEAD and the
-complete worktree (including untracked files) are still identical.
-Commit all intended sources before verification: Git-backed Nix flakes omit
-untracked files, so a check run while eventual source files are untracked is
-invalid even if its command exits successfully. The supervisor closes a child only after that handoff is durable and its
-acceptance criteria pass independent review. Hard gates enforce commit,
-verification, receipt, publication, blocker, and closure integrity; acceptance
-wording and evidence quality remain the supervisor's semantic judgment rather
-than a punctuation-sensitive protocol. `aloop_close_accepted_issue` is also dry-run-first. Once GitHub reports
-the issue closed, the exact published handoff and bound receipt ID provide a
-durable idempotency key, so an interrupted closure can be retried after a
-session restart without closing twice.
+There is no semantic retry count or `materially_new_approach` gate. The
+supervisor chooses a narrow patch, trivial direct edit, fresh full remediation,
+or human checkpoint according to the evidence. `aloop_context` serves the
+startup-cached GitHub graph and accepts an explicit refresh; successful
+publication and closure update that snapshot in memory.
 
-Two consecutive unsuccessful attempts without a materially new approach stop
-the loop for an explicit user decision. Material product, architecture, or
-scope ambiguity also causes a human-decision stop; the supervisor does not
-guess. A materially different remediation may proceed after the user or new
-evidence establishes the approach.
-
-Before closing the epic, the supervisor requires all descendants to be closed,
-review evidence for every descendant, passing project verification evidence,
-and evidence for every epic acceptance criterion. It then reports completed
-children and commits, verification, discovered or deferred work, and whether
-the epic closed or stopped at a human boundary.
+`aloop_epic_completion` is two phase. `prepare` refreshes the graph, requires no
+open descendants or unsettled attempts, runs epic-frequency integration, and
+terminates at a human approval boundary. The operator records approval with
+`/aloop-approve-epic <prepared-head>`; `apply` closes the parent only when that
+durable command attestation matches the unchanged prepared `HEAD`. Human
+checkpoint answers are similarly recorded with `/aloop-decision <issue>
+<decision>` rather than a model-supplied boolean or resolution string.
 
 ## Project verification policy
 
@@ -183,10 +158,9 @@ relative extension files that resolve inside the worktree) and
 are validated, merged only into a profile whose project policy is
 `aloop-opt-in`, and never grant GitHub mutation or supervisor communication
 capabilities implicitly. Workers use repository guidance for focused iteration
-checks. For acceptance, the supervisor passes only the worker commit to
-`aloop_supervisor_verify`; the tool uses the invocation's committed policy
-snapshot and records command status independently from diagnostic prose. A
-verification run must begin and end at the same clean HEAD. When the policy is
+checks. For acceptance, `aloop_finish_attempt` uses the invocation's committed
+policy snapshot and records command status independently from diagnostic prose.
+A verification run must begin and end at the same clean HEAD. When the policy is
 missing, malformed, or required infrastructure is unavailable, the supervisor
 records the gap and stops rather than inventing a passing check.
 
@@ -200,9 +174,10 @@ history; invocation budgets intentionally do not persist as hidden loop state.
 
 On startup, aloop also scans local attempt results whose commits belong to the
 current branch. If it finds an attempt artifact with no matching durable GitHub
-handoff, it blocks another worker launch. Inspect the result and commit,
-independently assess the attempt, then prepare and publish the missing handoff by its short ID.
-Do not manufacture a successful handoff from a worker summary alone.
+handoff, it blocks another worker launch. Inspect the result and commit, run
+`aloop_review_attempt`, remediate if needed, then use `aloop_finish_attempt` to
+verify and publish the v3 handoff. Do not manufacture acceptance from a worker
+summary alone.
 
 Common recovery cases:
 
@@ -213,8 +188,8 @@ Common recovery cases:
   artifacts remain available. Record the unsuccessful outcome, then choose a
   remediation or human stop.
 - **Commit/worktree contract violation:** treat the attempt as unsuccessful.
-  Inspect Git and the worktree, restore the clean one-commit boundary
-  deliberately, and record what happened.
+  Inspect Git and the worktree, preserve or deliberately settle partial state,
+  and require a clean tree only before accepting a successful candidate.
 - **Missing local artifacts:** GitHub and Git remain authoritative. Use their
   evidence to decide whether a fresh remediation is justified or human input is
   required; never infer acceptance from absent logs.

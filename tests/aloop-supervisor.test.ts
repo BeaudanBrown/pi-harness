@@ -24,9 +24,11 @@ import {
 	evaluateSupervisorAttempt,
 	findOutstandingAttempts,
 	formatAloopHandoff,
+	formatAloopHandoffV3,
 	handoffCommentsForIssue,
 	nextIssueRetryNumber,
 	parseAloopHandoffs,
+	parseAloopHandoffV3,
 	parseAloopRunRequest,
 	publishPreparedAloopHandoff,
 	selectAloopLeaf,
@@ -176,16 +178,32 @@ test("durable handoff markers round trip in comment order and feed recovery prom
 	assert.match(kickoff, /#2 remediation abcdef2: accepted=true/);
 	assert.match(kickoff, /#2 abcdef3 completed: \.pi\/tmp\/aloop\/unrecorded/);
 	assert.doesNotMatch(kickoff, /#2 implementation abcdef3/);
-	assert.match(kickoff, /recover it from its result artifact and Git commit/);
+	assert.match(kickoff, /returned or recovered attempt, call aloop_review_attempt/);
 	assert.match(kickoff, /Epic child progress: 0\/1 closed; 1 open/);
 	assert.match(kickoff, /Maximum worker launches: 20/);
-	assert.match(kickoff, /A worker launch on a new issue is not a retry/);
-	assert.match(kickoff, /deliberately bounded/);
-	assert.match(kickoff, /Labels and assignments are advisory/);
+	assert.match(kickoff, /There is no semantic retry-count gate/);
+	assert.match(kickoff, /implementation deadline and 20-launch cap/);
+	assert.match(kickoff, /labels and assignments are advisory/i);
 	assert.match(kickoff, /GitHub and Git are authoritative/);
-	assert.match(kickoff, /After every attempt/);
-	assert.match(kickoff, /two unsuccessful attempts/);
-	assert.match(kickoff, /aloop_check_closure/);
+	assert.match(kickoff, /aloop_finish_attempt/);
+	assert.doesNotMatch(kickoff, /two unsuccessful attempts/);
+	assert.match(kickoff, /aloop_epic_completion/);
+});
+
+test("v3 handoffs show concise current state while hiding recoverable snapshot payload", () => {
+	const handoff = {
+		version: 3 as const, issue: 73, issueBaseCommit: "a".repeat(40), commitRange: `${"a".repeat(40)}..${"b".repeat(40)}`,
+		outcome: "rejected" as const, summary: "Review found one issue.", outstandingFindings: ["Fix ordering"], decisions: ["Keep API"],
+		verification: ["focused pass"], nextAction: "Patch ordering.", attemptKey: "d".repeat(24), timestamp: "2026-09-03T00:00:00Z",
+	};
+	const body = formatAloopHandoffV3(handoff);
+	assert.match(body, /Aloop attempt settled as rejected/);
+	assert.doesNotMatch(body.split("<!--", 1)[0]!, /issueBaseCommit|attemptKey|artifact/);
+	assert.deepEqual(parseAloopHandoffV3(body), handoff);
+	const malformed = `<!-- pi-aloop-handoff:v3:${Buffer.from(JSON.stringify({ version: 3, issue: 73, attemptKey: "d".repeat(24) })).toString("base64url")} -->`;
+	assert.equal(parseAloopHandoffV3(malformed), null);
+	assert.equal(parseAloopHandoffV3(formatAloopHandoffV3({ ...handoff, issueBaseCommit: "e".repeat(40) })), null);
+	assert.equal(parseAloopHandoffV3(`<!-- pi-aloop-handoff:v3:${Buffer.from(JSON.stringify({ ...handoff, extra: true })).toString("base64url")} -->`), null);
 });
 
 test("compact handoffs remain compatible and materially smaller than duplicated JSON", () => {
@@ -262,16 +280,20 @@ test("aloop supervisor tools activate only for an active run and disappear after
 		writeFileSync(join(cwd, ".aloop.json"), verificationPolicyDocument);
 		const events = new Map<string, Array<(...args: any[]) => any>>();
 		const commands = new Map<string, { handler: (args: string, ctx: ExtensionContext) => Promise<void> }>();
+		const tools = new Map<string, any>();
 		let activeTools = ["read"];
 		let kickoffCount = 0;
+		let retrievals = 0;
+		let aborts = 0;
 		const pi = {
-			registerTool: (tool: { name: string }) => { activeTools.push(tool.name); },
+			registerTool: (tool: { name: string }) => { activeTools.push(tool.name); tools.set(tool.name, tool); },
 			registerCommand: (name: string, command: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => commands.set(name, command),
 			on: (event: string, handler: (...args: any[]) => any) => events.set(event, [...(events.get(event) ?? []), handler]),
 			getActiveTools: () => activeTools,
 			setActiveTools: (tools: string[]) => { activeTools = tools; },
 			setSessionName: () => undefined,
 			sendUserMessage: () => { kickoffCount += 1; },
+			appendEntry: () => undefined,
 			exec: async (_command: string, args: string[]) => args[0] === "log"
 				? { code: 0, stdout: "history\n", stderr: "" }
 				: args[0] === "show"
@@ -280,23 +302,101 @@ test("aloop supervisor tools activate only for an active run and disappear after
 						? { code: 0, stdout: `${"a".repeat(40)}\n`, stderr: "" }
 						: { code: 0, stdout: "", stderr: "" },
 		} as unknown as ExtensionAPI;
-		registerAloopExtension(pi, { retrieveEpicContext: async () => context([issue({ number: 2, title: "Leaf" })]) });
+		registerAloopExtension(pi, { retrieveEpicContext: async () => { retrievals += 1; return context([issue({ number: 2, title: "Leaf" })]); } });
 		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal,
-			abort: () => undefined, ui: { notify: () => undefined, setStatus: () => undefined } } as unknown as ExtensionContext;
+			abort: () => { aborts += 1; }, ui: { notify: () => undefined, setStatus: () => undefined } } as unknown as ExtensionContext;
 		for (const handler of events.get("session_start") ?? []) handler({ reason: "startup" }, ctx);
 		assert.deepEqual(activeTools, ["read"]);
 		await commands.get("aloop")!.handler("#1", ctx);
 		assert.equal(kickoffCount, 1);
 		assert.ok(activeTools.includes("aloop_launch_worker"));
+		assert.ok(activeTools.includes("aloop_context"));
+		assert.ok(activeTools.includes("aloop_finish_attempt"));
+		assert.equal(activeTools.includes("aloop_supervisor_verify"), false);
+		await tools.get("aloop_context").execute("context", {}, ctx.signal, undefined, ctx);
+		assert.equal(retrievals, 1);
+		await tools.get("aloop_context").execute("refresh", { refresh: true }, ctx.signal, undefined, ctx);
+		assert.equal(retrievals, 2);
 		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
 		assert.deepEqual(activeTools, ["read"]);
 		await commands.get("aloop")!.handler("#1", ctx);
 		assert.ok(activeTools.includes("aloop_launch_worker"));
+		await commands.get("aloop-abort")!.handler("", ctx);
+		assert.equal(aborts, 1);
+		assert.deepEqual(activeTools, ["read"]);
 		for (const handler of events.get("session_shutdown") ?? []) handler({ reason: "reload" }, ctx);
 		assert.deepEqual(activeTools, ["read"]);
 	} finally {
 		rmSync(cwd, { recursive: true, force: true });
 	}
+});
+
+test("high-level review and finish publish one v3 handoff, close, and retry idempotently", async () => {
+	const cwd = mkdtempSync(join(tmpdir(), "aloop-v3-finish-"));
+	try {
+		const policyDocument = JSON.stringify({ canonicalCommand: { argv: [process.execPath, "-e", "const fs=require('fs'); if (!fs.existsSync('.v3-pass')) process.exit(2); if (!fs.existsSync('.v3-clean')) fs.writeFileSync('.verification-mutation','dirty')"] } });
+		writeFileSync(join(cwd, ".aloop.json"), policyDocument);
+		const tools = new Map<string, any>();
+		const commands = new Map<string, any>();
+		const head = "c".repeat(40);
+		const graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n- Done" })]);
+		const published: Array<{ body: string; apply: boolean }> = [];
+		let closes = 0;
+		const pi = {
+			registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command),
+			on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, setSessionName: () => undefined, sendUserMessage: () => undefined,
+			exec: async (_command: string, args: string[]) => args[0] === "show" ? { code: 0, stdout: policyDocument, stderr: "" }
+				: args[0] === "log" ? { code: 0, stdout: "history", stderr: "" }
+					: args[0] === "status" ? { code: 0, stdout: require("node:fs").existsSync(join(cwd, ".verification-mutation")) ? "?? .verification-mutation\n" : "", stderr: "" }
+						: { code: 0, stdout: `${head}\n`, stderr: "" },
+			appendEntry: () => undefined,
+		} as unknown as ExtensionAPI;
+		registerAloopExtension(pi, {
+			retrieveEpicContext: async () => graph,
+			runReview: async () => ({ content: [{ type: "text", text: "No findings." }], details: { reports: 2 } }),
+			diagnoseCommand: async () => ({ summary: "canonical failed" }),
+			runWorker: async () => ({ status: "completed", summary: "done", commit: head, workerResult: null, contract: { valid: true, commit: head, violations: [] }, process: { exitCode: 0, signal: null, timedOut: false, cancelled: false, durationMs: 1 }, artifacts: { directory: ".pi/tmp/aloop/issue-2-1-abcdef", prompt: "p", stdout: "o", stderr: "e", result: "r" } }),
+			publishComment: async (_cwd, _issue, body, apply) => { published.push({ body, apply }); return {}; },
+			closeIssue: async () => { closes += 1; return {}; },
+		});
+		const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => undefined, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;
+		await commands.get("aloop").handler("#1", ctx);
+		await tools.get("aloop_launch_worker").execute("launch", { issue: 2 }, ctx.signal, undefined, ctx);
+		await tools.get("aloop_review_attempt").execute("review", { issue: 2 }, ctx.signal, undefined, ctx);
+		const params = { issue: 2, outcome: "accepted", summary: "Complete.", outstanding_findings: [], decisions: [], verification: ["reviewed"], next_action: "Continue." };
+		const checkpoint = await tools.get("aloop_checkpoint").execute("checkpoint", { issue: 2, decision: "Choose mode", options: ["A", "B"] }, ctx.signal, undefined, ctx);
+		assert.equal(checkpoint.terminate, true);
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("unresolved", params, ctx.signal, undefined, ctx), /unresolved or unattested human checkpoint/);
+		await commands.get("aloop-decision").handler("2 A", ctx);
+		assert.match(published.at(-1)!.body, /human decision recorded: A/i);
+		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/decisions", `${checkpoint.details.marker}.json`), "utf8")).approvedVia, "aloop-decision command");
+		const failed = await tools.get("aloop_finish_attempt").execute("failed", params, ctx.signal, undefined, ctx);
+		assert.equal(failed.details.settled, false);
+		assert.equal(closes, 0);
+		assert.equal(published.filter((item) => item.body.includes("pi-aloop-handoff:v3")).length, 0);
+		writeFileSync(join(cwd, ".v3-pass"), "pass\n");
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("mutated", params, ctx.signal, undefined, ctx), /Verification changed/);
+		assert.equal(closes, 0);
+		rmSync(join(cwd, ".verification-mutation"));
+		writeFileSync(join(cwd, ".v3-clean"), "clean\n");
+		const finished = await tools.get("aloop_finish_attempt").execute("finish", params, ctx.signal, undefined, ctx);
+		assert.equal(finished.details.closed, true);
+		assert.equal(closes, 1);
+		const v3Publications = published.filter((item) => item.body.includes("pi-aloop-handoff:v3"));
+		assert.deepEqual(v3Publications.map((item) => item.apply), [false, true]);
+		assert.doesNotMatch(v3Publications[1]!.body.split("<!--", 1)[0]!, /artifact|receipt|spool/);
+		const repeated = await tools.get("aloop_finish_attempt").execute("retry", params, ctx.signal, undefined, ctx);
+		assert.equal(repeated.details.idempotent, true);
+		assert.equal(closes, 1);
+		const prepared = await tools.get("aloop_epic_completion").execute("prepare", { phase: "prepare" }, ctx.signal, undefined, ctx);
+		assert.equal(prepared.terminate, true);
+		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/epic-approval.json"), "utf8")).head, head);
+		await assert.rejects(() => tools.get("aloop_epic_completion").execute("unapproved", { phase: "apply" }, ctx.signal, undefined, ctx), /human \/aloop-approve-epic command/);
+		await commands.get("aloop-approve-epic").handler(head, ctx);
+		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/epic-approval.json"), "utf8")).approved, true);
+		await tools.get("aloop_epic_completion").execute("approved", { phase: "apply" }, ctx.signal, undefined, ctx);
+		assert.equal(closes, 2);
+	} finally { rmSync(cwd, { recursive: true, force: true }); }
 });
 
 test("registered aloop tools load verification policy, preserve exact publication, and close idempotently", async () => {
@@ -339,6 +439,7 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		} as unknown as ExtensionAPI;
 		registerAloopExtension(pi, {
 			retrieveEpicContext: async () => graph,
+			runReview: async () => ({ content: [{ type: "text", text: "No findings." }], details: { reports: ["standards", "spec"] } }),
 			diagnoseCommand: async (_ctx, _params, result) => { diagnosisCalls += 1; return { summary: `diagnosed exit ${result.code}` }; },
 			runPatchWorker: async (input) => {
 				patchCalls += 1;
@@ -386,13 +487,15 @@ test("registered aloop tools load verification policy, preserve exact publicatio
 		await assert.rejects(() => tools.get("aloop_supervisor_verify")!.execute("too-early", { commit: fakeHead }, ctx.signal, undefined, ctx), /pending worker attempt/);
 		await tools.get("aloop_launch_worker")!.execute("launch", { issue: 2, attempt_type: "remediation", approach: "test wiring", materially_new_approach: true }, ctx.signal, undefined, ctx);
 		assert.deepEqual(workerIssues, [2]);
-		assert.deepEqual(workerDirections, ["test wiring"]);
+		assert.deepEqual(workerDirections, ["Derive the issue and implement it within the selected child boundary."]);
 		assert.deepEqual(workerPriorContexts, [[parseAloopHandoffs([comment(1, priorFailure, "2026-09-01T00:00:00Z")])[0]]]);
 		const patched = await tools.get("aloop_apply_patch")!.execute("patch", { issue: 2, correction: "fix one assertion" }, ctx.signal, undefined, ctx);
 		assert.equal(patchCalls, 1);
 		assert.equal(patched.details?.fullWorkerLaunchesStarted, 1);
 		await tools.get("aloop_apply_patch")!.execute("patch-failed", { issue: 2, correction: "fix another assertion" }, ctx.signal, undefined, ctx);
 		assert.equal(patchCalls, 2);
+		const review = await tools.get("aloop_review_attempt")!.execute("review", { issue: 2 }, ctx.signal, undefined, ctx);
+		assert.deepEqual(review.details?.reports, ["standards", "spec"]);
 		assert.deepEqual(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/issue-2-1-abcdef/patch-attempts.json"), "utf8")), [
 			{ commit: "b".repeat(40), artifactDirectory: ".pi/tmp/aloop/patch", status: "completed" },
 			{ commit: null, artifactDirectory: ".pi/tmp/aloop/patch", status: "timeout" },

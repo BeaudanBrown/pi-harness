@@ -3,6 +3,54 @@ import { createHash } from "node:crypto";
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../github-issues/github-context.js";
 
 const HANDOFF_PREFIX = "pi-aloop-handoff:v2:";
+const HANDOFF_V3_PREFIX = "<!-- pi-aloop-handoff:v3:";
+
+export type AloopHandoffV3 = {
+	version: 3;
+	issue: number;
+	issueBaseCommit: string;
+	commitRange: string;
+	outcome: "accepted" | "incomplete" | "decision-required" | "environment-blocked" | "rejected";
+	summary: string;
+	outstandingFindings: string[];
+	decisions: string[];
+	verification: string[];
+	nextAction: string;
+	attemptKey: string;
+	timestamp: string;
+};
+
+export function formatAloopHandoffV3(input: AloopHandoffV3): string {
+	const payload = Buffer.from(JSON.stringify(input), "utf8").toString("base64url");
+	const lines = input.outcome === "accepted"
+		? [`Aloop accepted ${input.commitRange}.`, input.summary, `Outstanding: ${input.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${input.decisions.join("; ") || "none"}.`, `Verification: ${input.verification.join("; ") || "none"}.`, `Next: ${input.nextAction}`]
+		: [`Aloop attempt settled as ${input.outcome}.`, input.summary, `Outstanding: ${input.outstandingFindings.join("; ") || "none"}.`, `Decisions: ${input.decisions.join("; ") || "none"}.`, `Next: ${input.nextAction}`];
+	return `${lines.join("\n\n")}\n\n${HANDOFF_V3_PREFIX}${payload} -->`;
+}
+
+export function parseAloopHandoffV3(body: string): AloopHandoffV3 | null {
+	const start = body.indexOf(HANDOFF_V3_PREFIX);
+	if (start < 0) return null;
+	const encoded = body.slice(start + HANDOFF_V3_PREFIX.length).split(" -->", 1)[0]?.trim();
+	if (!encoded) return null;
+	try {
+		const value = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+		const strings = (items: unknown) => Array.isArray(items) && items.every((item) => typeof item === "string");
+		const outcomes = ["accepted", "incomplete", "decision-required", "environment-blocked", "rejected"];
+		const expectedKeys = ["attemptKey", "commitRange", "decisions", "issue", "issueBaseCommit", "nextAction", "outcome", "outstandingFindings", "summary", "timestamp", "verification", "version"];
+		const exactKeys = value && typeof value === "object" && !Array.isArray(value) && JSON.stringify(Object.keys(value).sort()) === JSON.stringify(expectedKeys);
+		const valid = exactKeys && value?.version === 3 && Number.isInteger(value.issue) && value.issue > 0
+			&& typeof value.issueBaseCommit === "string" && /^[0-9a-f]{7,64}$/i.test(value.issueBaseCommit)
+			&& typeof value.commitRange === "string" && /^[0-9a-f]{7,64}\.\.[0-9a-f]{7,64}$/i.test(value.commitRange)
+			&& value.commitRange.split("..", 1)[0] === value.issueBaseCommit
+			&& outcomes.includes(value.outcome) && typeof value.summary === "string" && value.summary.trim()
+			&& strings(value.outstandingFindings) && strings(value.decisions) && strings(value.verification)
+			&& typeof value.nextAction === "string" && value.nextAction.trim()
+			&& typeof value.attemptKey === "string" && /^[a-f0-9]{24}$/.test(value.attemptKey)
+			&& typeof value.timestamp === "string" && !Number.isNaN(Date.parse(value.timestamp));
+		return valid ? value as AloopHandoffV3 : null;
+	} catch { return null; }
+}
 
 export type AloopAttemptHandoff = {
 	version: 1;
@@ -311,12 +359,17 @@ export function selectAloopLeaf(context: GitHubEpicContext, issueNumber: number)
 
 export function findOutstandingAttempts(context: GitHubEpicContext, records: AloopAttemptRecord[]): AloopAttemptRecord[] {
 	const descendants = new Set(context.issues.filter((issue) => issue.number !== context.epic.number).map((issue) => issue.number));
-	const recorded = new Set(context.issues.flatMap((issue) => parseAloopHandoffs(issue.recentHandoffs)
-		.filter((handoff) => handoff.issue === issue.number)
-		.map((handoff) => `${handoff.issue}:${handoff.commit ?? "none"}:${handoff.artifactDirectory}`)));
+	const recorded = new Set(context.issues.flatMap((issue) => issue.recentHandoffs.flatMap((comment) => {
+		const legacy = parseAloopHandoffs([comment])
+			.filter((handoff) => handoff.issue === issue.number)
+			.map((handoff) => `${handoff.issue}:${handoff.commit ?? "none"}:${handoff.artifactDirectory}`);
+		const v3 = parseAloopHandoffV3(comment.body);
+		return v3?.issue === issue.number ? [...legacy, `v3:${v3.attemptKey}`] : legacy;
+	})));
 	return records
 		.filter((record) => descendants.has(record.issue))
-		.filter((record) => !recorded.has(`${record.issue}:${record.commit ?? "none"}:${record.artifactDirectory}`))
+		.filter((record) => !recorded.has(`${record.issue}:${record.commit ?? "none"}:${record.artifactDirectory}`)
+			&& !recorded.has(`v3:${createHash("sha256").update(`${record.issue}:${record.artifactDirectory}`).digest("hex").slice(0, 24)}`))
 		.sort((left, right) => left.artifactDirectory.localeCompare(right.artifactDirectory));
 }
 
@@ -497,10 +550,12 @@ export function buildSupervisorKickoff(
 	const epicIssue = context.issues.find((issue) => issue.number === context.epic.number);
 	const descendants = context.issues.filter((issue) => issue.number !== context.epic.number);
 	const closedDescendants = descendants.filter((issue) => issue.state === "closed").length;
-	const handoffLines = context.issues.flatMap((issue) => parseAloopHandoffs(issue.recentHandoffs)
-		.filter((handoff) => handoff.issue === issue.number)
-		.slice(-3)
-		.map((handoff) => `- #${issue.number} ${handoff.attemptType} ${handoff.commit ?? "no-commit"}: accepted=${handoff.successful}; next=${bounded(handoff.nextAction, 300)}`));
+	const handoffLines = context.issues.flatMap((issue) => issue.recentHandoffs.flatMap((comment) => {
+		const v3 = parseAloopHandoffV3(comment.body);
+		if (v3?.issue === issue.number) return [`- #${issue.number} ${v3.outcome} ${v3.commitRange}: next=${bounded(v3.nextAction, 300)}`];
+		return parseAloopHandoffs([comment]).filter((handoff) => handoff.issue === issue.number)
+			.map((handoff) => `- #${issue.number} ${handoff.attemptType} ${handoff.commit ?? "no-commit"}: accepted=${handoff.successful}; next=${bounded(handoff.nextAction, 300)}`);
+	}).slice(-3));
 	return `Act as the LLM-led aloop supervisor for GitHub epic #${context.epic.number}: ${context.epic.title}.
 
 Epic goal and acceptance criteria:
@@ -526,21 +581,15 @@ ${bounded(gitHistory || "(no commits returned)", 8_000)}
 Invocation resource budget:
 ${budget ? `- Hard deadline: ${new Date(budget.deadlineMs).toISOString()}\n- Maximum worker launches: ${budget.maxWorkerLaunches}` : "- Use the configured hard deadline and worker-launch cap."}
 
-Retry accounting:
-- Epic progress is the closed-child count above.
-- A worker launch on a new issue is not a retry.
-- A remediation launch after an unsuccessful handoff increments only that issue's retry number.
-
 Operating procedure:
-1. Reconstruct state from the recursive GitHub graph, recent issue comments, and Git history. GitHub and Git are authoritative; there is no loop database.
-2. Select one implementable open, unblocked descendant leaf and use aloop_launch_worker for one fresh sequential implementation or remediation attempt. Labels and assignments are advisory; dependency state determines eligibility, and this supervisor serializes worker launches. Never run workers in parallel.
-3. If an outstanding attempt is listed above, recover it from its result artifact and Git commit, prepare and publish its handoff before launching anything else. Assess worker evidence yourself against every selected-issue acceptance criterion. A worker's "implemented" claim is not closure evidence by itself.
-4. After every attempt, call aloop_prepare_handoff, then pass its short ID to aloop_publish_handoff with dry_run=true and finally dry_run=false. Never copy the encoded comment through the model. Include attempt type, commit, verification, acceptance assessment, discovered work, and next action.
-5. Close an accepted child only after the handoff is durable and your independent acceptance assessment passes. The supervisor alone mutates GitHub. Create only tightly necessary corrective issues and use native sub-issue/blocker relationships.
-6. A remediation attempt may target the same issue. After two unsuccessful attempts without a materially new approach, or on material product/scope ambiguity, stop and ask the user for one explicit decision. Do not guess.
-7. Continue sequentially until no descendants remain open. Use aloop_supervisor_verify, which loads the repository-owned verification policy without accepting caller-supplied commands, review every descendant, and call aloop_check_closure. Close the epic only when that gate returns allowed.
-8. This invocation is deliberately bounded. When its deadline or worker-launch cap is reached, stop cleanly and tell the user to rerun /aloop; durable GitHub/Git state makes that continuation safe. Do not describe ordinary launches on new issues as retries.
-9. End with a concise epic report stating completed children, commits, verification, discovered/deferred work, and whether the epic was closed or stopped at a human-decision boundary.
+1. GitHub and Git are authoritative. Use aloop_context as the cached navigation view; request refresh only when external GitHub state may have changed.
+2. Select one open, unblocked descendant leaf and call aloop_launch_worker. Full workers are fresh and sequential; labels and assignments are advisory.
+3. For every returned or recovered attempt, call aloop_review_attempt. Use aloop_apply_patch for a narrow correction, a fresh full remediation worker for substantial work, or a trivial direct edit only when clearly safe. Review again after changes.
+4. Call aloop_finish_attempt exactly once for the full attempt. It owns canonical verification, v3 handoff publication, accepted-child closure, crash recovery, and next-frontier selection. Never call legacy receipt/spool/closure tools.
+5. If independent review is unavailable, canonical verification fails, or product/scope ambiguity needs a human, use aloop_checkpoint and stop. There is no semantic retry-count gate.
+6. Continue review, optional remediation, finalization, and next-child selection until worker bounds or a genuine decision boundary. The implementation deadline and 20-launch cap stop new full workers; supervisor settlement may continue.
+7. When all descendants are closed, call aloop_epic_completion with phase=prepare. Request explicit human approval, then call phase=apply with approved=true only for the unchanged prepared HEAD.
+8. End with a concise report of completed children, commits, verification, deferred work, and the human-decision or epic-approval state.
 
 Do not push. Do not restore tk or create ticket files. Keep working in this supervisor turn until the epic is complete or a genuine human decision is required.`;
 }
