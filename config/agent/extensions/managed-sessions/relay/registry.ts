@@ -471,6 +471,21 @@ export class RelayRegistry {
 		return this.state.conversations.flatMap((conversation) => conversation.generationTransition ? [{ conversationId: conversation.conversationId, transition: structuredClone(conversation.generationTransition) }] : []);
 	}
 
+	async updateActiveGenerationModel(conversationId: string, model: string): Promise<SessionGeneration> {
+		return this.mutate(async () => {
+			const current = this.manifests.get(conversationId);
+			if (!current) throw new RelayRegistryError("not_found", "Managed conversation is unavailable for model selection persistence");
+			const active = this.activeGeneration(current);
+			if (active.generationId !== (current.activeGenerationId ?? deriveGenerationId(conversationId, 1))) {
+				throw new RelayRegistryError("invalid_state", "Active generation is unavailable for model selection persistence");
+			}
+			const replacement: ConversationManifest = { ...current, selectedModel: model };
+			await this.manifestStore.write(replacement);
+			this.manifests.set(conversationId, replacement);
+			return { ...structuredClone(active), model };
+		});
+	}
+
 	async beginGenerationTransition(conversationId: string, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<NonNullable<RuntimeConversation["generationTransition"]>> {
 		return this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
@@ -508,7 +523,8 @@ export class RelayRegistry {
 			const generation: SessionGeneration = { generationId: transition.toGenerationId, ordinal: transition.ordinal, piSessionId: transition.toPiSessionId,
 				bindingBoundaryEntryId: transition.toBindingBoundaryEntryId, createdAt: new Date().toISOString(), ...(transition.model ? { model: transition.model } : {}), ...(transition.thinking ? { thinking: transition.thinking } : {}) };
 			replacement = { ...current, piSessionId: generation.piSessionId, bindingBoundaryEntryId: generation.bindingBoundaryEntryId,
-				activeGenerationId: generation.generationId, generations: [...history, generation] };
+				activeGenerationId: generation.generationId, generations: [...history, generation],
+				...(transition.model ? { selectedModel: transition.model } : {}) };
 			await this.manifestStore.write(replacement);
 		}
 		return this.mutate(async () => {

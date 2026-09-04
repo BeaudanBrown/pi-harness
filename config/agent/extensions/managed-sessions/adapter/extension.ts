@@ -52,7 +52,7 @@ import {
 
 const CONTROL_RESULT_ENTRY_TYPE = "pi-managed-session-control-result";
 const CONTROL_EXECUTION_ENTRY_TYPE = "pi-managed-session-control-execution";
-type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string } };
+type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string }; selection?: { model: string } };
 type StatefulControlName = "model" | "thinking" | "compact" | "new" | "stop";
 type ControlExecution = { controlId: string; name: StatefulControlName; argument?: string; state: "started" };
 
@@ -70,7 +70,7 @@ function isBoundedText(value: unknown, maxLength: number): value is string {
 function parseControlResult(value: unknown): ControlResult {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ManagedAdapterError("Malformed durable control result state");
 	const record = value as Record<string, unknown>;
-	if (!hasExactKeys(record, ["controlId", "status", "message"], ["options", "generation"]) ||
+	if (!hasExactKeys(record, ["controlId", "status", "message"], ["options", "generation", "selection"]) ||
 		typeof record.controlId !== "string" || !/^control_[a-f0-9]{32}$/.test(record.controlId) ||
 		(record.status !== "ok" && record.status !== "rejected") || !isBoundedText(record.message, 4_096)) {
 		throw new ManagedAdapterError("Malformed durable control result state");
@@ -94,7 +94,18 @@ function parseControlResult(value: unknown): ControlResult {
 		}
 		generation = candidate as { model?: string; thinking?: string };
 	}
-	return { controlId: record.controlId as string, status: record.status, message: record.message, ...(options ? { options } : {}), ...(generation ? { generation } : {}) };
+	let selection: { model: string } | undefined;
+	if (Object.hasOwn(record, "selection")) {
+		const candidate = record.selection;
+		if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate) ||
+			!hasExactKeys(candidate as Record<string, unknown>, ["model"]) || !isBoundedText((candidate as Record<string, unknown>).model, 256) ||
+			record.status !== "ok" || options !== undefined || generation !== undefined) {
+			throw new ManagedAdapterError("Malformed durable control result state");
+		}
+		selection = candidate as { model: string };
+	}
+	return { controlId: record.controlId as string, status: record.status, message: record.message, ...(options ? { options } : {}),
+		...(generation ? { generation } : {}), ...(selection ? { selection } : {}) };
 }
 
 function parseControlExecution(value: unknown): ControlExecution {
@@ -217,14 +228,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			pi.setActiveTools(active ? [...names, ...managed] : names);
 		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
-		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string }) => {
+		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
+			selection?: { model: string }) => {
 			let result = controlResults.get(controlId);
 			if (!result) {
-				result = { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}), ...(generation ? { generation } : {}) };
+				result = { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}),
+					...(generation ? { generation } : {}), ...(selection ? { selection } : {}) };
 				if (currentContext) appendMarker(pi, currentContext, CONTROL_RESULT_ENTRY_TYPE, result);
 				controlResults.set(controlId, result);
 			}
-			if (client?.connected) await client.controlResult(controlId, result.status, result.message, result.options, result.generation);
+			if (client?.connected) await client.controlResult(controlId, result.status, result.message, result.options, result.generation, result.selection);
 		};
 		const beginControlExecution = (ctx: ExtensionContext, controlId: string, name: StatefulControlName, argument?: string): ControlExecution => {
 			const existing = controlExecutions.get(controlId);
@@ -687,7 +700,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (controlExecutions.get(payload.controlId)?.name === "stop" && recoveredControlExecutions.delete(payload.controlId)) {
 					await controlReply(previous.controlId, previous.status, previous.message, previous.options); ctx.abort(); ctx.shutdown(); return;
 				}
-				return client?.controlResult(previous.controlId, previous.status, previous.message, previous.options, previous.generation);
+				return client?.controlResult(previous.controlId, previous.status, previous.message, previous.options, previous.generation, previous.selection);
 			}
 			const recoveredExecution = controlExecutions.get(payload.controlId);
 			if (recoveredExecution && (recoveredExecution.name !== payload.name || recoveredExecution.argument !== payload.argument)) throw new ManagedAdapterError("Conflicting replay for durable control execution");
@@ -695,8 +708,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (recoveredExecution.name === "compact") {
 					return controlReply(payload.controlId, "rejected", "Compaction was interrupted after durable execution began; it was not repeated during recovery. Context and history remain preserved.");
 				}
-				if (recoveredExecution.name === "model" || recoveredExecution.name === "thinking") {
-					return controlReply(payload.controlId, "rejected", `${recoveredExecution.name === "model" ? "Model selection" : "Thinking selection"} may have completed before interruption; the native mutation was not repeated during recovery. Check !status before retrying with a new control.`);
+				if (recoveredExecution.name === "thinking") {
+					return controlReply(payload.controlId, "rejected", "Thinking selection may have completed before interruption; the native mutation was not repeated during recovery. Check !status before retrying with a new control.");
 				}
 			}
 			if (["model", "thinking", "compact", "new"].includes(payload.name) && !ctx.isIdle()) {
@@ -723,7 +736,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					beginControlExecution(ctx, payload.controlId, "model", payload.argument);
 					if (!await pi.setModel(selected)) return controlReply(payload.controlId, "rejected", "Pi could not authenticate the selected model.");
 					selectedModel = argument;
-					return controlReply(payload.controlId, "ok", `Model changed to ${argument}.`);
+					return controlReply(payload.controlId, "ok", `Model changed to ${argument}.`, undefined, undefined, { model: argument });
 				}
 				const providers = new Set(models.map((model) => model.provider));
 				const filtered = argument ? models.filter((model) => providers.has(argument) ? model.provider === argument : `${model.provider}/${model.id}`.toLowerCase().includes(argument.toLowerCase())) : models;
@@ -908,7 +921,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (entry.customType === CONTROL_RESULT_ENTRY_TYPE) {
 					const result = parseControlResult(entry.data);
 					const prior = controlResults.get(result.controlId);
-					if (prior && (prior.status !== result.status || prior.message !== result.message || JSON.stringify(prior.options) !== JSON.stringify(result.options))) {
+					if (prior && (prior.status !== result.status || prior.message !== result.message || JSON.stringify(prior.options) !== JSON.stringify(result.options) ||
+						JSON.stringify(prior.generation) !== JSON.stringify(result.generation) || JSON.stringify(prior.selection) !== JSON.stringify(result.selection))) {
 						throw new ManagedAdapterError("Conflicting durable control result state");
 					}
 					controlResults.set(result.controlId, result);

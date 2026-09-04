@@ -113,11 +113,12 @@ test("coordinator launcher receives only fixed host configuration and records ex
 		schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "coordinator", conversationId, ownerHostId: hostId,
 		creationKey: "coordinator", concept: "host coordinator", piSessionId: "session-coordinator", roomId: "!coordinator:example.com",
 		bindingBoundaryEntryId: "entry_00000000000000000000000000000000", createdAt: "2026-08-31T00:00:00.000Z",
+		selectedModel: "local-llm/coordinator",
 	};
 	await value.registry.createCoordinatorConversation(manifest);
 	await assert.rejects(() => value.registry.deleteConversation(conversationId), /cannot be deleted/);
 	const launcher = join(value.root, "launcher");
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test "$PI_MANAGED_SESSION_MODEL" = local-llm/coordinator; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	await launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,

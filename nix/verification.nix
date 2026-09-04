@@ -307,6 +307,7 @@ let
       grep -F -- "$flag" "$coordinator" >/dev/null
     done
     grep -F 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$coordinator" >/dev/null
+    grep -F 'coordinator_model_args+=(--model "$PI_MANAGED_SESSION_MODEL")' "$coordinator" >/dev/null
     grep -F 'export PI_MANAGED_LOCAL_MODEL_TOOLS=' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
     grep -F -- '--extension "${piHarnessResources.managedSessionExtensions.modelPolicy}"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
     ! grep -F '${piHarnessResources.managedSessionExtensions.modelPolicy}' "$coordinator" >/dev/null

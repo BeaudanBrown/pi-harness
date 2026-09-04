@@ -170,7 +170,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			},
 			onEnvelope: async (envelope, attachment) => {
 				if (envelope.type === "control.result") {
-					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string } };
+					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[];
+						generation?: { model?: string; thinking?: string }; selection?: { model: string } };
 					const resultState = registry.controlResultState(attachment.conversationId, payload.controlId);
 					if (resultState === "unknown") throw new RelayRegistryError("not_found", "Pending managed control was not found");
 					if (resultState === "pending") {
@@ -187,6 +188,13 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 							setImmediate(() => { void hostLifecycle!.requestNewGeneration(manifest, payload.controlId, payload.generation!).catch((error) =>
 								process.stderr.write(`pi-managed-session-relay: generation transition failed: ${redactManagedValue(error instanceof Error ? error.message : "unknown failure", environment)}\n`)); });
 							return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
+						}
+						if (payload.selection) {
+							if (!source || source.name !== "model" || source.argument !== payload.selection.model ||
+								payload.status !== "ok" || payload.options || payload.generation) {
+								throw new RelayRegistryError("invalid_state", "Model selection result does not match an authorized exact control");
+							}
+							await registry.updateActiveGenerationModel(attachment.conversationId, payload.selection.model);
 						}
 						if (payload.options?.length) {
 							if (!source || (source.name !== "model" && source.name !== "thinking")) {

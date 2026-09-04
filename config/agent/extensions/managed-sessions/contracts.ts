@@ -218,6 +218,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		message: boundedString(4_096),
 		options: Type.Optional(Type.Array(boundedString(255), { minItems: 1, maxItems: 20 })),
 		generation: Type.Optional(strictObject({ model: Type.Optional(boundedString(256)), thinking: Type.Optional(boundedString(32)) })),
+		selection: Type.Optional(strictObject({ model: boundedString(256) })),
 	}),
 	clientEnvelope(adapterRole, "checkpoint.offer", {
 		checkpointId: identifier,
@@ -398,6 +399,7 @@ const projectManifest = strictObject({
 	projectDisplayName: Type.Optional(boundedString(128)),
 	checkoutDisplayName: Type.Optional(boundedString(128)),
 	projectSpace: Type.Optional(boundedString(255)),
+	selectedModel: Type.Optional(boundedString(256)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
 	...generationManifestFields,
@@ -412,6 +414,7 @@ const coordinatorManifest = strictObject({
 	piSessionId: identifier,
 	roomId: boundedString(255),
 	hostSpace: Type.Optional(boundedString(255)),
+	selectedModel: Type.Optional(boundedString(256)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
 	...generationManifestFields,
@@ -584,6 +587,7 @@ export interface ConversationManifest {
 	checkoutDisplayName?: string;
 	projectSpace?: string;
 	hostSpace?: string;
+	selectedModel?: string;
 	bindingBoundaryEntryId: string;
 	createdAt: string;
 	activeGenerationId?: string;
@@ -729,9 +733,13 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		if (payload.tools && (payload.tools.errors > payload.tools.total || payload.tools.counts.reduce((sum, item) => sum + item.count, 0) !== payload.tools.total)) throw new ManagedSessionContractError("malformed", "activity tool totals must be balanced");
 	}
 	if (envelope.type === "control.result") {
-		const payload = envelope.payload as { status: string; options?: string[]; generation?: unknown };
+		const payload = envelope.payload as { status: string; options?: string[]; generation?: unknown; selection?: unknown };
 		if (payload.generation !== undefined && (envelope.role !== "ordinary_adapter" || payload.status !== "ok" || payload.options !== undefined)) {
 			throw new ManagedSessionContractError("malformed", "generation metadata is permitted only on an accepted ordinary control result");
+		}
+		if (payload.selection !== undefined && ((envelope.role !== "ordinary_adapter" && envelope.role !== "coordinator_adapter") || payload.status !== "ok" ||
+			payload.options !== undefined || payload.generation !== undefined)) {
+			throw new ManagedSessionContractError("malformed", "selection metadata is permitted only on an accepted ordinary control result without options or generation metadata");
 		}
 	}
 	if (envelope.type === "checkpoint.offer") {

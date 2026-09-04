@@ -99,6 +99,28 @@ test("registry enforces nonce, role, binding, and one live attachment per conver
 	assert.equal(registry.snapshot().conversations[0]?.state, "dormant");
 });
 
+test("successful model selections durably replace only the active generation preference", async () => {
+	const value = manifest(); const { root, store, registry } = await fixture([value]);
+	const selected = await registry.updateActiveGenerationModel(value.conversationId, "local-llm/qwen");
+	assert.equal(selected.model, "local-llm/qwen");
+	assert.equal(selected.ordinal, 1);
+	let restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	assert.equal(restarted.manifestByConversationId(value.conversationId)?.selectedModel, "local-llm/qwen");
+	await restarted.updateActiveGenerationModel(value.conversationId, "openai/gpt");
+	restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	assert.equal(restarted.manifestByConversationId(value.conversationId)?.selectedModel, "openai/gpt");
+	assert.equal(restarted.manifestByConversationId(value.conversationId)?.generations, undefined,
+		"changing the current preference does not rewrite append-only generation history");
+
+	const coordinator = manifest("coordinator", "coordinator");
+	const coordinatorFixture = await fixture([coordinator]);
+	await coordinatorFixture.registry.updateActiveGenerationModel(coordinator.conversationId, "local-llm/coordinator");
+	const coordinatorRestart = new RelayRegistry(hostId, join(coordinatorFixture.root, "runtime"), coordinatorFixture.store);
+	await coordinatorRestart.load();
+	assert.equal(coordinatorRestart.manifestByConversationId(coordinator.conversationId)?.selectedModel, "local-llm/coordinator",
+		"coordinator conversations retain the same durable model preference");
+});
+
 test("generation transition phases and append-only history recover from each durable boundary", async () => {
 	const value = manifest(); const { root, store, registry } = await fixture([value]);
 	const controlId = `control_${"b".repeat(32)}`;

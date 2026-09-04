@@ -120,12 +120,14 @@ export class BoundAdapterClient {
 			result.payload.status !== (finalize ? "finalized" : "updated")) throw new ManagedAdapterError("Relay did not confirm activity projection", "invalid_response");
 	}
 
-	async controlResult(controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string }): Promise<void> {
+	async controlResult(controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
+		selection?: { model: string }): Promise<void> {
 		const result = await this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("control-result"), conversationId: this.options.binding.conversationId,
 			role: this.options.role, type: "control.result",
-			payload: { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}), ...(generation ? { generation } : {}) },
+			payload: { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}),
+				...(generation ? { generation } : {}), ...(selection ? { selection } : {}) },
 		});
 		if (result.type !== "self.result" || result.payload.operation !== "control.result" || result.payload.status !== "ok") {
 			throw new ManagedAdapterError("Relay did not confirm control result", "invalid_response");

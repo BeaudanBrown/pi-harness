@@ -84,15 +84,20 @@ test("session changes restore process-global tools before applying the new model
 	assert.deepEqual(harness.active(), ["read", "web_search", "remote_checkpoint"]);
 });
 
-test("tool-call enforcement uses the current model and fails closed", async () => {
-	const harness = policyHarness(["read", "web_search", "remote_checkpoint"]);
+test("tool-call enforcement uses the current model and blocks every model-delegation capability", async () => {
+	const delegated = ["run_worker", "review_agents", "aloop_launch_worker", "aloop_apply_patch"];
+	const harness = policyHarness(["read", "web_search", ...delegated, "remote_checkpoint"]);
+	await harness.emit("session_start", {}, "local-llm");
+	assert.deepEqual(harness.active(), ["read", "remote_checkpoint"], "delegation tools are absent from the local-model tool surface");
 	assert.equal(await harness.emit("tool_call", { toolName: "read" }, "local-llm"), undefined);
 	assert.equal(await harness.emit("tool_call", { toolName: "remote_checkpoint" }, "local-llm"), undefined);
-	assert.deepEqual(await harness.emit("tool_call", { toolName: "web_search" }, "local-llm"), {
-		block: true,
-		terminate: true,
-		reason: "Tool web_search is unavailable while using local-llm.",
-	});
+	for (const toolName of ["web_search", ...delegated]) {
+		assert.deepEqual(await harness.emit("tool_call", { toolName }, "local-llm"), {
+			block: true,
+			terminate: true,
+			reason: `Tool ${toolName} is unavailable while using local-llm.`,
+		});
+	}
 	harness.setActive(["read"]);
 	assert.deepEqual(await harness.emit("tool_call", { toolName: "remote_checkpoint" }, "local-llm"), {
 		block: true,

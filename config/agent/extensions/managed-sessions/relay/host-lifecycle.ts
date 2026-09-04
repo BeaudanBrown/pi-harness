@@ -523,7 +523,7 @@ export class HostLifecycle {
 					PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: manifest.bindingBoundaryEntryId,
 					PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
 					PI_MANAGED_SESSION_WORKSPACE_PATH: resolved.workspacePath,
-					...(activeGeneration.model ? { PI_MANAGED_SESSION_MODEL: activeGeneration.model } : {}),
+					...((manifest.selectedModel ?? activeGeneration.model) ? { PI_MANAGED_SESSION_MODEL: manifest.selectedModel ?? activeGeneration.model } : {}),
 					...(activeGeneration.thinking ? { PI_MANAGED_SESSION_THINKING: activeGeneration.thinking } : {}),
 				});
 				window = parseProjectWindow(result, manifest);

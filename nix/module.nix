@@ -158,6 +158,8 @@ let
     : "''${PI_MANAGED_COORDINATOR_SESSION_FILE:?PI_MANAGED_COORDINATOR_SESSION_FILE is required}"
     export PI_HARNESS_AGENT_PROFILE="managed-coordinator"
     ${lspEnvironmentCleanup}
+    coordinator_model_args=()
+    [[ -z "''${PI_MANAGED_SESSION_MODEL:-}" ]] || coordinator_model_args+=(--model "$PI_MANAGED_SESSION_MODEL")
     cd "$PI_MANAGED_COORDINATOR_CWD"
     exec ${managedRawPi}/bin/pi \
       --no-extensions \
@@ -170,6 +172,7 @@ let
       --extension "${cfg.package.agentProfileExtension}" \
       --tools "${coordinatorTools}" \
       --session "$PI_MANAGED_COORDINATOR_SESSION_FILE" \
+      "''${coordinator_model_args[@]}" \
       "$@"
   '';
 

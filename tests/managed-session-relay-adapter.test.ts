@@ -108,7 +108,23 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	assert.equal(running.registry.pendingControls(conversationId).length, 0);
 	assert.equal(running.registry.controlResultState(conversationId, controlId), "completed");
 	await replayClient.controlResult(controlId, "ok", "Durable control handled.");
+	const modelControlId = deriveControlId(conversationId, "$model-selection");
+	await running.registry.recordPendingControl(conversationId, {
+		controlId: modelControlId, matrixEventId: "$model-selection", name: "model", argument: "local-llm/qwen",
+	});
+	await replayClient.controlResult(modelControlId, "ok", "Model changed to local-llm/qwen.", undefined, undefined, { model: "local-llm/qwen" });
+	assert.equal(running.registry.manifestByConversationId(conversationId)?.selectedModel, "local-llm/qwen");
+	const mismatchedControlId = deriveControlId(conversationId, "$mismatched-model-selection");
+	await running.registry.recordPendingControl(conversationId, {
+		controlId: mismatchedControlId, matrixEventId: "$mismatched-model-selection", name: "model", argument: "local-llm/expected",
+	});
+	await assert.rejects(() => replayClient.controlResult(mismatchedControlId, "ok", "wrong", undefined, undefined, { model: "openai/wrong" }),
+		/Model selection result does not match an authorized exact control/);
+	assert.equal(running.registry.manifestByConversationId(conversationId)?.selectedModel, "local-llm/qwen",
+		"a mismatched result cannot alter the durable preference");
+	await running.registry.acknowledgeControlResult(conversationId, mismatchedControlId);
 	const controlNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${controlId}`);
+	const modelNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${modelControlId}`);
 	assert.equal(requests.filter((request) => request.path.includes(`/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`)).length, 1,
 		"lost control.result acknowledgements retry without duplicate Matrix projection");
 	failLeave = true;
@@ -130,6 +146,7 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
+		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, modelNoticeEntryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 	]);

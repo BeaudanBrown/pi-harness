@@ -37,8 +37,8 @@ const activity = Type.Union([
 const controlName = Type.Union(["help", "status", "model", "thinking", "compact", "new", "stop", "abort", "steer"].map((value) => Type.Literal(value)));
 const control = Type.Union([
 	envelope("relay", "control.deliver", strict({ controlId: id("control"), name: controlName, argument: Type.Optional(text(4_096)) })),
-	envelope("ordinary_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), generation: Type.Optional(strict({ model: Type.Optional(text(256)), thinking: Type.Optional(text(32)) })) })),
-	envelope("coordinator_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })) })),
+	envelope("ordinary_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), generation: Type.Optional(strict({ model: Type.Optional(text(256)), thinking: Type.Optional(text(32)) })), selection: Type.Optional(strict({ model: text(256) })) })),
+	envelope("coordinator_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), selection: Type.Optional(strict({ model: text(256) })) })),
 ]);
 const poll = Type.Union([
 	envelope("ordinary_adapter", "poll.open", strict({ pollId: id("poll"), question: text(1_200), options: Type.Array(text(300), { minItems: 2, maxItems: 8 }) })),
@@ -67,9 +67,9 @@ const generation = Type.Union([
 export const ManagedSessionV2EnvelopeSchema = Type.Union([activity, control, poll, media, generation]);
 
 export interface SessionGeneration { generationId: string; ordinal: number; piSessionId: string; bindingBoundaryEntryId: string; createdAt: string; model?: string; thinking?: string; }
-export interface ConversationManifestV2 { schemaVersion: typeof MANAGED_SESSION_V2_VERSION; kind: "project" | "coordinator"; conversationId: string; ownerHostId: string; creationKey: string; concept: string; roomId: string; placement?: { rootKey: string; workspace: string; relativeCwd: string }; projectKey?: string; projectDisplayName?: string; checkoutDisplayName?: string; projectSpace?: string; hostSpace?: string; activeGenerationId: string; generations: SessionGeneration[]; createdAt: string; }
+export interface ConversationManifestV2 { schemaVersion: typeof MANAGED_SESSION_V2_VERSION; kind: "project" | "coordinator"; conversationId: string; ownerHostId: string; creationKey: string; concept: string; roomId: string; placement?: { rootKey: string; workspace: string; relativeCwd: string }; projectKey?: string; projectDisplayName?: string; checkoutDisplayName?: string; projectSpace?: string; hostSpace?: string; selectedModel?: string; activeGenerationId: string; generations: SessionGeneration[]; createdAt: string; }
 const generationSchema = strict({ generationId, ordinal: Type.Integer({ minimum: 1 }), piSessionId: text(128), bindingBoundaryEntryId: id("entry"), createdAt: text(35), model: Type.Optional(text(256)), thinking: Type.Optional(text(32)) });
-export const ConversationManifestV2Schema = strict({ schemaVersion: Type.Literal(MANAGED_SESSION_V2_VERSION), kind: Type.Union([Type.Literal("project"), Type.Literal("coordinator")]), conversationId, ownerHostId: text(128), creationKey: text(128), concept: text(128), roomId: text(255), placement: Type.Optional(strict({ rootKey: text(128), workspace: text(128), relativeCwd: Type.String({ maxLength: 512 }) })), projectKey: Type.Optional(Type.String({ pattern: "^project_[a-f0-9]{32}$" })), projectDisplayName: Type.Optional(text(128)), checkoutDisplayName: Type.Optional(text(128)), projectSpace: Type.Optional(text(255)), hostSpace: Type.Optional(text(255)), activeGenerationId: generationId, generations: Type.Array(generationSchema, { minItems: 1, maxItems: 256 }), createdAt: text(35) });
+export const ConversationManifestV2Schema = strict({ schemaVersion: Type.Literal(MANAGED_SESSION_V2_VERSION), kind: Type.Union([Type.Literal("project"), Type.Literal("coordinator")]), conversationId, ownerHostId: text(128), creationKey: text(128), concept: text(128), roomId: text(255), placement: Type.Optional(strict({ rootKey: text(128), workspace: text(128), relativeCwd: Type.String({ maxLength: 512 }) })), projectKey: Type.Optional(Type.String({ pattern: "^project_[a-f0-9]{32}$" })), projectDisplayName: Type.Optional(text(128)), checkoutDisplayName: Type.Optional(text(128)), projectSpace: Type.Optional(text(255)), hostSpace: Type.Optional(text(255)), selectedModel: Type.Optional(text(256)), activeGenerationId: generationId, generations: Type.Array(generationSchema, { minItems: 1, maxItems: 256 }), createdAt: text(35) });
 
 function schemaError(schema: TSchema, value: unknown): never { const e = [...Errors(schema, value)][0]; throw new ManagedSessionContractError("malformed", `managed-session v2: ${e?.instancePath || "/"}: ${e?.message || "invalid value"}`); }
 export function parseManagedSessionV2Envelope(value: unknown) {
@@ -78,6 +78,10 @@ export function parseManagedSessionV2Envelope(value: unknown) {
 	if (envelope.type === "control.result" && envelope.payload.generation !== undefined &&
 		(envelope.role !== "ordinary_adapter" || envelope.payload.status !== "ok" || envelope.payload.options !== undefined)) {
 		throw new ManagedSessionContractError("malformed", "v2 generation metadata requires an accepted ordinary control result without options");
+	}
+	if (envelope.type === "control.result" && envelope.payload.selection !== undefined &&
+		((envelope.role !== "ordinary_adapter" && envelope.role !== "coordinator_adapter") || envelope.payload.status !== "ok" || envelope.payload.options !== undefined || envelope.payload.generation !== undefined)) {
+		throw new ManagedSessionContractError("malformed", "v2 selection metadata requires an accepted ordinary control result without options or generation metadata");
 	}
 	if (envelope.type === "media.begin") {
 		if (Math.ceil(Number(envelope.payload.byteLength) / MAX_MEDIA_CHUNK_BYTES) !== envelope.payload.chunkCount || Number(envelope.payload.width) * Number(envelope.payload.height) > 40_000_000) {
@@ -130,7 +134,7 @@ export function migrateV1Manifest(value: unknown): ConversationManifestV2 {
 		creationKey: old.creationKey, concept: old.concept, roomId: old.roomId, ...(old.placement ? { placement: old.placement } : {}),
 		...(old.projectKey ? { projectKey: old.projectKey, projectDisplayName: old.projectDisplayName, checkoutDisplayName: old.checkoutDisplayName } : {}),
 		...(old.projectSpace ? { projectSpace: old.projectSpace } : {}), ...(old.hostSpace ? { hostSpace: old.hostSpace } : {}),
-		activeGenerationId: generationId, generations, createdAt: old.createdAt });
+		...(old.selectedModel ? { selectedModel: old.selectedModel } : {}), activeGenerationId: generationId, generations, createdAt: old.createdAt });
 }
 export function migrateV1Bundle(manifests: unknown[], runtime: unknown) {
 	const source = parsePersistenceBundle(manifests, runtime); const migrated = source.manifests.map(migrateV1Manifest);

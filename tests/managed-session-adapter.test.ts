@@ -399,7 +399,9 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	assert.ok((relay.frames.at(-1)?.payload.options as string[]).includes("!model scoped/model-1"));
 	await send(8, "model", "outside/forbidden"); assert.equal(setModelCalls, 0);
 	await send(4, "model", "scoped/model-1"); assert.equal(setModelCalls, 1);
+	assert.deepEqual(relay.frames.at(-1)?.payload.selection, { model: "scoped/model-1" }, "the accepted exact model is returned for durable relay persistence");
 	await send(4, "model", "scoped/model-1"); assert.equal(setModelCalls, 1, "replayed control IDs return the durable result without repeating mutation");
+	assert.deepEqual(relay.frames.at(-1)?.payload.selection, { model: "scoped/model-1" }, "durable result replay preserves the exact selection");
 	await send(5, "thinking", "off"); assert.equal(thinking, "off");
 	await send(6, "compact", "focus on controls"); assert.equal(compactFocus, "focus on controls");
 	assert.match(String(relay.frames.at(-1)?.payload.message), /90 -> 40/);
@@ -425,6 +427,8 @@ test("durable control marker restoration rejects extra, malformed, and unbounded
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", options: [] }],
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", options: Array(21).fill("choice") }],
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", options: ["x".repeat(256)] }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: {} }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: { model: "x".repeat(257) } }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "provider/model", state: "started", extra: true }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "thinking", argument: "x".repeat(4_097), state: "started" }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "", state: "started" }],
@@ -442,7 +446,7 @@ test("durable control marker restoration rejects extra, malformed, and unbounded
 	}
 });
 
-test("recovered uncertain model and thinking mutations are not invoked again", async (t) => {
+test("recovered exact model selection is reapplied idempotently while uncertain thinking remains conservative", async (t) => {
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const modelId = `control_${"f".repeat(32)}`;
 	const thinkingId = `control_${"1".repeat(32)}`;
@@ -463,15 +467,17 @@ test("recovered uncertain model and thinking mutations are not invoked again", a
 		getContextUsage: () => undefined, abort: () => undefined, shutdown: () => undefined,
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf, getSessionFile: () => "/tmp/session.jsonl" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
-	for (const [controlId, name, argument] of [[modelId, "model", "scoped/model"], [thinkingId, "thinking", "high"]] as const) {
-		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `${name}-replay`, conversationId, role: "relay", type: "control.deliver",
-			payload: { controlId, name, argument } });
-		await new Promise((resolve) => setTimeout(resolve, 30));
-		assert.match(String(relay.frames.at(-1)?.payload.message), /not repeated/i);
-	}
-	assert.equal(setModelCalls, 0, "uncertain recovered model selection is not repeated");
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "model-replay", conversationId, role: "relay", type: "control.deliver",
+		payload: { controlId: modelId, name: "model", argument: "scoped/model" } });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(setModelCalls, 1, "the exact authenticated model mutation is safe to reapply after interruption");
+	assert.deepEqual(relay.frames.at(-1)?.payload.selection, { model: "scoped/model" });
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "thinking-replay", conversationId, role: "relay", type: "control.deliver",
+		payload: { controlId: thinkingId, name: "thinking", argument: "high" } });
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.match(String(relay.frames.at(-1)?.payload.message), /not repeated/i);
 	assert.equal(setThinkingCalls, 0, "uncertain recovered thinking selection is not repeated");
-	assert.equal(branch.filter((entry) => entry.customType === "pi-managed-session-control-result").length, 2, "conservative outcomes are durable");
+	assert.equal(branch.filter((entry) => entry.customType === "pi-managed-session-control-result").length, 2, "recovered outcomes are durable");
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
