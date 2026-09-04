@@ -50,7 +50,11 @@ let
   managedSessionsEnabled = cfg.managedSessions.enable;
   nonNullString = value: if value == null then "" else value;
   managedRelayPackage = if cfg.managedSessions.relayPackage == null then cfg.package else cfg.managedSessions.relayPackage;
-  managedLauncherPackage = if cfg.managedSessions.launcherPackage == null then pkgs.runCommand "missing-managed-session-launcher" { } "mkdir -p $out" else cfg.managedSessions.launcherPackage;
+  configuredManagedLauncherPackage = if cfg.managedSessions.launcherPackage == null then pkgs.runCommand "missing-managed-session-launcher" { } "mkdir -p $out" else cfg.managedSessions.launcherPackage;
+  managedLauncherPackage = pkgs.callPackage ./managed-session-launcher-wrapper.nix {
+    launcherPackage = configuredManagedLauncherPackage;
+    launcherExecutable = cfg.managedSessions.launcherExecutable;
+  };
   managedExtensions = cfg.package.managedSessionExtensions or { ordinary = "/missing-managed-ordinary"; coordinator = "/missing-managed-coordinator"; };
   profileDocument = cfg.package.agentProfiles or { profiles = { }; variants = { }; };
   engineeringProfile = profileDocument.profiles."engineering-full" or { extensions = [ ]; skills = [ ]; prompts = [ ]; themes = [ ]; };
@@ -446,7 +450,7 @@ in
       launcherPackage = lib.mkOption {
         type = lib.types.nullOr lib.types.package;
         default = null;
-        description = "Host-owned package providing the strict tmux_project managed launcher interface.";
+        description = "Host-owned package providing the strict tmux_project managed launcher interface; pi-harness wraps its canonical workspace results with project-identity authority checks.";
       };
 
       launcherExecutable = lib.mkOption {
@@ -565,7 +569,7 @@ in
         PI_MANAGED_SESSIONS_HOST_ID = nonNullString cfg.managedSessions.hostId;
         PI_MANAGED_SESSIONS_WORKSPACE_ROOTS = builtins.toJSON cfg.managedSessions.workspaceRoots;
         PI_MANAGED_COORDINATOR_CONCEPT = cfg.managedSessions.coordinator.concept;
-        PI_MANAGED_COORDINATOR_LAUNCHER = "${managedLauncherPackage}/${cfg.managedSessions.launcherExecutable}";
+        PI_MANAGED_COORDINATOR_LAUNCHER = "${managedLauncherPackage}/bin/tmux_project";
         PI_MATRIX_HOMESERVER = nonNullString cfg.managedSessions.homeserver;
         PI_MATRIX_BOT_USER_ID = nonNullString cfg.managedSessions.botUserId;
         PI_MATRIX_OPERATOR_USER_ID = nonNullString cfg.managedSessions.operatorUserId;

@@ -105,7 +105,7 @@
           xdgUtils = pkgs.xdg-utils;
           jq = pkgs.jq;
         };
-        managedSessionLauncher = pkgs.writeShellApplication {
+        managedSessionLauncherBase = pkgs.writeShellApplication {
           name = "tmux_project";
           runtimeInputs = [ pkgs.coreutils pkgs.direnv pkgs.findutils pkgs.gawk pkgs.git pkgs.jq pkgs.tmux ];
           text = ''
@@ -197,8 +197,7 @@
                 [[ $(git -C "$workspace_path" symbolic-ref --short HEAD) == main ]]
                 resolve_project_identity
                 jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg workspacePath "$workspace_path" \
-                  --arg projectKey "$project_key" --arg projectDisplayName "$project_display" --arg checkoutDisplayName "$checkout_display" \
-                  '{rootKey:$rootKey,workspace:$workspace,relativeCwd:"",workspacePath:$workspacePath,cwd:$workspacePath,projectKey:$projectKey,projectDisplayName:$projectDisplayName,checkoutDisplayName:$checkoutDisplayName}'
+                  '{rootKey:$rootKey,workspace:$workspace,relativeCwd:"",workspacePath:$workspacePath,cwd:$workspacePath,projectKey:null,projectDisplayName:null,checkoutDisplayName:null}'
                 ;;
               workspace-resolve|root-ensure)
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
@@ -220,8 +219,8 @@
                 else
                   resolve_project_identity
                   jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg relativeCwd "$relative_cwd" \
-                    --arg workspacePath "$workspace_path" --arg cwd "$cwd" --arg projectKey "$project_key" --arg projectDisplayName "$project_display" --arg checkoutDisplayName "$checkout_display" \
-                    '{rootKey:$rootKey,workspace:$workspace,relativeCwd:$relativeCwd,workspacePath:$workspacePath,cwd:$cwd,projectKey:$projectKey,projectDisplayName:$projectDisplayName,checkoutDisplayName:$checkoutDisplayName}'
+                    --arg workspacePath "$workspace_path" --arg cwd "$cwd" \
+                    '{rootKey:$rootKey,workspace:$workspace,relativeCwd:$relativeCwd,workspacePath:$workspacePath,cwd:$cwd,projectKey:null,projectDisplayName:null,checkoutDisplayName:null}'
                 fi
                 ;;
               window-inspect)
@@ -290,6 +289,9 @@
             esac
           '';
         };
+        managedSessionLauncher = pkgs.callPackage ./nix/managed-session-launcher-wrapper.nix {
+          launcherPackage = managedSessionLauncherBase;
+        };
         managedSessionModuleTest = lib.evalModules {
           specialArgs = { inherit pkgs; };
           modules = [
@@ -316,7 +318,7 @@
                   operatorUserId = "@operator:example.com";
                   hostId = "test-host";
                   workspaceRoots.projects = "/home/operator/projects";
-                  launcherPackage = managedSessionLauncher;
+                  launcherPackage = managedSessionLauncherBase;
                 };
               };
             }

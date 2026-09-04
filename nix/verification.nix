@@ -186,6 +186,7 @@ let
       export PI_MANAGED_SESSIONS_TEST_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}
       export PI_MANAGED_SESSIONS_TEST_TMUX=${pkgs.tmux}/bin/tmux
       export PI_MANAGED_TEST_LAUNCHER=${managedSessionLauncher}/bin/tmux_project
+      export PI_MANAGED_SESSIONS_WORKSPACE_ROOTS="{\"projects\":\"$TMPDIR/workspaces\"}"
       export PI_MANAGED_TEST_COORDINATOR_PI=${managedSessionCoordinatorPi}/bin/pi
       export PI_MANAGED_TEST_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi
       export PI_MANAGED_TEST_DIRENV=${pkgs.direnv}/bin/direnv

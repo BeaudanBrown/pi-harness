@@ -25,7 +25,7 @@ test("packaged project-create launcher confines creation, initializes only local
 	const launcher = process.env.PI_MANAGED_TEST_LAUNCHER; if (!launcher) return t.skip("packaged launcher is unavailable");
 	const root = await mkdtemp(join(tmpdir(), "pi-project-create-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const workspaceRoot = join(root, "roots"); await mkdir(workspaceRoot);
-	const env = { ...process.env, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot, PI_MANAGED_TEST_TMUX_SOCKET: `unused-${process.pid}` };
+	const env = { ...process.env, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: workspaceRoot }), PI_MANAGED_TEST_TMUX_SOCKET: `unused-${process.pid}` };
 	const invoke = (request: Record<string, unknown>) => JSON.parse(execFileSync(launcher, ["managed", "project-create"], {
 		input: `${JSON.stringify(request)}\n`, encoding: "utf8", env,
 	})) as Record<string, unknown>;
@@ -41,7 +41,7 @@ test("packaged project-create launcher confines creation, initializes only local
 	assert.deepEqual(invoke({ ...request, resumeExisting: true }), invoke({ ...request, resumeExisting: true }), "matching completed retries are idempotent");
 	const resolveWorkspace = (rootPath: string, workspace: string) => JSON.parse(execFileSync(launcher, ["managed", "workspace-resolve"], {
 		input: `${JSON.stringify({ rootKey: "projects", workspace, relativeCwd: "" })}\n`, encoding: "utf8",
-		env: { ...env, PI_MANAGED_TEST_WORKSPACE_ROOT: rootPath },
+		env: { ...env, PI_MANAGED_TEST_WORKSPACE_ROOT: rootPath, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: rootPath }) },
 	})) as Record<string, unknown>;
 	const mainCheckout = join(workspaceRoot, "group-main"); await mkdir(mainCheckout);
 	execFileSync("git", ["-C", mainCheckout, "init", "-b", "main"]); execFileSync("git", ["-C", mainCheckout, "config", "user.email", "test@example.com"]);
@@ -74,7 +74,7 @@ test("packaged project-create launcher confines creation, initializes only local
 	assert.throws(() => invoke({ ...request, rootKey: "foreign" }));
 	const linkedRoot = join(root, "linked-root"); await symlink(workspaceRoot, linkedRoot);
 	assert.throws(() => execFileSync(launcher, ["managed", "project-create"], { input: `${JSON.stringify(request)}\n`, encoding: "utf8",
-		env: { ...env, PI_MANAGED_TEST_WORKSPACE_ROOT: linkedRoot } }));
+		env: { ...env, PI_MANAGED_TEST_WORKSPACE_ROOT: linkedRoot, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: linkedRoot }) } }));
 	await mkdir(join(workspaceRoot, "empty-existing"));
 	assert.throws(() => invoke({ ...request, workspace: "empty-existing", creationKey: "create-empty" }));
 	assert.throws(() => invoke({ ...request, workspace: "empty-existing", creationKey: "create-empty", resumeExisting: true }),
@@ -382,7 +382,8 @@ test("packaged lifecycle launches real Pi through direnv and projects its final 
 	const tmuxSocket = `pi44-${process.pid}-${Date.now()}`; const projectLog = join(root, "project.log");
 	await mkdir(workspaceRoot, { recursive: true });
 	execFileSync(launcher, ["managed", "project-create"], { input: `${JSON.stringify({ creationKey: "live-create-alpha", resumeExisting: false, rootKey: "projects", workspace: "alpha" })}\n`,
-		env: { ...process.env, PI_MANAGED_TEST_TMUX_SOCKET: tmuxSocket, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot } });
+		env: { ...process.env, PI_MANAGED_TEST_TMUX_SOCKET: tmuxSocket, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot,
+			PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: workspaceRoot }) } });
 	await mkdir(join(workspace, ".pi/extensions"), { recursive: true });
 	await mkdir(join(workspace, ".pi/skills/project-probe"), { recursive: true });
 	await mkdir(join(workspace, ".pi/prompts"), { recursive: true });
@@ -488,6 +489,7 @@ export default function (pi: ExtensionAPI) {
 		registry, matrix, server, environment: { ...launchEnvironment, PATH: `${managedPi.slice(0, managedPi.lastIndexOf("/"))}:${process.env.PATH}`,
 			HOME: home, PI_CODING_AGENT_DIR: join(root, "agent"),
 			DIRENV_CONFIG: direnvConfig, PI_MANAGED_TEST_TMUX_SOCKET: tmuxSocket, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot,
+			PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: workspaceRoot }),
 			PI_MANAGED_TEST_PROVIDER: launcherExtension, PI_MANAGED_TEST_PROJECT_LOG: projectLog } });
 	let started: Record<string, unknown>;
 	try {

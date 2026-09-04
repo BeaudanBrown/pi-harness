@@ -254,7 +254,7 @@ identity, and preserves partial repositories for explicit retry. Stable private
 Matrix aliases and durable provisioning phases prevent uncertain retries from
 duplicating project Spaces or rooms. Starting a
 project conversation accepts only a named root, immediate-child workspace, safe
-relative cwd, and immutable concept. The trusted launcher resolves Git common-directory
+relative cwd, and immutable concept. A harness-owned authority wrapper enriches the configured tmux launcher’s canonical workspace result and resolves Git common-directory
 identity so a main checkout and its linked worktrees share one deterministic private
 project Space while retaining distinct checkout room names; non-Git workspaces use
 a stable immediate-child fallback. Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. The coordinator can preview a bounded host-resolved plan, explicitly apply its stable reconciliation key without replacing rooms or sessions, and separately confirm cleanup of obsolete Spaces. Cleanup refuses referenced, non-empty, inaccessible, or foreign Spaces and removes the operator only from verified obsolete empty Spaces before the bot leaves. The relay resolves placement
