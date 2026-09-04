@@ -32,7 +32,7 @@ function messageId(prefix: string): string {
 }
 
 export interface ReceivedImage {
-	deliveryId: string; matrixEventId: string; blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp";
+	deliveryId: string; matrixEventId: string; senderUserId?: string; blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp";
 	byteLength: number; width: number; height: number; caption: string; data: Buffer;
 }
 
@@ -121,7 +121,7 @@ export class BoundAdapterClient {
 	}
 
 	async controlResult(controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
-		selection?: { model: string }): Promise<void> {
+		selection?: { model: string } | { thinking: string }): Promise<void> {
 		const result = await this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("control-result"), conversationId: this.options.binding.conversationId,
@@ -318,6 +318,7 @@ export class BoundAdapterClient {
 			return;
 		}
 		await this.options.onMedia({ deliveryId: transfer.descriptor.deliveryId, matrixEventId: transfer.descriptor.matrixEventId,
+			...(transfer.descriptor.senderUserId ? { senderUserId: transfer.descriptor.senderUserId } : {}),
 			blobId: transfer.descriptor.blobId, sha256: transfer.descriptor.sha256, mimeType: transfer.descriptor.mimeType,
 			byteLength: transfer.descriptor.byteLength, width: transfer.descriptor.width, height: transfer.descriptor.height,
 			caption: transfer.descriptor.caption, data });

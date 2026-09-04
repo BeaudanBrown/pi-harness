@@ -15,6 +15,7 @@ import { type MatrixImageEvent, ManagedImageTransport } from "./image-media.js";
 
 interface MatrixTextEvent {
 	eventId: string;
+	senderUserId: string;
 	body: string;
 	replyToEventId?: string;
 }
@@ -22,7 +23,7 @@ interface MatrixTextEvent {
 export type AuthorizedMatrixRoomEvent =
 	| ({ kind: "text" } & MatrixTextEvent)
 	| MatrixImageEvent
-	| { kind: "poll_response"; eventId: string; pollEventId: string; answerId: string };
+	| { kind: "poll_response"; eventId: string; senderUserId: string; pollEventId: string; answerId: string };
 
 const MAX_TIMELINE_EVENTS = 512;
 const MAX_INITIAL_EVENT_AGE_MS = 24 * 60 * 60 * 1_000;
@@ -65,25 +66,37 @@ function inputKind(body: string): { kind: "prompt" | "steer" | "abort"; body?: s
 	return { kind: "prompt", body: text };
 }
 
-export function authorizedRoomEvents(response: unknown, roomId: string, operatorUserId: string, hasCursor: boolean, now = Date.now()): AuthorizedMatrixRoomEvent[] {
+function roomTimeline(response: unknown, roomId: string): unknown[] {
 	if (typeof response !== "object" || response === null) return [];
 	const rooms = (response as { rooms?: unknown }).rooms;
 	const joined = typeof rooms === "object" && rooms !== null ? (rooms as { join?: unknown }).join : undefined;
 	const room = typeof joined === "object" && joined !== null ? (joined as Record<string, unknown>)[roomId] : undefined;
 	if (typeof room !== "object" || room === null) return [];
-	const roomValue = room as { timeline?: unknown; state?: unknown };
-	const stateEvents = typeof roomValue.state === "object" && roomValue.state !== null && Array.isArray((roomValue.state as { events?: unknown }).events) ? (roomValue.state as { events: unknown[] }).events : [];
-	const membership = [...stateEvents].reverse().find((value) => typeof value === "object" && value !== null && (value as { type?: unknown }).type === "m.room.member" && (value as { state_key?: unknown }).state_key === operatorUserId) as { content?: unknown } | undefined;
-	if (membership && (typeof membership.content !== "object" || membership.content === null || (membership.content as { membership?: unknown }).membership !== "join")) return [];
-	const timeline = roomValue.timeline;
+	const timeline = (room as { timeline?: unknown }).timeline;
 	if (typeof timeline !== "object" || timeline === null || !Array.isArray((timeline as { events?: unknown }).events)) return [];
-	const timelineValue = timeline as { events: unknown[]; limited?: unknown };
-	if (timelineValue.limited === true || timelineValue.events.length > MAX_TIMELINE_EVENTS) throw new Error("Matrix room timeline requires bounded gap recovery before advancing the cursor");
+	const value = timeline as { events: unknown[]; limited?: unknown };
+	if (value.limited === true || value.events.length > MAX_TIMELINE_EVENTS) throw new Error("Matrix room timeline requires bounded gap recovery before advancing the cursor");
+	return value.events;
+}
+
+export function roomEventSenderIds(response: unknown, roomId: string, excludedSenderUserIds: ReadonlySet<string>, hasCursor: boolean, now = Date.now()): ReadonlySet<string> {
+	const senders = new Set<string>();
+	for (const value of roomTimeline(response, roomId)) {
+		if (typeof value !== "object" || value === null) continue;
+		const event = value as { sender?: unknown; origin_server_ts?: unknown };
+		if (typeof event.sender === "string" && !excludedSenderUserIds.has(event.sender) && typeof event.origin_server_ts === "number" &&
+			Number.isSafeInteger(event.origin_server_ts) && event.origin_server_ts <= now + MAX_FUTURE_EVENT_SKEW_MS &&
+			(hasCursor || event.origin_server_ts >= now - MAX_INITIAL_EVENT_AGE_MS)) senders.add(event.sender);
+	}
+	return senders;
+}
+
+export function authorizedRoomEvents(response: unknown, roomId: string, authorizedSenderUserIds: ReadonlySet<string>, hasCursor: boolean, now = Date.now()): AuthorizedMatrixRoomEvent[] {
 	const result: AuthorizedMatrixRoomEvent[] = []; const seen = new Set<string>();
-	for (const value of timelineValue.events) {
+	for (const value of roomTimeline(response, roomId)) {
 		if (typeof value !== "object" || value === null) continue;
 		const event = value as { event_id?: unknown; sender?: unknown; type?: unknown; content?: unknown; origin_server_ts?: unknown };
-		if (event.sender !== operatorUserId || typeof event.event_id !== "string" || !event.event_id || event.event_id.length > 255 || seen.has(event.event_id) ||
+		if (typeof event.sender !== "string" || !authorizedSenderUserIds.has(event.sender) || typeof event.event_id !== "string" || !event.event_id || event.event_id.length > 255 || seen.has(event.event_id) ||
 			typeof event.origin_server_ts !== "number" || !Number.isSafeInteger(event.origin_server_ts) || event.origin_server_ts > now + MAX_FUTURE_EVENT_SKEW_MS || (!hasCursor && event.origin_server_ts < now - MAX_INITIAL_EVENT_AGE_MS) ||
 			typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) continue;
 		const content = event.content as Record<string, unknown>;
@@ -102,7 +115,7 @@ export function authorizedRoomEvents(response: unknown, roomId: string, operator
 			if (!Array.isArray(selections) || selections.length !== 1 || typeof selections[0] !== "string" || selections[0].length < 1 || selections[0].length > 255 ||
 				!relation || Object.keys(relation).length !== 2 || relation.rel_type !== "m.reference" || typeof relation.event_id !== "string" ||
 				relation.event_id.length < 1 || relation.event_id.length > 255) continue;
-			seen.add(event.event_id); result.push({ kind: "poll_response", eventId: event.event_id, pollEventId: relation.event_id, answerId: selections[0] });
+			seen.add(event.event_id); result.push({ kind: "poll_response", eventId: event.event_id, senderUserId: event.sender, pollEventId: relation.event_id, answerId: selections[0] });
 		} else if (event.type === "m.room.message" && content.msgtype === "m.image") {
 			const info = content.info;
 			const allowedContent = new Set(["msgtype", "body", "filename", "url", "info"]);
@@ -115,7 +128,7 @@ export function authorizedRoomEvents(response: unknown, roomId: string, operator
 				!Number.isSafeInteger(imageInfo.w) || !Number.isSafeInteger(imageInfo.h)) continue;
 			const filename = content.filename;
 			if (filename !== undefined && (typeof filename !== "string" || filename.length < 1 || filename.length > 1_024)) continue;
-			seen.add(event.event_id); result.push({ kind: "image", eventId: event.event_id, mxcUrl: content.url,
+			seen.add(event.event_id); result.push({ kind: "image", eventId: event.event_id, senderUserId: event.sender, mxcUrl: content.url,
 				declaredMimeType: imageInfo.mimetype as MatrixImageEvent["declaredMimeType"], declaredSize: Number(imageInfo.size),
 				declaredWidth: Number(imageInfo.w), declaredHeight: Number(imageInfo.h), ...(filename ? { caption: content.body } : {}) });
 		} else if (event.type === "m.room.message" && content.msgtype === "m.text" && typeof content.body === "string" && content.body.length > 0 && content.body.length <= MAX_INPUT_TEXT_LENGTH) {
@@ -127,52 +140,8 @@ export function authorizedRoomEvents(response: unknown, roomId: string, operator
 				if (typeof reply !== "object" || reply === null || Array.isArray(reply) || Object.keys(reply).length !== 1 || typeof (reply as { event_id?: unknown }).event_id !== "string") continue;
 				replyToEventId = String((reply as { event_id: string }).event_id);
 			}
-			seen.add(event.event_id); result.push({ kind: "text", eventId: event.event_id, body: content.body, ...(replyToEventId ? { replyToEventId } : {}) });
+			seen.add(event.event_id); result.push({ kind: "text", eventId: event.event_id, senderUserId: event.sender, body: content.body, ...(replyToEventId ? { replyToEventId } : {}) });
 		}
-	}
-	return result;
-}
-
-export function operatorTextEvents(response: unknown, roomId: string, operatorUserId: string, hasCursor: boolean, now = Date.now()): MatrixTextEvent[] {
-	if (typeof response !== "object" || response === null) return [];
-	const rooms = (response as { rooms?: unknown }).rooms;
-	if (typeof rooms !== "object" || rooms === null) return [];
-	const joined = (rooms as { join?: unknown }).join;
-	if (typeof joined !== "object" || joined === null) return [];
-	const room = (joined as Record<string, unknown>)[roomId];
-	if (typeof room !== "object" || room === null) return [];
-	const roomValue = room as { timeline?: unknown; state?: unknown };
-	const stateEvents = typeof roomValue.state === "object" && roomValue.state !== null && Array.isArray((roomValue.state as { events?: unknown }).events)
-		? (roomValue.state as { events: unknown[] }).events : [];
-	const operatorMembership = [...stateEvents].reverse().find((value) => typeof value === "object" && value !== null &&
-		(value as { type?: unknown }).type === "m.room.member" && (value as { state_key?: unknown }).state_key === operatorUserId) as { content?: unknown } | undefined;
-	if (operatorMembership && (typeof operatorMembership.content !== "object" || operatorMembership.content === null ||
-		(operatorMembership.content as { membership?: unknown }).membership !== "join")) return [];
-	const timeline = roomValue.timeline;
-	if (typeof timeline !== "object" || timeline === null || !Array.isArray((timeline as { events?: unknown }).events)) return [];
-	const timelineValue = timeline as { events: unknown[]; limited?: unknown; prev_batch?: unknown };
-	const events = timelineValue.events;
-	if (timelineValue.limited === true || events.length > MAX_TIMELINE_EVENTS) throw new Error("Matrix room timeline requires bounded gap recovery before advancing the cursor");
-	const result: MatrixTextEvent[] = [];
-	for (const value of events) {
-		if (typeof value !== "object" || value === null) continue;
-		const event = value as { event_id?: unknown; sender?: unknown; type?: unknown; content?: unknown; origin_server_ts?: unknown };
-		if (event.sender !== operatorUserId || event.type !== "m.room.message" || typeof event.event_id !== "string" || event.event_id.length > 255 ||
-			typeof event.origin_server_ts !== "number" || !Number.isSafeInteger(event.origin_server_ts) || event.origin_server_ts > now + MAX_FUTURE_EVENT_SKEW_MS ||
-			(!hasCursor && event.origin_server_ts < now - MAX_INITIAL_EVENT_AGE_MS) ||
-			typeof event.content !== "object" || event.content === null) continue;
-		const content = event.content as { msgtype?: unknown; body?: unknown; "m.relates_to"?: unknown };
-		if (content.msgtype !== "m.text" || typeof content.body !== "string" || content.body.length < 1 || content.body.length > MAX_INPUT_TEXT_LENGTH) continue;
-		let replyToEventId: string | undefined;
-		if (content["m.relates_to"] !== undefined) {
-			const relation = content["m.relates_to"];
-			if (typeof relation !== "object" || relation === null || Array.isArray(relation) || Object.keys(relation).length !== 1) continue;
-			const reply = (relation as { "m.in_reply_to"?: unknown })["m.in_reply_to"];
-			if (typeof reply !== "object" || reply === null || Array.isArray(reply) || Object.keys(reply).length !== 1 ||
-				typeof (reply as { event_id?: unknown }).event_id !== "string") continue;
-			replyToEventId = String((reply as { event_id: string }).event_id);
-		}
-		result.push({ eventId: event.event_id, body: content.body, ...(replyToEventId ? { replyToEventId } : {}) });
 	}
 	return result;
 }
@@ -249,15 +218,14 @@ export class CoordinatorRouter {
 				await this.reconcileControlPollPublications();
 				await this.reconcileCheckpointPollPublications();
 				for (const manifest of this.registry.listManifests()) {
-					const events = authorizedRoomEvents(sync.response, manifest.roomId, this.matrix.operatorUserId, established);
-					if (established) {
-						if (events.length > 0 && await this.matrix.memberJoined(manifest.roomId, this.matrix.operatorUserId, signal)) {
-							for (const event of events) {
-								if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
-								else if (event.kind === "image") await this.acceptImage(manifest, event, signal);
-								else await this.accept(manifest, event);
-							}
-						}
+					const candidateSenders = roomEventSenderIds(sync.response, manifest.roomId, this.matrix.ignoredSenderUserIds, established);
+					const joinedMembers = established && candidateSenders.size > 0 ? await this.matrix.joinedMemberIds(manifest.roomId, signal) : new Set<string>();
+					const authorizedSenders = new Set([...candidateSenders].filter((sender) => joinedMembers.has(sender)));
+					const events = authorizedRoomEvents(sync.response, manifest.roomId, authorizedSenders, established);
+					if (established) for (const event of events) {
+						if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
+						else if (event.kind === "image") await this.acceptImage(manifest, event, signal);
+						else await this.accept(manifest, event);
 					}
 					await this.ensureWake(manifest);
 				}
@@ -284,7 +252,7 @@ export class CoordinatorRouter {
 				checkpointPoll.question, checkpointPoll.options.map((option) => ({ id: option.answerId, text: option.text })), signal);
 			if (selected !== checkpointOption) return;
 			const input = { deliveryId: deriveDeliveryId(manifest.conversationId, event.eventId), matrixEventId: event.eventId,
-				kind: "prompt", body: selected, status: "accepted" as const };
+				senderUserId: event.senderUserId, kind: "prompt", body: selected, status: "accepted" as const };
 			const closing = await this.registry.acceptActiveCheckpointPollResponse(manifest.conversationId, event.pollEventId, event.answerId, selected, input);
 			if (!closing) return;
 			await this.closeCheckpointPoll(manifest, closing, signal);
@@ -298,7 +266,7 @@ export class CoordinatorRouter {
 		const control = parseTypedRemoteControl(offered);
 		if (!control || control.name === "help") return;
 		const pending = { controlId: deriveControlId(manifest.conversationId, event.eventId), matrixEventId: event.eventId,
-			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
+			senderUserId: event.senderUserId, name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
 		if (!await this.registry.acceptActiveControlPollResponse(manifest.conversationId, event.pollEventId, event.answerId, offered, pending)) return;
 		await this.beginOperationFeedback(manifest.conversationId, pending.controlId);
 		try {
@@ -310,7 +278,7 @@ export class CoordinatorRouter {
 		await this.deliverRecordedControl(manifest, event.eventId, pending);
 	}
 
-	private async dispatchControl(manifest: ConversationManifest, eventId: string, control: TypedRemoteControl): Promise<void> {
+	private async dispatchControl(manifest: ConversationManifest, eventId: string, senderUserId: string, control: TypedRemoteControl): Promise<void> {
 		if (control.name === "new" && manifest.kind !== "project") {
 			await this.projectNotice(eventId, manifest, "Fresh session generations are available only in project conversations; the coordinator session was not changed.");
 			return;
@@ -330,7 +298,7 @@ export class CoordinatorRouter {
 			await this.projectNotice(eventId, manifest, message); return;
 		}
 		const pending = { controlId: deriveControlId(manifest.conversationId, eventId), matrixEventId: eventId,
-			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
+			senderUserId, name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
 		await this.registry.recordPendingControl(manifest.conversationId, pending);
 		await this.beginOperationFeedback(manifest.conversationId, pending.controlId);
 		await this.deliverRecordedControl(manifest, eventId, pending);
@@ -397,7 +365,8 @@ export class CoordinatorRouter {
 			if (this.registry.pendingInputs(manifest.conversationId).some((input) => input.media?.blobId === accepted.image.blobId && input.status !== "completed" && input.status !== "cancelled")) {
 				throw new Error("Duplicate image content is already pending");
 			}
-			const input = { deliveryId, matrixEventId: event.eventId, kind: "prompt", body: accepted.prompt, media: accepted.image, status: "accepted" as const };
+			const input = { deliveryId, matrixEventId: event.eventId, senderUserId: event.senderUserId,
+				kind: "prompt", body: accepted.prompt, media: accepted.image, status: "accepted" as const };
 			await this.registry.recordAcceptedInput(manifest.conversationId, input);
 			await this.deliverRecordedInput(manifest, input);
 		} catch (error) {
@@ -417,14 +386,14 @@ export class CoordinatorRouter {
 		}
 		const input = inputKind(body);
 		const control = parseTypedRemoteControl(body);
-		if (control) return this.dispatchControl(manifest, event.eventId, control);
-		if (!input || body.trim().startsWith("!" ) && input.kind === "prompt") return this.dispatchControl(manifest, event.eventId, { name: "help" });
+		if (control) return this.dispatchControl(manifest, event.eventId, event.senderUserId, control);
+		if (!input || body.trim().startsWith("!" ) && input.kind === "prompt") return this.dispatchControl(manifest, event.eventId, event.senderUserId, { name: "help" });
 		if (input.kind === "prompt") {
 			if (this.registry.hasPublishingCheckpointPoll(manifest.conversationId)) {
 				throw new RelayRegistryError("matrix_unavailable", "Checkpoint poll publication must reconcile before accepting text");
 			}
 			const checkpointInput = { deliveryId: deriveDeliveryId(manifest.conversationId, event.eventId), matrixEventId: event.eventId,
-				kind: "prompt", body: input.body!, status: "accepted" as const };
+				senderUserId: event.senderUserId, kind: "prompt", body: input.body!, status: "accepted" as const };
 			const closing = await this.registry.acceptActiveCheckpointText(manifest.conversationId, checkpointInput);
 			if (closing) {
 				await this.closeCheckpointPoll(manifest, closing);
@@ -441,7 +410,7 @@ export class CoordinatorRouter {
 		}
 		const deliveryId = deriveDeliveryId(manifest.conversationId, event.eventId);
 		await this.registry.recordAcceptedInput(manifest.conversationId, {
-			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
+			deliveryId, matrixEventId: event.eventId, senderUserId: event.senderUserId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
 		});
 		if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(manifest.conversationId, deliveryId);
 		const recordedState = this.registry.conversationState(manifest.conversationId);
@@ -462,7 +431,7 @@ export class CoordinatorRouter {
 			await this.endCancelledCommandFeedback(manifest.conversationId);
 		}
 		await this.deliverRecordedInput(manifest, {
-			deliveryId, matrixEventId: event.eventId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
+			deliveryId, matrixEventId: event.eventId, senderUserId: event.senderUserId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
 		});
 	}
 
@@ -505,14 +474,15 @@ export class CoordinatorRouter {
 		}
 	}
 
-	private deliveryEnvelope(conversationId: string, input: { deliveryId: string; matrixEventId: string; kind: string; body?: string }): ManagedSessionEnvelope {
+	private deliveryEnvelope(conversationId: string, input: { deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string }): ManagedSessionEnvelope {
 		return {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-input-${randomUUID()}`,
 			conversationId,
 			role: "relay",
 			type: "input.deliver",
-			payload: { deliveryId: input.deliveryId, matrixEventId: input.matrixEventId, kind: input.kind, ...(input.body ? { body: input.body } : {}) },
+			payload: { deliveryId: input.deliveryId, matrixEventId: input.matrixEventId, ...(input.senderUserId ? { senderUserId: input.senderUserId } : {}),
+				kind: input.kind, ...(input.body ? { body: input.body } : {}) },
 		};
 	}
 }

@@ -20,6 +20,7 @@ export type ImageNormalizer = (bytes: Buffer, mimeType: ImageMimeType) => Promis
 export interface MatrixImageEvent {
 	kind: "image";
 	eventId: string;
+	senderUserId: string;
 	mxcUrl: string;
 	declaredMimeType: ImageMimeType;
 	declaredSize: number;
@@ -31,7 +32,7 @@ export interface PendingImage {
 	blobId: string; sha256: string; mimeType: ImageMimeType; byteLength: number; width: number; height: number; chunkCount: number;
 }
 export interface MediaPendingInput {
-	deliveryId: string; matrixEventId: string; kind: string; body?: string; media?: PendingImage;
+	deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string; media?: PendingImage;
 }
 
 function dimensions(bytes: Buffer, mimeType: ImageMimeType): { width: number; height: number } {
@@ -95,7 +96,8 @@ export class ManagedImageTransport {
 		if (!input.media || !input.body) return false;
 		const bytes = await this.spool.read(input.media);
 		const begin: ManagedSessionEnvelope = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-media-${input.deliveryId}-begin`, conversationId,
-			role: "relay", type: "media.begin", payload: { deliveryId: input.deliveryId, matrixEventId: input.matrixEventId, ...input.media, caption: input.body } };
+			role: "relay", type: "media.begin", payload: { deliveryId: input.deliveryId, matrixEventId: input.matrixEventId,
+				...(input.senderUserId ? { senderUserId: input.senderUserId } : {}), ...input.media, caption: input.body } };
 		if (!server.sendToConversation(begin)) return false;
 		for (let index = 0; index < input.media.chunkCount; index += 1) {
 			const chunk = bytes.subarray(index * MAX_MEDIA_CHUNK_BYTES, (index + 1) * MAX_MEDIA_CHUNK_BYTES);

@@ -171,7 +171,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			onEnvelope: async (envelope, attachment) => {
 				if (envelope.type === "control.result") {
 					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[];
-						generation?: { model?: string; thinking?: string }; selection?: { model: string } };
+						generation?: { model?: string; thinking?: string }; selection?: { model: string } | { thinking: string } };
 					const resultState = registry.controlResultState(attachment.conversationId, payload.controlId);
 					if (resultState === "unknown") throw new RelayRegistryError("not_found", "Pending managed control was not found");
 					if (resultState === "pending") {
@@ -190,11 +190,14 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 							return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
 						}
 						if (payload.selection) {
-							if (!source || source.name !== "model" || source.argument !== payload.selection.model ||
+							const selection = "model" in payload.selection ? { kind: "model" as const, value: payload.selection.model }
+								: { kind: "thinking" as const, value: payload.selection.thinking };
+							if (!source || source.name !== selection.kind || source.argument !== selection.value ||
 								payload.status !== "ok" || payload.options || payload.generation) {
-								throw new RelayRegistryError("invalid_state", "Model selection result does not match an authorized exact control");
+								throw new RelayRegistryError("invalid_state", `${selection.kind === "model" ? "Model" : "Thinking"} selection result does not match an authorized exact control`);
 							}
-							await registry.updateActiveGenerationModel(attachment.conversationId, payload.selection.model);
+							if (selection.kind === "model") await registry.updateActiveGenerationModel(attachment.conversationId, selection.value);
+							else await registry.updateActiveGenerationThinking(attachment.conversationId, selection.value);
 						}
 						if (payload.options?.length) {
 							if (!source || (source.name !== "model" && source.name !== "thinking")) {

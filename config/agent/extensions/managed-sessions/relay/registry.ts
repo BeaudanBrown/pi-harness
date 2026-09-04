@@ -472,18 +472,11 @@ export class RelayRegistry {
 	}
 
 	async updateActiveGenerationModel(conversationId: string, model: string): Promise<SessionGeneration> {
-		return this.mutate(async () => {
-			const current = this.manifests.get(conversationId);
-			if (!current) throw new RelayRegistryError("not_found", "Managed conversation is unavailable for model selection persistence");
-			const active = this.activeGeneration(current);
-			if (active.generationId !== (current.activeGenerationId ?? deriveGenerationId(conversationId, 1))) {
-				throw new RelayRegistryError("invalid_state", "Active generation is unavailable for model selection persistence");
-			}
-			const replacement: ConversationManifest = { ...current, selectedModel: model };
-			await this.manifestStore.write(replacement);
-			this.manifests.set(conversationId, replacement);
-			return { ...structuredClone(active), model };
-		});
+		return this.updateActiveGenerationPreference(conversationId, "model", model);
+	}
+
+	async updateActiveGenerationThinking(conversationId: string, thinking: string): Promise<SessionGeneration> {
+		return this.updateActiveGenerationPreference(conversationId, "thinking", thinking);
 	}
 
 	async beginGenerationTransition(conversationId: string, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<NonNullable<RuntimeConversation["generationTransition"]>> {
@@ -524,7 +517,7 @@ export class RelayRegistry {
 				bindingBoundaryEntryId: transition.toBindingBoundaryEntryId, createdAt: new Date().toISOString(), ...(transition.model ? { model: transition.model } : {}), ...(transition.thinking ? { thinking: transition.thinking } : {}) };
 			replacement = { ...current, piSessionId: generation.piSessionId, bindingBoundaryEntryId: generation.bindingBoundaryEntryId,
 				activeGenerationId: generation.generationId, generations: [...history, generation],
-				...(transition.model ? { selectedModel: transition.model } : {}) };
+				...(transition.model ? { selectedModel: transition.model } : {}), ...(transition.thinking ? { selectedThinking: transition.thinking } : {}) };
 			await this.manifestStore.write(replacement);
 		}
 		return this.mutate(async () => {
@@ -954,7 +947,7 @@ export class RelayRegistry {
 	private addPendingInput(conversation: RuntimeConversation, input: RuntimeConversation["pendingInputs"][number]): boolean {
 		const existing = conversation.pendingInputs.find((candidate) => candidate.deliveryId === input.deliveryId || candidate.matrixEventId === input.matrixEventId);
 		if (existing) {
-			if (existing.deliveryId !== input.deliveryId || existing.matrixEventId !== input.matrixEventId || existing.kind !== input.kind ||
+			if (existing.deliveryId !== input.deliveryId || existing.matrixEventId !== input.matrixEventId || existing.senderUserId !== input.senderUserId || existing.kind !== input.kind ||
 				existing.body !== input.body || JSON.stringify(existing.media) !== JSON.stringify(input.media)) {
 				throw new RelayRegistryError("invalid_state", "Conflicting accepted Matrix input identity");
 			}
@@ -976,6 +969,21 @@ export class RelayRegistry {
 		if (conversation.pendingControls.length >= MAX_PENDING_CONTROLS) throw new RelayRegistryError("capacity_reached", "Pending control capacity was reached");
 		conversation.pendingControls.push(control);
 		return true;
+	}
+
+	private async updateActiveGenerationPreference(conversationId: string, kind: "model" | "thinking", value: string): Promise<SessionGeneration> {
+		return this.mutate(async () => {
+			const current = this.manifests.get(conversationId);
+			if (!current) throw new RelayRegistryError("not_found", `Managed conversation is unavailable for ${kind} selection persistence`);
+			const active = this.activeGeneration(current);
+			if (active.generationId !== (current.activeGenerationId ?? deriveGenerationId(conversationId, 1))) {
+				throw new RelayRegistryError("invalid_state", `Active generation is unavailable for ${kind} selection persistence`);
+			}
+			const replacement: ConversationManifest = kind === "model" ? { ...current, selectedModel: value } : { ...current, selectedThinking: value };
+			await this.manifestStore.write(replacement);
+			this.manifests.set(conversationId, replacement);
+			return { ...structuredClone(active), [kind]: value };
+		});
 	}
 
 	private runtimeConversation(conversationId: string): RuntimeConversation {

@@ -23,6 +23,7 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 		if (url.pathname.endsWith("/whoami")) return Response.json({ user_id: config.botUserId });
 		if (url.pathname.endsWith("/sync")) return Response.json({ next_batch: "cursor-2", rooms: {} });
 		if (url.pathname.endsWith("/createRoom")) return Response.json({ room_id: "!room:example.com" });
+		if (url.pathname.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {}, "@alice:example.com": {}, "@signal_123:example.com": {} } });
 		if (url.pathname.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (url.pathname.includes("/send/")) return Response.json({ event_id: "$sent" });
 		return Response.json({});
@@ -33,6 +34,7 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 	assert.equal(await client.createPrivateRoom("pi · work"), "!room:example.com");
 	await client.setRoomName("!room:example.com", "work");
 	assert.equal(await client.memberJoined("!room:example.com", config.operatorUserId), true);
+	assert.deepEqual([...(await client.joinedMemberIds("!room:example.com"))], [config.operatorUserId, "@alice:example.com", "@signal_123:example.com"]);
 	assert.equal(await client.sendText("!room:example.com", "pi_txn", "hello"), "$sent");
 	await client.leaveRoom("!room:example.com");
 	assert.deepEqual(calls.map((call) => [call.init?.method, call.url.pathname]), [
@@ -41,12 +43,23 @@ test("Matrix client exposes only fixed whoami, sync, room, state, send, and leav
 		["POST", "/_matrix/client/v3/createRoom"],
 		["PUT", "/_matrix/client/v3/rooms/!room%3Aexample.com/state/m.room.name/"],
 		["GET", "/_matrix/client/v3/rooms/!room%3Aexample.com/state/m.room.member/%40operator%3Aexample.com"],
+		["GET", "/_matrix/client/v3/rooms/!room%3Aexample.com/joined_members"],
 		["PUT", "/_matrix/client/v3/rooms/!room%3Aexample.com/send/m.room.message/pi_txn"],
 		["POST", "/_matrix/client/v3/rooms/!room%3Aexample.com/leave"],
 	]);
 	assert.ok(calls.every((call) => new Headers(call.init?.headers).get("authorization") === `Bearer ${token}`));
 	assert.ok(!JSON.stringify(client).includes(token));
 	await assert.rejects(() => client.sendText("!unmanaged:example.com", "pi_other", "no"), /not owned/);
+});
+
+test("joined-member snapshots reject malformed identities, profiles, and oversized rooms", async () => {
+	let joined: Record<string, unknown> = { "not-an-mxid": {} };
+	const client = new ManagedMatrixClient(config, async () => Response.json({ joined }), ["!members:example.com"]);
+	await assert.rejects(() => client.joinedMemberIds("!members:example.com"), /malformed or too large/);
+	joined = { "@alice:example.com": null };
+	await assert.rejects(() => client.joinedMemberIds("!members:example.com"), /malformed or too large/);
+	joined = Object.fromEntries(Array.from({ length: 4_097 }, (_, index) => [`@user${index}:example.com`, {}]));
+	await assert.rejects(() => client.joinedMemberIds("!members:example.com"), /malformed or too large/);
 });
 
 test("Matrix rich primitives emit exact MSC3381 wire dialects and bounded edit fallback", async () => {
@@ -189,7 +202,7 @@ test("fault diagnostics redact bearer and credential environment values", () => 
 	assert.equal(redactManagedValue("token=x", { PI_MATRIX_ACCESS_TOKEN: "x" }).includes("x"), false);
 });
 
-test("Matrix environment validation rejects non-HTTPS and credential-bearing homeservers", () => {
+test("Matrix environment validation rejects non-HTTPS, malformed ignored senders, and credential-bearing homeservers", () => {
 	const environment = {
 		PI_MATRIX_HOMESERVER: "http://matrix.example.com",
 		PI_MATRIX_ACCESS_TOKEN: token,
@@ -198,6 +211,12 @@ test("Matrix environment validation rejects non-HTTPS and credential-bearing hom
 	};
 	assert.throws(() => managedMatrixConfigFromEnvironment(environment), /credential-free HTTPS/);
 	assert.throws(() => managedMatrixConfigFromEnvironment({ ...environment, PI_MATRIX_HOMESERVER: "https://user:password@matrix.example.com" }), /credential-free HTTPS/);
-	assert.equal(managedMatrixConfigFromEnvironment({ ...environment, PI_MATRIX_HOMESERVER: config.homeserver,
-		PI_MATRIX_ACCESS_TOKEN: " =opaque-token= " }).accessToken, " =opaque-token= ");
+	const parsed = managedMatrixConfigFromEnvironment({ ...environment, PI_MATRIX_HOMESERVER: config.homeserver,
+		PI_MATRIX_ACCESS_TOKEN: " =opaque-token= ", PI_MATRIX_IGNORED_SENDER_USER_IDS: '["@signalbot:example.com","@facebookbot:example.com"]' });
+	assert.equal(parsed.accessToken, " =opaque-token= ");
+	assert.deepEqual(parsed.ignoredSenderUserIds, ["@signalbot:example.com", "@facebookbot:example.com"]);
+	assert.throws(() => managedMatrixConfigFromEnvironment({ ...environment, PI_MATRIX_HOMESERVER: config.homeserver,
+		PI_MATRIX_IGNORED_SENDER_USER_IDS: '["@operator:example.com"]' }), /operator cannot be an ignored sender/);
+	assert.throws(() => managedMatrixConfigFromEnvironment({ ...environment, PI_MATRIX_HOMESERVER: config.homeserver,
+		PI_MATRIX_IGNORED_SENDER_USER_IDS: '["signalbot"]' }), /at most 64 unique/);
 });

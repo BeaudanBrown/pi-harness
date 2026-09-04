@@ -160,6 +160,7 @@ let
     ${lspEnvironmentCleanup}
     coordinator_model_args=()
     [[ -z "''${PI_MANAGED_SESSION_MODEL:-}" ]] || coordinator_model_args+=(--model "$PI_MANAGED_SESSION_MODEL")
+    [[ -z "''${PI_MANAGED_SESSION_THINKING:-}" ]] || coordinator_model_args+=(--thinking "$PI_MANAGED_SESSION_THINKING")
     cd "$PI_MANAGED_COORDINATOR_CWD"
     exec ${managedRawPi}/bin/pi \
       --no-extensions \
@@ -432,6 +433,11 @@ in
       homeserver = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
       botUserId = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
       operatorUserId = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
+      ignoredSenderUserIds = lib.mkOption {
+        type = lib.types.listOf lib.types.nonEmptyStr;
+        default = [ ];
+        description = "Exact Matrix service-account MXIDs ignored for managed-session input; the relay bot is always ignored separately.";
+      };
       hostId = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
       botIsAdmin = lib.mkOption {
         type = lib.types.bool;
@@ -564,6 +570,15 @@ in
         message = "services.pi-harness managed-session bots must be non-admin.";
       }
       {
+        assertion = !managedSessionsEnabled || (
+          builtins.length cfg.managedSessions.ignoredSenderUserIds <= 64
+          && builtins.length (lib.unique cfg.managedSessions.ignoredSenderUserIds) == builtins.length cfg.managedSessions.ignoredSenderUserIds
+          && lib.all (userId: builtins.match "@[^[:space:]:]{1,255}:[^[:space:]]{1,255}" userId != null) cfg.managedSessions.ignoredSenderUserIds
+          && !(builtins.elem (nonNullString cfg.managedSessions.operatorUserId) cfg.managedSessions.ignoredSenderUserIds)
+        );
+        message = "services.pi-harness.managedSessions.ignoredSenderUserIds must contain at most 64 unique complete MXIDs and cannot ignore the configured operator.";
+      }
+      {
         assertion = !managedSessionsEnabled || lib.all (name: builtins.match "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}" name != null) (builtins.attrNames cfg.managedSessions.workspaceRoots);
         message = "services.pi-harness.managedSessions.workspaceRoots keys must be stable identifiers.";
       }
@@ -588,6 +603,7 @@ in
         PI_MATRIX_HOMESERVER = nonNullString cfg.managedSessions.homeserver;
         PI_MATRIX_BOT_USER_ID = nonNullString cfg.managedSessions.botUserId;
         PI_MATRIX_OPERATOR_USER_ID = nonNullString cfg.managedSessions.operatorUserId;
+        PI_MATRIX_IGNORED_SENDER_USER_IDS = builtins.toJSON cfg.managedSessions.ignoredSenderUserIds;
       };
       serviceConfig = {
         Type = "simple";

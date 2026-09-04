@@ -52,7 +52,12 @@ import {
 
 const CONTROL_RESULT_ENTRY_TYPE = "pi-managed-session-control-result";
 const CONTROL_EXECUTION_ENTRY_TYPE = "pi-managed-session-control-execution";
-type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string }; selection?: { model: string } };
+type ControlSelection = { model: string } | { thinking: string };
+type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string }; selection?: ControlSelection };
+
+export function renderMatrixParticipantInput(senderUserId: string | undefined, body: string): string {
+	return senderUserId ? `Matrix participant ${senderUserId}:\n\n${body}` : body;
+}
 type StatefulControlName = "model" | "thinking" | "compact" | "new" | "stop";
 type ControlExecution = { controlId: string; name: StatefulControlName; argument?: string; state: "started" };
 
@@ -94,15 +99,16 @@ function parseControlResult(value: unknown): ControlResult {
 		}
 		generation = candidate as { model?: string; thinking?: string };
 	}
-	let selection: { model: string } | undefined;
+	let selection: ControlSelection | undefined;
 	if (Object.hasOwn(record, "selection")) {
 		const candidate = record.selection;
-		if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate) ||
-			!hasExactKeys(candidate as Record<string, unknown>, ["model"]) || !isBoundedText((candidate as Record<string, unknown>).model, 256) ||
-			record.status !== "ok" || options !== undefined || generation !== undefined) {
+		const value = typeof candidate === "object" && candidate !== null && !Array.isArray(candidate) ? candidate as Record<string, unknown> : undefined;
+		const model = value && hasExactKeys(value, ["model"]) && isBoundedText(value.model, 256);
+		const thinking = value && hasExactKeys(value, ["thinking"]) && isBoundedText(value.thinking, 32);
+		if ((!model && !thinking) || record.status !== "ok" || options !== undefined || generation !== undefined) {
 			throw new ManagedAdapterError("Malformed durable control result state");
 		}
-		selection = candidate as { model: string };
+		selection = candidate as ControlSelection;
 	}
 	return { controlId: record.controlId as string, status: record.status, message: record.message, ...(options ? { options } : {}),
 		...(generation ? { generation } : {}), ...(selection ? { selection } : {}) };
@@ -229,7 +235,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
 		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
-			selection?: { model: string }) => {
+			selection?: ControlSelection) => {
 			let result = controlResults.get(controlId);
 			if (!result) {
 				result = { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}),
@@ -583,21 +589,22 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		async function handleMedia(image: ReceivedImage, ctx: ExtensionContext): Promise<void> {
 			const previous = deliveries.get(image.deliveryId);
+			const attributedCaption = renderMatrixParticipantInput(image.senderUserId, image.caption);
 			const media = { blobId: image.blobId, sha256: image.sha256, mimeType: image.mimeType, byteLength: image.byteLength,
 				width: image.width, height: image.height, chunkCount: Math.ceil(image.byteLength / (32 * 1024)) };
-			if (previous && (previous.matrixEventId !== image.matrixEventId || JSON.stringify(previous.media) !== JSON.stringify(media) ||
-				(previous.expandedText !== undefined && previous.expandedText !== image.caption))) {
+			if (previous && (previous.matrixEventId !== image.matrixEventId || previous.senderUserId !== image.senderUserId || JSON.stringify(previous.media) !== JSON.stringify(media) ||
+				(previous.expandedText !== undefined && previous.expandedText !== attributedCaption))) {
 				throw new ManagedAdapterError("Conflicting duplicate media delivery", "invalid_delivery");
 			}
 			if (previous?.status === "persisted" || previous?.status === "completed" || previous?.status === "cancelled") { acknowledge(previous); return; }
 			if (inFlightDeliveries.has(image.deliveryId)) return;
 			const accepted: DeliveryMarker = previous ?? { version: MANAGED_SESSION_STATE_VERSION, deliveryId: image.deliveryId,
-				matrixEventId: image.matrixEventId, kind: "prompt", status: "accepted", media };
+				matrixEventId: image.matrixEventId, ...(image.senderUserId ? { senderUserId: image.senderUserId } : {}), kind: "prompt", status: "accepted", media };
 			if (!previous) { recordDelivery(ctx, accepted); acknowledge(accepted); }
 			if (!ctx.model?.input.includes("image")) {
 				if (!client?.connected) throw new ManagedAdapterError("Managed media rejection requires the relay connection");
 				await client.rejectMedia(image.deliveryId, image.blobId, "unsupported_model");
-				const cancelled: DeliveryMarker = { ...accepted, status: "cancelled", expandedText: image.caption, media };
+				const cancelled: DeliveryMarker = { ...accepted, status: "cancelled", expandedText: attributedCaption, media };
 				recordDelivery(ctx, cancelled); deliveries.set(cancelled.deliveryId, cancelled);
 				return;
 			}
@@ -610,7 +617,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				recordDelivery(ctx, expanded); pendingUserPersistence.push(expanded);
 			};
 			try {
-				pi.sendUserMessage([{ type: "text", text: image.caption }, { type: "image", data: image.data.toString("base64"), mimeType: image.mimeType }], {
+				pi.sendUserMessage([{ type: "text", text: attributedCaption }, { type: "image", data: image.data.toString("base64"), mimeType: image.mimeType }], {
 					...(ctx.isIdle() ? {} : { deliverAs: "followUp" as const }), expandPromptTemplates: false, onPromptExpanded: recordExpanded,
 				});
 			} catch (error) { inFlightDeliveries.delete(image.deliveryId); throw error; }
@@ -618,12 +625,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		async function handleDelivery(envelope: ManagedSessionEnvelope, ctx: ExtensionContext): Promise<void> {
 			const payload = envelope.payload as {
-				deliveryId: string; matrixEventId: string; kind: "prompt" | "follow_up" | "steer" | "abort"; body?: string;
+				deliveryId: string; matrixEventId: string; senderUserId?: string; kind: "prompt" | "follow_up" | "steer" | "abort"; body?: string;
 			};
 			const previous = deliveries.get(payload.deliveryId);
 			let accepted: DeliveryMarker;
 			if (previous) {
-				if (previous.matrixEventId !== payload.matrixEventId || previous.kind !== payload.kind) throw new ManagedAdapterError("Conflicting duplicate delivery", "invalid_delivery");
+				if (previous.matrixEventId !== payload.matrixEventId || previous.senderUserId !== payload.senderUserId || previous.kind !== payload.kind) throw new ManagedAdapterError("Conflicting duplicate delivery", "invalid_delivery");
 				if (inFlightDeliveries.has(previous.deliveryId)) return;
 				if (previous.status === "accepted") {
 					accepted = previous;
@@ -639,7 +646,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			} else {
 				accepted = {
 					version: MANAGED_SESSION_STATE_VERSION,
-					deliveryId: payload.deliveryId, matrixEventId: payload.matrixEventId, kind: payload.kind, status: "accepted",
+					deliveryId: payload.deliveryId, matrixEventId: payload.matrixEventId, ...(payload.senderUserId ? { senderUserId: payload.senderUserId } : {}), kind: payload.kind, status: "accepted",
 				};
 				recordDelivery(ctx, accepted);
 				inFlightDeliveries.add(accepted.deliveryId);
@@ -678,9 +685,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			};
 			const invocation = payload.body.match(/^\/([^\s]+)(?:\s|$)/)?.[1];
 			const extensionCommand = Boolean(invocation && pi.getCommands().some((command) => command.name === invocation && command.source === "extension"));
+			// Preserve Pi's leading-slash command/template dispatch; all ordinary model-visible text is attributed.
+			const deliveredBody = invocation ? payload.body : renderMatrixParticipantInput(payload.senderUserId, payload.body);
 			if (extensionCommand) recordExpanded(payload.body);
 			try {
-				pi.sendUserMessage(payload.body, {
+				pi.sendUserMessage(deliveredBody, {
 					...(deliverAs ? { deliverAs } : {}),
 					expandPromptTemplates: true,
 					onPromptExpanded: recordExpanded,
@@ -765,7 +774,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				beginControlExecution(ctx, payload.controlId, "thinking", payload.argument);
 				pi.setThinkingLevel(argument as Parameters<typeof pi.setThinkingLevel>[0]);
 				selectedThinking = argument;
-				return controlReply(payload.controlId, "ok", `Thinking changed to ${pi.getThinkingLevel()}.`);
+				return controlReply(payload.controlId, "ok", `Thinking changed to ${pi.getThinkingLevel()}.`, undefined, undefined, { thinking: argument });
 			}
 			if (payload.name === "compact") {
 				const before = ctx.getContextUsage()?.tokens;

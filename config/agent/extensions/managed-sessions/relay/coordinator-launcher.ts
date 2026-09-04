@@ -97,6 +97,7 @@ export async function launchCoordinator(options: {
 		PI_MANAGED_COORDINATOR_SESSION_FILE: options.sessionFile,
 		PI_MANAGED_COORDINATOR_CWD: options.workspaceDirectory,
 		...(options.manifest.selectedModel ? { PI_MANAGED_SESSION_MODEL: options.manifest.selectedModel } : {}),
+		...(options.manifest.selectedThinking ? { PI_MANAGED_SESSION_THINKING: options.manifest.selectedThinking } : {}),
 	}), options.manifest.conversationId);
 	await options.registry.setManagedWindow(options.manifest.conversationId, window);
 }

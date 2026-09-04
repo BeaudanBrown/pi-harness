@@ -84,7 +84,7 @@ test("protocol envelopes round trip through strict bounded NDJSON", () => {
 	assert.deepEqual(parseNdjsonEnvelope(new TextEncoder().encode(frame)), envelope);
 });
 
-test("accepted ordinary model control results carry only an exact durable selection", () => {
+test("accepted exact model and thinking control results carry only one durable selection", () => {
 	const value = {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: "model-selection",
@@ -94,7 +94,10 @@ test("accepted ordinary model control results carry only an exact durable select
 		payload: { controlId: `control_${"a".repeat(32)}`, status: "ok", message: "selected", selection: { model: "local-llm/qwen" } },
 	};
 	assert.deepEqual(parseManagedSessionEnvelope(value), value);
+	const thinking = { ...value, payload: { ...value.payload, selection: { thinking: "high" } } };
+	assert.deepEqual(parseManagedSessionEnvelope(thinking), thinking);
 	assert.deepEqual(parseManagedSessionEnvelope({ ...value, role: "coordinator_adapter" }), { ...value, role: "coordinator_adapter" });
+	assert.throws(() => parseManagedSessionEnvelope({ ...value, payload: { ...value.payload, selection: { model: "local-llm/qwen", thinking: "high" } } }), /managed-session envelope/);
 	assert.throws(() => parseManagedSessionEnvelope({ ...value, role: "relay" }), /managed-session envelope/);
 	assert.throws(() => parseManagedSessionEnvelope({ ...value, payload: { ...value.payload, status: "rejected" } }), /selection metadata/);
 	assert.throws(() => parseManagedSessionEnvelope({ ...value, payload: { ...value.payload, options: ["one"] } }), /selection metadata/);

@@ -102,6 +102,7 @@ test("idempotent Matrix provisioning recovers an uncertain create response witho
 		if (path.endsWith("/createRoom")) { postCalls += 1; if (postCalls === 1) throw new TypeError("response lost"); return new Response("alias exists", { status: 400 }); }
 		if (path.includes("/directory/room/")) return Response.json({ room_id: "!stable:example.com" });
 		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId, type: "m.space" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		throw new Error(`unexpected Matrix request ${init?.method} ${path}`);
 	}, [], { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, sleep: async () => undefined });
@@ -177,6 +178,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	let roomIndex = 0; let syncIndex = 0; const failSpaceLinks = new Set(["!room1:example.com", "!room3:example.com"]);
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
 		const path = new URL(String(input)).pathname; matrixCalls.push(`${init?.method ?? "GET"} ${path}`);
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
 			...(["!room1:example.com", "!room3:example.com"].some((room) => decodeURIComponent(path).includes(room)) ? { type: "m.space" } : {}) });
@@ -201,7 +203,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		return Response.json({ event_id: "$ok" });
 	}, [coordinator.roomId, coordinator.hostSpace!], { maxAttempts: 1 });
 	const launcher = join(root, "tmux_project");
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nproject-create) name=$(field workspace); test ! -e "${workspaceRoot}/$name" || test "$(field resumeExisting)" = true; mkdir -p "${workspaceRoot}/$name"; mkdir -p "${workspaceRoot}/$name/.git"; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","projectDisplayName":"%s","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$name" "$name";;\nworkspace-resolve) name=$(field workspace); if test "$name" = beta; then key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; project=beta; else key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; project=alpha; fi; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_%s","projectDisplayName":"%s","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$key" "$project" "$name";;\nroot-ensure) name=$(field workspace); printf '{"sessionName":"%s","workspacePath":"${workspaceRoot}/%s"}\\n' "$name" "$name";;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; case "$PI_MANAGED_PROJECT_SESSION_FILE" in *generation-2.jsonl) test "$PI_MANAGED_SESSION_MODEL" = scoped/model; test "$PI_MANAGED_SESSION_THINKING" = high;; *) test -z "\${PI_MANAGED_SESSION_MODEL-}" || test "$PI_MANAGED_SESSION_MODEL" = local-llm/qwen;; esac; conversation=$(field conversationId); name=$(field placement.workspace); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"%s","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"%s","relativeCwd":"","role":"conversation"}\\n' "$conversation" "$name" "$name";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworkspace-list) printf '{"workspaces":[{"rootKey":"projects","workspace":"alpha"}]}\\n';;\nproject-create) name=$(field workspace); test ! -e "${workspaceRoot}/$name" || test "$(field resumeExisting)" = true; mkdir -p "${workspaceRoot}/$name"; mkdir -p "${workspaceRoot}/$name/.git"; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","projectDisplayName":"%s","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$name" "$name";;\nworkspace-resolve) name=$(field workspace); if test "$name" = beta; then key=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb; project=beta; else key=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; project=alpha; fi; printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_%s","projectDisplayName":"%s","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$key" "$project" "$name";;\nroot-ensure) name=$(field workspace); printf '{"sessionName":"%s","workspacePath":"${workspaceRoot}/%s"}\\n' "$name" "$name";;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) test "$PI_MANAGED_SESSION_LAUNCH_ROLE" = project; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test -f "$PI_MANAGED_PROJECT_SESSION_FILE"; case "$PI_MANAGED_PROJECT_SESSION_FILE" in *generation-2.jsonl) test "$PI_MANAGED_SESSION_MODEL" = scoped/model; test "$PI_MANAGED_SESSION_THINKING" = high;; *) test -z "\${PI_MANAGED_SESSION_MODEL-}" || test "$PI_MANAGED_SESSION_MODEL" = local-llm/qwen; test -z "\${PI_MANAGED_SESSION_THINKING-}" || test "$PI_MANAGED_SESSION_THINKING" = low;; esac; conversation=$(field conversationId); name=$(field placement.workspace); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > "$TEST_LAUNCH_RECORD"; printf '{"conversationId":"%s","sessionName":"%s","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"%s","relativeCwd":"","role":"conversation"}\\n' "$conversation" "$name" "$name";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") });
 	await server.start(); t.after(async () => server.close());
@@ -286,6 +288,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/createRoom")) { restartCreates.push(JSON.parse(String(init?.body))); return Response.json({ room_id: "!restart-room:example.com" }); }
 		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		return Response.json({ event_id: "$ok" });
 	}, restartedRegistry.managedRoomIds());
@@ -299,6 +302,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		"restart reuses the persisted stable Space and creates only the distinct conversation room");
 
 	await registry.updateActiveGenerationModel(conversationId, "local-llm/qwen");
+	await registry.updateActiveGenerationThinking(conversationId, "low");
 	setTimeout(() => firstSocket.destroy(), 25);
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.stop", targetConversationId: conversationId }));
 	assert.equal(registry.conversationState(conversationId), "dormant");
@@ -334,6 +338,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	assert.equal(generated.generations?.[1]?.piSessionId, generated.piSessionId);
 	assert.equal(generated.generations?.[1]?.model, "scoped/model");
 	assert.equal(generated.generations?.[1]?.thinking, "high");
+	assert.equal(generated.selectedThinking, "high");
 	assert.equal(await readFile(sessionFile, "utf8"), oldSessionText, "generation one is never rewritten");
 	const generationFile = join(sessions, conversationId, "generation-2.jsonl");
 	assert.equal((await readFile(generationFile, "utf8")).trim().split("\n").length, 2, "fresh generation contains only its header and binding boundary");
@@ -443,6 +448,7 @@ export default function (pi: ExtensionAPI) {
 		if (path.endsWith("/createRoom")) { roomIndex += 1; return Response.json({ room_id: roomIndex === 1 ? "!project:example.com" : "!task:example.com" }); }
 		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
 			...(decodeURIComponent(path).includes("!project:example.com") ? { type: "m.space" } : {}) });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/send/m.room.message/")) {
 			const body = JSON.parse(String(init?.body)) as { body: string };

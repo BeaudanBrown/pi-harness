@@ -10,3 +10,5 @@
 .pi/
 .pi-types/
 .pi-test-build/
+/result
+/result-*

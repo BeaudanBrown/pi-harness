@@ -35,7 +35,7 @@ test("authorized managed-room image parsing accepts Element captions and fails c
 	const events = [imageEvent("$caption", { body: "inspect this", filename: "photo.png" }), imageEvent("$plain"),
 		{ ...imageEvent("$foreign"), sender: "@other:example.com" }, imageEvent("$encrypted", { url: undefined, file: { url: "mxc://example.com/encrypted" } }),
 		imageEvent("$gif", { info: { mimetype: "image/gif", size: 20, w: 1, h: 1 } }), imageEvent("$relation", { "m.relates_to": { rel_type: "m.thread", event_id: "$x" } })];
-	assert.deepEqual(authorizedRoomEvents(sync(events), "!room:example.com", config.operatorUserId, true).map((event) => event.kind === "image" ? [event.eventId, event.caption] : event.kind), [
+	assert.deepEqual(authorizedRoomEvents(sync(events), "!room:example.com", new Set([config.operatorUserId]), true).map((event) => event.kind === "image" ? [event.eventId, event.caption] : event.kind), [
 		["$caption", "inspect this"], ["$plain", undefined],
 	]);
 });
@@ -98,7 +98,7 @@ test("image transport validates, normalizes, and creates a stable captioned or n
 	const root = await temp(t);
 	const matrix = new ManagedMatrixClient(config, async () => new Response(png, { headers: { "content-type": "image/png", "content-length": String(png.length) } }), ["!room:example.com"], { maxAttempts: 1 });
 	const transport = new ManagedImageTransport(new BlobSpool(join(root, "spool")), matrix, async (bytes) => Buffer.from(bytes)); await transport.initialize(new Set());
-	const base = { kind: "image" as const, eventId: "$image", mxcUrl: "mxc://example.com/media", declaredMimeType: "image/png" as const,
+	const base = { kind: "image" as const, eventId: "$image", senderUserId: config.operatorUserId, mxcUrl: "mxc://example.com/media", declaredMimeType: "image/png" as const,
 		declaredSize: png.length, declaredWidth: 1, declaredHeight: 1 };
 	const neutral = await transport.accept(conversationId, base);
 	assert.equal(neutral.prompt, CAPTIONLESS_IMAGE_PROMPT); assert.equal(neutral.image.blobId, deriveBlobId(conversationId, neutral.image.sha256));
@@ -118,7 +118,7 @@ test("production ImageMagick normalization supports JPEG, PNG, and WebP while st
 		const generate = extension === "webp" ? ["-size", "2x1", "xc:red", "-size", "2x1", "xc:blue", "-delay", "10", "-loop", "0", "-set", "comment", "private-metadata", source]
 			: ["-size", "2x1", "xc:red", "-set", "comment", "private-metadata", source];
 		await execFileAsync(magick, generate); current = await readFile(source); currentMime = mime;
-		const accepted = await transport.accept(deriveConversationId("host", extension), { kind: "image", eventId: `$${extension}`, mxcUrl: `mxc://example.com/${extension}`,
+		const accepted = await transport.accept(deriveConversationId("host", extension), { kind: "image", eventId: `$${extension}`, senderUserId: config.operatorUserId, mxcUrl: `mxc://example.com/${extension}`,
 			declaredMimeType: mime, declaredSize: current.length, declaredWidth: 2, declaredHeight: 1 });
 		const metadata = (await spool.list()).find((blob) => blob.blobId === accepted.image.blobId)!;
 		const output = join(root, `output.${extension}`); await writeFile(output, await spool.read(metadata));

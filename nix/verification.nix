@@ -291,7 +291,8 @@ let
   } ''
     jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4
       and (.hasGeneralEnvironmentFile | not) and (.hasPrivateTmp | not)
-      and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"' \
+      and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"
+      and (.serviceEnvironment.PI_MATRIX_IGNORED_SENDER_USER_IDS | fromjson) == ["@signalbot:example.com", "@facebookbot:example.com"]' \
       ${managedSessionModuleReport} >/dev/null
     test -x ${managedSessionPiWrapper}/bin/pi
     test -x ${managedSessionStatusWrapper}/bin/pi-managed-session-status
@@ -308,6 +309,7 @@ let
     done
     grep -F 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$coordinator" >/dev/null
     grep -F 'coordinator_model_args+=(--model "$PI_MANAGED_SESSION_MODEL")' "$coordinator" >/dev/null
+    grep -F 'coordinator_model_args+=(--thinking "$PI_MANAGED_SESSION_THINKING")' "$coordinator" >/dev/null
     grep -F 'export PI_MANAGED_LOCAL_MODEL_TOOLS=' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
     grep -F -- '--extension "${piHarnessResources.managedSessionExtensions.modelPolicy}"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
     ! grep -F '${piHarnessResources.managedSessionExtensions.modelPolicy}' "$coordinator" >/dev/null

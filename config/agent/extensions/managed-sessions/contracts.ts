@@ -29,6 +29,7 @@ export const DeliveryIdSchema = stableId("delivery");
 export const TranscriptEntryIdSchema = stableId("entry");
 export const ChunkIdSchema = stableId("chunk");
 export const MatrixTransactionIdSchema = Type.String({ pattern: "^pi_[a-f0-9]{48}$" });
+export const MatrixUserIdSchema = Type.String({ maxLength: 512, pattern: "^@[^\\s:]{1,255}:[^\\s]{1,255}$" });
 export const GenerationIdSchema = stableId("generation");
 export const TransitionIdSchema = stableId("transition");
 const BlobIdSchema = stableId("blob");
@@ -218,7 +219,10 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		message: boundedString(4_096),
 		options: Type.Optional(Type.Array(boundedString(255), { minItems: 1, maxItems: 20 })),
 		generation: Type.Optional(strictObject({ model: Type.Optional(boundedString(256)), thinking: Type.Optional(boundedString(32)) })),
-		selection: Type.Optional(strictObject({ model: boundedString(256) })),
+		selection: Type.Optional(Type.Union([
+			strictObject({ model: boundedString(256) }),
+			strictObject({ thinking: boundedString(32) }),
+		])),
 	}),
 	clientEnvelope(adapterRole, "checkpoint.offer", {
 		checkpointId: identifier,
@@ -266,6 +270,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			Type.Literal("abort"),
 		]),
 		body: Type.Optional(boundedString(MAX_INPUT_TEXT_LENGTH)),
+		senderUserId: Type.Optional(MatrixUserIdSchema),
 	}),
 	relayEnvelope("input.result", {
 		deliveryId: DeliveryIdSchema,
@@ -274,6 +279,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	relayEnvelope("media.begin", {
 		deliveryId: DeliveryIdSchema, matrixEventId: boundedString(255), ...mediaDescriptor,
 		caption: boundedString(MAX_INPUT_TEXT_LENGTH),
+		senderUserId: Type.Optional(MatrixUserIdSchema),
 	}),
 	relayEnvelope("media.chunk", {
 		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema, index: Type.Integer({ minimum: 0, maximum: 799 }),
@@ -400,6 +406,7 @@ const projectManifest = strictObject({
 	checkoutDisplayName: Type.Optional(boundedString(128)),
 	projectSpace: Type.Optional(boundedString(255)),
 	selectedModel: Type.Optional(boundedString(256)),
+	selectedThinking: Type.Optional(boundedString(32)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
 	...generationManifestFields,
@@ -415,6 +422,7 @@ const coordinatorManifest = strictObject({
 	roomId: boundedString(255),
 	hostSpace: Type.Optional(boundedString(255)),
 	selectedModel: Type.Optional(boundedString(256)),
+	selectedThinking: Type.Optional(boundedString(32)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
 	createdAt: timestamp,
 	...generationManifestFields,
@@ -431,6 +439,7 @@ const pendingInput = strictObject({
 		Type.Literal("abort"),
 	]),
 	body: Type.Optional(boundedString(MAX_INPUT_TEXT_LENGTH)),
+	senderUserId: Type.Optional(MatrixUserIdSchema),
 	piEntryId: Type.Optional(TranscriptEntryIdSchema),
 	status: Type.Union([
 		Type.Literal("accepted"),
@@ -449,6 +458,7 @@ const pendingControl = strictObject({
 		Type.Literal("compact"), Type.Literal("new"), Type.Literal("stop"),
 	]),
 	argument: Type.Optional(boundedString(4_096)),
+	senderUserId: Type.Optional(MatrixUserIdSchema),
 });
 const controlPollScope = Type.Union([Type.Literal("model"), Type.Literal("thinking")]);
 const controlPollOptions = Type.Array(strictObject({ answerId: boundedString(255), command: boundedString(255) }), { minItems: 1, maxItems: MAX_CONTROL_POLL_OPTIONS });
@@ -588,6 +598,7 @@ export interface ConversationManifest {
 	projectSpace?: string;
 	hostSpace?: string;
 	selectedModel?: string;
+	selectedThinking?: string;
 	bindingBoundaryEntryId: string;
 	createdAt: string;
 	activeGenerationId?: string;
@@ -602,12 +613,12 @@ export interface HostRuntimeState {
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string };
 		matrixCursor: { status: "bootstrap" } | { status: "established"; since: string };
-		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; kind: string; body?: string; piEntryId?: string; status: string;
+		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string; piEntryId?: string; status: string;
 			media?: { blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp"; byteLength: number; width: number; height: number; chunkCount: number } }>;
-		pendingControls: Array<{ controlId: string; matrixEventId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string }>;
+		pendingControls: Array<{ controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string }>;
 		completedControlIds: string[];
 		publishingControlPoll: null | {
-			sourceControl: { controlId: string; matrixEventId: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };
+			sourceControl: { controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };
 			scope: "model" | "thinking"; transactionId: string; prompt: string;
 			options: Array<{ answerId: string; command: string }>;
 		};

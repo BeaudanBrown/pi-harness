@@ -5,6 +5,7 @@ export interface ManagedMatrixConfig {
 	accessToken: string;
 	botUserId: string;
 	operatorUserId: string;
+	ignoredSenderUserIds?: readonly string[];
 }
 
 export interface ManagedMatrixRetryOptions {
@@ -35,6 +36,23 @@ const MAX_RETRY_AFTER_MS = 120_000;
 const MAX_TYPING_TIMEOUT_MS = 30_000;
 const MAX_MESSAGE_BODY_LENGTH = 32_768;
 const MAX_POLL_ANSWERS = 20;
+const MAX_JOINED_MEMBERS = 4_096;
+const MAX_IGNORED_SENDERS = 64;
+
+export function isMatrixUserId(value: unknown): value is string {
+	return typeof value === "string" && value.length <= 512 && /^@[^\s:]{1,255}:[^\s]{1,255}$/.test(value);
+}
+
+function ignoredSendersFromEnvironment(environment: NodeJS.ProcessEnv): string[] {
+	const encoded = environment.PI_MATRIX_IGNORED_SENDER_USER_IDS;
+	if (encoded === undefined) return [];
+	let parsed: unknown;
+	try { parsed = JSON.parse(encoded); } catch { throw new Error("PI_MATRIX_IGNORED_SENDER_USER_IDS must be a JSON array of Matrix user IDs"); }
+	if (!Array.isArray(parsed) || parsed.length > MAX_IGNORED_SENDERS || parsed.some((value) => !isMatrixUserId(value)) || new Set(parsed).size !== parsed.length) {
+		throw new Error("PI_MATRIX_IGNORED_SENDER_USER_IDS must contain at most 64 unique Matrix user IDs");
+	}
+	return parsed as string[];
+}
 
 export interface MatrixPollAnswer { id: string; text: string }
 
@@ -77,14 +95,19 @@ export function managedMatrixConfigFromEnvironment(environment: NodeJS.ProcessEn
 	if (homeserver.protocol !== "https:" || homeserver.username || homeserver.password || homeserver.search || homeserver.hash) {
 		throw new Error("PI_MATRIX_HOMESERVER must be a credential-free HTTPS origin");
 	}
-	return { homeserver: homeserver.toString().replace(/\/$/, ""), accessToken,
-		botUserId: value("PI_MATRIX_BOT_USER_ID"), operatorUserId: value("PI_MATRIX_OPERATOR_USER_ID") };
+	const botUserId = value("PI_MATRIX_BOT_USER_ID");
+	const operatorUserId = value("PI_MATRIX_OPERATOR_USER_ID");
+	const ignoredSenderUserIds = ignoredSendersFromEnvironment(environment);
+	if (!isMatrixUserId(botUserId) || !isMatrixUserId(operatorUserId)) throw new Error("Configured Matrix identities must be complete Matrix user IDs");
+	if (ignoredSenderUserIds.includes(operatorUserId)) throw new Error("The configured Matrix operator cannot be an ignored sender");
+	return { homeserver: homeserver.toString().replace(/\/$/, ""), accessToken, botUserId, operatorUserId, ignoredSenderUserIds };
 }
 
 export class ManagedMatrixClient {
 	readonly homeserver: string;
 	readonly botUserId: string;
 	readonly operatorUserId: string;
+	readonly ignoredSenderUserIds: ReadonlySet<string>;
 	readonly #accessToken: string;
 	readonly #managedRoomIds: Set<string>;
 	readonly #retry: Required<Omit<ManagedMatrixRetryOptions, "sleep">> & { sleep: NonNullable<ManagedMatrixRetryOptions["sleep"]> };
@@ -92,7 +115,11 @@ export class ManagedMatrixClient {
 	constructor(config: ManagedMatrixConfig, private readonly fetchImplementation: FetchLike = fetch, managedRoomIds: Iterable<string> = [], retry: ManagedMatrixRetryOptions = {}) {
 		const parsed = new URL(config.homeserver);
 		if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Matrix homeserver must be a credential-free HTTPS origin");
+		if (!isMatrixUserId(config.botUserId) || !isMatrixUserId(config.operatorUserId) || (config.ignoredSenderUserIds ?? []).length > MAX_IGNORED_SENDERS ||
+			(config.ignoredSenderUserIds ?? []).some((value) => !isMatrixUserId(value)) || new Set(config.ignoredSenderUserIds ?? []).size !== (config.ignoredSenderUserIds ?? []).length ||
+			(config.ignoredSenderUserIds ?? []).includes(config.operatorUserId)) throw new Error("Managed Matrix sender identities are invalid");
 		this.homeserver = parsed.toString().replace(/\/$/, ""); this.botUserId = config.botUserId; this.operatorUserId = config.operatorUserId;
+		this.ignoredSenderUserIds = new Set([config.botUserId, ...(config.ignoredSenderUserIds ?? [])]);
 		this.#accessToken = config.accessToken; this.#managedRoomIds = new Set(managedRoomIds);
 		this.#retry = { maxAttempts: retry.maxAttempts ?? 5, baseDelayMs: retry.baseDelayMs ?? 250, maxDelayMs: retry.maxDelayMs ?? 30_000,
 			random: retry.random ?? Math.random, sleep: retry.sleep ?? defaultSleep };
@@ -115,6 +142,20 @@ export class ManagedMatrixClient {
 			if (error instanceof ManagedMatrixError && (error.status === 403 || error.status === 404)) return false;
 			throw error;
 		}
+	}
+	async joinedMemberIds(roomId: string, signal?: AbortSignal): Promise<ReadonlySet<string>> {
+		this.assertManagedRoom(roomId);
+		const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/joined_members`, undefined, signal);
+		if (typeof response !== "object" || response === null || Array.isArray(response) || Object.keys(response).some((key) => key !== "joined")) {
+			throw new ManagedMatrixError("invalid_response", "Matrix joined-members response is malformed");
+		}
+		const joined = (response as JsonObject).joined;
+		if (typeof joined !== "object" || joined === null || Array.isArray(joined)) throw new ManagedMatrixError("invalid_response", "Matrix joined-members response is malformed");
+		const entries = Object.entries(joined as JsonObject);
+		if (entries.length > MAX_JOINED_MEMBERS || entries.some(([userId, profile]) => !isMatrixUserId(userId) || typeof profile !== "object" || profile === null || Array.isArray(profile))) {
+			throw new ManagedMatrixError("invalid_response", "Matrix joined-members response is malformed or too large");
+		}
+		return new Set(entries.map(([userId]) => userId));
 	}
 	async eventSender(roomId: string, eventId: string, signal?: AbortSignal): Promise<string | undefined> {
 		this.assertManagedRoom(roomId); const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);

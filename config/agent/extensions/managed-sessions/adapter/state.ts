@@ -66,6 +66,7 @@ export interface DeliveryMarker {
 	version: typeof MANAGED_SESSION_STATE_VERSION;
 	deliveryId: string;
 	matrixEventId: string;
+	senderUserId?: string;
 	kind: "prompt" | "follow_up" | "steer" | "abort";
 	status: "accepted" | "expanded" | "reinjecting" | "persisted" | "completed" | "cancelled";
 	piEntryId?: string;
@@ -112,6 +113,7 @@ function isDelivery(value: Record<string, unknown>): boolean {
 	return value.version === MANAGED_SESSION_STATE_VERSION &&
 		typeof value.deliveryId === "string" && /^delivery_[a-f0-9]{32}$/.test(value.deliveryId) &&
 		typeof value.matrixEventId === "string" &&
+		(value.senderUserId === undefined || (typeof value.senderUserId === "string" && value.senderUserId.length <= 512 && /^@[^\s:]{1,255}:[^\s]{1,255}$/.test(value.senderUserId))) &&
 		["prompt", "follow_up", "steer", "abort"].includes(String(value.kind)) &&
 		["accepted", "expanded", "reinjecting", "persisted", "completed", "cancelled"].includes(String(value.status)) &&
 		(value.piEntryId === undefined || (typeof value.piEntryId === "string" && /^entry_[a-f0-9]{32}$/.test(value.piEntryId))) &&
@@ -170,7 +172,7 @@ export function restoreDeliveries(entries: readonly unknown[]): Map<string, Deli
 		const marker = candidate.data as unknown as DeliveryMarker;
 		const previous = deliveries.get(marker.deliveryId);
 		if (previous) {
-			if (previous.matrixEventId !== marker.matrixEventId || previous.kind !== marker.kind || rank[marker.status] < rank[previous.status] ||
+			if (previous.matrixEventId !== marker.matrixEventId || previous.senderUserId !== marker.senderUserId || previous.kind !== marker.kind || rank[marker.status] < rank[previous.status] ||
 				(previous.status === "reinjecting" && marker.status === "expanded") ||
 				((previous.status === "completed" || previous.status === "cancelled") && marker.status !== previous.status)) {
 				throw new Error(`Conflicting managed-session delivery history ${marker.deliveryId}`);

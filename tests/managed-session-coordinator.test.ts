@@ -113,12 +113,12 @@ test("coordinator launcher receives only fixed host configuration and records ex
 		schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "coordinator", conversationId, ownerHostId: hostId,
 		creationKey: "coordinator", concept: "host coordinator", piSessionId: "session-coordinator", roomId: "!coordinator:example.com",
 		bindingBoundaryEntryId: "entry_00000000000000000000000000000000", createdAt: "2026-08-31T00:00:00.000Z",
-		selectedModel: "local-llm/coordinator",
+		selectedModel: "local-llm/coordinator", selectedThinking: "medium",
 	};
 	await value.registry.createCoordinatorConversation(manifest);
 	await assert.rejects(() => value.registry.deleteConversation(conversationId), /cannot be deleted/);
 	const launcher = join(value.root, "launcher");
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test "$PI_MANAGED_SESSION_MODEL" = local-llm/coordinator; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test "$PI_MANAGED_SESSION_MODEL" = local-llm/coordinator; test "$PI_MANAGED_SESSION_THINKING" = medium; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	await launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
@@ -158,7 +158,8 @@ test("unprefixed authorized coordinator text is durable before wake and delivere
 	let syncCount = 0;
 	const matrix = {
 		operatorUserId: matrixConfig.operatorUserId,
-		memberJoined: async () => true,
+		ignoredSenderUserIds: new Set([matrixConfig.botUserId]),
+		joinedMemberIds: async () => new Set([matrixConfig.operatorUserId]),
 		sync: async (_since?: string, signal?: AbortSignal) => {
 			syncCount += 1;
 			if (syncCount === 1) return { nextBatch: "cursor-1", response: { rooms: { join: { [manifest.roomId]: { timeline: { events: [
@@ -213,7 +214,8 @@ test("failed coordinator wake returns dormant, retains input, and emits one stab
 	let synced = false;
 	const matrix = {
 		operatorUserId: matrixConfig.operatorUserId,
-		memberJoined: async () => true,
+		ignoredSenderUserIds: new Set([matrixConfig.botUserId]),
+		joinedMemberIds: async () => new Set([matrixConfig.operatorUserId]),
 		sync: async (_since?: string, signal?: AbortSignal) => {
 			if (!synced) {
 				synced = true;
@@ -286,7 +288,8 @@ export default function (pi) {
 			createCount += 1;
 			return Response.json({ room_id: createCount === 1 ? "!space:example.com" : "!coordinator:example.com" });
 		}
-		if (url.pathname.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (url.pathname.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
+if (url.pathname.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (url.pathname.endsWith("/sync")) {
 			syncCount += 1;
 			if (syncCount === 1) return Response.json({ next_batch: "cursor-bootstrap", rooms: { join: {} } });

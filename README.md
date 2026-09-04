@@ -214,7 +214,8 @@ private socket and attachment nonce.
 
 After binding, adapters classify persisted Pi branch entries and offer only
 terminal-origin text turns and final assistant answers. Matrix-origin users are
-mapped to their existing operator events rather than echoed. The relay records
+mapped to their existing Matrix events rather than echoed; their relay-verified
+sender MXIDs are persisted and included in ordinary model-visible attribution; leading-slash commands retain native Pi dispatch. The relay records
 each offer before sending deterministic, sanitized Markdown chunks with stable
 Matrix transaction IDs; reconnect and restart retry the same transactions.
 Thinking, tool activity, compaction/internal entries, pre-binding history, and
@@ -232,6 +233,7 @@ services.pi-harness.managedSessions = {
   homeserver = "https://matrix.example.com";
   botUserId = "@pi-host:example.com";
   operatorUserId = "@operator:example.com";
+  ignoredSenderUserIds = [ "@signalbot:example.com" "@facebookbot:example.com" ];
   hostId = "workstation";
   workspaceRoots.projects = "/home/operator/documents/projects";
   launcherPackage = pkgs.tmux_project;
@@ -272,13 +274,13 @@ Managed room controls retain Pi's established control semantics while using
 host-owned room routing: ordinary text is an idle prompt or busy follow-up; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. Adapter-executed controls and slash commands hold reference-counted Matrix typing feedback until durable completion without cancelling typing for concurrent model activity. State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new --confirm` creates a fresh generation while preserving the room and prior Pi session files. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
 queued during wake cancels that wake input. The `remote_checkpoint` tool emits
 one durable structured question, blocker, or issue-completion boundary, then
-hard-aborts the run until a new operator reply. Declared question options become
+hard-aborts the run until a new currently joined participant reply. Declared question options become
 single-select polls with durable opaque answer mappings; the first valid vote or
 an ordinary text fallback atomically retires the poll and resumes exactly once.
 Authorized unencrypted Element X JPEG, PNG, and WebP events are size-, signature-, decode-, dimension-, and pixel-validated, normalized to one metadata-free frame, persisted under bounded blob quotas, and transferred through digest-verified IPC chunks. Captions and images enter Pi as one ordered user turn; captionless images use a neutral prompt. Models without image input support reject the whole delivery with a Matrix notice and cleanup, without a silent model switch or caption-only fallback. A connected ordinary adapter also activates `remote_artifact_export`, which validates one workspace-relative regular file before streaming digest-verified bounded chunks to the relay. The relay durably reserves and uploads bounded images, audio, or generic files and sends one stable Matrix media event without exposing contents or host paths in activity. Accepted input and media, persisted
 unfinished work, checkpoint/final projection, launch failure, explicit
 cancellation, generation transition, and restart recovery all reuse stable identities so retries do
-not lose or duplicate operator turns. Generation changes durably create the new session and binding boundary before activation, invalidate the old attachment, carry forward selected model/thinking and placement metadata, and leave historical generations terminal-only.
+not lose or duplicate participant turns. Generation changes durably create the new session and binding boundary before activation, invalidate the old attachment, carry forward selected model/thinking and placement metadata, and leave historical generations terminal-only.
 
 ## Managed Matrix operations
 

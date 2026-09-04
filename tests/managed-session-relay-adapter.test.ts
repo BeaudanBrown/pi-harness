@@ -114,6 +114,20 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	});
 	await replayClient.controlResult(modelControlId, "ok", "Model changed to local-llm/qwen.", undefined, undefined, { model: "local-llm/qwen" });
 	assert.equal(running.registry.manifestByConversationId(conversationId)?.selectedModel, "local-llm/qwen");
+	const thinkingControlId = deriveControlId(conversationId, "$thinking-selection");
+	await running.registry.recordPendingControl(conversationId, {
+		controlId: thinkingControlId, matrixEventId: "$thinking-selection", name: "thinking", argument: "high",
+	});
+	await replayClient.controlResult(thinkingControlId, "ok", "Thinking changed to high.", undefined, undefined, { thinking: "high" });
+	assert.equal(running.registry.manifestByConversationId(conversationId)?.selectedThinking, "high");
+	const mismatchedThinkingId = deriveControlId(conversationId, "$mismatched-thinking-selection");
+	await running.registry.recordPendingControl(conversationId, {
+		controlId: mismatchedThinkingId, matrixEventId: "$mismatched-thinking-selection", name: "thinking", argument: "medium",
+	});
+	await assert.rejects(() => replayClient.controlResult(mismatchedThinkingId, "ok", "wrong", undefined, undefined, { thinking: "low" }),
+		/Thinking selection result does not match an authorized exact control/);
+	assert.equal(running.registry.manifestByConversationId(conversationId)?.selectedThinking, "high");
+	await running.registry.acknowledgeControlResult(conversationId, mismatchedThinkingId);
 	const mismatchedControlId = deriveControlId(conversationId, "$mismatched-model-selection");
 	await running.registry.recordPendingControl(conversationId, {
 		controlId: mismatchedControlId, matrixEventId: "$mismatched-model-selection", name: "model", argument: "local-llm/expected",
@@ -125,6 +139,7 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	await running.registry.acknowledgeControlResult(conversationId, mismatchedControlId);
 	const controlNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${controlId}`);
 	const modelNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${modelControlId}`);
+	const thinkingNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${thinkingControlId}`);
 	assert.equal(requests.filter((request) => request.path.includes(`/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`)).length, 1,
 		"lost control.result acknowledgements retry without duplicate Matrix projection");
 	failLeave = true;
@@ -147,6 +162,7 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, modelNoticeEntryId, 0)}`,
+		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, thinkingNoticeEntryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 	]);

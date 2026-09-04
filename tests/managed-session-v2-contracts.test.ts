@@ -18,12 +18,13 @@ test("migration preserves complete host-resolved project grouping identity witho
 test("generation manifest rejects old fields and impossible active generations", () => { const value = migrateV1Manifest(old); assert.throws(() => parseConversationManifestV2({ ...value, piSessionId: "legacy" })); assert.throws(() => parseConversationManifestV2({ ...value, activeGenerationId: deriveGenerationId(conversationId, 2) }), /newest/); assert.throws(() => parseConversationManifestV2({ ...value, generations: [{ ...value.generations[0]!, generationId: deriveGenerationId(conversationId, 2) }] }), /generation/); assert.throws(() => parseConversationManifestV2({ ...value, activeGenerationId: deriveGenerationId(conversationId, 2), generations: [value.generations[0]!, { ...value.generations[0]!, ordinal: 2, generationId: deriveGenerationId(conversationId, 2) }] }), /generation/); });
 test("migration preserves append-only compatibility generations and selected runtime metadata", () => {
 	const secondSession = "session-2"; const activeGenerationId = deriveGenerationId(conversationId, 2);
-	const compatibility = { ...old, piSessionId: secondSession, bindingBoundaryEntryId: deriveTranscriptEntryId(secondSession, "boundary-2"), selectedModel: "local-llm/current", activeGenerationId,
+	const compatibility = { ...old, piSessionId: secondSession, bindingBoundaryEntryId: deriveTranscriptEntryId(secondSession, "boundary-2"), selectedModel: "local-llm/current", selectedThinking: "xhigh", activeGenerationId,
 		generations: [{ generationId: deriveGenerationId(conversationId, 1), ordinal: 1, piSessionId: old.piSessionId, bindingBoundaryEntryId: old.bindingBoundaryEntryId, createdAt: old.createdAt },
 			{ generationId: activeGenerationId, ordinal: 2, piSessionId: secondSession, bindingBoundaryEntryId: deriveTranscriptEntryId(secondSession, "boundary-2"), createdAt: old.createdAt, model: "scoped/model", thinking: "high" }] };
 	const migrated = migrateV1Manifest(compatibility);
 	assert.deepEqual(migrated.generations, compatibility.generations); assert.equal(migrated.activeGenerationId, activeGenerationId);
-	assert.equal(migrated.selectedModel, "local-llm/current", "migration preserves the current preference without rewriting generation history");
+	assert.equal(migrated.selectedModel, "local-llm/current", "migration preserves the current model preference without rewriting generation history");
+	assert.equal(migrated.selectedThinking, "xhigh", "migration preserves the current thinking preference without rewriting generation history");
 });
 test("v2 operations are role-strict and reject extra fields", () => { const value = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "m1", conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${"a".repeat(32)}`, name: "status" } }; assert.deepEqual(parseManagedSessionV2Envelope(value), value); assert.throws(() => parseManagedSessionV2Envelope({ ...value, role: "ordinary_adapter" })); assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, command: "pwd" } })); });
 test("v2 ordinary generation authorization metadata remains role-strict", () => {
@@ -35,10 +36,14 @@ test("v2 ordinary generation authorization metadata remains role-strict", () => 
 	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, options: ["one"] } }), /without options/);
 });
 
-test("v2 ordinary model selection metadata remains role-strict", () => {
+test("v2 ordinary model and thinking selection metadata remains role-strict", () => {
 	const value = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "model-control", conversationId, role: "ordinary_adapter", type: "control.result",
 		payload: { controlId: `control_${"d".repeat(32)}`, status: "ok", message: "selected", selection: { model: "local-llm/qwen" } } };
 	assert.deepEqual(parseManagedSessionV2Envelope(value), value);
+	const thinking = { ...value, payload: { ...value.payload, selection: { thinking: "high" } } };
+	assert.deepEqual(parseManagedSessionV2Envelope(thinking), thinking);
+	assert.deepEqual(parseManagedSessionV2Envelope({ ...thinking, role: "coordinator_adapter" }), { ...thinking, role: "coordinator_adapter" });
+	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, selection: { model: "local-llm/qwen", thinking: "high" } } }));
 	assert.deepEqual(parseManagedSessionV2Envelope({ ...value, role: "coordinator_adapter" }), { ...value, role: "coordinator_adapter" });
 	assert.throws(() => parseManagedSessionV2Envelope({ ...value, role: "relay" }));
 	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, status: "rejected" } }), /selection metadata/);

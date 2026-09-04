@@ -99,7 +99,7 @@ test("registry enforces nonce, role, binding, and one live attachment per conver
 	assert.equal(registry.snapshot().conversations[0]?.state, "dormant");
 });
 
-test("successful model selections durably replace only the active generation preference", async () => {
+test("successful model and thinking selections durably replace only active preferences", async () => {
 	const value = manifest(); const { root, store, registry } = await fixture([value]);
 	const selected = await registry.updateActiveGenerationModel(value.conversationId, "local-llm/qwen");
 	assert.equal(selected.model, "local-llm/qwen");
@@ -107,18 +107,24 @@ test("successful model selections durably replace only the active generation pre
 	let restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
 	assert.equal(restarted.manifestByConversationId(value.conversationId)?.selectedModel, "local-llm/qwen");
 	await restarted.updateActiveGenerationModel(value.conversationId, "openai/gpt");
+	const thinking = await restarted.updateActiveGenerationThinking(value.conversationId, "xhigh");
+	assert.equal(thinking.thinking, "xhigh");
 	restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
 	assert.equal(restarted.manifestByConversationId(value.conversationId)?.selectedModel, "openai/gpt");
+	assert.equal(restarted.manifestByConversationId(value.conversationId)?.selectedThinking, "xhigh");
 	assert.equal(restarted.manifestByConversationId(value.conversationId)?.generations, undefined,
 		"changing the current preference does not rewrite append-only generation history");
 
 	const coordinator = manifest("coordinator", "coordinator");
 	const coordinatorFixture = await fixture([coordinator]);
 	await coordinatorFixture.registry.updateActiveGenerationModel(coordinator.conversationId, "local-llm/coordinator");
+	await coordinatorFixture.registry.updateActiveGenerationThinking(coordinator.conversationId, "medium");
 	const coordinatorRestart = new RelayRegistry(hostId, join(coordinatorFixture.root, "runtime"), coordinatorFixture.store);
 	await coordinatorRestart.load();
 	assert.equal(coordinatorRestart.manifestByConversationId(coordinator.conversationId)?.selectedModel, "local-llm/coordinator",
 		"coordinator conversations retain the same durable model preference");
+	assert.equal(coordinatorRestart.manifestByConversationId(coordinator.conversationId)?.selectedThinking, "medium",
+		"coordinator conversations retain the same durable thinking preference");
 });
 
 test("generation transition phases and append-only history recover from each durable boundary", async () => {
@@ -135,6 +141,7 @@ test("generation transition phases and append-only history recover from each dur
 	const activated = await restarted.activateGeneration(value.conversationId, requested.transitionId);
 	assert.equal(activated.activeGenerationId, deriveGenerationId(value.conversationId, 2));
 	assert.deepEqual(activated.generations?.map((generation) => generation.piSessionId), [value.piSessionId, session.sessionId]);
+	assert.equal(activated.selectedModel, "scoped/model"); assert.equal(activated.selectedThinking, "high");
 	restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
 	assert.equal(restarted.generationTransitions()[0]?.transition.phase, "activated", "manifest activation remains recoverable before process replacement");
 	await restarted.completeGenerationTransition(value.conversationId, requested.transitionId);
@@ -148,8 +155,11 @@ test("adapter receipt acknowledgement is idempotent after relay socket delivery"
 	const { registry } = await fixture([value]);
 	const deliveryId = deriveDeliveryId(value.conversationId, "$ordered-delivery");
 	await registry.recordAcceptedInput(value.conversationId, {
-		deliveryId, matrixEventId: "$ordered-delivery", kind: "prompt", body: "hello", status: "accepted",
+		deliveryId, matrixEventId: "$ordered-delivery", senderUserId: "@alice:example.com", kind: "prompt", body: "hello", status: "accepted",
 	});
+	await assert.rejects(() => registry.recordAcceptedInput(value.conversationId, {
+		deliveryId, matrixEventId: "$ordered-delivery", senderUserId: "@mallory:example.com", kind: "prompt", body: "hello", status: "accepted",
+	}), /Conflicting accepted Matrix input identity/);
 	await registry.markInputDelivered(value.conversationId, deliveryId);
 	await registry.acknowledgeInput(value.conversationId, deliveryId, "accepted");
 	assert.equal(registry.pendingInputs(value.conversationId)[0]?.status, "delivered");

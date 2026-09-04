@@ -524,7 +524,7 @@ export class HostLifecycle {
 					PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
 					PI_MANAGED_SESSION_WORKSPACE_PATH: resolved.workspacePath,
 					...((manifest.selectedModel ?? activeGeneration.model) ? { PI_MANAGED_SESSION_MODEL: manifest.selectedModel ?? activeGeneration.model } : {}),
-					...(activeGeneration.thinking ? { PI_MANAGED_SESSION_THINKING: activeGeneration.thinking } : {}),
+					...((manifest.selectedThinking ?? activeGeneration.thinking) ? { PI_MANAGED_SESSION_THINKING: manifest.selectedThinking ?? activeGeneration.thinking } : {}),
 				});
 				window = parseProjectWindow(result, manifest);
 			}

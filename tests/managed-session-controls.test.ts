@@ -10,7 +10,7 @@ import {
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { renderRemoteCheckpoint, renderRemoteCheckpointPollQuestion } from "../config/agent/extensions/managed-sessions/checkpoint.js";
 import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
-import { CoordinatorRouter, authorizedRoomEvents, operatorTextEvents, parseTypedRemoteControl } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
+import { CoordinatorRouter, authorizedRoomEvents, parseTypedRemoteControl } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
@@ -19,7 +19,8 @@ import { ControlPollPublisher } from "../config/agent/extensions/managed-session
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 
-const config = { homeserver: "https://matrix.example.com", accessToken: "secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
+const config = { homeserver: "https://matrix.example.com", accessToken: "secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com",
+	ignoredSenderUserIds: ["@signalbot:example.com", "@facebookbot:example.com"] };
 
 async function fixture(establishCursor = true) {
 	const root = await mkdtemp(join(tmpdir(), "managed-controls-"));
@@ -36,7 +37,7 @@ async function fixture(establishCursor = true) {
 }
 
 function sync(events: unknown[]) { return { next_batch: "next", rooms: { join: { "!room:example.com": { timeline: { events } } } } }; }
-function event(id: string, body: string, relation?: unknown) { return { event_id: id, origin_server_ts: Date.now(), sender: config.operatorUserId, type: "m.room.message",
+function event(id: string, body: string, relation?: unknown, sender = config.operatorUserId) { return { event_id: id, origin_server_ts: Date.now(), sender, type: "m.room.message",
 	content: { msgtype: "m.text", body, ...(relation === undefined ? {} : { "m.relates_to": relation }) } }; }
 
 async function attach(server: ManagedSessionIpcServer, manifest: ConversationManifest): Promise<Socket> {
@@ -152,7 +153,7 @@ test("control poll intent recovers an accepted PUT and a vote arriving before ev
 	assert.equal(putPaths[1]?.endsWith(`/${transactionId}`), true);
 	assert.equal(restarted.snapshot().conversations[0]?.publishingControlPoll, null);
 	assert.equal(restarted.activeControlPollOption(manifest.conversationId, "$accepted-poll", "pi-control-0"), "!model scoped/model");
-	const [authorized] = authorizedRoomEvents(sync([vote]), manifest.roomId, config.operatorUserId, true, Date.now());
+	const [authorized] = authorizedRoomEvents(sync([vote]), manifest.roomId, new Set([config.operatorUserId]), true, Date.now());
 	assert.equal(authorized?.kind, "poll_response");
 	const selected = await matrix.controlPollAnswer(manifest.roomId, "$accepted-poll", "pi-control-0");
 	const response = { controlId: deriveControlId(manifest.conversationId, "$window-vote"), matrixEventId: "$window-vote",
@@ -273,19 +274,17 @@ test("bootstrap limited timeline also does not establish a cursor", async () => 
 	assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor, { status: "bootstrap" });
 });
 
-test("room membership, event age, and payload shape fail closed before routing", () => {
+test("authorized sender set, event age, and payload shape fail closed before routing", () => {
 	const now = Date.now(); const message = event("$member", "hello");
-	const response = (membership: string) => ({ rooms: { join: { "!room:example.com": {
-		state: { events: [{ type: "m.room.member", state_key: config.operatorUserId, content: { membership } }] }, timeline: { events: [message] },
-	} } } });
-	assert.equal(operatorTextEvents(response("leave"), "!room:example.com", config.operatorUserId, false, now).length, 0);
-	assert.equal(operatorTextEvents(response("join"), "!room:example.com", config.operatorUserId, false, now).length, 1);
-	const stale = response("join"); stale.rooms.join["!room:example.com"].timeline.events[0] = { ...message, origin_server_ts: now - 2 * 24 * 60 * 60 * 1_000 };
-	assert.equal(operatorTextEvents(stale, "!room:example.com", config.operatorUserId, false, now).length, 0);
-	assert.throws(() => operatorTextEvents({ rooms: { join: { "!room:example.com": { timeline: { events: Array(513).fill(message) } } } } },
-		"!room:example.com", config.operatorUserId, false, now), /gap recovery/);
-	assert.throws(() => operatorTextEvents({ rooms: { join: { "!room:example.com": { timeline: { limited: true, prev_batch: "gap", events: [message] } } } } },
-		"!room:example.com", config.operatorUserId, true, now), /gap recovery/);
+	const response = { rooms: { join: { "!room:example.com": { timeline: { events: [message] } } } } };
+	assert.equal(authorizedRoomEvents(response, "!room:example.com", new Set<string>(), false, now).length, 0);
+	assert.equal(authorizedRoomEvents(response, "!room:example.com", new Set([config.operatorUserId]), false, now).length, 1);
+	const stale = structuredClone(response); stale.rooms.join["!room:example.com"].timeline.events[0] = { ...message, origin_server_ts: now - 2 * 24 * 60 * 60 * 1_000 };
+	assert.equal(authorizedRoomEvents(stale, "!room:example.com", new Set([config.operatorUserId]), false, now).length, 0);
+	assert.throws(() => authorizedRoomEvents({ rooms: { join: { "!room:example.com": { timeline: { events: Array(513).fill(message) } } } } },
+		"!room:example.com", new Set([config.operatorUserId]), false, now), /gap recovery/);
+	assert.throws(() => authorizedRoomEvents({ rooms: { join: { "!room:example.com": { timeline: { limited: true, prev_batch: "gap", events: [message] } } } } },
+		"!room:example.com", new Set([config.operatorUserId]), true, now), /gap recovery/);
 });
 
 test("authorized poll responses accept exact stable and unstable forms and reject adversarial hybrids", () => {
@@ -309,10 +308,46 @@ test("authorized poll responses accept exact stable and unstable forms and rejec
 		poll("$content-extra", "m.poll.response", { "m.selections": ["yes"], extra: true }),
 		{ event_id: "$reaction", origin_server_ts: now, sender: config.operatorUserId, type: "m.reaction", content: { "m.relates_to": relation } },
 	] } } } } };
-	assert.deepEqual(authorizedRoomEvents(response, "!room:example.com", config.operatorUserId, true, now), [
-		{ kind: "poll_response", eventId: "$stable", pollEventId: "$poll", answerId: "yes" },
-		{ kind: "poll_response", eventId: "$unstable", pollEventId: "$poll", answerId: "yes" },
+	assert.deepEqual(authorizedRoomEvents(response, "!room:example.com", new Set([config.operatorUserId]), true, now), [
+		{ kind: "poll_response", eventId: "$stable", senderUserId: config.operatorUserId, pollEventId: "$poll", answerId: "yes" },
+		{ kind: "poll_response", eventId: "$unstable", senderUserId: config.operatorUserId, pollEventId: "$poll", answerId: "yes" },
 	]);
+});
+
+test("all joined Matrix and bridge-puppet senders have equal authority while exact service bots are ignored", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc-group") });
+	await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const member = "@alice:example.com"; const puppet = "@signal_123:example.com"; const similarlyNamedHuman = "@signalbot-helper:example.com"; let synced = false;
+	const events = [
+		event("$operator-group", "operator", undefined, config.operatorUserId),
+		event("$member-group", "member", undefined, member),
+		event("$puppet-group", "puppet", undefined, puppet),
+		event("$member-control", "!thinking high", undefined, member),
+		event("$similarly-named", "not ignored by a name heuristic", undefined, similarlyNamedHuman),
+		event("$departed", "not currently joined", undefined, "@departed:example.com"),
+		event("$signal-service", "ignored", undefined, "@signalbot:example.com"),
+		event("$facebook-service", "ignored", undefined, "@facebookbot:example.com"),
+		event("$relay-service", "ignored", undefined, config.botUserId),
+	];
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("/joined_members")) return Response.json({ joined: {
+			[config.operatorUserId]: {}, [member]: {}, [puppet]: {}, [similarlyNamedHuman]: {}, "@signalbot:example.com": {}, "@facebookbot:example.com": {}, [config.botUserId]: {},
+		} });
+		if (path.endsWith("/sync")) { if (!synced) { synced = true; return Response.json(sync(events)); }
+			await new Promise<void>((resolve) => init?.signal?.addEventListener("abort", () => resolve(), { once: true })); throw Object.assign(new Error("cancelled"), { name: "AbortError" }); }
+		return Response.json({ event_id: "$ok" });
+	}, [manifest.roomId], { maxAttempts: 1 });
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
+	router.start(); const delivered = await readMany(socket, 5); await router.stop();
+	assert.deepEqual(delivered.map((item) => item.type === "input.deliver" ? [item.payload.senderUserId, item.payload.body] : ["control", item.payload.name]), [
+		[config.operatorUserId, "operator"], [member, "member"], [puppet, "puppet"], ["control", "thinking"],
+		[similarlyNamedHuman, "not ignored by a name heuristic"],
+	]);
+	assert.deepEqual(registry.pendingInputs(manifest.conversationId).map((input) => input.senderUserId), [config.operatorUserId, member, puppet, similarlyNamedHuman]);
+	assert.equal(registry.pendingControls(manifest.conversationId)[0]?.senderUserId, member);
 });
 
 test("dormant and starting controls are deterministic and never launch an aborted wake", async (t) => {
@@ -323,7 +358,7 @@ test("dormant and starting controls are deterministic and never launch an aborte
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/sync")) return Response.json(responses.shift() ?? sync([]));
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
 		if (path.includes("/send/m.room.message/")) { sent.push({ transaction: path.split("/").at(-1)!, body: JSON.parse(String(init?.body)).body }); return Response.json({ event_id: "$notice" }); }
 		return Response.json({ sender: config.botUserId });
 	}, [manifest.roomId]);
@@ -354,7 +389,7 @@ test("abort arriving during an in-progress wake cancels queued work and is never
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/sync")) return Response.json(responses.shift() ?? sync([]));
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
 		if (path.includes("/send/m.room.message/")) { notices.push(JSON.parse(String(init?.body)).body); return Response.json({ event_id: "$notice" }); }
 		return Response.json({ event_id: "$ok" });
 	}, [manifest.roomId]);
@@ -390,7 +425,7 @@ test("active prompt, steer, abort, valid reply fallback, and fail-closed relatio
 	const matrix = new ManagedMatrixClient(config, async (input) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/sync")) { if (synced) return Response.json(sync([])); synced = true; return Response.json(sync(events)); }
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
 		if (path.includes("/event/")) return Response.json({ sender: config.botUserId });
 		return Response.json({ event_id: "$ok" });
 	}, [manifest.roomId]);
@@ -493,7 +528,7 @@ test("text waits behind an unresolved checkpoint poll publication without advanc
 	let diagnostics = 0; let syncCalls = 0;
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
 		if (path.endsWith("/sync")) { syncCalls += 1; if (syncCalls === 1) return Response.json(sync([event("$publication-window-text", "Fallback answer")]));
 			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true })); }
 		return Response.json({ event_id: "$ok" });
@@ -509,8 +544,8 @@ test("text waits behind an unresolved checkpoint poll publication without advanc
 	assert.equal(registry.hasPublishingCheckpointPoll(manifest.conversationId), true);
 });
 
-test("first valid checkpoint vote resumes once with exact option text and retires late votes", async (t) => {
-	const { root, registry, manifest } = await fixture();
+test("first valid joined-member checkpoint vote resumes once with exact option text and retires late votes", async (t) => {
+	const { root, registry, manifest } = await fixture(); const puppet = "@signal_456:example.com";
 	const deliveryId = deriveDeliveryId(manifest.conversationId, "$vote-origin");
 	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId, matrixEventId: "$vote-origin", kind: "prompt", body: "choose", status: "accepted" });
 	await registry.acknowledgeInput(manifest.conversationId, deliveryId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "vote-origin-user"));
@@ -520,7 +555,7 @@ test("first valid checkpoint vote resumes once with exact option text and retire
 		if (method === "PUT" && path.includes("/org.matrix.msc3381.poll.start/")) { pollContent = JSON.parse(String(init?.body)); return Response.json({ event_id: "$vote-poll" }); }
 		if (method === "GET" && path.endsWith("/event/%24vote-poll")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: pollContent });
 		if (method === "PUT" && path.includes("/org.matrix.msc3381.poll.end/")) { pollEnds.push(path); return Response.json({ event_id: "$poll-end" }); }
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {}, [puppet]: {} } });
 		if (path.endsWith("/sync")) {
 			syncCount += 1;
 			if (syncCount > 1) return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true }));
@@ -530,7 +565,7 @@ test("first valid checkpoint vote resumes once with exact option text and retire
 				content: { "org.matrix.msc3381.poll.response": { answers: [answerId] }, "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } });
 			const cleared = { ...vote("$cleared-vote", firstAnswer), content: { "org.matrix.msc3381.poll.response": { answers: [] }, "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } };
 			return Response.json(sync([vote("$foreign-vote", firstAnswer, "@foreign:example.com"), cleared, vote("$malformed-vote", "unknown-answer"),
-				vote("$first-vote", firstAnswer), vote("$changed-vote", changedAnswer), vote("$late-vote", firstAnswer)]));
+				vote("$first-vote", firstAnswer, puppet), vote("$changed-vote", changedAnswer), vote("$late-vote", firstAnswer)]));
 		}
 		throw new Error(`unexpected request ${method} ${path}`);
 	}, [manifest.roomId]);
@@ -544,7 +579,7 @@ test("first valid checkpoint vote resumes once with exact option text and retire
 		() => projector.checkpointPollPublisher.reconcile());
 	const delivered = readMany(socket, 1); router.start();
 	const [answer] = await delivered; await router.stop();
-	assert.deepEqual([answer.payload.kind, answer.payload.body], ["prompt", "Release exactly"]);
+	assert.deepEqual([answer.payload.kind, answer.payload.body, answer.payload.senderUserId], ["prompt", "Release exactly", puppet]);
 	assert.equal(registry.snapshot().conversations[0]?.activeCheckpointPoll, null);
 	assert.deepEqual(registry.pendingInputs(manifest.conversationId).filter((input) => input.matrixEventId.endsWith("-vote")).map((input) => input.matrixEventId), ["$first-vote"]);
 	assert.equal(pollEnds.length, 1);
@@ -554,7 +589,7 @@ test("router starts ephemeral feedback for adapter controls and slash commands",
 	const { root, registry, manifest } = await fixture(); let syncCount = 0; const feedback: string[] = []; const ended: string[] = [];
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
 		if (path.endsWith("/sync")) { syncCount += 1; if (syncCount === 1) return Response.json(sync([event("$compact-feedback", "!compact focus"), event("$command-feedback", "/name grouped"), event("$abort-feedback", "!abort")]));
 			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true })); }
 		return Response.json({ event_id: "$ok" });
@@ -578,7 +613,7 @@ test("control-poll selections acquire the same adapter-operation typing feedback
 	let syncCount = 0; const feedback: string[] = [];
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
 		if (path.includes("/event/")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: {
 			"org.matrix.msc3381.poll.start": { kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
 				answers: [{ id: "pi-control-0", "org.matrix.msc1767.text": "!model scoped/model" }] } } });
@@ -607,7 +642,7 @@ test("ordinary checkpoint text closes the poll and bypasses configured options e
 		if (path.includes("/org.matrix.msc3381.poll.start/")) { pollContent = JSON.parse(String(init?.body)); return Response.json({ event_id: "$text-poll" }); }
 		if (path.endsWith("/event/%24text-poll")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: pollContent });
 		if (path.includes("/org.matrix.msc3381.poll.end/")) { pollEnds += 1; return Response.json({ event_id: "$text-poll-end" }); }
-		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
 		if (path.endsWith("/sync")) {
 			syncCount += 1;
 			if (syncCount === 1) return Response.json(sync([event("$text-answer", "Use a custom safe answer"), event("$later-text", "must not replace") ]));

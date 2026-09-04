@@ -403,6 +403,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	await send(4, "model", "scoped/model-1"); assert.equal(setModelCalls, 1, "replayed control IDs return the durable result without repeating mutation");
 	assert.deepEqual(relay.frames.at(-1)?.payload.selection, { model: "scoped/model-1" }, "durable result replay preserves the exact selection");
 	await send(5, "thinking", "off"); assert.equal(thinking, "off");
+	assert.deepEqual(relay.frames.at(-1)?.payload.selection, { thinking: "off" }, "the accepted exact thinking level is returned for durable relay persistence");
 	await send(6, "compact", "focus on controls"); assert.equal(compactFocus, "focus on controls");
 	assert.match(String(relay.frames.at(-1)?.payload.message), /90 -> 40/);
 	await send(7, "new"); assert.match(String(relay.frames.at(-1)?.payload.message), /!new --confirm/);
@@ -429,6 +430,8 @@ test("durable control marker restoration rejects extra, malformed, and unbounded
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", options: ["x".repeat(256)] }],
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: {} }],
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: { model: "x".repeat(257) } }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: { thinking: "x".repeat(33) } }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: { model: "scoped/model", thinking: "high" } }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "provider/model", state: "started", extra: true }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "thinking", argument: "x".repeat(4_097), state: "started" }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "", state: "started" }],
@@ -678,12 +681,12 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
 			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
-	const send = async (eventId: string, kind: "prompt" | "steer", body: string) => {
+	const send = async (eventId: string, kind: "prompt" | "steer", body: string, senderUserId?: string) => {
 		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-${eventId.replace(/[^A-Za-z0-9]/g, "")}`, conversationId, role: "relay", type: "input.deliver",
-			payload: { deliveryId: deriveDeliveryId(conversationId, eventId), matrixEventId: eventId, kind, body } });
+			payload: { deliveryId: deriveDeliveryId(conversationId, eventId), matrixEventId: eventId, ...(senderUserId ? { senderUserId } : {}), kind, body } });
 		await new Promise((resolve) => setTimeout(resolve, 30));
 	};
-	await send("$idle", "prompt", "idle task");
+	await send("$idle", "prompt", "idle task", "@alice:example.com");
 	await handlers.get("agent_start")!({}, ctx);
 	assert.ok(tools.has("remote_checkpoint"));
 	const delegated = await delegateManagedAloopCheckpoint(sessionId, "tool-call-stable", { kind: "question", decision: "Approve?" });
@@ -696,7 +699,9 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "completed"));
 	idle = false; await send("$follow", "prompt", "busy follow-up"); await send("$steer", "steer", "redirect");
-	assert.deepEqual(deliveriesSeen, [{ text: "idle task" }, { text: "busy follow-up", deliverAs: "followUp" }, { text: "redirect", deliverAs: "steer" }]);
+	assert.deepEqual(deliveriesSeen, [{ text: "Matrix participant @alice:example.com:\n\nidle task" },
+		{ text: "busy follow-up", deliverAs: "followUp" }, { text: "redirect", deliverAs: "steer" }]);
+	assert.equal(restoreDeliveries(branch).get(deriveDeliveryId(conversationId, "$idle"))?.senderUserId, "@alice:example.com");
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 
 	const recoveryId = deriveDeliveryId(conversationId, "$persisted-crash");
@@ -733,7 +738,8 @@ test("managed images become one ordered text-plus-image turn and unsupported mod
 			registerTool: () => undefined, getCommands: () => [], getActiveTools: () => [], setActiveTools: () => undefined,
 			appendEntry: (customType: string, data: unknown) => { const id = `media-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id; },
 			sendMessage: () => undefined,
-			sendUserMessage: (content: unknown, options: { onPromptExpanded?: (text: string) => void }) => { sent.push(content); options.onPromptExpanded?.("caption");
+			sendUserMessage: (content: unknown, options: { onPromptExpanded?: (text: string) => void }) => { sent.push(content);
+				options.onPromptExpanded?.(String((content as Array<{ type: string; text?: string }>)[0]?.text));
 				const id = `media-user-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content } }); leaf = id; },
 		} as unknown as ExtensionAPI;
 		createManagedSessionAdapterExtension(adapterRole, { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
@@ -747,7 +753,7 @@ test("managed images become one ordered text-plus-image turn and unsupported mod
 	const bytes = Buffer.from("normalized-image"); const sha256 = createHash("sha256").update(bytes).digest("hex");
 	const deliveryId = deriveDeliveryId(conversationId, "$image"); const blobId = `blob_${"a".repeat(32)}`;
 	const begin = () => ({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `begin-${Date.now()}`, conversationId, role: "relay" as const, type: "media.begin",
-		payload: { deliveryId, matrixEventId: "$image", blobId, sha256, mimeType: "image/png", byteLength: bytes.length, width: 1, height: 1, chunkCount: 1, caption: "caption" } });
+		payload: { deliveryId, matrixEventId: "$image", senderUserId: "@signal_123:example.com", blobId, sha256, mimeType: "image/png", byteLength: bytes.length, width: 1, height: 1, chunkCount: 1, caption: "caption" } });
 	const push = async () => {
 		relay.send(begin());
 		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `chunk-${Date.now()}`, conversationId, role: "relay", type: "media.chunk",
@@ -759,7 +765,8 @@ test("managed images become one ordered text-plus-image turn and unsupported mod
 	await new Promise((resolve) => setTimeout(resolve, 400));
 	await push();
 	assert.equal(capable.sent.length, 1);
-	assert.deepEqual(capable.sent[0], [{ type: "text", text: "caption" }, { type: "image", data: bytes.toString("base64"), mimeType: "image/png" }]);
+	assert.deepEqual(capable.sent[0], [{ type: "text", text: "Matrix participant @signal_123:example.com:\n\ncaption" },
+		{ type: "image", data: bytes.toString("base64"), mimeType: "image/png" }]);
 	await capable.handlers.get("agent_settled")!({}, capable.ctx);
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === deliveryId && frame.payload.status === "completed"));

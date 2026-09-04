@@ -316,6 +316,7 @@
                   homeserver = "https://matrix.example.com";
                   botUserId = "@pi-test:example.com";
                   operatorUserId = "@operator:example.com";
+                  ignoredSenderUserIds = [ "@signalbot:example.com" "@facebookbot:example.com" ];
                   hostId = "test-host";
                   workspaceRoots.projects = "/home/operator/projects";
                   launcherPackage = managedSessionLauncherBase;
