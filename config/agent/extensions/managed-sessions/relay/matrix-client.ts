@@ -160,24 +160,38 @@ export class ManagedMatrixClient {
 		}
 		throw last ?? new ManagedMatrixError("network", "Matrix media download failed", undefined, true);
 	}
+	async pollDialect(roomId: string, eventId: string, signal?: AbortSignal): Promise<"stable" | "unstable" | undefined> {
+		this.assertManagedRoom(roomId);
+		const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
+		if (typeof response !== "object" || response === null || Array.isArray(response)) return undefined;
+		const event = response as JsonObject;
+		if (event.sender !== this.botUserId) return undefined;
+		if (event.type === "m.poll.start") return "stable";
+		if (event.type === "org.matrix.msc3381.poll.start") return "unstable";
+		return undefined;
+	}
 	async controlPollAnswer(roomId: string, eventId: string, answerId: string, signal?: AbortSignal): Promise<string | undefined> {
 		this.assertManagedRoom(roomId);
 		const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
 		if (typeof response !== "object" || response === null || Array.isArray(response)) return undefined;
 		const event = response as JsonObject;
-		if (event.sender !== this.botUserId || event.type !== "m.poll.start" || typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) return undefined;
-		const poll = (event.content as JsonObject)["m.poll"];
+		if (event.sender !== this.botUserId || typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) return undefined;
+		const stable = event.type === "m.poll.start";
+		if (!stable && event.type !== "org.matrix.msc3381.poll.start") return undefined;
+		const poll = (event.content as JsonObject)[stable ? "m.poll" : "org.matrix.msc3381.poll.start"];
 		if (typeof poll !== "object" || poll === null || Array.isArray(poll)) return undefined;
 		const value = poll as JsonObject;
-		if (value.kind !== "m.disclosed" || value.max_selections !== 1 || !Array.isArray(value.answers) || value.answers.length < 1 || value.answers.length > MAX_POLL_ANSWERS) return undefined;
+		if (value.kind !== (stable ? "m.disclosed" : "org.matrix.msc3381.poll.disclosed") || value.max_selections !== 1 || !Array.isArray(value.answers) || value.answers.length < 1 || value.answers.length > MAX_POLL_ANSWERS) return undefined;
 		let selected: string | undefined; const ids = new Set<string>();
 		for (let index = 0; index < value.answers.length; index += 1) {
 			const candidate = value.answers[index];
 			if (typeof candidate !== "object" || candidate === null || Array.isArray(candidate)) return undefined;
-			const answer = candidate as JsonObject; const id = answer["m.id"]; const text = answer["m.text"];
-			if (id !== `pi-control-${index}` || ids.has(id) || !Array.isArray(text) || text.length !== 1 || typeof text[0] !== "object" || text[0] === null || Array.isArray(text[0])) return undefined;
-			ids.add(id); const body = (text[0] as JsonObject).body;
-			if (typeof body !== "string" || body.length < 1 || body.length > 255) return undefined;
+			const answer = candidate as JsonObject; const id = answer[stable ? "m.id" : "id"];
+			const text = answer[stable ? "m.text" : "org.matrix.msc1767.text"];
+			const body = stable && Array.isArray(text) && text.length === 1 && typeof text[0] === "object" && text[0] !== null && !Array.isArray(text[0])
+				? (text[0] as JsonObject).body : !stable ? text : undefined;
+			if (id !== `pi-control-${index}` || ids.has(id) || typeof body !== "string" || body.length < 1 || body.length > 255) return undefined;
+			ids.add(id);
 			if (id === answerId) selected = body;
 		}
 		return selected;
@@ -188,22 +202,28 @@ export class ManagedMatrixClient {
 		const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
 		if (typeof response !== "object" || response === null || Array.isArray(response)) return undefined;
 		const event = response as JsonObject;
-		if (event.sender !== this.botUserId || event.type !== "m.poll.start" || typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) return undefined;
-		const content = event.content as JsonObject;
-		if (Object.keys(content).length !== 2 || !Array.isArray(content["m.text"]) || typeof content["m.poll"] !== "object" || content["m.poll"] === null || Array.isArray(content["m.poll"])) return undefined;
-		const poll = content["m.poll"] as JsonObject;
-		if (Object.keys(poll).length !== 4 || poll.kind !== "m.disclosed" || poll.max_selections !== 1 || !Array.isArray(poll.answers) || poll.answers.length !== expected.length ||
-			typeof poll.question !== "object" || poll.question === null || Array.isArray(poll.question)) return undefined;
-		const questionText = (poll.question as JsonObject)["m.text"];
-		if (Object.keys(poll.question as JsonObject).length !== 1 || !Array.isArray(questionText) || questionText.length !== 1 ||
-			typeof questionText[0] !== "object" || questionText[0] === null || Array.isArray(questionText[0]) || (questionText[0] as JsonObject).body !== question) return undefined;
+		if (event.sender !== this.botUserId || typeof event.content !== "object" || event.content === null || Array.isArray(event.content)) return undefined;
+		const stable = event.type === "m.poll.start";
+		if (!stable && event.type !== "org.matrix.msc3381.poll.start") return undefined;
+		const content = event.content as JsonObject; const pollKey = stable ? "m.poll" : "org.matrix.msc3381.poll.start";
+		const fallbackKey = stable ? "m.text" : "org.matrix.msc1767.text";
+		if (Object.keys(content).length !== 2 || (stable ? !Array.isArray(content[fallbackKey]) : typeof content[fallbackKey] !== "string") ||
+			typeof content[pollKey] !== "object" || content[pollKey] === null || Array.isArray(content[pollKey])) return undefined;
+		const poll = content[pollKey] as JsonObject;
+		if (Object.keys(poll).length !== 4 || poll.kind !== (stable ? "m.disclosed" : "org.matrix.msc3381.poll.disclosed") || poll.max_selections !== 1 ||
+			!Array.isArray(poll.answers) || poll.answers.length !== expected.length || typeof poll.question !== "object" || poll.question === null || Array.isArray(poll.question)) return undefined;
+		const questionValue = poll.question as JsonObject; const questionText = questionValue[stable ? "m.text" : "org.matrix.msc1767.text"];
+		const questionBody = stable && Array.isArray(questionText) && questionText.length === 1 && typeof questionText[0] === "object" && questionText[0] !== null && !Array.isArray(questionText[0])
+			? (questionText[0] as JsonObject).body : !stable ? questionText : undefined;
+		if (Object.keys(questionValue).length !== 1 || questionBody !== question) return undefined;
 		let selected: string | undefined;
 		for (let index = 0; index < expected.length; index += 1) {
 			const candidate = poll.answers[index]; const offered = expected[index];
 			if (!offered || typeof candidate !== "object" || candidate === null || Array.isArray(candidate) || Object.keys(candidate).length !== 2) return undefined;
-			const value = candidate as JsonObject; const text = value["m.text"];
-			if (value["m.id"] !== offered.id || !Array.isArray(text) || text.length !== 1 || typeof text[0] !== "object" || text[0] === null || Array.isArray(text[0]) ||
-				Object.keys(text[0] as JsonObject).length !== 1 || (text[0] as JsonObject).body !== offered.text) return undefined;
+			const value = candidate as JsonObject; const text = value[stable ? "m.text" : "org.matrix.msc1767.text"];
+			const body = stable && Array.isArray(text) && text.length === 1 && typeof text[0] === "object" && text[0] !== null && !Array.isArray(text[0]) && Object.keys(text[0] as JsonObject).length === 1
+				? (text[0] as JsonObject).body : !stable ? text : undefined;
+			if (value[stable ? "m.id" : "id"] !== offered.id || body !== offered.text) return undefined;
 			if (offered.id === answerId) selected = offered.text;
 		}
 		return selected;

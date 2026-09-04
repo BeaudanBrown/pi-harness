@@ -668,7 +668,7 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 	} as unknown as ExtensionAPI;
 	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath,
 		PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
-	const ctx: any = { hasUI: false, isIdle: () => idle, abort: () => { aborts += 1; }, shutdown: () => undefined,
+	const ctx: any = { hasUI: false, isIdle: () => idle, abort: () => { aborts += 1; }, shutdown: () => undefined, getContextUsage: () => undefined,
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
 			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
@@ -678,10 +678,15 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 		await new Promise((resolve) => setTimeout(resolve, 30));
 	};
 	await send("$idle", "prompt", "idle task");
+	await handlers.get("agent_start")!({}, ctx);
 	assert.ok(tools.has("remote_checkpoint"));
 	const delegated = await delegateManagedAloopCheckpoint(sessionId, "tool-call-stable", { kind: "question", decision: "Approve?" });
 	assert.equal(delegated, true); assert.equal(aborts, 1);
 	assert.equal(relay.frames.filter((frame) => frame.type === "checkpoint.offer").length, 1);
+	handlers.get("turn_end")!({ message: { role: "assistant", usage: { input: 1, output: 1 }, stopReason: "error" } });
+	await handlers.get("agent_settled")!({}, ctx);
+	assert.equal(relay.frames.filter((frame) => frame.type === "activity.finalize").at(-1)?.payload.outcome, "checkpoint",
+		"the intentional hard stop cannot overwrite a projected checkpoint with a generic model error");
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "completed"));
 	idle = false; await send("$follow", "prompt", "busy follow-up"); await send("$steer", "steer", "redirect");

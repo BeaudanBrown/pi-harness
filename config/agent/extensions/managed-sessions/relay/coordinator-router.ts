@@ -301,8 +301,12 @@ export class CoordinatorRouter {
 			name: control.name, ...(control.argument ? { argument: control.argument } : {}) };
 		if (!await this.registry.acceptActiveControlPollResponse(manifest.conversationId, event.pollEventId, event.answerId, offered, pending)) return;
 		await this.beginOperationFeedback(manifest.conversationId, pending.controlId);
-		await this.matrix.endPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, event.pollEventId, 0), event.pollEventId,
-			"Selection accepted", signal, "stable").catch((error) => this.diagnostic(error instanceof Error ? error.message : "Matrix control poll closure failed"));
+		try {
+			const dialect = await this.matrix.pollDialect(manifest.roomId, event.pollEventId, signal);
+			if (!dialect) throw new Error("Matrix control poll closure could not verify its bot-owned start event");
+			await this.matrix.endPoll(manifest.roomId, deriveMatrixTransactionId(manifest.conversationId, event.pollEventId, 0), event.pollEventId,
+				"Selection accepted", signal, dialect);
+		} catch (error) { this.diagnostic(error instanceof Error ? error.message : "Matrix control poll closure failed"); }
 		await this.deliverRecordedControl(manifest, event.eventId, pending);
 	}
 
@@ -363,7 +367,9 @@ export class CoordinatorRouter {
 	private async closeCheckpointPoll(manifest: ConversationManifest,
 		closing: ReturnType<RelayRegistry["closingCheckpointPolls"]>[number]["closing"], signal?: AbortSignal): Promise<void> {
 		try {
-			await this.matrix.endPoll(manifest.roomId, closing.closureTransactionId, closing.pollEventId, closing.fallback, signal, "stable");
+			const dialect = await this.matrix.pollDialect(manifest.roomId, closing.pollEventId, signal);
+			if (!dialect) throw new Error("Matrix checkpoint poll closure could not verify its bot-owned start event");
+			await this.matrix.endPoll(manifest.roomId, closing.closureTransactionId, closing.pollEventId, closing.fallback, signal, dialect);
 			await this.registry.completeCheckpointPollClosure(manifest.conversationId, closing.pollEventId, closing.closureTransactionId);
 		} catch (error) {
 			this.diagnostic(error instanceof Error ? error.message : "Matrix checkpoint poll closure failed");

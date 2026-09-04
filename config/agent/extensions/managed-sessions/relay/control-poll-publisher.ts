@@ -47,7 +47,7 @@ export class ControlPollPublisher {
 	private async publishIntent(conversationId: string, roomId: string,
 		intent: NonNullable<RuntimeConversation["publishingControlPoll"]>): Promise<void> {
 		const pollEventId = await this.matrix.startPoll(roomId, intent.transactionId, intent.prompt,
-			intent.options.map((option) => ({ id: option.answerId, text: option.command })), undefined, "stable");
+			intent.options.map((option) => ({ id: option.answerId, text: option.command })), undefined, "unstable");
 		await this.afterMatrixAcceptance();
 		await this.registry.completeControlPollPublication(conversationId, intent.sourceControl.controlId, pollEventId);
 	}

@@ -975,7 +975,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("turn_end", (event) => {
 			if (!activity || event.message.role !== "assistant") return;
 			activity.modelTurns += 1; activity.inputTokens += event.message.usage.input; activity.outputTokens += event.message.usage.output;
-			if (event.message.stopReason === "error") activity.requestedOutcome = "failed";
+			if (event.message.stopReason === "error" && !activity.requestedOutcome) activity.requestedOutcome = "failed";
 			else if (event.message.stopReason === "aborted" && !activity.requestedOutcome) activity.requestedOutcome = "interrupted";
 		});
 		pi.on("tool_execution_start", (event) => {

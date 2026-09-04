@@ -125,10 +125,12 @@ test("control poll intent recovers an accepted PUT and a vote arriving before ev
 	const putPaths: string[] = [];
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const url = String(input); const method = init?.method ?? "GET";
-		if (method === "PUT" && url.includes("/m.poll.start/")) { putPaths.push(new URL(url).pathname); return Response.json({ event_id: "$accepted-poll" }); }
-		if (method === "GET" && url.includes("/event/")) return Response.json({ sender: config.botUserId, type: "m.poll.start", content: {
-			"m.poll": { kind: "m.disclosed", max_selections: 1, question: { "m.text": [{ body: "Choose" }] },
-				answers: [{ "m.id": "pi-control-0", "m.text": [{ body: "!model scoped/model" }] }] },
+		if (method === "PUT" && url.includes("/org.matrix.msc3381.poll.start/")) { putPaths.push(new URL(url).pathname); return Response.json({ event_id: "$accepted-poll" }); }
+		if (method === "GET" && url.includes("/event/")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: {
+			"org.matrix.msc1767.text": "Choose\n1. !model scoped/model",
+			"org.matrix.msc3381.poll.start": { kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
+				question: { "org.matrix.msc1767.text": "Choose" },
+				answers: [{ id: "pi-control-0", "org.matrix.msc1767.text": "!model scoped/model" }] },
 		} });
 		throw new Error(`unexpected Matrix request ${method} ${url}`);
 	}, [manifest.roomId]);
@@ -140,8 +142,8 @@ test("control poll intent recovers an accepted PUT and a vote arriving before ev
 	assert.equal(uncertain?.publishingControlPoll?.transactionId, transactionId, "complete bounded intent is durable before PUT");
 
 	// The homeserver can expose this vote in the next sync while the relay still lacks the poll event ID.
-	const vote = { event_id: "$window-vote", origin_server_ts: Date.now(), sender: config.operatorUserId, type: "m.poll.response",
-		content: { "m.selections": ["pi-control-0"], "m.relates_to": { rel_type: "m.reference", event_id: "$accepted-poll" } } };
+	const vote = { event_id: "$window-vote", origin_server_ts: Date.now(), sender: config.operatorUserId, type: "org.matrix.msc3381.poll.response",
+		content: { "org.matrix.msc3381.poll.response": { answers: ["pi-control-0"] }, "m.relates_to": { rel_type: "m.reference", event_id: "$accepted-poll" } } };
 	const restarted = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
 	await restarted.load();
 	await new ControlPollPublisher(restarted, matrix).reconcile();
@@ -441,7 +443,7 @@ test("checkpoint option polls persist opaque mappings and recover the same accep
 	const transactions: string[] = [];
 	const matrix = new ManagedMatrixClient(config, async (input) => {
 		const path = new URL(String(input)).pathname;
-		if (path.includes("/m.poll.start/")) { transactions.push(path.split("/").at(-1)!); return Response.json({ event_id: "$checkpoint-poll" }); }
+		if (path.includes("/org.matrix.msc3381.poll.start/")) { transactions.push(path.split("/").at(-1)!); return Response.json({ event_id: "$checkpoint-poll" }); }
 		throw new Error(`unexpected request ${path}`);
 	}, [manifest.roomId]);
 	const crashing = new CheckpointPollPublisher(registry, matrix, () => { throw new Error("crash after poll acceptance"); });
@@ -458,8 +460,10 @@ test("checkpoint option polls persist opaque mappings and recover the same accep
 	const closing = await restarted.acceptActiveCheckpointText(manifest.conversationId, answer);
 	assert.ok(closing);
 	const closeTransactions: string[] = []; let failClose = true;
-	const closingMatrix = new ManagedMatrixClient(config, async (input) => {
-		const path = new URL(String(input)).pathname; closeTransactions.push(path.split("/").at(-1)!);
+	const closingMatrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if ((init?.method ?? "GET") === "GET") return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start" });
+		closeTransactions.push(path.split("/").at(-1)!);
 		if (failClose) { failClose = false; throw new Error("close outage"); }
 		return Response.json({ event_id: "$closed" });
 	}, [manifest.roomId], { maxAttempts: 1 });
@@ -512,18 +516,18 @@ test("first valid checkpoint vote resumes once with exact option text and retire
 	let pollContent: Record<string, unknown> | undefined; let syncCount = 0; const pollEnds: string[] = [];
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname; const method = init?.method ?? "GET";
-		if (method === "PUT" && path.includes("/m.poll.start/")) { pollContent = JSON.parse(String(init?.body)); return Response.json({ event_id: "$vote-poll" }); }
-		if (method === "GET" && path.endsWith("/event/%24vote-poll")) return Response.json({ sender: config.botUserId, type: "m.poll.start", content: pollContent });
-		if (method === "PUT" && path.includes("/m.poll.end/")) { pollEnds.push(path); return Response.json({ event_id: "$poll-end" }); }
+		if (method === "PUT" && path.includes("/org.matrix.msc3381.poll.start/")) { pollContent = JSON.parse(String(init?.body)); return Response.json({ event_id: "$vote-poll" }); }
+		if (method === "GET" && path.endsWith("/event/%24vote-poll")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: pollContent });
+		if (method === "PUT" && path.includes("/org.matrix.msc3381.poll.end/")) { pollEnds.push(path); return Response.json({ event_id: "$poll-end" }); }
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.endsWith("/sync")) {
 			syncCount += 1;
 			if (syncCount > 1) return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true }));
 			const firstAnswer = deriveCheckpointPollAnswerId("checkpoint-vote", 1);
 			const changedAnswer = deriveCheckpointPollAnswerId("checkpoint-vote", 0);
-			const vote = (id: string, answerId: string, sender = config.operatorUserId) => ({ event_id: id, origin_server_ts: Date.now(), sender, type: "m.poll.response",
-				content: { "m.selections": [answerId], "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } });
-			const cleared = { ...vote("$cleared-vote", firstAnswer), content: { "m.selections": [], "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } };
+			const vote = (id: string, answerId: string, sender = config.operatorUserId) => ({ event_id: id, origin_server_ts: Date.now(), sender, type: "org.matrix.msc3381.poll.response",
+				content: { "org.matrix.msc3381.poll.response": { answers: [answerId] }, "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } });
+			const cleared = { ...vote("$cleared-vote", firstAnswer), content: { "org.matrix.msc3381.poll.response": { answers: [] }, "m.relates_to": { rel_type: "m.reference", event_id: "$vote-poll" } } };
 			return Response.json(sync([vote("$foreign-vote", firstAnswer, "@foreign:example.com"), cleared, vote("$malformed-vote", "unknown-answer"),
 				vote("$first-vote", firstAnswer), vote("$changed-vote", changedAnswer), vote("$late-vote", firstAnswer)]));
 		}
@@ -574,9 +578,10 @@ test("control-poll selections acquire the same adapter-operation typing feedback
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
-		if (path.includes("/event/")) return Response.json({ sender: config.botUserId, type: "m.poll.start", content: { "m.poll": {
-			kind: "m.disclosed", max_selections: 1, answers: [{ "m.id": "pi-control-0", "m.text": [{ body: "!model scoped/model" }] }] } } });
-		if (path.includes("/m.poll.end/")) return Response.json({ event_id: "$closed" });
+		if (path.includes("/event/")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: {
+			"org.matrix.msc3381.poll.start": { kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
+				answers: [{ id: "pi-control-0", "org.matrix.msc1767.text": "!model scoped/model" }] } } });
+		if (path.includes("/org.matrix.msc3381.poll.end/")) return Response.json({ event_id: "$closed" });
 		if (path.endsWith("/sync")) { syncCount += 1; if (syncCount === 1) return Response.json(sync([{ event_id: "$model-vote", origin_server_ts: Date.now(), sender: config.operatorUserId,
 			type: "m.poll.response", content: { "m.selections": ["pi-control-0"], "m.relates_to": { rel_type: "m.reference", event_id: "$model-poll" } } }]));
 			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(new Error("cancelled"), { name: "AbortError" })), { once: true })); }
@@ -595,11 +600,12 @@ test("ordinary checkpoint text closes the poll and bypasses configured options e
 	const originId = deriveDeliveryId(manifest.conversationId, "$text-origin");
 	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId: originId, matrixEventId: "$text-origin", kind: "prompt", body: "choose", status: "accepted" });
 	await registry.acknowledgeInput(manifest.conversationId, originId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "text-origin-user"));
-	let syncCount = 0; let pollEnds = 0;
+	let syncCount = 0; let pollEnds = 0; let pollContent: unknown;
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
-		if (path.includes("/m.poll.start/")) return Response.json({ event_id: "$text-poll" });
-		if (path.includes("/m.poll.end/")) { pollEnds += 1; return Response.json({ event_id: "$text-poll-end" }); }
+		if (path.includes("/org.matrix.msc3381.poll.start/")) { pollContent = JSON.parse(String(init?.body)); return Response.json({ event_id: "$text-poll" }); }
+		if (path.endsWith("/event/%24text-poll")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: pollContent });
+		if (path.includes("/org.matrix.msc3381.poll.end/")) { pollEnds += 1; return Response.json({ event_id: "$text-poll-end" }); }
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.endsWith("/sync")) {
 			syncCount += 1;

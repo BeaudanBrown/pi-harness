@@ -20,7 +20,8 @@ export class CheckpointPollPublisher {
 			await this.registry.markProjectionChunkSent(conversationId, intent.entryId, chunkId);
 			return active.pollEventId;
 		}
-		const pollEventId = await this.matrix.startPoll(roomId, intent.transactionId, intent.question, intent.options.map((option) => ({ id: option.answerId, text: option.text })), undefined, "stable");
+		const pollEventId = await this.matrix.startPoll(roomId, intent.transactionId, intent.question,
+			intent.options.map((option) => ({ id: option.answerId, text: option.text })), undefined, "unstable");
 		this.afterMatrixAcceptance();
 		await this.registry.completeCheckpointPollPublication(conversationId, intent.checkpointId, pollEventId);
 		await this.registry.markProjectionChunkSent(conversationId, intent.entryId, this.projectionChunkId(conversationId, intent.entryId));
@@ -35,7 +36,9 @@ export class CheckpointPollPublisher {
 	}
 
 	async close(conversationId: string, roomId: string, closing: HostRuntimeState["conversations"][number]["closingCheckpointPolls"][number], signal?: AbortSignal): Promise<void> {
-		await this.matrix.endPoll(roomId, closing.closureTransactionId, closing.pollEventId, closing.fallback, signal, "stable");
+		const dialect = await this.matrix.pollDialect(roomId, closing.pollEventId, signal);
+		if (!dialect) throw new RelayRegistryError("invalid_state", "Checkpoint poll closure could not verify its bot-owned start event");
+		await this.matrix.endPoll(roomId, closing.closureTransactionId, closing.pollEventId, closing.fallback, signal, dialect);
 		await this.registry.completeCheckpointPollClosure(conversationId, closing.pollEventId, closing.closureTransactionId);
 	}
 
