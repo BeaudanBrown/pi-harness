@@ -176,13 +176,7 @@ function assertCheckpointEventBounds(body: string): void {
 
 export function renderRemoteCheckpointPollQuestion(input: Extract<RemoteCheckpointInput, { kind: "question" }>): string {
 	if (!input.options?.length) throw new Error("Checkpoint poll requires declared options");
-	const question = [
-		"❓ Question",
-		`Decision required: ${input.decision}`,
-		input.context ? `Context: ${input.context}` : undefined,
-		input.codeOrDiffRequested && input.requestedCodeOrDiff ? `Requested code/diff:\n${input.requestedCodeOrDiff}` : undefined,
-		"Select one option, or reply with text to provide another answer.",
-	].filter((line): line is string => line !== undefined).join("\n\n");
+	const question = `❓ ${input.decision}`;
 	const fallback = [question, ...input.options.map((option, index) => `${index + 1}. ${option}`)].join("\n");
 	assertCheckpointEventBounds(fallback);
 	return question;

@@ -420,10 +420,11 @@ test("persisted unfinished delivery wakes a crashed process but explicit cancell
 	assert.equal(launches, 1, "durably cancelled input is never recovered");
 });
 
-test("checkpoint poll question and fallback enforce the single-event byte bound", () => {
+test("checkpoint poll question stays concise and its fallback enforces the single-event byte bound", () => {
 	assert.throws(() => renderRemoteCheckpointPollQuestion({ kind: "question", decision: "😀".repeat(600), context: "😀".repeat(600),
-		options: Array.from({ length: 8 }, () => "😀".repeat(150)) }), /single Matrix event limit/);
-	assert.match(renderRemoteCheckpointPollQuestion({ kind: "question", decision: "Choose", options: ["One", "Two"] }), /reply with text/);
+		options: Array.from({ length: 8 }, () => "😀".repeat(200)) }), /single Matrix event limit/);
+	assert.equal(renderRemoteCheckpointPollQuestion({ kind: "question", decision: "Choose", context: "Background that should not crowd the poll.",
+		options: ["One", "Two"] }), "❓ Choose");
 });
 
 test("checkpoint option polls persist opaque mappings and recover the same accepted Matrix transaction", async () => {
