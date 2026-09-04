@@ -62,6 +62,7 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 	assert.equal(local.contextFiles, false);
 	assert.throws(() => withProjectWorkerOptIn(local, { tools: ["project_lookup"] }), /does not permit/);
 	assert.deepEqual(local.extensions, ["pi-r", "agent-profiles"]);
+	assert.deepEqual(local.tools, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
 	const full = resolveAgentProfile("engineering-full");
 	const managed = resolveAgentProfile("managed-project");

@@ -55,9 +55,15 @@ let
     launcherPackage = configuredManagedLauncherPackage;
     launcherExecutable = cfg.managedSessions.launcherExecutable;
   };
-  managedExtensions = cfg.package.managedSessionExtensions or { ordinary = "/missing-managed-ordinary"; coordinator = "/missing-managed-coordinator"; };
+  managedExtensions = cfg.package.managedSessionExtensions or {
+    ordinary = "/missing-managed-ordinary";
+    coordinator = "/missing-managed-coordinator";
+    modelPolicy = "/missing-managed-model-policy";
+  };
   profileDocument = cfg.package.agentProfiles or { profiles = { }; variants = { }; };
   engineeringProfile = profileDocument.profiles."engineering-full" or { extensions = [ ]; skills = [ ]; prompts = [ ]; themes = [ ]; };
+  localProfile = profileDocument.profiles."pi-local" or { tools = [ ]; };
+  managedLocalModelTools = builtins.toJSON localProfile.tools;
   managedVariant = profileDocument.variants."managed-project" or { excludeExtensions = [ ]; excludeSkills = [ ]; excludePrompts = [ ]; };
   managedProfileExtensions = builtins.filter
     (name: !(builtins.elem name (managedVariant.excludeExtensions or [ ])) && name != "pi-r" && name != "agentgraph")
@@ -176,6 +182,7 @@ let
       project)
         : "''${PI_MANAGED_PROJECT_SESSION_FILE:?PI_MANAGED_PROJECT_SESSION_FILE is required}"
         export PI_HARNESS_AGENT_PROFILE="managed-project"
+        export PI_MANAGED_LOCAL_MODEL_TOOLS=${lib.escapeShellArg managedLocalModelTools}
         export PI_HARNESS_RESOURCES_ROOT="${cfg.package.harnessResources}/share/pi-harness/agent"
         export PI_HARNESS_MATT_SKILLS_ROOT="${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills"
         export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
@@ -280,6 +287,7 @@ let
           "''${profile_args[@]}" \
           "''${extension_args[@]}" \
           "''${project_extension_args[@]}" \
+          --extension "${managedExtensions.modelPolicy}" \
           "''${project_skill_args[@]}" \
           "''${project_prompt_args[@]}" \
           --session "$PI_MANAGED_PROJECT_SESSION_FILE" \
@@ -540,9 +548,13 @@ in
           && cfg.managedSessions.launcherPackage != null
           && cfg.managedSessions.workspaceRoots != { }
           && cfg.package ? managedSessionExtensions
+          && cfg.package.managedSessionExtensions ? ordinary
+          && cfg.package.managedSessionExtensions ? coordinator
+          && cfg.package.managedSessionExtensions ? modelPolicy
+          && builtins.length localProfile.tools > 0
           && cfg.package ? pi
         );
-        message = "services.pi-harness.managedSessions.enable requires user, relayPackage, environmentFile, Matrix identities, hostId, launcherPackage, and named workspaceRoots.";
+        message = "services.pi-harness.managedSessions.enable requires user, relayPackage, environmentFile, Matrix identities, hostId, launcherPackage, named workspaceRoots, managed adapter/model-policy extensions, and a non-empty pi-local tool profile.";
       }
       {
         assertion = !managedSessionsEnabled || !cfg.managedSessions.botIsAdmin;

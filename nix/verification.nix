@@ -181,6 +181,7 @@ let
       export PI_MANAGED_ADAPTER_TEST_PI=${piPackage}/bin/pi
       export PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary}
       export PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator}
+      export PI_MANAGED_ADAPTER_MODEL_POLICY_EXTENSION=${piHarnessResources.managedSessionExtensions.modelPolicy}
       export PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid
       export PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock
       export PI_MANAGED_SESSIONS_TEST_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}
@@ -219,6 +220,7 @@ let
     done
     test -f ${piHarnessResources.managedSessionExtensions.ordinary}
     test -f ${piHarnessResources.managedSessionExtensions.coordinator}
+    test -f ${piHarnessResources.managedSessionExtensions.modelPolicy}
     test -d "$agent_root/extensions/node_modules/typebox"
     test -f "$agent_root/skills/migrate-tk-to-github/SKILL.md"
     test -f "$agent_root/skills/playwright-browser/SKILL.md"
@@ -305,6 +307,9 @@ let
       grep -F -- "$flag" "$coordinator" >/dev/null
     done
     grep -F 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$coordinator" >/dev/null
+    grep -F 'export PI_MANAGED_LOCAL_MODEL_TOOLS=' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+    grep -F -- '--extension "${piHarnessResources.managedSessionExtensions.modelPolicy}"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+    ! grep -F '${piHarnessResources.managedSessionExtensions.modelPolicy}' "$coordinator" >/dev/null
     ! grep -F '${piLspExtension}/share/pi-lsp-extension/src/index.ts' ${lspDisabledPiWrapper}/bin/pi >/dev/null
     touch "$out"
   '';
