@@ -90,6 +90,7 @@ buildNpmPackage {
       ../patches/pi-lsp-extension-document-sync-hardening.patch
       ../patches/pi-lsp-extension-workspace-symbols-hardening.patch
       ../patches/pi-lsp-extension-language-mapping-hardening.patch
+      ../patches/pi-lsp-extension-restart-budget.patch
     ];
   };
   npmDepsHash = "sha256-j0BEIgsM9pUL56lE5JdJrlFW8jjZkkrox2KB8VRFLgE=";

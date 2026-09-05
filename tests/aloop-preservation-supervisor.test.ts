@@ -15,16 +15,22 @@ test("dirty startup reports interrupted evidence without activating or spawning"
 	await writeAttemptIdentity(join(cwd, artifactDirectory), { version: 1, issue: 2, epic: 1, artifactDirectory, beforeHead: "a".repeat(40), issueBaseCommit: "a".repeat(40), workerKind: "implementation" });
 	const commands = new Map<string, any>();
 	const lifecycle: any[] = [];
+	const messages: any[] = [];
 	const pi = {
 		registerTool: () => undefined, registerCommand: (name: string, command: any) => commands.set(name, command), on: () => undefined,
 		getActiveTools: () => [], setActiveTools: () => assert.fail("must not activate"),
 		appendEntry: (_type: string, event: unknown) => lifecycle.push(event),
+		sendMessage: (message: unknown) => messages.push(message),
 		exec: async () => ({ code: 0, stdout: "?? partial.txt", stderr: "" }),
 	} as unknown as ExtensionAPI;
 	registerAloopExtension(pi, { retrieveEpicContext: async () => { assert.fail("must not consult GitHub"); }, runWorker: async () => { assert.fail("must not spawn"); } });
 	const ctx = { cwd, hasUI: false, isIdle: () => true, sessionManager: { getSessionId: () => "dirty-recovery" }, ui: { notify: () => undefined } } as unknown as ExtensionContext;
 	await commands.get("aloop").handler("#1", ctx);
-	assert.match(lifecycle.at(-1)?.body, /1 interrupted attempt.*retained recovery evidence/);
+	assert.match(lifecycle.find((event) => event.kind === "startup-failure")?.body, /1 interrupted attempt.*retained recovery evidence/);
+	assert.equal(messages[0].details.status, "startup-failed");
+	await commands.get("aloop-recovery").handler("#2", ctx);
+	assert.match(messages.at(-1).content, /#2: interrupted; recorded commit unknown/);
+	assert.deepEqual(await readdir(join(cwd, artifactDirectory)), ["attempt.json"]);
 });
 
 test("supervisor blocks acceptance on incomplete capture and publishes preservation facts on rejection", async (t) => {
@@ -37,9 +43,12 @@ test("supervisor blocks acceptance on incomplete capture and publishes preservat
 	const published: string[] = [];
 	let runtimeReady = false;
 	let workerCalls = 0;
+	let aborts = 0;
+	let activeTools: string[] = [];
+	t.mock.timers.enable({ apis: ["setTimeout"] });
 	const pi = {
 		registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command),
-		on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, setSessionName: () => undefined, sendUserMessage: () => undefined, appendEntry: () => undefined,
+		on: () => undefined, getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; }, setSessionName: () => undefined, sendUserMessage: () => undefined, appendEntry: () => undefined,
 		exec: async (command: string, args: string[]) => ({ code: 0, stderr: "", stdout: command === "gh" ? "supervisor" : args[0] === "show" ? JSON.stringify({ canonicalCommand: { argv: [process.execPath, "-e", "process.exit(0)"] } }) : args[0] === "status" ? "" : head }),
 	} as unknown as ExtensionAPI;
 	registerAloopExtension(pi, {
@@ -49,8 +58,8 @@ test("supervisor blocks acceptance on incomplete capture and publishes preservat
 		publishComment: async (_cwd, _issue, body, apply) => { if (apply) published.push(body); return {}; },
 		closeIssue: async () => { assert.fail("must not close"); },
 	});
-	const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => undefined, sessionManager: { getSessionId: () => "preservation-test" }, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;
-	await commands.get("aloop").handler("#1", ctx);
+	const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => { aborts++; }, sessionManager: { getSessionId: () => "preservation-test" }, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;
+	await commands.get("aloop").handler("#1 --max-minutes 1 --settlement-minutes 1", ctx);
 	const blocked = await tools.get("aloop_launch_worker").execute("blocked", { issue: 2 }, ctx.signal, undefined, ctx);
 	assert.equal(blocked.details.status, "environment-blocked");
 	assert.equal(workerCalls, 0);
@@ -61,6 +70,9 @@ test("supervisor blocks acceptance on incomplete capture and publishes preservat
 	runtimeReady = true;
 	await tools.get("aloop_launch_worker").execute("launch", { issue: 2 }, ctx.signal, undefined, ctx);
 	assert.equal(workerCalls, 1);
+	t.mock.timers.tick(60_000);
+	assert.equal(activeTools.includes("aloop_launch_worker"), false);
+	assert.equal(activeTools.includes("aloop_review_attempt"), true);
 	const params = { issue: 2, outcome: "accepted", summary: "No changes", outstanding_findings: [], decisions: [], verification: [], next_action: "Inspect" };
 	await assert.rejects(tools.get("aloop_finish_attempt").execute("finish", params, ctx.signal, undefined, ctx), /complete preservation evidence/);
 	assert.equal(published.length, 0);
@@ -68,4 +80,12 @@ test("supervisor blocks acceptance on incomplete capture and publishes preservat
 	assert.match(published[0]!, /unknown untracked paths/);
 	assert.match(published[0]!, /Preservation: incomplete/);
 	assert.doesNotMatch(published[0]!, /No changes/);
+	t.mock.timers.tick(60_000);
+	assert.equal(aborts, 1);
+	const expired = await tools.get("aloop_context").execute("expired", {}, ctx.signal, undefined, ctx);
+	assert.equal(expired.details.status, "budget-exhausted");
+	assert.equal(expired.details.started, false);
+	for (const command of ["aloop-decision", "aloop-authorize-recovery", "aloop-approve-epic"]) {
+		await assert.rejects(commands.get(command).handler("2 denied", ctx), /No open settlement window/);
+	}
 });

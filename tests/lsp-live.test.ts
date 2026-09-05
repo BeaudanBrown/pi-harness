@@ -276,7 +276,7 @@ test("LspManager status reports startup errors and setup hints", async () => {
 	});
 });
 
-async function createLiveManager(dir: string, configs: Record<string, { command: string; args: string[] }>): Promise<any> {
+async function createLiveManager(dir: string, configs: Record<string, { command: string; args: string[]; env?: Record<string, string> }>): Promise<any> {
 	const managerModule = await compileExtensionModule(dir, "lsp-manager.ts");
 	const { LspManager } = await import(`file://${managerModule}`) as { LspManager: new (...args: any[]) => any };
 	const workspace = {
@@ -294,6 +294,44 @@ async function startLiveClient(manager: any, languageId: string): Promise<any> {
 	await manager.getClientForLanguage(languageId);
 	return waitFor(() => manager.getRunningClient(languageId) ?? undefined, 15_000);
 }
+
+test("LSP initialized crash loops exhaust retries, resist demand bypass, and notify once", async () => {
+	await withTempDir(async (dir) => {
+		const manager = await createLiveManager(dir, { typescript: { command: process.execPath, args: [fakeServerPath], env: { FAKE_LSP_CRASH_AFTER_MS: "100" } } });
+		manager.constructor.INITIAL_BACKOFF_MS = 10;
+		const errors: string[] = [];
+		manager._callbacks.onServerError = (_language: string, message: string) => errors.push(message);
+		try {
+			await manager.getClientForLanguage("typescript");
+			await waitFor(() => manager._restartExhausted.has("typescript") ? true : undefined, 10_000);
+			assert.equal(manager._restartAttempts.get("typescript"), 3);
+			for (let i = 0; i < 10; i++) { manager.handleUnexpectedExit("typescript", 69); await manager.getClientForLanguage("typescript"); manager.startEagerly(["typescript"]); }
+			assert.equal(errors.filter((message) => message.includes("auto-restart disabled")).length, 1);
+			assert.equal(manager.startingServers.size, 0);
+			assert.equal(manager._restartTimers.size, 0);
+		} finally { await manager.shutdownAll(); }
+		assert.equal(manager._healthTimers.size, 0);
+	});
+});
+
+test("LSP counters reset only after stable health and shutdown clears queued timers", async () => {
+	await withTempDir(async (dir) => {
+		const manager = await createLiveManager(dir, { typescript: { command: process.execPath, args: [fakeServerPath] } });
+		manager.constructor.STABLE_HEALTH_MS = 200;
+		manager._restartAttempts.set("typescript", 2);
+		try {
+			await startLiveClient(manager, "typescript");
+			assert.equal(manager._restartAttempts.get("typescript"), 2);
+			await waitFor(() => !manager._restartAttempts.has("typescript") ? true : undefined);
+			await manager.getRunningClient("typescript").shutdown();
+			manager.handleUnexpectedExit("typescript", 69);
+			assert.equal(manager._restartTimers.size, 1);
+		} finally { await manager.shutdownAll(); }
+		assert.equal(manager._restartTimers.size, 0);
+		assert.equal(manager._healthTimers.size, 0);
+		assert.equal(await manager.getClientForLanguage("typescript"), null);
+	});
+});
 
 test("real TypeScript fallback server starts and answers document symbols", async () => {
 	await withTempDir(async (dir) => {

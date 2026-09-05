@@ -1,0 +1,21 @@
+import { createInterface } from "node:readline";
+const send = (event) => process.stdout.write(JSON.stringify(event) + "\n");
+const mode = process.env.FAKE_HEADLESS_MODE;
+const lines = createInterface({ input: process.stdin });
+lines.on("close", () => process.exit(mode === "completed-nonzero" ? 1 : 0));
+lines.on("line", (line) => {
+  const command = JSON.parse(line);
+  if (command.type === "get_commands") send({ type: "response", id: command.id, success: true, data: { commands: mode === "unsupported" ? [] : [{ name: "aloop", source: "extension" }] } });
+  if (command.type === "abort") send({ type: "agent_settled" });
+  if (command.type !== "prompt") return;
+  send({ type: "response", id: command.id, success: true });
+  process.stderr.write("secret-provider-error-do-not-print\n");
+  if (mode === "timeout") return;
+  if (mode === "exit") process.exit(0);
+  if (mode === "null") process.stdout.write("null\n");
+  else if (mode === "overflow") process.stdout.write("x".repeat(2 * 1024 * 1024) + "\n");
+  else if (mode === "malformed") process.stdout.write("not-json\n");
+  else if (mode !== "missing") send({ type: "message_end", message: { role: "custom", customType: "aloop-terminal-outcome", details: { version: 1, invocationId: mode === "wrong-id" ? "0".repeat(32) : process.env.PI_ALOOP_INVOCATION_ID, epic: 1, status: ["wrong-id", "completed-nonzero", "conflicting"].includes(mode) ? "completed" : mode } } });
+  if (mode === "conflicting") send({ type: "message_end", message: { role: "custom", customType: "aloop-terminal-outcome", details: { version: 1, invocationId: process.env.PI_ALOOP_INVOCATION_ID, epic: 1, status: "incomplete" } } });
+  send({ type: "agent_settled" });
+});

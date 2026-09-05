@@ -563,8 +563,11 @@ verification and a concise handoff before closing an issue.
 For multi-issue epics, the packaged `/aloop #<epic>` command supervises fresh,
 sequential implementation workers from a clean worktree while keeping GitHub
 and Git authoritative. See [GitHub-native aloop](docs/github-aloop.md) for setup,
-worker and supervisor responsibilities, retry boundaries, verification
-discovery, interruption recovery, and attempt artifacts.
+worker and supervisor responsibilities, separate implementation/settlement budgets,
+read-only `/aloop-recovery`, the terminal-outcome-backed `pi-aloop` RPC driver,
+verification, interruption recovery, and attempt artifacts. The
+[worktree compatibility trial](docs/aloop-worktree-trial.md) records why automatic
+workspace isolation remains disabled.
 
 The primary workflow is the curated Matt Pocock skill chain:
 

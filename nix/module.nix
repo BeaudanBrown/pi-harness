@@ -160,6 +160,11 @@ let
     exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
   '';
 
+  headlessAloop = pkgs.writeShellScriptBin "pi-aloop" ''
+    export PI_ALOOP_LAUNCHER=${piWithRuntime}/bin/pi
+    exec ${cfg.package}/bin/pi-aloop "$@"
+  '';
+
   coordinatorPi = pkgs.writeShellScriptBin "pi-managed-coordinator" ''
     set -euo pipefail
     : "''${PI_MANAGED_COORDINATOR_CWD:?PI_MANAGED_COORDINATOR_CWD is required}"
@@ -632,6 +637,7 @@ in
         [ piWithRuntime ]
       else
         [ cfg.package ])
-      ++ lib.optional managedSessionsEnabled managedStatus;
+      ++ lib.optional managedSessionsEnabled managedStatus
+      ++ lib.optional ((cfg.package.hasAloopDriver or false) && (runtimeEnvironmentFiles != [ ] || runtimeFeaturesEnabled || sessionDirectoryEnabled || managedSessionsEnabled)) headlessAloop;
   };
 }

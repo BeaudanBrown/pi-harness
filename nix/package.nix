@@ -3,6 +3,7 @@
   lib,
   callPackage,
   bash,
+  nodejs,
   piPackage,
   piHarnessResources,
   mattPocockSkillsResources,
@@ -191,6 +192,14 @@ exec "${lib.getExe piPackage}" "\''${resource_args[@]}" "\$@"
 EOF
     chmod +x "$out/bin/pi"
 
+    cat > "$out/bin/pi-aloop" <<EOF
+#!${bash}/bin/bash
+set -euo pipefail
+export PI_ALOOP_LAUNCHER="\''${PI_ALOOP_LAUNCHER:-$out/bin/pi}"
+exec ${nodejs}/bin/node ${piHarnessResources}/share/pi-harness/agent/extensions/aloop/headless.mjs "\$@"
+EOF
+    chmod +x "$out/bin/pi-aloop"
+
     cat > "$out/bin/pi-r-local" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -276,6 +285,7 @@ EOF
 
   passthru = {
     inherit engineeringRuntimePath;
+    hasAloopDriver = true;
     pi = piPackage;
     piR = piRPackage;
     piResources = piHarnessResources.piResources;

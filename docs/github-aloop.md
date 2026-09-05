@@ -34,8 +34,9 @@ loop database, queue file, or session state to restore.
    ```
 
    Each invocation defaults to a 60-minute implementation deadline and at most 20 fresh
-   worker launches. Use `--max-minutes <1-240>` and
-   `--max-worker-launches <1-20>` to choose explicit resource bounds for that
+   worker launches, followed by at most 20 additional minutes of acceptance
+   settlement. Use `--settlement-minutes <1-60>` to adjust that allowance.
+   Use `--max-minutes <1-240>` and `--max-worker-launches <1-20>` to choose explicit resource bounds for that
    invocation, for example
    `/aloop #123 --max-minutes 120 --max-worker-launches 20`.
 
@@ -99,11 +100,19 @@ full worker is active, the tool emits elapsed-time heartbeats and caps that full
 worker at the smaller of its requested timeout and the invocation's remaining
 time. A targeted patch must start before the implementation deadline, but once
 started it is settlement work governed by its own command timeout, hard-capped
-server-side at 20 minutes even if the tool caller requests longer.
+server-side at 20 minutes even if the tool caller requests longer, and further
+clipped to the remaining settlement window.
 
-The whole supervisor turn is also bounded. Reaching either the hard deadline or
-the worker-launch cap stops that invocation; it never waits indefinitely or
-silently starts unlimited workers. This launch cap is a resource guard and does
+The whole supervisor turn is also bounded. The worker-launch cap stops new full workers; the implementation cutoff stops
+both full-worker and targeted-patch launches. Review and verification
+may continue only until the implementation cutoff plus the settlement allowance.
+At that final deadline, active operations and the model turn are aborted; no
+new supervisor operation starts. Human continuation commands reject a settled
+or expired invocation rather than restarting an unbounded model turn.
+Budget-skipped or interrupted checks are not
+reported as failed checks and cannot authorize acceptance. Worker emergency
+preservation retains its independent 30-second inspection allowance even after
+cancellation. The invocation never silently starts unlimited workers. This launch cap is a resource guard and does
 not represent retries or epic size. GitHub CLI subprocesses have their own
 30-second timeout and honor turn cancellation, including during initial graph
 retrieval. Their timeout cleanup terminates the complete POSIX process group;
@@ -112,6 +121,44 @@ leaving descendant processes unbounded. Run `/aloop` again to reconstruct
 durable state and continue. A
 settled supervisor turn cannot launch another worker without that explicit
 restart.
+
+## Headless execution
+
+The packaged `pi-aloop #<epic>` command runs the same native Pi supervisor through
+RPC. It accepts the separate `--max-minutes`, `--settlement-minutes`, and
+`--max-worker-launches` options (space-separated values). NixOS runtime-enabled
+hosts route it through their normal engineering launcher, retaining configured
+LSP and project environment behavior. No new model, environment wrapper, or
+session manager is selected.
+
+It checks that `/aloop` is an extension command before sending the request.
+Each process has a fresh invocation identity. Only the matching structured
+terminal outcome can authorize exit zero, and only after successful explicit
+parent closure; `agent_settled`, worker prose, and completed children alone do
+not imply success. Human approval/checkpoint, budget exhaustion, cancellation,
+startup failure, mismatched or missing outcomes exit nonzero (currently 2).
+Headless operation does not grant epic approval: complete the human boundary
+through the normal interactive workflow. Native attempt files and GitHub remain
+recovery evidence; the driver starts with `--no-session` and is not a resume UI.
+
+Output is one bounded JSON status with no prompts, tool output, credential
+values, or private paths. RPC has a 1 MiB buffered-frame bound and 64 MiB total
+stdout bound. A watchdog covers startup and the configured budget, sends native
+abort, allows up to 40 seconds for shutdown/preservation, then force-terminates
+the supervisor process group if necessary. Forced termination cannot prove the
+absence of an independently detached or unresponsive process; inspect before
+recovery. The driver does not infer old-worker liveness or delete artifacts.
+
+## Explicit recovery inspection
+
+`/aloop-recovery [#issue]` is a read-only bounded local-attempt inspection, also
+available when ordinary startup refuses a dirty checkout. It reports retained
+statuses and unknown evidence without starting a model, adopting dirty work,
+mutating Git/GitHub, or determining whether a previous worker still exists.
+Detailed records remain in private native session history. No retained record
+is a claim that the current worktree has no changes. Inspect `git status` and
+the attempt files, preserve valuable partial work, and intentionally settle it
+before rerunning `/aloop`; no automatic WIP commit or cleanup is offered.
 
 ## Durable handoffs and issue closure
 
@@ -254,8 +301,10 @@ identity names its parent so an interruption before parent-ledger publication
 does not detach the patch's evidence. Invalid bookkeeping marks preservation
 incomplete rather than suppressing evidence.
 
-Automatic dirty-worktree recovery, isolated worktrees, and a headless driver
-remain subsequent reliability slices.
+Automatic dirty-worktree adoption remains intentionally unsupported. Automatic
+worktree isolation remains disabled after the
+[compatibility trial](aloop-worktree-trial.md); headless execution is supported
+through the driver described above.
 
 ## Resume and recovery
 

@@ -64,6 +64,14 @@ problems that belong to each project environment.
 - Opaque status: `/lsp` now exposes root, command args, state, capability,
   diagnostics, shared-daemon, last-error, and setup-hint context.
 
+- Post-initialization crash loops: initialization no longer resets restart
+  counters. A client must remain initialized and connected for 60 seconds before
+  its retry/backoff state resets. Three automatic restart attempts are allowed;
+  exhaustion emits one terminal notice and also blocks lazy/eager demand from
+  bypassing the circuit. Explicit `/lsp` restart resets the circuit after the
+  operator fixes the project environment. Shutdown clears restart/health timers;
+  a late initialization is disconnected rather than retained after shutdown.
+
 ## Failures To Report Honestly, Not Hide
 
 - TypeScript "No Project" is usually a project configuration signal: the server
@@ -74,6 +82,9 @@ problems that belong to each project environment.
   by the project environment. The harness may make fallback tools available on
   `PATH`, but it should not run package managers, install dependencies, or patch
   project manifests.
+- Exit code 69 alone does not establish an HLS root cause. Inspect the actual
+  project-local command, GHC/HLS compatibility, startup diagnostics and root;
+  the retry fix does not install compilers or hide the underlying failure.
 - A language server missing from the active environment should be reported as a
   command/startup failure. The project can provide its own server through the
   dev shell or `.pi-lsp.json`; harness packages are only fallbacks.

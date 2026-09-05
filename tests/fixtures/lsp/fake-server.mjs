@@ -46,6 +46,7 @@ async function handle(message) {
       },
     });
     if (process.env.FAKE_LSP_EXIT_AFTER_INITIALIZE === "1") process.exit(0);
+    if (process.env.FAKE_LSP_CRASH_AFTER_MS) setTimeout(() => process.exit(69), Number(process.env.FAKE_LSP_CRASH_AFTER_MS));
     return;
   }
 

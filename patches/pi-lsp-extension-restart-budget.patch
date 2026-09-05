@@ -1,0 +1,152 @@
+--- a/src/lsp-manager.ts
++++ b/src/lsp-manager.ts
+@@ -99,6 +99,35 @@
+   private _sessionId: string;
+   private _lombokJarPath: string | null = null;
+   private _shuttingDown = false;
++  private _restartTimers = new Map<string, ReturnType<typeof setTimeout>>();
++  private _healthTimers = new Map<string, ReturnType<typeof setTimeout>>();
++  private _restartExhausted = new Set<string>();
++  private static readonly STABLE_HEALTH_MS = 60_000;
++
++  private clearRestartTimers(languageId: string): void {
++    clearTimeout(this._restartTimers.get(languageId));
++    clearTimeout(this._healthTimers.get(languageId));
++    this._restartTimers.delete(languageId);
++    this._healthTimers.delete(languageId);
++  }
++
++  private watchStableHealth(languageId: string, client: LspClient): void {
++    clearTimeout(this._healthTimers.get(languageId));
++    if (this._shuttingDown) {
++      this.clients.delete(languageId);
++      void client.shutdown().catch(() => {});
++      return;
++    }
++    const timer = setTimeout(() => {
++      this._healthTimers.delete(languageId);
++      if (this._shuttingDown || this.clients.get(languageId) !== client || client.disposed || !client.initialized) return;
++      this._restartAttempts.delete(languageId);
++      this._restartBackoff.delete(languageId);
++      this._lastServerErrors.delete(languageId);
++    }, LspManager.STABLE_HEALTH_MS);
++    timer.unref?.();
++    this._healthTimers.set(languageId, timer);
++  }
+   private _restartAttempts: Map<string, number> = new Map();
+   private _restartBackoff: Map<string, number> = new Map();
+   private _lastServerErrors: Map<string, string> = new Map();
+@@ -307,6 +336,7 @@
+    * Returns null if no server is configured for this language.
+    */
+   async getClientForLanguage(languageId: string): Promise<LspClient | null> {
++    if (this._shuttingDown || this._restartExhausted.has(languageId) || this._restartTimers.has(languageId)) return null;
+     // Already running?
+     const existing = this.clients.get(languageId);
+     if (existing && existing.initialized && !existing.disposed) {
+@@ -348,6 +378,7 @@
+    */
+   startEagerly(languageIds: string[]): void {
+     for (const languageId of languageIds) {
++      if (this._shuttingDown || this._restartExhausted.has(languageId) || this._restartTimers.has(languageId)) continue;
+       // Skip if already running or starting
+       const existing = this.clients.get(languageId);
+       if (existing && existing.initialized && !existing.disposed) continue;
+@@ -431,8 +462,7 @@
+         this.startingServers.delete(languageId);
+         this._lastServerErrors.delete(languageId);
+         this._callbacks.onServerReady?.(languageId);
+-        this._restartAttempts.delete(languageId);
+-        this._restartBackoff.delete(languageId);
++        this.watchStableHealth(languageId, client);
+         this.triggerPostInit(languageId, client);
+         return client;
+       } catch {
+@@ -470,8 +500,7 @@
+             this.startingServers.delete(languageId);
+             this._lastServerErrors.delete(languageId);
+             this._callbacks.onServerReady?.(languageId);
+-            this._restartAttempts.delete(languageId);
+-            this._restartBackoff.delete(languageId);
++            this.watchStableHealth(languageId, client);
+             this.triggerPostInit(languageId, client);
+             return client;
+           } catch (err: any) {
+@@ -510,8 +539,7 @@
+       this.startingServers.delete(languageId);
+       this._lastServerErrors.delete(languageId);
+       this._callbacks.onServerReady?.(languageId);
+-      this._restartAttempts.delete(languageId);
+-      this._restartBackoff.delete(languageId);
++      this.watchStableHealth(languageId, client);
+       this.triggerPostInit(languageId, client);
+       return client;
+     } catch (err: any) {
+@@ -651,7 +679,9 @@
+    * Gives up after MAX_RESTART_ATTEMPTS failures per language per session.
+    */
+   private handleUnexpectedExit(languageId: string, code: number | null): void {
+-    if (this._shuttingDown) return;
++    if (this._shuttingDown || this._restartExhausted.has(languageId) || this._restartTimers.has(languageId)) return;
++    clearTimeout(this._healthTimers.get(languageId));
++    this._healthTimers.delete(languageId);
+ 
+     // Clean up the dead client
+     this.clients.delete(languageId);
+@@ -659,7 +689,10 @@
+ 
+     const attempts = this._restartAttempts.get(languageId) ?? 0;
+     if (attempts >= LspManager.MAX_RESTART_ATTEMPTS) {
+-      this._callbacks.onServerError?.(languageId, `LSP server for ${languageId} crashed ${attempts} times — giving up auto-restart`);
++      this._restartExhausted.add(languageId);
++      const message = `LSP server for ${languageId} exhausted ${attempts} restart attempts — auto-restart disabled; inspect /lsp status and explicitly restart after fixing the project environment`;
++      this._lastServerErrors.set(languageId, message);
++      this._callbacks.onServerError?.(languageId, message);
+       this._callbacks.onServerCrash?.(languageId, false, attempts);
+       return;
+     }
+@@ -670,7 +703,8 @@
+ 
+     this._callbacks.onServerCrash?.(languageId, true, attempts + 1);
+ 
+-    setTimeout(() => {
++    const timer = setTimeout(() => {
++      this._restartTimers.delete(languageId);
+       if (this._shuttingDown) return;
+       const config = this.serverConfigs.get(languageId);
+       if (!config) return;
+@@ -679,17 +713,20 @@
+       this.startingServers.set(languageId, startPromise);
+       startPromise.catch((err) => {
+         this.startingServers.delete(languageId);
+-        this._callbacks.onServerError?.(languageId, `Auto-restart failed for ${languageId}: ${err.message}`);
++        // startServer already reported the error; do not notify twice.
+         // Trigger another restart attempt (recursive backoff)
+         this.handleUnexpectedExit(languageId, null);
+       });
+     }, backoff);
++    timer.unref?.();
++    this._restartTimers.set(languageId, timer);
+   }
+ 
+   /** Shut down all clients (disconnect from daemons, kill direct servers) */
+   async shutdownAll(): Promise<void> {
+     this._workspace.shutdown();
+     this._shuttingDown = true;
++    for (const languageId of new Set([...this._restartTimers.keys(), ...this._healthTimers.keys()])) this.clearRestartTimers(languageId);
+     const shutdowns = [...this.clients.values()].map((client) =>
+       client.shutdown().catch(() => {})
+     );
+@@ -704,6 +741,12 @@
+    * Returns once the new server is initialized, or throws on failure.
+    */
+   async restartServer(languageId: string): Promise<void> {
++    if (this._shuttingDown) throw new Error("LSP manager is shutting down");
++    if (this.startingServers.has(languageId)) throw new Error("LSP server is still starting; wait before restarting");
++    this.clearRestartTimers(languageId);
++    this._restartExhausted.delete(languageId);
++    this._restartAttempts.delete(languageId);
++    this._restartBackoff.delete(languageId);
+     // Shut down existing client
+     const existing = this.clients.get(languageId);
+     if (existing) {

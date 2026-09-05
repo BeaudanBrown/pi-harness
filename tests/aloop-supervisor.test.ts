@@ -117,8 +117,10 @@ test("managed aloop delegates are isolated by Pi session identity", async () => 
 });
 
 test("aloop invocations separate worker-launch resource bounds from issue retries", () => {
-	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 60, maxWorkerLaunches: 20 });
-	assert.deepEqual(parseAloopRunRequest("48 --max-minutes=12 --max-worker-launches 12"), { epic: 48, maxMinutes: 12, maxWorkerLaunches: 12 });
+	assert.deepEqual(parseAloopRunRequest("#48"), { epic: 48, maxMinutes: 60, maxWorkerLaunches: 20, settlementMinutes: 20 });
+	assert.deepEqual(parseAloopRunRequest("48 --max-minutes=12 --max-worker-launches 12"), { epic: 48, maxMinutes: 12, maxWorkerLaunches: 12, settlementMinutes: 20 });
+	assert.equal(parseAloopRunRequest("#48 --settlement-minutes=3").settlementMinutes, 3);
+	assert.throws(() => parseAloopRunRequest("#48 --settlement-minutes 61"), /between 1 and 60/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-minutes 0"), /between 1 and 240/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-worker-launches 21"), /between 1 and 20/);
 	assert.throws(() => parseAloopRunRequest("#48 --max-attempts 3"), /Unknown/);
@@ -351,7 +353,7 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 		assert.equal(kickoffCount, 1);
 		const startup = parseAloopLifecycleEvent(lifecycleEvents[0]);
 		assert.equal(startup?.kind, "startup");
-		assert.match(startup?.body ?? "", /epic #1.*Selected child: #2.*60 minutes.*20 full-worker launches.*supervisor\/implementation:/);
+		assert.match(startup?.body ?? "", /epic #1.*Selected child: #2.*60 implementation minutes.*20 additional settlement minutes.*20 full-worker launches.*supervisor\/implementation:/);
 		assert.doesNotMatch(startup?.body ?? "", /\.pi\/tmp|receipt|spool|verify-/i);
 		assert.ok(activeTools.includes("aloop_launch_worker"));
 		assert.ok(activeTools.includes("aloop_context"));

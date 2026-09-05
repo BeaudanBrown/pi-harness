@@ -153,6 +153,15 @@ const defaultDependencies: AloopExtensionDependencies = {
 export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<AloopExtensionDependencies> = {}): void {
 	const dependencies = { ...defaultDependencies, ...overrides };
 	let activeEpic: number | null = null;
+	let invocation: { version: 1; invocationId: string; epic: number; status: string } | null = null;
+	let invocationReason = "incomplete";
+	let epicClosed = false;
+	function terminalOutcome(status: string): void {
+		if (!invocation || invocation.status !== "running") return;
+		invocation = { ...invocation, status };
+		pi.appendEntry("aloop-terminal-outcome", invocation);
+		pi.sendMessage?.({ customType: "aloop-terminal-outcome", content: `Aloop invocation: ${status}.`, details: invocation, display: false }, { triggerTurn: false });
+	}
 	let activeSessionId: string | null = null;
 	let pendingHandoffs: PendingHandoff[] = [];
 	const issueBaseCommits = new Map<number, string>();
@@ -165,6 +174,22 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	const pendingHumanBoundaries = new Set<string>();
 	const publishedAttemptDigests = new Map<string, string>();
 	let deadlineTimer: ReturnType<typeof setTimeout> | null = null;
+	let settlementTimer: ReturnType<typeof setTimeout> | null = null;
+	let settlementAbort = new AbortController();
+
+	const registerBudgetTool: ExtensionAPI["registerTool"] = (tool) => {
+		pi.registerTool<typeof tool.parameters, unknown>({ ...tool, renderResult: undefined, execute: async (...args) => {
+			if (tool.name === "aloop_abort") return tool.execute(...args);
+			if (runBudget?.settled) return { content: [{ type: "text", text: "This invocation has settled; rerun /aloop before continuing." }], details: { status: "invocation-settled", accepted: false } };
+			const controller = settlementAbort;
+			const expired = () => controller.signal.aborted || Boolean(runBudget?.settlementDeadlineMs && Date.now() >= runBudget.settlementDeadlineMs);
+			const exhausted = (started: boolean) => ({ content: [{ type: "text" as const, text: `Settlement budget exhausted. ${started ? "Active work was not completed" : "This operation was not started"}; required checks are not recorded as failed or passed. Retained work requires explicit recovery.` }], details: { status: "budget-exhausted", started, accepted: false } });
+			if (expired()) return exhausted(false);
+			args[2] = args[2] ? AbortSignal.any([args[2], controller.signal]) : controller.signal;
+			try { const result = await tool.execute(...args); return expired() ? exhausted(true) : result; }
+			catch (error) { if (expired()) return exhausted(true); throw error; }
+		} });
+	};
 	let removeAbortListener: (() => void) | null = null;
 	let removeManagedAbortDelegate: (() => void) | null = null;
 
@@ -172,11 +197,15 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		const event = createAloopLifecycleEvent(kind, epic, body, issue, activeSessionId ?? "standalone");
 		pi.appendEntry(ALOOP_LIFECYCLE_ENTRY_TYPE, event);
 		publishAloopLifecycleEvent(event);
+		if (kind === "cancelled") { invocationReason = settlementAbort.signal.aborted ? "budget-exhausted" : "cancelled"; terminalOutcome(invocationReason); }
+		if (kind === "startup-failure") { invocationReason = "startup-failed"; if (!workerRunning) terminalOutcome(invocationReason); }
 	}
 
 	function clearDeadlineTimer(): void {
 		if (deadlineTimer) clearTimeout(deadlineTimer);
 		deadlineTimer = null;
+		if (settlementTimer) clearTimeout(settlementTimer);
+		settlementTimer = null;
 	}
 
 	function deactivate(): void {
@@ -200,13 +229,23 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
 	}
 
-	function activate(epic: number, ctx: ExtensionContext, recovered: PendingHandoff[], maxMinutes: number, maxWorkerLaunches: number): AloopRunBudget {
+	function activate(epic: number, ctx: ExtensionContext, recovered: PendingHandoff[], maxMinutes: number, maxWorkerLaunches: number, settlementMinutes: number): AloopRunBudget {
 		clearDeadlineTimer();
 		activeEpic = epic;
 		activeSessionId = ctx.sessionManager.getSessionId();
 		pendingHandoffs = recovered;
 		issueBaseCommits.clear();
-		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
+		settlementAbort = new AbortController();
+		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, settlementDeadlineMs: Date.now() + (maxMinutes + settlementMinutes) * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
+		settlementTimer = setTimeout(() => {
+			if (!runBudget || runBudget.settled) return;
+			projectLifecycle("bounded-stop", epic, `Aloop #${epic} exhausted its settlement allowance. Unfinished checks are not passing or failed evidence; retained work requires explicit recovery.`);
+			terminalOutcome("budget-exhausted");
+			settlementAbort.abort();
+			pi.setActiveTools(pi.getActiveTools().filter((name) => !ALL_ALOOP_TOOLS.includes(name)));
+			void ctx.abort();
+		}, (maxMinutes + settlementMinutes) * 60_000);
+		settlementTimer.unref?.();
 		const abort = () => {
 			if (activeEpic !== epic || pendingHumanBoundaries.size > 0) return;
 			projectLifecycle("cancelled", epic, `Aloop #${epic} was cancelled from the managed session. Active subprocesses were terminated and durable recovery state was preserved.`);
@@ -255,6 +294,12 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		return snapshotAloopPolicy(document.stdout, startCommit);
 	}
 
+	function assertSettlementOpen(): void {
+		if (!runBudget || runBudget.settled || settlementAbort.signal.aborted || Date.now() >= (runBudget.settlementDeadlineMs ?? runBudget.deadlineMs)) {
+			throw new Error("No open settlement window; rerun /aloop before recording this decision.");
+		}
+	}
+
 	function activePolicy(): AloopPolicySnapshot {
 		if (!policySnapshot) throw new Error("The active aloop invocation has no committed verification-policy snapshot.");
 		return policySnapshot;
@@ -277,7 +322,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		signal?: AbortSignal,
 		onUpdate?: (value: any) => void,
 	) {
-		const timeoutMs = definition.timeoutMs;
+		const timeoutMs = Math.min(definition.timeoutMs, Math.max(1, (runBudget?.settlementDeadlineMs ?? Infinity) - Date.now()));
 		const root = path.resolve(ctx.cwd, ".pi/tmp/aloop/verification");
 		await mkdir(root, { recursive: true, mode: 0o700 });
 		let directory = "";
@@ -294,7 +339,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		onUpdate?.({ content: [{ type: "text", text: `Running ${label}: ${definition.argv.join(" ")}` }], details: { argv: definition.argv, timeoutMs } });
 		const result = await runDurableCommand({ cwd: ctx.cwd, command: definition.argv, logPath, resultPath, timeoutMs, signal });
 		let diagnosis: Awaited<ReturnType<AloopExtensionDependencies["diagnoseCommand"]>> | undefined;
-		if (result.code !== 0 || result.timedOut || result.cancelled || result.spawnError) {
+		if (!signal?.aborted && !settlementAbort.signal.aborted && (result.code !== 0 || result.timedOut || result.cancelled || result.spawnError)) {
 			const log = await readFile(logPath, "utf8");
 			diagnosis = await dependencies.diagnoseCommand(ctx, {
 				name: label,
@@ -317,6 +362,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
+		terminalOutcome(epicClosed ? "completed" : pendingHumanBoundaries.size > 0 ? "decision-required" : invocationReason);
 		if (pendingHumanBoundaries.size > 0) {
 			if (ctx.hasUI && activeEpic !== null) ctx.ui.setStatus(STATUS_KEY, `aloop: #${activeEpic} awaiting human command`);
 			return;
@@ -401,6 +447,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				return;
 			}
 			const epic = request.epic;
+			const externalId = process.env.PI_ALOOP_INVOCATION_ID;
+			invocation = { version: 1, invocationId: externalId && /^[a-f0-9]{32}$/.test(externalId) ? externalId : randomBytes(16).toString("hex"), epic, status: "running" };
+			invocationReason = "incomplete";
+			epicClosed = false;
 			activeSessionId = ctx.sessionManager.getSessionId();
 			if (!ctx.isIdle()) {
 				ctx.ui.notify("/aloop must be started while Pi is idle; abort the active turn or wait for it to settle, then retry.", "warning");
@@ -421,7 +471,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				projectLifecycle("startup-failure", epic, `Aloop #${epic} could not load its committed verification policy. No worker was started.`);
 				throw error;
 			}
-			const budget = activate(epic, ctx, [], request.maxMinutes, request.maxWorkerLaunches);
+			const budget = activate(epic, ctx, [], request.maxMinutes, request.maxWorkerLaunches, request.settlementMinutes);
 			policySnapshot = startupPolicy;
 			let context;
 			try {
@@ -494,7 +544,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const supervisorModel = activeModelRef(ctx) ?? "unavailable";
 				const patchModel = startupPolicy.policy.patchWorkerModel?.trim() || DEFAULT_ALOOP_PATCH_MODEL;
 				const reviewModel = process.env.PI_HARNESS_REVIEW_MODEL?.trim() || DEFAULT_REVIEW_MODEL;
-				projectLifecycle("startup", epic, `Aloop started for epic #${epic}. ${selected ? `Selected child: #${selected}.` : "No executable child is currently available."} Shared budget: ${request.maxMinutes} minutes and ${request.maxWorkerLaunches} full-worker launches. Models — supervisor/implementation: ${supervisorModel}; patch: ${patchModel}; review: ${reviewModel}.`);
+				projectLifecycle("startup", epic, `Aloop started for epic #${epic}. ${selected ? `Selected child: #${selected}.` : "No executable child is currently available."} Budget: ${request.maxMinutes} implementation minutes, ${request.settlementMinutes} additional settlement minutes and ${request.maxWorkerLaunches} full-worker launches. Models — supervisor/implementation: ${supervisorModel}; patch: ${patchModel}; review: ${reviewModel}.`);
 				if (outstanding.length) projectLifecycle("recovery", epic, `Aloop recovered ${outstanding.length} unsettled attempt${outstanding.length === 1 ? "" : "s"}. No duplicate worker will start before recovery settles.`);
 				pi.sendUserMessage(buildSupervisorKickoff(context, history.stdout, outstanding, budget));
 			} catch (error) {
@@ -509,6 +559,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	pi.registerCommand("aloop-approve-epic", {
 		description: "Human approval for the durably prepared epic HEAD: /aloop-approve-epic <commit>",
 		handler: async (args, ctx) => {
+			assertSettlementOpen();
 			if (!activeEpic || !policySnapshot) throw new Error("No active aloop epic is awaiting approval.");
 			const approvalPath = path.resolve(ctx.cwd, ".pi/tmp/aloop/epic-approval.json");
 			const prepared = JSON.parse(await readFile(approvalPath, "utf8"));
@@ -523,6 +574,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	pi.registerCommand("aloop-decision", {
 		description: "Record a human decision for a child: /aloop-decision <issue> <decision>",
 		handler: async (args, ctx) => {
+			assertSettlementOpen();
 			const match = args.trim().match(/^#?(\d+)\s+(.+)$/s);
 			if (!match) throw new Error("Usage: /aloop-decision <issue> <decision>");
 			const issueNumber = Number(match[1]);
@@ -553,6 +605,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	pi.registerCommand("aloop-authorize-recovery", {
 		description: "Human authorization to close one accepted handoff requiring GitHub-recorded authorization: /aloop-authorize-recovery <issue> <attempt-key>",
 		handler: async (args, ctx) => {
+			assertSettlementOpen();
 			const match = args.trim().match(/^#?(\d+)\s+([a-f0-9]{24})$/);
 			if (!match) throw new Error("Usage: /aloop-authorize-recovery <issue> <attempt-key>");
 			const issue = Number(match[1]);
@@ -582,6 +635,18 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
+	pi.registerCommand("aloop-recovery", {
+		description: "Read-only retained-attempt inspection: /aloop-recovery [#issue]. Never adopts or cleans up work.",
+		async handler(args, ctx) {
+			if (args.trim() && !/^#?[1-9]\d*$/.test(args.trim())) throw new Error("Usage: /aloop-recovery [#issue]");
+			const issue = args.trim() ? Number(args.trim().replace(/^#/, "")) : undefined;
+			const records = (await scanAttemptArtifacts(ctx.cwd)).filter((record) => issue === undefined || record.issue === issue);
+			pi.appendEntry("aloop-recovery-inspection", { records });
+			const summary = records.slice(0, 20).map((record) => `#${record.issue}: ${record.status}; recorded commit ${record.commit ?? "unknown"}; preservation ${record.preservation?.capture ?? "unknown"}`).join("\n");
+			pi.sendMessage({ customType: "aloop-recovery", content: `${records.length} retained attempt(s) in the bounded local scan.\n${summary}\nThis is historical evidence, not current Git state or worker liveness. Inspect git status and retained artifacts; preserve the working copy before intentionally settling it. No files, index, commits, issues or processes were changed. Dirty work is never automatically adopted; rerun /aloop only after explicit settlement.`, display: true });
+		},
+	});
+
 	pi.registerCommand("aloop-abort", {
 		description: "Abort the active aloop invocation and preserve durable recovery state.",
 		handler: async (_args, ctx) => {
@@ -593,7 +658,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_abort",
 		label: "Aloop Abort",
 		description: "Immediately abort active work and prevent further aloop effects while preserving recovery artifacts.",
@@ -608,7 +673,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_context",
 		label: "Aloop Context",
 		description: "Return the active cached epic graph, pending attempt state, budget, and next frontier; optionally refresh GitHub once explicitly.",
@@ -626,7 +691,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_launch_worker",
 		label: "Aloop Launch Worker",
 		description: "Launch one fresh sequential implementation or remediation worker for an executable epic leaf.",
@@ -736,7 +801,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_review_attempt",
 		label: "Aloop Review Attempt",
 		description: "Run fresh Standards and Spec reviewers against the cumulative selected-issue state.",
@@ -771,7 +836,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_apply_patch",
 		label: "Aloop Apply Patch",
 		description: "Launch one sequential targeted patch worker for an unsettled full attempt without consuming full-worker counters.",
@@ -801,7 +866,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					cwd: ctx.cwd, epic: { number: epic.number, title: epic.title, body: epic.body },
 					issue: { number: issue.number, title: issue.title, body: issue.body }, correction: params.correction,
 					issueContext: context, issueBaseCommit: issueBaseCommits.get(issue.number), projectWorkerResources: policy.workerResources,
-					modelRef, timeoutMs: Math.min(params.timeout_ms ?? MAX_PATCH_TIMEOUT_MS, MAX_PATCH_TIMEOUT_MS), spawnDeadlineMs: runBudget.deadlineMs, signal,
+					modelRef, timeoutMs: Math.min(params.timeout_ms ?? MAX_PATCH_TIMEOUT_MS, MAX_PATCH_TIMEOUT_MS, Math.max(1, runBudget.settlementDeadlineMs! - Date.now())), spawnDeadlineMs: runBudget.deadlineMs, signal,
 					parentArtifactDirectory: pending.artifactDirectory,
 				});
 				if (outcome.preservation?.capture === "incomplete") pending.preservation = outcome.preservation;
@@ -820,7 +885,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_finish_attempt",
 		label: "Aloop Finish Attempt",
 		description: "Settle one full attempt: verify accepted work, publish one v3 handoff, close accepted children, and return the next frontier.",
@@ -981,7 +1046,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_checkpoint",
 		label: "Aloop Checkpoint",
 		description: "Create or resolve a transport-neutral human decision boundary and record it on the child issue.",
@@ -1014,7 +1079,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		},
 	});
 
-	pi.registerTool({
+	registerBudgetTool({
 		name: "aloop_epic_completion",
 		label: "Aloop Epic Completion",
 		description: "Verify and prepare complete epic evidence for human approval, then close the parent only after explicit approval.",
@@ -1077,6 +1142,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			await assertCleanHead(head, ctx, signal);
 			await dependencies.closeIssue(ctx.cwd, context.epic.number, { signal });
 			context.epic.state = "closed";
+			epicClosed = true;
 			try { await unlink(approvalPath); } catch { /* Closure is already durable remotely. */ }
 			return { content: [{ type: "text", text: `Closed epic #${context.epic.number} after explicit approval of the final evidence.` }], details: { closed: true, epic: context.epic.number, head } };
 		},

@@ -116,12 +116,14 @@ export type AloopAttemptHandoff = {
 };
 
 export const DEFAULT_ALOOP_MAX_MINUTES = 60;
+export const DEFAULT_ALOOP_SETTLEMENT_MINUTES = 20;
 export const DEFAULT_ALOOP_MAX_WORKER_LAUNCHES = 20;
 export const MAX_ALOOP_MINUTES = 240;
 export const MAX_ALOOP_WORKER_LAUNCHES = 20;
 
 export type AloopRunRequest = {
 	epic: number;
+	settlementMinutes: number;
 	maxMinutes: number;
 	maxWorkerLaunches: number;
 };
@@ -138,6 +140,7 @@ export type AloopAttemptRecord = {
 
 export type AloopRunBudget = {
 	deadlineMs: number;
+	settlementDeadlineMs?: number;
 	maxWorkerLaunches: number;
 	workerLaunchesStarted: number;
 	settled: boolean;
@@ -199,24 +202,26 @@ function positiveBoundedInteger(value: string, option: string, maximum: number):
 export function parseAloopRunRequest(value: string): AloopRunRequest {
 	const tokens = value.trim().split(/\s+/).filter(Boolean);
 	const epicMatch = tokens.shift()?.match(/^#?(\d+)$/);
-	if (!epicMatch) throw new Error("Usage: /aloop #<epic> [--max-minutes <1-240>] [--max-worker-launches <1-20>]");
+	if (!epicMatch) throw new Error("Usage: /aloop #<epic> [--max-minutes <1-240>] [--settlement-minutes <1-60>] [--max-worker-launches <1-20>]");
 	const epic = positiveBoundedInteger(epicMatch[1]!, "Epic number", Number.MAX_SAFE_INTEGER);
 	let maxMinutes = DEFAULT_ALOOP_MAX_MINUTES;
+	let settlementMinutes = DEFAULT_ALOOP_SETTLEMENT_MINUTES;
 	let maxWorkerLaunches = DEFAULT_ALOOP_MAX_WORKER_LAUNCHES;
 	const seen = new Set<string>();
 	while (tokens.length > 0) {
 		const token = tokens.shift()!;
-		const equals = token.match(/^(--max-minutes|--max-worker-launches)=(.+)$/);
+		const equals = token.match(/^(--max-minutes|--max-worker-launches|--settlement-minutes)=(.+)$/);
 		const option = equals?.[1] ?? token;
-		if (option !== "--max-minutes" && option !== "--max-worker-launches") throw new Error(`Unknown /aloop option: ${token}`);
+		if (option !== "--max-minutes" && option !== "--max-worker-launches" && option !== "--settlement-minutes") throw new Error(`Unknown /aloop option: ${token}`);
 		if (seen.has(option)) throw new Error(`Duplicate /aloop option: ${option}`);
 		seen.add(option);
 		const raw = equals?.[2] ?? tokens.shift();
 		if (!raw) throw new Error(`${option} requires a value.`);
 		if (option === "--max-minutes") maxMinutes = positiveBoundedInteger(raw, option, MAX_ALOOP_MINUTES);
+		else if (option === "--settlement-minutes") settlementMinutes = positiveBoundedInteger(raw, option, 60);
 		else maxWorkerLaunches = positiveBoundedInteger(raw, option, MAX_ALOOP_WORKER_LAUNCHES);
 	}
-	return { epic, maxMinutes, maxWorkerLaunches };
+	return { epic, maxMinutes, maxWorkerLaunches, settlementMinutes };
 }
 
 export type AloopBudgetAssessment = {
@@ -424,7 +429,7 @@ export function buildSupervisorKickoff(
 	context: GitHubEpicContext,
 	gitHistory: string,
 	outstandingAttempts: AloopAttemptRecord[] = [],
-	budget?: { deadlineMs: number; maxWorkerLaunches: number },
+	budget?: { deadlineMs: number; settlementDeadlineMs?: number; maxWorkerLaunches: number },
 ): string {
 	const epicIssue = context.issues.find((issue) => issue.number === context.epic.number);
 	const descendants = context.issues.filter((issue) => issue.number !== context.epic.number);
@@ -461,7 +466,7 @@ Recent Git history:
 ${bounded(gitHistory || "(no commits returned)", 8_000)}
 
 Invocation resource budget:
-${budget ? `- Hard deadline: ${new Date(budget.deadlineMs).toISOString()}\n- Maximum worker launches: ${budget.maxWorkerLaunches}` : "- Use the configured hard deadline and worker-launch cap."}
+${budget ? `- Implementation cutoff: ${new Date(budget.deadlineMs).toISOString()}\n- Settlement cutoff: ${new Date(budget.settlementDeadlineMs ?? budget.deadlineMs).toISOString()}\n- Maximum worker launches: ${budget.maxWorkerLaunches}` : "- Use the configured hard deadline and worker-launch cap."}
 
 Operating procedure:
 1. GitHub and Git are authoritative. Use aloop_context as the cached navigation view; request refresh only when external GitHub state may have changed. First recover any accepted handoff awaiting child closure by calling aloop_finish_attempt for that issue; never launch a duplicate worker for it.
@@ -469,7 +474,7 @@ Operating procedure:
 3. For every returned or recovered attempt, call aloop_review_attempt. Use aloop_apply_patch for a narrow correction, a fresh full remediation worker for substantial work, or a trivial direct edit only when clearly safe. Review again after changes.
 4. Call aloop_finish_attempt exactly once for the full attempt. It owns canonical verification, v3 handoff publication, accepted-child closure, crash recovery, and next-frontier selection. Never call legacy receipt/spool/closure tools.
 5. If independent review is unavailable, canonical verification fails, or product/scope ambiguity needs a human, use aloop_checkpoint and stop. There is no semantic retry-count gate.
-6. Continue review, optional remediation, finalization, and next-child selection until worker bounds or a genuine decision boundary. The implementation deadline and 20-launch cap stop new full workers; supervisor settlement may continue.
+6. Continue review, optional remediation, finalization, and next-child selection until worker bounds or a genuine decision boundary. The implementation deadline and 20-launch cap stop new full workers; supervisor settlement may continue only until the settlement cutoff. Checks not completed for budget reasons are not failed checks and cannot authorize acceptance. Emergency preservation uses its own independent bounded allowance.
 7. When all descendants are closed, call aloop_epic_completion with phase=prepare and complete final review/acceptance evidence. Request explicit human approval, then call phase=apply only for the unchanged prepared HEAD.
 8. End with a concise report of completed children, commits, verification, deferred work, and the human-decision or epic-approval state.
 

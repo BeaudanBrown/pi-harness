@@ -209,7 +209,7 @@ let
   '';
 
   packageContracts = pkgs.runCommand "pi-harness-package-contracts" {
-    nativeBuildInputs = [ pkgs.check-jsonschema pkgs.coreutils pkgs.gnugrep pkgs.jq pkgs.nodejs ];
+    nativeBuildInputs = [ pkgs.check-jsonschema pkgs.coreutils pkgs.gnugrep pkgs.git pkgs.jq pkgs.nodejs ];
   } ''
     export HOME="$TMPDIR/home"
     mkdir -p "$HOME"
@@ -282,7 +282,10 @@ let
     PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
       PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
       PI_HARNESS_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
+      PI_HARNESS_WORKER_EXTENSION=${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts \
       node --test ${source}/tests/engineering-runtime.test.mjs
+    PI_HARNESS_HEADLESS_PI=${piHarnessPackage}/bin/pi-aloop \
+      node --test ${source}/tests/aloop-headless.test.mjs
 
     # High-value negative package assertions remain explicit security contracts.
     ! grep -F 'extensions/remote-session/' ${piHarnessPackage}/bin/pi

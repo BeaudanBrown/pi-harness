@@ -183,6 +183,7 @@ async function askWorker(
 	logExcerpt: string,
 	signal: AbortSignal | undefined = ctx.signal,
 ): Promise<{ summary: string; modelRef: string }> {
+	signal?.throwIfAborted();
 	const selected = selectedWorkerModel(ctx, selection);
 	if (!("model" in selected)) throw new Error(selected.error);
 	const { model, modelRef } = selected;
@@ -207,6 +208,7 @@ async function askWorker(
 	signal?.addEventListener("abort", abortWorker, { once: true });
 	let diagnosisTimer: ReturnType<typeof setTimeout> | undefined;
 	try {
+		signal?.throwIfAborted();
 		const prompt = session.prompt(`Parent task:\n${params.task}\n\nCommand name:\n${params.name}\n\nCommand:\n${shellDisplay(params.command)}\n\nExit code: ${result.code ?? "null"}\nTimed out: ${result.timedOut ? "yes" : "no"}\nDuration: ${Math.round(result.durationMs / 1000)}s\nLog path: ${repoRelative(ctx.cwd, result.logPath)}\n\nLog excerpt:\n\`\`\`text\n${logExcerpt}\n\`\`\`\n\nReturn only the concise answer requested by the parent task. Do not mention the wrapper, worker, model, tool internals, or whether summarization occurred.`);
 		const deadline = new Promise<never>((_resolve, reject) => {
 			diagnosisTimer = setTimeout(() => {
