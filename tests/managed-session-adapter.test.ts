@@ -689,6 +689,9 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 	await send("$idle", "prompt", "idle task", "@alice:example.com");
 	await handlers.get("agent_start")!({}, ctx);
 	assert.ok(tools.has("remote_checkpoint"));
+	await assert.rejects(() => tools.get("remote_checkpoint").execute("malformed-checkpoint", {}, undefined, undefined, ctx), /kind must be/);
+	assert.equal(relay.frames.filter((frame) => frame.type === "checkpoint.offer").length, 0,
+		"malformed local-model arguments fail before durable relay or Matrix side effects");
 	const delegated = await delegateManagedAloopCheckpoint(sessionId, "tool-call-stable", { kind: "question", decision: "Approve?" });
 	assert.equal(delegated, true); assert.equal(aborts, 1);
 	assert.equal(relay.frames.filter((frame) => frame.type === "checkpoint.offer").length, 1);

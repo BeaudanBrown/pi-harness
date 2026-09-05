@@ -39,6 +39,8 @@ let
 
   fallbackRuntimePackages = [
     cfg.package
+    pkgs.bash
+    pkgs.which
   ]
   ++ lib.optionals cfg.lsp.enable cfg.lsp.packages
   ++ lib.optionals cfg.diagrams.enable cfg.diagrams.packages

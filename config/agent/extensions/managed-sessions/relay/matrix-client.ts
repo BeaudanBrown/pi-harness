@@ -66,6 +66,15 @@ function transaction(value: string): string {
 	return value;
 }
 
+function hasExpectedPollContent(content: JsonObject, pollKey: string, fallbackKey: string): boolean {
+	const keys = Object.keys(content);
+	if (!keys.includes(pollKey) || !keys.includes(fallbackKey) || keys.some((key) => key !== pollKey && key !== fallbackKey && key !== "m.mentions")) return false;
+	if (!Object.hasOwn(content, "m.mentions")) return true; // Polls published before notification support remain resolvable.
+	const mentions = content["m.mentions"];
+	return typeof mentions === "object" && mentions !== null && !Array.isArray(mentions) &&
+		Object.keys(mentions).length === 1 && (mentions as JsonObject).room === true;
+}
+
 function requiredString(value: unknown, field: string): string {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ManagedMatrixError("invalid_response", `Matrix response omitted ${field}`);
 	const candidate = (value as JsonObject)[field];
@@ -248,7 +257,7 @@ export class ManagedMatrixClient {
 		if (!stable && event.type !== "org.matrix.msc3381.poll.start") return undefined;
 		const content = event.content as JsonObject; const pollKey = stable ? "m.poll" : "org.matrix.msc3381.poll.start";
 		const fallbackKey = stable ? "m.text" : "org.matrix.msc1767.text";
-		if (Object.keys(content).length !== 2 || (stable ? !Array.isArray(content[fallbackKey]) : typeof content[fallbackKey] !== "string") ||
+		if (!hasExpectedPollContent(content, pollKey, fallbackKey) || (stable ? !Array.isArray(content[fallbackKey]) : typeof content[fallbackKey] !== "string") ||
 			typeof content[pollKey] !== "object" || content[pollKey] === null || Array.isArray(content[pollKey])) return undefined;
 		const poll = content[pollKey] as JsonObject;
 		if (Object.keys(poll).length !== 4 || poll.kind !== (stable ? "m.disclosed" : "org.matrix.msc3381.poll.disclosed") || poll.max_selections !== 1 ||
@@ -422,6 +431,7 @@ export class ManagedMatrixClient {
 		const normalized = answers.map((answer) => ({ id: boundedText(answer.id, "poll answer ID", 255), text: boundedText(answer.text, "poll answer", 1_024) }));
 		const fallback = boundedText([text, ...normalized.map((answer, index) => `${index + 1}. ${answer.text}`)].join("\n"), "poll fallback");
 		if (dialect === "stable") return this.sendEvent(roomId, "m.poll.start", transactionId, {
+			"m.mentions": { room: true },
 			"m.text": [{ mimetype: "text/plain", body: fallback }],
 			"m.poll": {
 				kind: "m.disclosed", max_selections: 1, question: { "m.text": [{ body: text }] },
@@ -429,6 +439,7 @@ export class ManagedMatrixClient {
 			},
 		}, signal);
 		return this.sendEvent(roomId, "org.matrix.msc3381.poll.start", transactionId, {
+			"m.mentions": { room: true },
 			"org.matrix.msc1767.text": fallback,
 			"org.matrix.msc3381.poll.start": {
 				kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1, question: { "org.matrix.msc1767.text": text },

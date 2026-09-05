@@ -88,6 +88,7 @@ test("Matrix rich primitives emit exact MSC3381 wire dialects and bounded edit f
 	assert.deepEqual(calls[4], {
 		path: "/_matrix/client/v3/rooms/!rich%3Aexample.com/send/org.matrix.msc3381.poll.start/pi_poll",
 		body: {
+			"m.mentions": { room: true },
 			"org.matrix.msc1767.text": "Continue?\n1. Yes\n2. No",
 			"org.matrix.msc3381.poll.start": {
 				kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
@@ -103,6 +104,7 @@ test("Matrix rich primitives emit exact MSC3381 wire dialects and bounded edit f
 	assert.deepEqual(calls[6], {
 		path: "/_matrix/client/v3/rooms/!rich%3Aexample.com/send/m.poll.start/pi_poll_stable",
 		body: {
+			"m.mentions": { room: true },
 			"m.text": [{ mimetype: "text/plain", body: "Stable?\n1. Yes" }],
 			"m.poll": { kind: "m.disclosed", max_selections: 1, question: { "m.text": [{ body: "Stable?" }] },
 				answers: [{ "m.id": "yes", "m.text": [{ body: "Yes" }] }] },
@@ -115,6 +117,26 @@ test("Matrix rich primitives emit exact MSC3381 wire dialects and bounded edit f
 	assert.equal(String(calls[8]?.body.body).length, 32_768);
 	assert.equal((calls[8]?.body["m.new_content"] as { body: string }).body.length, 32_768);
 	await assert.rejects(() => client.startPoll("!rich:example.com", "pi_bad", "q", [], undefined), /out of bounds/);
+});
+
+test("checkpoint poll revalidation accepts legacy starts and only the exact room notification mention", async () => {
+	const answer = { id: "checkpoint-answer", text: "Proceed" };
+	const base = {
+		"org.matrix.msc1767.text": "Choose\n1. Proceed",
+		"org.matrix.msc3381.poll.start": {
+			kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
+			question: { "org.matrix.msc1767.text": "Choose" },
+			answers: [{ id: answer.id, "org.matrix.msc1767.text": answer.text }],
+		},
+	};
+	let content: Record<string, unknown> = base;
+	const client = new ManagedMatrixClient(config, async () => Response.json({ sender: config.botUserId,
+		type: "org.matrix.msc3381.poll.start", content }), ["!checkpoint:example.com"]);
+	assert.equal(await client.checkpointPollAnswer("!checkpoint:example.com", "$poll", answer.id, "Choose", [answer]), "Proceed");
+	content = { "m.mentions": { room: true }, ...base };
+	assert.equal(await client.checkpointPollAnswer("!checkpoint:example.com", "$poll", answer.id, "Choose", [answer]), "Proceed");
+	content = { "m.mentions": { room: false }, ...base };
+	assert.equal(await client.checkpointPollAnswer("!checkpoint:example.com", "$poll", answer.id, "Choose", [answer]), undefined);
 });
 
 test("control poll resolution revalidates durable bot-owned poll content after restart", async () => {

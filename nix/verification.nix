@@ -311,6 +311,11 @@ let
     grep -F 'coordinator_model_args+=(--model "$PI_MANAGED_SESSION_MODEL")' "$coordinator" >/dev/null
     grep -F 'coordinator_model_args+=(--thinking "$PI_MANAGED_SESSION_THINKING")' "$coordinator" >/dev/null
     grep -F 'export PI_MANAGED_LOCAL_MODEL_TOOLS=' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+    grep -F '${pkgs.bash}/bin' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+    grep -F '${pkgs.which}/bin' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
+    managed_runtime_path=${lib.makeBinPath [ pkgs.bash pkgs.which pkgs.coreutils ]}
+    test "$(${pkgs.coreutils}/bin/env -i PATH="$managed_runtime_path" which bash)" = '${lib.getExe pkgs.bash}'
+    ${pkgs.coreutils}/bin/env -i PATH="$managed_runtime_path" sh -c 'date +%F >/dev/null'
     grep -F -- '--extension "${piHarnessResources.managedSessionExtensions.modelPolicy}"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
     ! grep -F '${piHarnessResources.managedSessionExtensions.modelPolicy}' "$coordinator" >/dev/null
     ! grep -F '${piLspExtension}/share/pi-lsp-extension/src/index.ts' ${lspDisabledPiWrapper}/bin/pi >/dev/null

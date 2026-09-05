@@ -8,7 +8,7 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveCheckpointPollAnswerId, deriveCheckpointPollIntentHash, deriveChunkId, deriveConversationId, deriveDeliveryId, deriveMatrixTransactionId, deriveTranscriptEntryId,
 	encodeNdjsonEnvelope, parseNdjsonEnvelope, type ConversationManifest, type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { renderRemoteCheckpoint, renderRemoteCheckpointPollQuestion } from "../config/agent/extensions/managed-sessions/checkpoint.js";
+import { RemoteCheckpointSchema, renderRemoteCheckpoint, renderRemoteCheckpointPollQuestion, validateRemoteCheckpoint } from "../config/agent/extensions/managed-sessions/checkpoint.js";
 import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
 import { CoordinatorRouter, authorizedRoomEvents, parseTypedRemoteControl } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
@@ -453,6 +453,19 @@ test("persisted unfinished delivery wakes a crashed process but explicit cancell
 	await registry.cancelPendingInputs(manifest.conversationId);
 	await router.reconcileWake();
 	assert.equal(launches, 1, "durably cancelled input is never recovered");
+});
+
+test("checkpoint tool schema stays flat for local constrained decoding while execution validation stays kind-specific", () => {
+	const schema = RemoteCheckpointSchema as unknown as Record<string, unknown>;
+	assert.equal(schema.type, "object");
+	assert.equal(Object.hasOwn(schema, "anyOf"), false);
+	assert.deepEqual(schema.required, ["kind"]);
+	assert.deepEqual(validateRemoteCheckpoint({ kind: "question", decision: "Choose", options: ["A", "B"] }),
+		{ kind: "question", decision: "Choose", options: ["A", "B"] });
+	assert.throws(() => validateRemoteCheckpoint({}), /kind must be/);
+	assert.throws(() => validateRemoteCheckpoint({ kind: "question" }), /decision must be a string/);
+	assert.throws(() => validateRemoteCheckpoint({ kind: "blocked", blockerEvidence: "Observed" }), /requiredIntervention must be a string/);
+	assert.throws(() => validateRemoteCheckpoint({ kind: "issue_complete", issueOrObjective: "Done" }), /implementationSummary must be a string/);
 });
 
 test("checkpoint poll question stays concise and its fallback enforces the single-event byte bound", () => {

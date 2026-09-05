@@ -11,42 +11,26 @@ const requestedCodeFields = {
 	requestedCodeOrDiff: Type.Optional(prose("Code or diff explicitly requested by the operator.", 1_000)),
 };
 
-export const RemoteCheckpointSchema = Type.Union([
-	Type.Object(
-		{
-			kind: Type.Literal("question"),
-			decision: prose("The specific decision or answer required from the operator.", 1_200),
-			context: Type.Optional(prose("Concise context needed to make the decision.", 1_200)),
-			options: Type.Optional(
-				Type.Array(prose("One concise option.", 300), { minItems: 1, maxItems: 8 }),
-			),
-			...requestedCodeFields,
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			kind: Type.Literal("blocked"),
-			blockerEvidence: prose("Observed evidence showing why work cannot continue.", 2_200),
-			requiredIntervention: prose("The exact operator action or information required.", 1_200),
-			...requestedCodeFields,
-		},
-		{ additionalProperties: false },
-	),
-	Type.Object(
-		{
-			kind: Type.Literal("issue_complete"),
-			issueOrObjective: prose("Completed issue number, title, or objective.", 500),
-			implementationSummary: prose("Concise implementation summary without code or diffs.", 1_200),
-			verificationEvidence: prose("Tests, checks, and live evidence that passed.", 1_200),
-			caveats: prose("Remaining caveats, deferred work, or 'None'.", 800),
-			gitCommitState: prose("Commit, push, and working-tree state.", 800),
-			approvalRequest: prose("Exact closure or continuation approval requested from the operator.", 600),
-			...requestedCodeFields,
-		},
-		{ additionalProperties: false },
-	),
-]);
+// llama.cpp's constrained tool grammar emits an empty object for a root anyOf.
+// Advertise one flat shape and retain the stricter kind-specific validation below.
+export const RemoteCheckpointSchema = Type.Object(
+	{
+		kind: Type.String({ description: "Checkpoint kind: question, blocked, or issue_complete.", pattern: "^(question|blocked|issue_complete)$" }),
+		decision: Type.Optional(prose("Required for question: the specific decision or answer required from the operator.", 1_200)),
+		context: Type.Optional(prose("Optional for question: concise context needed to make the decision.", 1_200)),
+		options: Type.Optional(Type.Array(prose("Optional question answer choice.", 300), { minItems: 1, maxItems: 8 })),
+		blockerEvidence: Type.Optional(prose("Required for blocked: observed evidence showing why work cannot continue.", 2_200)),
+		requiredIntervention: Type.Optional(prose("Required for blocked: the exact operator action or information required.", 1_200)),
+		issueOrObjective: Type.Optional(prose("Required for issue_complete: completed issue number, title, or objective.", 500)),
+		implementationSummary: Type.Optional(prose("Required for issue_complete: concise implementation summary without code or diffs.", 1_200)),
+		verificationEvidence: Type.Optional(prose("Required for issue_complete: tests, checks, and live evidence that passed.", 1_200)),
+		caveats: Type.Optional(prose("Required for issue_complete: remaining caveats, deferred work, or 'None'.", 800)),
+		gitCommitState: Type.Optional(prose("Required for issue_complete: commit, push, and working-tree state.", 800)),
+		approvalRequest: Type.Optional(prose("Required for issue_complete: exact closure or continuation approval requested from the operator.", 600)),
+		...requestedCodeFields,
+	},
+	{ additionalProperties: false },
+);
 
 interface RequestedCodeOrDiff {
 	codeOrDiffRequested?: true;

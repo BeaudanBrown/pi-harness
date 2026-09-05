@@ -275,7 +275,7 @@ host-owned room routing: ordinary text is an idle prompt or busy follow-up; type
 queued during wake cancels that wake input. The `remote_checkpoint` tool emits
 one durable structured question, blocker, or issue-completion boundary, then
 hard-aborts the run until a new currently joined participant reply. Declared question options become
-single-select polls with durable opaque answer mappings; the first valid vote or
+single-select polls with durable opaque answer mappings and deterministic room-mention notification requests; the first valid vote or
 an ordinary text fallback atomically retires the poll and resumes exactly once.
 Authorized unencrypted Element X JPEG, PNG, and WebP events are size-, signature-, decode-, dimension-, and pixel-validated, normalized to one metadata-free frame, persisted under bounded blob quotas, and transferred through digest-verified IPC chunks. Captions and images enter Pi as one ordered user turn; captionless images use a neutral prompt. Models without image input support reject the whole delivery with a Matrix notice and cleanup, without a silent model switch or caption-only fallback. A connected ordinary adapter also activates `remote_artifact_export`, which validates one workspace-relative regular file before streaming digest-verified bounded chunks to the relay. The relay durably reserves and uploads bounded images, audio, or generic files and sends one stable Matrix media event without exposing contents or host paths in activity. Accepted input and media, persisted
 unfinished work, checkpoint/final projection, launch failure, explicit
