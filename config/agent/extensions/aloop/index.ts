@@ -4,6 +4,7 @@ import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
 import { closeCurrentRepositoryIssue, publishExactIssueComment, retrieveCurrentRepositoryEpicContext } from "../github-issues/index.js";
+import { AloopEnvironmentError, preflightAloopEnvironment } from "../github-issues/aloop-environment.js";
 import { DEFAULT_ALOOP_PATCH_MODEL, runAloopPatchWorker, runAloopWorker, selectAloopPatchModel } from "../github-issues/aloop-worker.js";
 import { balancedLogExcerpt, runDurableCommand, writeDurableResult } from "../worker-runner/command-execution.js";
 import { DEFAULT_REVIEW_MODEL } from "../review-agents/core.js";
@@ -131,6 +132,7 @@ export type AloopExtensionDependencies = {
 	closeIssue: typeof closeCurrentRepositoryIssue;
 	publishComment: typeof publishExactIssueComment;
 	retrieveEpicContext: typeof retrieveCurrentRepositoryEpicContext;
+	preflightEnvironment: typeof preflightAloopEnvironment;
 	runWorker: typeof runAloopWorker;
 	runPatchWorker: typeof runAloopPatchWorker;
 	runReview: typeof invokeReviewAgents;
@@ -141,6 +143,7 @@ const defaultDependencies: AloopExtensionDependencies = {
 	closeIssue: closeCurrentRepositoryIssue,
 	publishComment: publishExactIssueComment,
 	retrieveEpicContext: retrieveCurrentRepositoryEpicContext,
+	preflightEnvironment: preflightAloopEnvironment,
 	runWorker: runAloopWorker,
 	runPatchWorker: runAloopPatchWorker,
 	runReview: invokeReviewAgents,
@@ -636,6 +639,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		async execute(_id, params: { issue: number; attempt_type?: "implementation" | "remediation"; timeout_ms?: number }, signal, onUpdate, ctx) {
 			if (workerRunning) throw new Error("An aloop worker is already running; workers must remain sequential.");
 			workerRunning = true;
+			let launchCharged = false;
 			try {
 				const attemptType = params.attempt_type ?? "implementation";
 				if (!runBudget) throw new Error("Run /aloop #<epic> before launching a worker.");
@@ -653,9 +657,15 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const issue = selectAloopLeaf(context, params.issue);
 				const handoffs = parseAloopHandoffs(issue.recentHandoffs).filter((handoff) => handoff.issue === issue.number);
 				const epic = context.issues.find((candidate) => candidate.number === context.epic.number)!;
+				const runtime = await dependencies.preflightEnvironment({ cwd: ctx.cwd, canonicalCommand: activePolicy().policy.canonicalCommand.argv, signal });
+				// Keep pre-launch evidence in native private session storage: writing
+				// into an unignored workspace here could itself make the worker dirty.
+				pi.appendEntry("aloop-environment-preflight", runtime);
+				if (runtime.status === "environment-blocked") throw new AloopEnvironmentError(runtime);
 				const launchBudget = assessAloopRunBudget(runBudget, Date.now());
 				if (!launchBudget.allowed) throw new Error(launchBudget.reason);
 				runBudget.workerLaunchesStarted += 1;
+				launchCharged = true;
 				attemptReviews.delete(issue.number);
 				const workerLaunchNumber = runBudget.workerLaunchesStarted;
 				const retryNumber = nextIssueRetryNumber(handoffs, attemptType);
@@ -713,6 +723,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				].join("\n");
 				return { content: [{ type: "text", text }], details: outcome };
 			} catch (error) {
+				if (error instanceof AloopEnvironmentError) {
+					if (launchCharged && runBudget) runBudget.workerLaunchesStarted -= 1;
+					if (activeEpic !== null) projectLifecycle("startup-failure", activeEpic, error.message, params.issue);
+					return { content: [{ type: "text", text: error.message }], details: { status: "environment-blocked", missing: error.evidence.missing, workerStarted: false, launchCharged: false } };
+				}
 				if (activeEpic !== null) projectLifecycle("startup-failure", activeEpic, `Aloop could not complete the requested worker launch for child #${params.issue}. No later review, verification, or GitHub mutation was started; recovery state is preserved.`, params.issue);
 				throw error;
 			} finally {

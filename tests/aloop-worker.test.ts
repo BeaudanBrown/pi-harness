@@ -215,8 +215,11 @@ test("worker execution records a clean one-commit attempt and complete artifacts
 			cwd,
 			issueContext: { relationships: { blockedBy: [49] }, decision: "Use v3" },
 			launcher: [process.execPath, fakeWorker],
-			env: { FAKE_ALOOP_MODE: "success" },
+			env: { FAKE_ALOOP_MODE: "success", API_SECRET: "never-persist-env-values" },
 		});
+		const runtimeEvidence = await readFile(path.join(cwd, outcome.artifacts.runtime!), "utf8");
+		assert.equal(JSON.parse(runtimeEvidence).status, "ready");
+		assert.doesNotMatch(runtimeEvidence, /API_SECRET|never-persist-env-values|FAKE_ALOOP_MODE/);
 		assert.equal(outcome.status, "completed");
 		assert.match(outcome.commit ?? "", /^[0-9a-f]{40}$/);
 		assert.equal(outcome.workerResult?.status, "candidate-complete");
@@ -289,10 +292,22 @@ test("targeted patch spawn deadline is enforced at the process boundary", async 
 	} finally { await rm(cwd, { recursive: true, force: true }); }
 });
 
+test("missing launcher fails environment preflight before creating an attempt", async () => {
+	const cwd = await createRepository();
+	try {
+		await assert.rejects(runAloopWorker({ ...workerInput, cwd, launcher: [path.join(cwd, "missing-pi")] }), /environment blocked: missing launcher/);
+		await assert.rejects(readdir(path.join(cwd, ".pi/tmp/aloop")), { code: "ENOENT" });
+	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
 test("launcher failures return a bounded outcome and finalized result artifact", async () => {
 	const cwd = await createRepository();
 	try {
-		const outcome = await runAloopWorker({ ...workerInput, cwd, launcher: [path.join(cwd, "missing-pi")] });
+		const launcher = path.join(cwd, ".pi", "bad-interpreter");
+		await mkdir(path.dirname(launcher), { recursive: true });
+		await writeFile(launcher, "#!/nonexistent-aloop-interpreter\n");
+		await chmod(launcher, 0o700);
+		const outcome = await runAloopWorker({ ...workerInput, cwd, launcher: [launcher] });
 		assert.equal(outcome.status, "worker-failed");
 		assert.match(outcome.summary, /ENOENT|spawn/);
 		const artifact = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.result), "utf8"));

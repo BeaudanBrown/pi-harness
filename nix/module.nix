@@ -37,6 +37,11 @@ let
     xdg-utils
   ];
 
+  engineeringRuntimePath = cfg.package.engineeringRuntimePath or (lib.makeBinPath (pkgs.callPackage ./engineering-runtime.nix { }));
+  engineeringRuntimeEnvironment = ''
+    export PI_HARNESS_ENGINEERING_RUNTIME_PATH="${engineeringRuntimePath}"
+    export PATH="''${PATH:+$PATH:}${engineeringRuntimePath}"
+  '';
   fallbackRuntimePackages = [
     cfg.package
     pkgs.bash
@@ -145,6 +150,7 @@ let
     ${runtimeEnvironmentSetup}
     ${sessionDirectoryEnvironment}
     ${managedSessionEnvironment}
+    ${lib.optionalString (!(cfg.package ? engineeringRuntimePath)) engineeringRuntimeEnvironment}
     export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspEnabledEnvironment}
     ${lspFallbackEnvironment}
@@ -191,6 +197,7 @@ let
         export PI_MANAGED_LOCAL_MODEL_TOOLS=${lib.escapeShellArg managedLocalModelTools}
         export PI_HARNESS_RESOURCES_ROOT="${cfg.package.harnessResources}/share/pi-harness/agent"
         export PI_HARNESS_MATT_SKILLS_ROOT="${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills"
+        ${engineeringRuntimeEnvironment}
         export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
         ${lspEnabledEnvironment}
         ${lspFallbackEnvironment}

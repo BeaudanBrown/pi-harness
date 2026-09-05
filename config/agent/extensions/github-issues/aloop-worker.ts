@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { resolveAgentProfile, withProjectWorkerOptIn, type AgentProfile } from "../agent-profiles/core.js";
 import { collectSessionUsage, readNestedModelUsage, type NestedModelUsage } from "../agent-profiles/usage.js";
 
+import { AloopEnvironmentError, defaultAloopLauncher, preflightAloopEnvironment, resolveAloopEnvironment } from "./aloop-environment.js";
 import { prepareResultPublication, syncAttemptDirectory, writeAttemptIdentity } from "./aloop-artifacts.js";
 import { preserveAttempt, preservationSummary, type PreservationEvidence } from "./aloop-preservation.js";
 
@@ -83,7 +84,7 @@ export type AloopAttemptOutcome = {
 	submission?: "valid" | "missing" | "invalid";
 	preservation?: PreservationEvidence;
 	modelUsage?: NestedModelUsage[];
-	artifacts: { directory: string; prompt: string; stdout: string; stderr: string; result: string; submission?: string; context?: string; diff?: string; stagedDiff?: string; untracked?: string };
+	artifacts: { directory: string; prompt: string; stdout: string; stderr: string; result: string; submission?: string; context?: string; runtime?: string; diff?: string; stagedDiff?: string; untracked?: string };
 };
 
 type ProcessResult = {
@@ -372,7 +373,7 @@ export async function runIsolatedAloopProcess(options: {
 	});
 }
 
-type GitCommandOptions = { signal?: AbortSignal; deadlineMs?: number; timeoutMs?: number };
+type GitCommandOptions = { signal?: AbortSignal; deadlineMs?: number; timeoutMs?: number; env?: NodeJS.ProcessEnv };
 
 async function gitResult(cwd: string, args: string[], options: GitCommandOptions = {}): Promise<{ code: number | null; stdout: string; stderr: string }> {
 	if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("Aloop Git checks require process-group cleanup on Linux or macOS.");
@@ -380,7 +381,7 @@ async function gitResult(cwd: string, args: string[], options: GitCommandOptions
 	const timeoutMs = Math.min(options.timeoutMs ?? DEFAULT_GIT_TIMEOUT_MS, options.deadlineMs === undefined ? Number.MAX_SAFE_INTEGER : options.deadlineMs - Date.now());
 	if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new Error(`Git command deadline expired before spawn: git ${args.join(" ")}`);
 	return await new Promise((resolve, reject) => {
-		const child = spawn("git", args, { cwd, detached: true, stdio: ["ignore", "pipe", "pipe"] });
+		const child = spawn("git", args, { cwd, env: options.env, detached: true, stdio: ["ignore", "pipe", "pipe"] });
 		let stdout = "";
 		let stderr = "";
 		let settled = false;
@@ -444,14 +445,11 @@ export async function resolveProjectWorkerResources(
 	return { extensions, tools };
 }
 
-function defaultLauncher(): string[] {
-	const script = process.argv[1];
-	if (!script) throw new Error("Cannot locate the running Pi CLI script; provide an explicit aloop launcher.");
-	return [process.execPath, script];
-}
-
 export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAttemptOutcome> {
-	const gitOptions = { signal: input.signal, deadlineMs: input.deadlineMs };
+	const environment = resolveAloopEnvironment(input.env);
+	const runtime = await preflightAloopEnvironment({ cwd: input.cwd, env: environment, launcher: input.launcher, signal: input.signal });
+	if (runtime.status === "environment-blocked") throw new AloopEnvironmentError(runtime);
+	const gitOptions = { signal: input.signal, deadlineMs: input.deadlineMs, env: environment };
 	const initialStatus = await worktreeStatus(input.cwd, gitOptions);
 	if (initialStatus) throw new Error("Aloop worker refused to start because the worktree is dirty.");
 	const beforeHead = await git(input.cwd, ["rev-parse", "HEAD"], gitOptions);
@@ -474,6 +472,8 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 	const stagedDiffPath = resolveAloopArtifactPath(input.cwd, attemptId, "staged.patch");
 	const untrackedPath = resolveAloopArtifactPath(input.cwd, attemptId, "untracked-files.json");
 	const usagePath = resolveAloopArtifactPath(input.cwd, attemptId, "nested-usage.jsonl");
+	const runtimePath = resolveAloopArtifactPath(input.cwd, attemptId, "runtime.json");
+	await writeFile(runtimePath, `${JSON.stringify(runtime, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" });
 	await writeFile(contextPath, `${JSON.stringify({
 		version: 1, epic: input.epic, selectedIssue: input.issue, attemptType: input.attemptType,
 		issueBaseCommit: input.issueBaseCommit ?? beforeHead, attemptStartCommit: beforeHead, priorHandoffs: input.priorHandoffs ?? [], snapshot: input.issueContext ?? null,
@@ -495,11 +495,8 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			...(input.parentArtifactDirectory ? { parentArtifactDirectory: input.parentArtifactDirectory } : {}),
 		});
 		publication = await prepareResultPublication(directory);
-		const fallbackPath = process.env.PI_HARNESS_LSP_FALLBACK_PATH?.trim();
-		const inheritedPath = input.env?.PATH ?? process.env.PATH;
 		const workerEnvironment: NodeJS.ProcessEnv = {
-			...input.env,
-			...(fallbackPath ? { PATH: `${inheritedPath ?? ""}:${fallbackPath}` } : {}),
+			...environment,
 			PI_HARNESS_AGENT_PROFILE: profileName,
 			PI_HARNESS_PROJECT_WORKER_TOOLS: JSON.stringify(projectResources.tools),
 			PI_ALOOP_ISSUE_CONTEXT_PATH: contextPath,
@@ -510,7 +507,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 		};
 		const effectiveEnvironment: NodeJS.ProcessEnv = { ...process.env, ...workerEnvironment };
 		const command = buildAloopWorkerCommand({
-		launcher: input.launcher ?? defaultLauncher(), prompt, modelRef: input.modelRef, profile,
+		launcher: input.launcher ?? defaultAloopLauncher(), prompt, modelRef: input.modelRef, profile,
 		resourceRoots: {
 			harness: effectiveEnvironment.PI_HARNESS_RESOURCES_ROOT,
 			mattSkills: effectiveEnvironment.PI_HARNESS_MATT_SKILLS_ROOT,
@@ -553,7 +550,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 		}
 	}
-	const settlementGitOptions: GitCommandOptions = { deadlineMs: Date.now() + 30_000 };
+	const settlementGitOptions: GitCommandOptions = { deadlineMs: Date.now() + 30_000, env: environment };
 	const preserved = await preserveAttempt({ cwd: input.cwd, directory, base: beforeHead,
 		git: (args) => gitResult(input.cwd, args, settlementGitOptions),
 	});
@@ -621,6 +618,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			result: relative(resultPath),
 			submission: relative(submissionPath),
 			context: relative(contextPath),
+			runtime: relative(runtimePath),
 			diff: relative(diffPath),
 			stagedDiff: relative(stagedDiffPath),
 			untracked: relative(untrackedPath),

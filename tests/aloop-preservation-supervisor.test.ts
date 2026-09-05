@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -35,6 +35,8 @@ test("supervisor blocks acceptance on incomplete capture and publishes preservat
 	const leaf = { number: 2, title: "Leaf", body: "Fix", state: "open" as const, labels: [], assignee: null, parent: null, container: { number: 1, title: "Epic", state: "open" as const }, children: [], blockers: [], recentHandoffs: [] };
 	const graph = { epic: { number: 1, title: "Epic", state: "open" as const }, issues: [{ ...leaf, number: 1, children: [2] }, leaf], executableLeaves: [2] };
 	const published: string[] = [];
+	let runtimeReady = false;
+	let workerCalls = 0;
 	const pi = {
 		registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command),
 		on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, setSessionName: () => undefined, sendUserMessage: () => undefined, appendEntry: () => undefined,
@@ -42,13 +44,23 @@ test("supervisor blocks acceptance on incomplete capture and publishes preservat
 	} as unknown as ExtensionAPI;
 	registerAloopExtension(pi, {
 		retrieveEpicContext: async () => graph,
-		runWorker: async () => ({ status: "timeout", summary: "partial", commit: null, workerResult: null, contract: { valid: false, commit: null, violations: [] }, process: { exitCode: null, signal: null, timedOut: true, cancelled: false, durationMs: 1 }, preservation: { version: 1, head, commits: 0, staged: null, unstaged: null, untracked: null, capture: "incomplete", failures: ["worktree inspection"] }, artifacts: { directory: ".pi/tmp/aloop/issue-2-1-abcdef", prompt: "p", stdout: "o", stderr: "e", result: "r" } }),
+		preflightEnvironment: async () => ({ version: 1, status: runtimeReady ? "ready" : "environment-blocked", missing: runtimeReady ? [] : ["canonical-command"], executables: {} }),
+		runWorker: async () => { workerCalls++; return ({ status: "timeout", summary: "partial", commit: null, workerResult: null, contract: { valid: false, commit: null, violations: [] }, process: { exitCode: null, signal: null, timedOut: true, cancelled: false, durationMs: 1 }, preservation: { version: 1, head, commits: 0, staged: null, unstaged: null, untracked: null, capture: "incomplete", failures: ["worktree inspection"] }, artifacts: { directory: ".pi/tmp/aloop/issue-2-1-abcdef", prompt: "p", stdout: "o", stderr: "e", result: "r" } }); },
 		publishComment: async (_cwd, _issue, body, apply) => { if (apply) published.push(body); return {}; },
 		closeIssue: async () => { assert.fail("must not close"); },
 	});
 	const ctx = { cwd, hasUI: false, isIdle: () => true, signal: new AbortController().signal, abort: () => undefined, sessionManager: { getSessionId: () => "preservation-test" }, model: { provider: "p", id: "m" }, modelRegistry: { find: () => undefined, hasConfiguredAuth: () => false } } as unknown as ExtensionContext;
 	await commands.get("aloop").handler("#1", ctx);
+	const blocked = await tools.get("aloop_launch_worker").execute("blocked", { issue: 2 }, ctx.signal, undefined, ctx);
+	assert.equal(blocked.details.status, "environment-blocked");
+	assert.equal(workerCalls, 0);
+	assert.equal(published.length, 0);
+	assert.deepEqual(await readdir(cwd), [], "preflight must not dirty an unignored workspace");
+	const state = await tools.get("aloop_context").execute("context", {}, ctx.signal, undefined, ctx);
+	assert.equal(state.details.budget.workerLaunchesStarted, 0);
+	runtimeReady = true;
 	await tools.get("aloop_launch_worker").execute("launch", { issue: 2 }, ctx.signal, undefined, ctx);
+	assert.equal(workerCalls, 1);
 	const params = { issue: 2, outcome: "accepted", summary: "No changes", outstanding_findings: [], decisions: [], verification: [], next_action: "Inspect" };
 	await assert.rejects(tools.get("aloop_finish_attempt").execute("finish", params, ctx.signal, undefined, ctx), /complete preservation evidence/);
 	assert.equal(published.length, 0);

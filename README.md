@@ -375,6 +375,13 @@ required command is missing. It does not add a new execution tool; normal Pi
 sessions still use the built-in `bash` tool, and AgentGraph mode keeps its
 restricted tool surface.
 
+Engineering launchers also append a shared Nix-owned runtime baseline after the
+project PATH: shell, Git/GitHub tools, core file/text utilities, ripgrep, flock,
+and Nix. Aloop checks required executable availability before consuming a worker
+launch and records only bounded private executable-resolution evidence. Python,
+compilers, and project dependencies still belong to the repository environment.
+The lean local and coordinator launchers do not explicitly inject this baseline.
+
 ## Tmux Cursor Focus
 
 The included `tmux-cursor-focus` extension hides Pi's software-rendered editor

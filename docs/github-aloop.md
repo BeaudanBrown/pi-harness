@@ -181,6 +181,34 @@ A verification run must begin and end at the same clean HEAD. When the policy is
 missing, malformed, or required infrastructure is unavailable, the supervisor
 records the gap and stops rather than inventing a passing check.
 
+## Worker environment preflight
+
+Normal and managed-project engineering launchers append the same Nix-owned
+baseline after the project PATH: Bash, coreutils, findutils, grep/sed, Git,
+GitHub CLI, jq, ripgrep, flock, which, and Nix. Worker launches retain the inherited
+project environment and append missing LSP/runtime fallback entries. The local
+and coordinator launchers do not explicitly inject this engineering baseline;
+this is capability configuration, not an operating-system sandbox.
+
+Before charging a full-worker launch, the supervisor checks the launcher, Bash,
+Git, and the committed canonical command's executable. Canonical availability is
+checked against the supervisor's actual inherited PATH, not synthetic worker
+fallbacks that verification would not receive. Missing requirements
+return `environment-blocked`, without a worker spawn, launch charge or GitHub
+mutation. Direct worker calls check their effective launcher/Bash/Git too;
+missing tools fail before creating an attempt. Executable presence is not a
+promise that a script's interpreter, nested commands, or project build will work.
+A present launcher that fails at execution still produces the existing durable
+launch-failure result.
+
+Private native Pi session entries (`aloop-environment-preflight`) and successful
+worker `runtime.json` record bounded role-to-executable resolutions, never the whole
+environment or credential values. Public failure text contains role labels only.
+Preflight does not install tools, start Nix builds, or alter project configuration.
+Python and project compilers remain project-owned: launch from the repository's
+existing Nix environment and use its documented verification entrypoint. No
+project environment wrapper or automatic model change is introduced.
+
 ## Preservation evidence
 
 New worker results retain execution status independently of `submission`
@@ -292,6 +320,8 @@ It contains:
 - `issue-context.json` — the immutable GitHub-backed startup snapshot;
 - `attempt.json` — bounded, synced pre-spawn issue/base identity and optional
   patch-parent association;
+- `runtime.json` — bounded private executable-resolution evidence (no environment
+  dump or credential values);
 - `submission.json` — the optional structured result written by the terminating
   submission tool;
 - `worktree.patch`, `staged.patch`, `untracked-files.json`, and `untracked/` —

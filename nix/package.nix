@@ -1,6 +1,8 @@
 {
   stdenvNoCC,
   lib,
+  callPackage,
+  bash,
   piPackage,
   piHarnessResources,
   mattPocockSkillsResources,
@@ -25,6 +27,7 @@
 }:
 
 let
+  engineeringRuntimePath = lib.makeBinPath (callPackage ./engineering-runtime.nix { });
   profileDocument = piHarnessResources.agentProfiles;
   engineeringProfile = profileDocument.profiles."engineering-full";
   engineeringExtensionArgs = lib.concatMapStringsSep "\n" (name:
@@ -86,11 +89,13 @@ stdenvNoCC.mkDerivation {
 
     mkdir -p "$out/bin"
     cat > "$out/bin/pi" <<EOF
-#!/usr/bin/env bash
+#!${bash}/bin/bash
 set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
 export PI_HARNESS_RESOURCES_ROOT="${piHarnessResources}/share/pi-harness/agent"
 export PI_HARNESS_MATT_SKILLS_ROOT="${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"
+export PI_HARNESS_ENGINEERING_RUNTIME_PATH="${engineeringRuntimePath}"
+export PATH="\''${PATH:+\$PATH:}${engineeringRuntimePath}"
 ${lib.optionalString (piLspExtension != null) ''
 if [[ "\''${PI_HARNESS_LSP_ENABLED:-0}" == 1 ]]; then
   export PI_HARNESS_LSP_EXTENSION="${piLspExtension}/share/pi-lsp-extension/src/index.ts"
@@ -270,6 +275,7 @@ EOF
   '';
 
   passthru = {
+    inherit engineeringRuntimePath;
     pi = piPackage;
     piR = piRPackage;
     piResources = piHarnessResources.piResources;

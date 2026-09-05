@@ -279,6 +279,11 @@ let
     done
     ${playwrightAgentCli}/bin/playwright-cli-fallback --version | grep -Fx '0.1.17' >/dev/null
 
+    PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
+      PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
+      PI_HARNESS_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
+      node --test ${source}/tests/engineering-runtime.test.mjs
+
     # High-value negative package assertions remain explicit security contracts.
     ! grep -F 'extensions/remote-session/' ${piHarnessPackage}/bin/pi
     ! grep -F 'managed-sessions/adapter/' ${piHarnessPackage}/bin/pi
