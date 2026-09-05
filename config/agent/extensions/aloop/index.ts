@@ -1,5 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { lstat, mkdir, readdir, readFile, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import { createHash, randomBytes } from "node:crypto";
 import * as path from "node:path";
 import { Type } from "typebox";
@@ -35,7 +35,9 @@ const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
 
-import { parsePreservationEvidence, preservationSummary, type PreservationEvidence } from "../github-issues/aloop-preservation.js";
+import { scanAttemptArtifacts } from "../github-issues/aloop-artifacts.js";
+export { scanAttemptArtifacts } from "../github-issues/aloop-artifacts.js";
+import { preservationSummary, type PreservationEvidence } from "../github-issues/aloop-preservation.js";
 
 type PendingHandoff = {
 	preservation?: PreservationEvidence;
@@ -102,60 +104,6 @@ function registeredModel(ctx: ExtensionContext, reference: string): boolean {
 	if (slash <= 0 || slash === reference.length - 1) return false;
 	const model = ctx.modelRegistry.find(reference.slice(0, slash), reference.slice(slash + 1));
 	return model !== undefined && ctx.modelRegistry.hasConfiguredAuth(model);
-}
-
-export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRecord[]> {
-	const root = path.resolve(cwd, ".pi/tmp/aloop");
-	let rootStatus;
-	try {
-		rootStatus = await lstat(root);
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-		throw error;
-	}
-	if (rootStatus.isSymbolicLink() || !rootStatus.isDirectory()) return [];
-	const entries = (await readdir(root, { withFileTypes: true }))
-		.filter((entry) => entry.isDirectory() && /^issue-\d+-\d+-[a-f0-9]+$/.test(entry.name))
-		.sort((left, right) => left.name.localeCompare(right.name))
-		.slice(-200);
-	const records: AloopAttemptRecord[] = [];
-	const patchArtifactDirectories = new Set<string>();
-	for (const entry of entries) {
-		const match = entry.name.match(/^issue-(\d+)-/);
-		if (!match) continue;
-		const resultPath = path.join(root, entry.name, "result.json");
-		try {
-			const status = await lstat(resultPath);
-			if (status.isSymbolicLink() || !status.isFile() || status.size > 1_000_000) continue;
-			const result = JSON.parse(await readFile(resultPath, "utf8"));
-			const artifactDirectory = `.pi/tmp/aloop/${entry.name}`;
-			if (result?.artifacts?.directory !== artifactDirectory) continue;
-			let preservation = parsePreservationEvidence(result.preservation);
-			let commit = result.commit === null ? null : typeof result.commit === "string" && /^[0-9a-f]{7,64}$/i.test(result.commit) ? result.commit : undefined;
-			if (commit === undefined || typeof result.status !== "string") continue;
-			try {
-				const patchPath = path.join(root, entry.name, "patch-attempts.json");
-				const patchStatus = await lstat(patchPath);
-				if (!patchStatus.isSymbolicLink() && patchStatus.isFile() && patchStatus.size <= 1_000_000) {
-					const patches = JSON.parse(await readFile(patchPath, "utf8"));
-					if (Array.isArray(patches)) {
-						for (const patch of patches) {
-							const patchPreservation = parsePreservationEvidence(patch.preservation);
-							if (patchPreservation?.capture === "incomplete") preservation = patchPreservation;
-							if (typeof patch?.artifactDirectory === "string") patchArtifactDirectories.add(patch.artifactDirectory);
-							if (typeof patch?.commit === "string" && /^[0-9a-f]{7,64}$/i.test(patch.commit)) commit = patch.commit;
-						}
-					}
-				}
-			} catch (error) {
-				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-			}
-			records.push({ issue: Number(match[1]), commit, artifactDirectory, status: result.status, preservation });
-		} catch {
-			// Ignore incomplete or malformed attempt artifacts; they carry no recoverable structured outcome.
-		}
-	}
-	return records.filter((record) => !patchArtifactDirectories.has(record.artifactDirectory));
 }
 
 function handoffWasRecorded(context: Awaited<ReturnType<typeof retrieveCurrentRepositoryEpicContext>>, pending: PendingHandoff): boolean {
@@ -458,7 +406,9 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const status = await pi.exec("git", ["status", "--porcelain=v1", "--untracked-files=all"], { timeout: 10_000 });
 			if (status.code !== 0) throw new Error((status.stderr || status.stdout || "Could not inspect the worktree.").trim());
 			if (status.stdout.trim()) {
-				projectLifecycle("startup-failure", epic, `Aloop #${epic} did not start because the worktree is dirty. Commit or intentionally clean the tree, then invoke it again.`);
+				const retained = await scanAttemptArtifacts(ctx.cwd);
+				const interrupted = retained.filter((record) => record.status === "interrupted").length;
+				projectLifecycle("startup-failure", epic, `Aloop #${epic} did not start because the worktree is dirty. ${interrupted ? `${interrupted} interrupted attempt(s) have retained recovery evidence. Inspect and preserve that work before continuing.` : "Commit or intentionally settle the tree, then invoke it again."}`);
 				ctx.ui.notify("/aloop requires a clean worktree before supervision starts.", "error");
 				return;
 			}
@@ -511,16 +461,21 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				startupTimeout();
 				const branchRecords: AloopAttemptRecord[] = [];
 				for (const record of records) {
-					if (record.commit === null) {
+					const branchCommit = record.commit ?? record.beforeHead;
+					if (!branchCommit) {
 						branchRecords.push(record);
 						continue;
 					}
-					const ancestry = await pi.exec("git", ["merge-base", "--is-ancestor", record.commit, "HEAD"], { timeout: startupTimeout() });
+					const ancestry = await pi.exec("git", ["merge-base", "--is-ancestor", branchCommit, "HEAD"], { timeout: startupTimeout() });
 					if (ancestry.code === 0) branchRecords.push(record);
 					else if (ancestry.code !== 1) throw new Error((ancestry.stderr || ancestry.stdout || `Could not inspect attempt commit ${record.commit}.`).trim());
 				}
 				startupTimeout();
 				for (const record of branchRecords) {
+					if (record.issueBaseCommit && !issueBaseCommits.has(record.issue)) {
+						issueBaseCommits.set(record.issue, record.issueBaseCommit);
+						continue;
+					}
 					try {
 						const snapshot = JSON.parse(await readFile(path.resolve(ctx.cwd, record.artifactDirectory, "issue-context.json"), "utf8"));
 						if (Number.isInteger(snapshot?.selectedIssue?.number) && typeof snapshot.issueBaseCommit === "string" && !issueBaseCommits.has(snapshot.selectedIssue.number)) {
@@ -832,6 +787,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					issue: { number: issue.number, title: issue.title, body: issue.body }, correction: params.correction,
 					issueContext: context, issueBaseCommit: issueBaseCommits.get(issue.number), projectWorkerResources: policy.workerResources,
 					modelRef, timeoutMs: Math.min(params.timeout_ms ?? MAX_PATCH_TIMEOUT_MS, MAX_PATCH_TIMEOUT_MS), spawnDeadlineMs: runBudget.deadlineMs, signal,
+					parentArtifactDirectory: pending.artifactDirectory,
 				});
 				if (outcome.preservation?.capture === "incomplete") pending.preservation = outcome.preservation;
 				pending.patchArtifacts = [...(pending.patchArtifacts ?? []), { commit: outcome.commit, artifactDirectory: outcome.artifacts.directory, status: outcome.status, preservation: outcome.preservation }];

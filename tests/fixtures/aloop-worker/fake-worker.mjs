@@ -1,8 +1,13 @@
 import { spawn } from "node:child_process";
 import { execFileSync } from "node:child_process";
-import { readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
+import { readFileSync, readdirSync, symlinkSync, unlinkSync, writeFileSync } from "node:fs";
 
 const mode = process.env.FAKE_ALOOP_MODE ?? "success";
+if (process.env.PI_ALOOP_ATTEMPT_DIRECTORY) {
+	const identity = JSON.parse(readFileSync(`${process.env.PI_ALOOP_ATTEMPT_DIRECTORY}/attempt.json`, "utf8"));
+	if (identity.version !== 1 || !identity.beforeHead) throw new Error("Startup identity absent before worker execution");
+	writeFileSync(`${process.env.PI_ALOOP_ATTEMPT_DIRECTORY}/observed-identity.json`, JSON.stringify(identity));
+}
 
 if (mode === "timeout") {
 	const grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });

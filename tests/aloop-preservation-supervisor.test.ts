@@ -1,10 +1,31 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { writeAttemptIdentity } from "../config/agent/extensions/github-issues/aloop-artifacts.js";
 import { registerAloopExtension } from "../config/agent/extensions/aloop/index.js";
+
+test("dirty startup reports interrupted evidence without activating or spawning", async (t) => {
+	const cwd = await mkdtemp(join(tmpdir(), "aloop-dirty-recovery-"));
+	t.after(() => rm(cwd, { recursive: true, force: true }));
+	const artifactDirectory = ".pi/tmp/aloop/issue-2-100-abcdef";
+	await mkdir(join(cwd, artifactDirectory), { recursive: true });
+	await writeAttemptIdentity(join(cwd, artifactDirectory), { version: 1, issue: 2, epic: 1, artifactDirectory, beforeHead: "a".repeat(40), issueBaseCommit: "a".repeat(40), workerKind: "implementation" });
+	const commands = new Map<string, any>();
+	const lifecycle: any[] = [];
+	const pi = {
+		registerTool: () => undefined, registerCommand: (name: string, command: any) => commands.set(name, command), on: () => undefined,
+		getActiveTools: () => [], setActiveTools: () => assert.fail("must not activate"),
+		appendEntry: (_type: string, event: unknown) => lifecycle.push(event),
+		exec: async () => ({ code: 0, stdout: "?? partial.txt", stderr: "" }),
+	} as unknown as ExtensionAPI;
+	registerAloopExtension(pi, { retrieveEpicContext: async () => { assert.fail("must not consult GitHub"); }, runWorker: async () => { assert.fail("must not spawn"); } });
+	const ctx = { cwd, hasUI: false, isIdle: () => true, sessionManager: { getSessionId: () => "dirty-recovery" }, ui: { notify: () => undefined } } as unknown as ExtensionContext;
+	await commands.get("aloop").handler("#1", ctx);
+	assert.match(lifecycle.at(-1)?.body, /1 interrupted attempt.*retained recovery evidence/);
+});
 
 test("supervisor blocks acceptance on incomplete capture and publishes preservation facts on rejection", async (t) => {
 	const cwd = await mkdtemp(join(tmpdir(), "aloop-evidence-supervisor-"));

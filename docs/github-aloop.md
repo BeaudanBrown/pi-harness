@@ -205,9 +205,29 @@ files are never deleted, staged, or committed by preservation. Inspect and
 explicitly settle retained work before another attempt. Historical results
 without this evidence retain their existing recovery behavior.
 
-This does not yet add atomic final-result replacement, discovery of interrupted
-records without valid results, automatic dirty-worktree recovery, isolated
-worktrees, or a headless driver. Those remain subsequent reliability slices.
+Before spawning, the harness writes and syncs a bounded `attempt.json` identity.
+Final results are size-bounded, written to a private same-directory temporary
+file, synced, atomically renamed over the reserved result, and directory-synced.
+Replaced result/directory identities are rejected. Writes, rename, and cleanup
+are anchored to an open directory descriptor so pathname replacement cannot
+redirect them. Descriptor-path support is checked before worker launch (Linux
+uses procfs; other hosts require working directory traversal through their
+file-descriptor filesystem and fail closed if unavailable). Linux is covered by
+the deterministic race tests; Darwin has not been live-verified. Temporary files
+left by a crash are not treated as final results.
+
+Missing, truncated, malformed, oversized, or invalid final results with valid
+startup identity are recovered as `interrupted`: commit and preservation counts
+remain unknown, and acceptance stays blocked. Legacy startup contexts can also
+establish identity. Discovery is read-only; it does not determine whether an
+old process is alive, stop processes, or modify the workspace. Operators must
+ensure the previous worker has stopped before settling its work. Patch startup
+identity names its parent so an interruption before parent-ledger publication
+does not detach the patch's evidence. Invalid bookkeeping marks preservation
+incomplete rather than suppressing evidence.
+
+Automatic dirty-worktree recovery, isolated worktrees, and a headless driver
+remain subsequent reliability slices.
 
 ## Resume and recovery
 
@@ -217,8 +237,10 @@ clean worktree, start Pi, and run `/aloop #<epic-number>` again. The supervisor
 reconstructs progress from the current GitHub graph and comments plus Git
 history; invocation budgets intentionally do not persist as hidden loop state.
 
-On startup, aloop also scans local attempt results whose commits belong to the
-current branch. If it finds an attempt artifact with no matching durable GitHub
+On startup, aloop also scans the latest 200 local attempt directories. Results
+are filtered by their commit, or validated starting commit when the result is
+interrupted, to the current branch. A matching directory name alone cannot
+establish interrupted identity; a validated startup record is required. If it finds an attempt artifact with no matching durable GitHub
 handoff, it blocks another worker launch. Inspect the result and commit, run
 `aloop_review_attempt`, remediate if needed, then use `aloop_finish_attempt` to
 verify and publish the v3 handoff. If an accepted v3 handoff is already published
@@ -237,9 +259,13 @@ authority. Do not manufacture acceptance from a worker summary alone.
 
 Common recovery cases:
 
-- **Dirty worktree:** `/aloop` refuses to start. Inspect the changes and preserve
-  or resolve the interrupted work deliberately until the tree is clean; do not
-  discard it blindly.
+- **Dirty worktree:** `/aloop` refuses to start and reports when interrupted
+  attempt evidence is retained. Inspect the changes and preserve or resolve the
+  interrupted work deliberately until the tree is clean; do not discard it blindly.
+- **Interrupted result publication:** inspect `attempt.json`, startup context,
+  any patches, and current Git state. Settle with an unsuccessful handoff rather
+  than accepting unknown preservation; explicit remediation can then establish
+  fresh verified evidence. The scanner never invents a successful result.
 - **Worker timeout, cancellation, invalid result, or process failure:** full
   artifacts remain available. Record the unsuccessful outcome, then choose a
   remediation or human stop.
@@ -264,6 +290,8 @@ It contains:
 - `stdout.jsonl` — the complete Pi JSON event stream;
 - `stderr.log` — worker diagnostics;
 - `issue-context.json` — the immutable GitHub-backed startup snapshot;
+- `attempt.json` — bounded, synced pre-spawn issue/base identity and optional
+  patch-parent association;
 - `submission.json` — the optional structured result written by the terminating
   submission tool;
 - `worktree.patch`, `staged.patch`, `untracked-files.json`, and `untracked/` —

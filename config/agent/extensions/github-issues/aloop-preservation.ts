@@ -112,15 +112,20 @@ export async function preserveAttempt(input: {
 	return { evidence, status, ancestor };
 }
 
-export function parsePreservationEvidence(value: unknown): PreservationEvidence | undefined {
-	if (value === undefined) return undefined; // historical attempt
+export function isPreservationEvidence(value: unknown): value is PreservationEvidence {
 	const v = value as Partial<PreservationEvidence> | null;
 	const count = (n: unknown) => n === null || (typeof n === "number" && Number.isSafeInteger(n) && n >= 0);
 	if (v && v.version === 1 && (v.head === null || (typeof v.head === "string" && /^[a-f0-9]{40,64}$/.test(v.head)))
 		&& [v.commits, v.staged, v.unstaged, v.untracked].every(count)
 		&& (v.capture === "complete" || v.capture === "incomplete")
 		&& Array.isArray(v.failures) && v.failures.length <= 20 && v.failures.every((s) => typeof s === "string" && s.length <= 100)
-		&& (v.capture !== "complete" || (v.head !== null && [v.commits, v.staged, v.unstaged, v.untracked].every((n) => n !== null) && v.failures.length === 0))) return v as PreservationEvidence;
+		&& (v.capture !== "complete" || (v.head !== null && [v.commits, v.staged, v.unstaged, v.untracked].every((n) => n !== null) && v.failures.length === 0))) return true;
+	return false;
+}
+
+export function parsePreservationEvidence(value: unknown): PreservationEvidence | undefined {
+	if (value === undefined) return undefined; // historical attempt
+	if (isPreservationEvidence(value)) return value;
 	return { version: 1, head: null, commits: null, staged: null, unstaged: null, untracked: null, capture: "incomplete", failures: ["invalid preservation record"] };
 }
 

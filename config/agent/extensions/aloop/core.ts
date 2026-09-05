@@ -127,6 +127,8 @@ export type AloopRunRequest = {
 };
 
 export type AloopAttemptRecord = {
+	beforeHead?: string;
+	issueBaseCommit?: string;
 	preservation?: import("../github-issues/aloop-preservation.js").PreservationEvidence;
 	issue: number;
 	commit: string | null;

@@ -7,6 +7,7 @@ import * as path from "node:path";
 import { resolveAgentProfile, withProjectWorkerOptIn, type AgentProfile } from "../agent-profiles/core.js";
 import { collectSessionUsage, readNestedModelUsage, type NestedModelUsage } from "../agent-profiles/usage.js";
 
+import { prepareResultPublication, syncAttemptDirectory, writeAttemptIdentity } from "./aloop-artifacts.js";
 import { preserveAttempt, preservationSummary, type PreservationEvidence } from "./aloop-preservation.js";
 
 const ALOOP_ROOT = ".pi/tmp/aloop";
@@ -45,6 +46,7 @@ export type AloopWorkerInput = {
 	issueBaseCommit?: string;
 	workerKind?: "implementation" | "patch";
 	patchDirection?: string;
+	parentArtifactDirectory?: string;
 	launcher?: string[];
 	modelRef?: string;
 	timeoutMs?: number;
@@ -128,6 +130,7 @@ export async function prepareAloopArtifactDirectory(cwd: string, attemptId: stri
 	for (const candidate of [path.resolve(cwd, ".pi"), path.resolve(cwd, ".pi/tmp"), root, directory]) {
 		try {
 			await mkdir(candidate, { mode: candidate === directory ? 0o700 : 0o755 });
+			await syncAttemptDirectory(path.dirname(candidate));
 		} catch (error) {
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 		}
@@ -483,7 +486,15 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 		await promptFile.close();
 	}
 	const resultFile = await open(resultPath, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | noFollow, 0o600);
+	let publication: Awaited<ReturnType<typeof prepareResultPublication>> | undefined;
 	try {
+		await writeAttemptIdentity(directory, {
+			version: 1, issue: input.issue.number, epic: input.epic.number,
+			artifactDirectory: path.relative(input.cwd, directory), beforeHead,
+			issueBaseCommit: input.issueBaseCommit ?? beforeHead, workerKind: input.workerKind ?? "implementation",
+			...(input.parentArtifactDirectory ? { parentArtifactDirectory: input.parentArtifactDirectory } : {}),
+		});
+		publication = await prepareResultPublication(directory);
 		const fallbackPath = process.env.PI_HARNESS_LSP_FALLBACK_PATH?.trim();
 		const inheritedPath = input.env?.PATH ?? process.env.PATH;
 		const workerEnvironment: NodeJS.ProcessEnv = {
@@ -615,17 +626,10 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			untracked: relative(untrackedPath),
 		},
 	};
-	const [openedResult, currentResult] = await Promise.all([resultFile.stat(), lstat(resultPath)]);
-	if (!currentResult.isFile() || openedResult.dev !== currentResult.dev || openedResult.ino !== currentResult.ino) {
-		throw new Error("Aloop result artifact was replaced during worker execution.");
-	}
-	await resultFile.writeFile(
-		`${JSON.stringify({ ...outcome, command: command.slice(0, -1), beforeHead, afterHead, commitCount, worktreeStatus: worktreeStatusAfter, launchError, parseError }, null, 2)}\n`,
-		"utf8",
-	);
+	await publication.publish({ ...outcome, command: command.slice(0, -1), beforeHead, afterHead, commitCount, worktreeStatus: worktreeStatusAfter, launchError, parseError });
 	return outcome;
 	} finally {
-		await resultFile.close();
+		try { await publication?.close(); } finally { await resultFile.close(); }
 	}
 }
 
