@@ -18,6 +18,7 @@ import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_PROJECTION_ENTRIES,
 	deriveProjectCreationKey,
+	type ManagedAdapterLiveStatus,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
@@ -53,7 +54,7 @@ import {
 const CONTROL_RESULT_ENTRY_TYPE = "pi-managed-session-control-result";
 const CONTROL_EXECUTION_ENTRY_TYPE = "pi-managed-session-control-execution";
 type ControlSelection = { model: string } | { thinking: string };
-type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string }; selection?: ControlSelection };
+type ControlResult = { controlId: string; status: "ok" | "rejected"; message: string; options?: string[]; generation?: { model?: string; thinking?: string }; selection?: ControlSelection; liveStatus?: ManagedAdapterLiveStatus };
 
 export function renderMatrixParticipantInput(senderUserId: string | undefined, body: string): string {
 	return senderUserId ? `Matrix participant ${senderUserId}:\n\n${body}` : body;
@@ -75,7 +76,7 @@ function isBoundedText(value: unknown, maxLength: number): value is string {
 function parseControlResult(value: unknown): ControlResult {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new ManagedAdapterError("Malformed durable control result state");
 	const record = value as Record<string, unknown>;
-	if (!hasExactKeys(record, ["controlId", "status", "message"], ["options", "generation", "selection"]) ||
+	if (!hasExactKeys(record, ["controlId", "status", "message"], ["options", "generation", "selection", "liveStatus"]) ||
 		typeof record.controlId !== "string" || !/^control_[a-f0-9]{32}$/.test(record.controlId) ||
 		(record.status !== "ok" && record.status !== "rejected") || !isBoundedText(record.message, 4_096)) {
 		throw new ManagedAdapterError("Malformed durable control result state");
@@ -99,19 +100,38 @@ function parseControlResult(value: unknown): ControlResult {
 		}
 		generation = candidate as { model?: string; thinking?: string };
 	}
+	let liveStatus: ManagedAdapterLiveStatus | undefined;
+	if (Object.hasOwn(record, "liveStatus")) {
+		const candidate = record.liveStatus;
+		const value = typeof candidate === "object" && candidate !== null && !Array.isArray(candidate) ? candidate as Record<string, unknown> : undefined;
+		const context = value?.context;
+		const contextValue = typeof context === "object" && context !== null && !Array.isArray(context) ? context as Record<string, unknown> : undefined;
+		if (!value || !hasExactKeys(value, ["state", "thinking"], ["model", "context"]) ||
+			(value.state !== "idle" && value.state !== "busy") || !isBoundedText(value.thinking, 32) ||
+			(Object.hasOwn(value, "model") && !isBoundedText(value.model, 256)) ||
+			(context !== undefined && (!contextValue || !hasExactKeys(contextValue, ["usedTokens", "limitTokens"]) ||
+				!Number.isSafeInteger(contextValue.usedTokens) || Number(contextValue.usedTokens) < 0 ||
+				!Number.isSafeInteger(contextValue.limitTokens) || Number(contextValue.limitTokens) < 1 || Number(contextValue.usedTokens) > Number(contextValue.limitTokens)))) {
+			throw new ManagedAdapterError("Malformed durable control result state");
+		}
+		liveStatus = candidate as ManagedAdapterLiveStatus;
+	}
 	let selection: ControlSelection | undefined;
 	if (Object.hasOwn(record, "selection")) {
 		const candidate = record.selection;
 		const value = typeof candidate === "object" && candidate !== null && !Array.isArray(candidate) ? candidate as Record<string, unknown> : undefined;
 		const model = value && hasExactKeys(value, ["model"]) && isBoundedText(value.model, 256);
 		const thinking = value && hasExactKeys(value, ["thinking"]) && isBoundedText(value.thinking, 32);
-		if ((!model && !thinking) || record.status !== "ok" || options !== undefined || generation !== undefined) {
+		if ((!model && !thinking) || record.status !== "ok" || options !== undefined || generation !== undefined || liveStatus !== undefined) {
 			throw new ManagedAdapterError("Malformed durable control result state");
 		}
 		selection = candidate as ControlSelection;
 	}
+	if (liveStatus && (record.status !== "ok" || options !== undefined || generation !== undefined || selection !== undefined)) {
+		throw new ManagedAdapterError("Malformed durable control result state");
+	}
 	return { controlId: record.controlId as string, status: record.status, message: record.message, ...(options ? { options } : {}),
-		...(generation ? { generation } : {}), ...(selection ? { selection } : {}) };
+		...(generation ? { generation } : {}), ...(selection ? { selection } : {}), ...(liveStatus ? { liveStatus } : {}) };
 }
 
 function parseControlExecution(value: unknown): ControlExecution {
@@ -235,15 +255,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
 		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
-			selection?: ControlSelection) => {
+			selection?: ControlSelection, liveStatus?: ManagedAdapterLiveStatus) => {
 			let result = controlResults.get(controlId);
 			if (!result) {
 				result = { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}),
-					...(generation ? { generation } : {}), ...(selection ? { selection } : {}) };
+					...(generation ? { generation } : {}), ...(selection ? { selection } : {}), ...(liveStatus ? { liveStatus } : {}) };
 				if (currentContext) appendMarker(pi, currentContext, CONTROL_RESULT_ENTRY_TYPE, result);
 				controlResults.set(controlId, result);
 			}
-			if (client?.connected) await client.controlResult(controlId, result.status, result.message, result.options, result.generation, result.selection);
+			if (client?.connected) await client.controlResult(controlId, result.status, result.message, result.options, result.generation, result.selection, result.liveStatus);
 		};
 		const beginControlExecution = (ctx: ExtensionContext, controlId: string, name: StatefulControlName, argument?: string): ControlExecution => {
 			const existing = controlExecutions.get(controlId);
@@ -709,7 +729,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (controlExecutions.get(payload.controlId)?.name === "stop" && recoveredControlExecutions.delete(payload.controlId)) {
 					await controlReply(previous.controlId, previous.status, previous.message, previous.options); ctx.abort(); ctx.shutdown(); return;
 				}
-				return client?.controlResult(previous.controlId, previous.status, previous.message, previous.options, previous.generation, previous.selection);
+				return client?.controlResult(previous.controlId, previous.status, previous.message, previous.options, previous.generation, previous.selection, previous.liveStatus);
 			}
 			const recoveredExecution = controlExecutions.get(payload.controlId);
 			if (recoveredExecution && (recoveredExecution.name !== payload.name || recoveredExecution.argument !== payload.argument)) throw new ManagedAdapterError("Conflicting replay for durable control execution");
@@ -727,13 +747,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (payload.name === "help") return controlReply(payload.controlId, "ok", CONTROL_HELP);
 			if (payload.name === "status") {
 				const usage = ctx.getContextUsage();
-				return controlReply(payload.controlId, "ok", [
-					`State: ${ctx.isIdle() ? "idle" : "busy"}`,
-					`Generation: ${client?.generation ?? 1}`,
-					`Model: ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unavailable"}`,
-					`Thinking: ${ctx.thinkingLevel ?? "off"}`,
-					...(usage && ctx.model?.contextWindow ? [`Context: ${usage.tokens}/${ctx.model.contextWindow} tokens`] : []),
-				].join("\n"));
+				const used = usage?.tokens;
+				const limit = ctx.model?.contextWindow;
+				const liveStatus: ManagedAdapterLiveStatus = {
+					state: ctx.isIdle() ? "idle" : "busy",
+					...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}),
+					thinking: ctx.thinkingLevel ?? "off",
+					...(typeof used === "number" && typeof limit === "number" && Number.isSafeInteger(used) && used >= 0 &&
+						Number.isSafeInteger(limit) && limit >= used ? { context: { usedTokens: used, limitTokens: limit } } : {}),
+				};
+				return controlReply(payload.controlId, "ok", "Managed conversation status requested.", undefined, undefined, undefined, liveStatus);
 			}
 			if (payload.name === "model") {
 				const models = availableModels(ctx);

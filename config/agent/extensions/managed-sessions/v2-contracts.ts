@@ -35,10 +35,12 @@ const activity = Type.Union([
 	envelope("relay", "activity.acknowledge", strict({ activityId: id("activity"), revision: nonNegative, status: Type.Union([Type.Literal("updated"), Type.Literal("finalized")]) })),
 ]);
 const controlName = Type.Union(["help", "status", "model", "thinking", "compact", "new", "stop", "abort", "steer"].map((value) => Type.Literal(value)));
+const liveStatus = strict({ state: Type.Union([Type.Literal("idle"), Type.Literal("busy")]), model: Type.Optional(text(256)), thinking: text(32),
+	context: Type.Optional(strict({ usedTokens: nonNegative, limitTokens: Type.Integer({ minimum: 1 }) })) });
 const control = Type.Union([
 	envelope("relay", "control.deliver", strict({ controlId: id("control"), name: controlName, argument: Type.Optional(text(4_096)) })),
-	envelope("ordinary_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), generation: Type.Optional(strict({ model: Type.Optional(text(256)), thinking: Type.Optional(text(32)) })), selection: Type.Optional(Type.Union([strict({ model: text(256) }), strict({ thinking: text(32) })])) })),
-	envelope("coordinator_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), selection: Type.Optional(Type.Union([strict({ model: text(256) }), strict({ thinking: text(32) })])) })),
+	envelope("ordinary_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), generation: Type.Optional(strict({ model: Type.Optional(text(256)), thinking: Type.Optional(text(32)) })), selection: Type.Optional(Type.Union([strict({ model: text(256) }), strict({ thinking: text(32) })])), liveStatus: Type.Optional(liveStatus) })),
+	envelope("coordinator_adapter", "control.result", strict({ controlId: id("control"), status: Type.Union([Type.Literal("ok"), Type.Literal("rejected")]), message: text(4_096), options: Type.Optional(Type.Array(text(255), { minItems: 1, maxItems: 20 })), selection: Type.Optional(Type.Union([strict({ model: text(256) }), strict({ thinking: text(32) })])), liveStatus: Type.Optional(liveStatus) })),
 ]);
 const poll = Type.Union([
 	envelope("ordinary_adapter", "poll.open", strict({ pollId: id("poll"), question: text(1_200), options: Type.Array(text(300), { minItems: 2, maxItems: 8 }) })),
@@ -76,12 +78,19 @@ export function parseManagedSessionV2Envelope(value: unknown) {
 	if (!Check(ManagedSessionV2EnvelopeSchema, value)) schemaError(ManagedSessionV2EnvelopeSchema, value);
 	const envelope = value as { role: string; type: string; payload: Record<string, unknown> };
 	if (envelope.type === "control.result" && envelope.payload.generation !== undefined &&
-		(envelope.role !== "ordinary_adapter" || envelope.payload.status !== "ok" || envelope.payload.options !== undefined)) {
+		(envelope.role !== "ordinary_adapter" || envelope.payload.status !== "ok" || envelope.payload.options !== undefined || envelope.payload.liveStatus !== undefined)) {
 		throw new ManagedSessionContractError("malformed", "v2 generation metadata requires an accepted ordinary control result without options");
 	}
 	if (envelope.type === "control.result" && envelope.payload.selection !== undefined &&
-		((envelope.role !== "ordinary_adapter" && envelope.role !== "coordinator_adapter") || envelope.payload.status !== "ok" || envelope.payload.options !== undefined || envelope.payload.generation !== undefined)) {
-		throw new ManagedSessionContractError("malformed", "v2 selection metadata requires an accepted ordinary control result without options or generation metadata");
+		((envelope.role !== "ordinary_adapter" && envelope.role !== "coordinator_adapter") || envelope.payload.status !== "ok" || envelope.payload.options !== undefined || envelope.payload.generation !== undefined || envelope.payload.liveStatus !== undefined)) {
+		throw new ManagedSessionContractError("malformed", "v2 selection metadata requires an accepted control result without options, generation, or live status metadata");
+	}
+	if (envelope.type === "control.result" && envelope.payload.liveStatus !== undefined) {
+		if (envelope.payload.status !== "ok" || envelope.payload.options !== undefined || envelope.payload.generation !== undefined || envelope.payload.selection !== undefined) {
+			throw new ManagedSessionContractError("malformed", "v2 live status metadata requires an accepted control result without other result metadata");
+		}
+		const context = (envelope.payload.liveStatus as { context?: { usedTokens: number; limitTokens: number } }).context;
+		if (context && context.usedTokens > context.limitTokens) throw new ManagedSessionContractError("malformed", "v2 live status context usage cannot exceed its limit");
 	}
 	if (envelope.type === "media.begin") {
 		if (Math.ceil(Number(envelope.payload.byteLength) / MAX_MEDIA_CHUNK_BYTES) !== envelope.payload.chunkCount || Number(envelope.payload.width) * Number(envelope.payload.height) > 40_000_000) {

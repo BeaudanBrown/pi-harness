@@ -299,6 +299,10 @@ let
     test -x ${managedSessionCoordinatorPi}/bin/pi
     test -x ${managedLspDisabledCoordinatorPi}/bin/pi
     test -x ${lspDisabledPiWrapper}/bin/pi
+    relay_launch=$(jq -r .execStart ${managedSessionModuleReport})
+    test -x "$relay_launch"
+    grep -F 'unset TMUX TMUX_PANE' "$relay_launch" >/dev/null
+    grep -F 'export TMUX_TMPDIR="$XDG_RUNTIME_DIR"' "$relay_launch" >/dev/null
 
     # Generated wrappers are shell interfaces. Keep only capability and secret
     # assertions that cannot be observed without starting a long-lived Pi RPC process.

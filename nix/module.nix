@@ -365,6 +365,9 @@ let
     expand_home() { printf '%s' "''${1//%h/$HOME}"; }
     export PI_MANAGED_SESSIONS_RUNTIME_DIR="''${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/pi-managed-sessions"
     export PI_MANAGED_SESSIONS_SOCKET="$PI_MANAGED_SESSIONS_RUNTIME_DIR/relay.sock"
+    # The relay and interactive launcher must address the same per-user tmux server.
+    unset TMUX TMUX_PANE
+    export TMUX_TMPDIR="$XDG_RUNTIME_DIR"
     export PI_MANAGED_SESSIONS_MANIFEST_DIR="$(expand_home ${lib.escapeShellArg cfg.managedSessions.manifestDirectory})"
     export PI_MANAGED_COORDINATOR_WORKSPACE_DIR="$(expand_home ${lib.escapeShellArg cfg.managedSessions.coordinator.workspaceDirectory})"
     export PI_MANAGED_COORDINATOR_SESSION_FILE="$(expand_home ${lib.escapeShellArg cfg.managedSessions.coordinator.sessionFile})"

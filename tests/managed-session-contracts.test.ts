@@ -104,6 +104,22 @@ test("accepted exact model and thinking control results carry only one durable s
 	assert.throws(() => parseManagedSessionEnvelope({ ...value, payload: { ...value.payload, generation: { model: "other/model" } } }), /selection metadata/);
 });
 
+test("status control results carry one bounded typed live snapshot", () => {
+	const value = {
+		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "status-result", conversationId,
+		role: "ordinary_adapter", type: "control.result",
+		payload: { controlId: `control_${"b".repeat(32)}`, status: "ok", message: "status", liveStatus: {
+			state: "idle", model: "local-llm/qwen", thinking: "high", context: { usedTokens: 100, limitTokens: 1000 },
+		} },
+	};
+	assert.deepEqual(parseManagedSessionEnvelope(value), value);
+	assert.throws(() => parseManagedSessionEnvelope({ ...value, payload: { ...value.payload, options: ["one"] } }), /live status metadata/);
+	assert.throws(() => parseManagedSessionEnvelope({ ...value, payload: { ...value.payload, liveStatus: { ...value.payload.liveStatus, secret: "no" } } }), /managed-session envelope/);
+	assert.throws(() => parseManagedSessionEnvelope({ ...value, payload: { ...value.payload, liveStatus: {
+		...value.payload.liveStatus, context: { usedTokens: 1001, limitTokens: 1000 },
+	} } }), /cannot exceed/);
+});
+
 test("protocol rejects unknown fields, malformed framing, invalid UTF-8, and oversized frames", () => {
 	assert.throws(() => parseManagedSessionEnvelope({ ...attachEnvelope(), surprise: true }), ManagedSessionContractError);
 	assert.throws(() => parseNdjsonEnvelope(JSON.stringify(attachEnvelope())), /LF-terminated/);

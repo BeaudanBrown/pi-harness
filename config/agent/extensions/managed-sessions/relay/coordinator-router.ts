@@ -12,6 +12,7 @@ import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { type MatrixImageEvent, ManagedImageTransport } from "./image-media.js";
+import { renderManagedConversationStatus } from "./status.js";
 
 interface MatrixTextEvent {
 	eventId: string;
@@ -293,8 +294,14 @@ export class CoordinatorRouter {
 		}
 		const state = this.registry.conversationState(manifest.conversationId);
 		if (state === "dormant" && (control.name === "help" || control.name === "status" || control.name === "stop")) {
-			const message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>."
-				: control.name === "status" ? "Managed conversation is dormant." : "Managed conversation is already dormant.";
+			let message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>."
+				: "Managed conversation is already dormant.";
+			if (control.name === "status") {
+				const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
+				if (!runtime) throw new RelayRegistryError("not_found", "Managed runtime status is unavailable");
+				message = renderManagedConversationStatus(manifest, runtime, undefined,
+					this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length);
+			}
 			await this.projectNotice(eventId, manifest, message); return;
 		}
 		const pending = { controlId: deriveControlId(manifest.conversationId, eventId), matrixEventId: eventId,

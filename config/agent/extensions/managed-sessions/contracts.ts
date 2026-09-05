@@ -223,6 +223,14 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			strictObject({ model: boundedString(256) }),
 			strictObject({ thinking: boundedString(32) }),
 		])),
+		liveStatus: Type.Optional(strictObject({
+			state: Type.Union([Type.Literal("idle"), Type.Literal("busy")]),
+			model: Type.Optional(boundedString(256)),
+			thinking: boundedString(32),
+			context: Type.Optional(strictObject({
+				usedTokens: Type.Integer({ minimum: 0 }), limitTokens: Type.Integer({ minimum: 1 }),
+			})),
+		})),
 	}),
 	clientEnvelope(adapterRole, "checkpoint.offer", {
 		checkpointId: identifier,
@@ -604,6 +612,13 @@ export interface ConversationManifest {
 	activeGenerationId?: string;
 	generations?: SessionGeneration[];
 }
+export interface ManagedAdapterLiveStatus {
+	state: "idle" | "busy";
+	model?: string;
+	thinking: string;
+	context?: { usedTokens: number; limitTokens: number };
+}
+
 export interface HostRuntimeState {
 	schemaVersion: typeof MANAGED_SESSION_STATE_VERSION;
 	hostId: string;
@@ -744,13 +759,20 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		if (payload.tools && (payload.tools.errors > payload.tools.total || payload.tools.counts.reduce((sum, item) => sum + item.count, 0) !== payload.tools.total)) throw new ManagedSessionContractError("malformed", "activity tool totals must be balanced");
 	}
 	if (envelope.type === "control.result") {
-		const payload = envelope.payload as { status: string; options?: string[]; generation?: unknown; selection?: unknown };
-		if (payload.generation !== undefined && (envelope.role !== "ordinary_adapter" || payload.status !== "ok" || payload.options !== undefined)) {
+		const payload = envelope.payload as { status: string; options?: string[]; generation?: unknown; selection?: unknown; liveStatus?: unknown };
+		if (payload.generation !== undefined && (envelope.role !== "ordinary_adapter" || payload.status !== "ok" || payload.options !== undefined || payload.liveStatus !== undefined)) {
 			throw new ManagedSessionContractError("malformed", "generation metadata is permitted only on an accepted ordinary control result");
 		}
 		if (payload.selection !== undefined && ((envelope.role !== "ordinary_adapter" && envelope.role !== "coordinator_adapter") || payload.status !== "ok" ||
-			payload.options !== undefined || payload.generation !== undefined)) {
-			throw new ManagedSessionContractError("malformed", "selection metadata is permitted only on an accepted ordinary control result without options or generation metadata");
+			payload.options !== undefined || payload.generation !== undefined || payload.liveStatus !== undefined)) {
+			throw new ManagedSessionContractError("malformed", "selection metadata is permitted only on an accepted ordinary control result without options, generation, or live status metadata");
+		}
+		if (payload.liveStatus !== undefined && (payload.status !== "ok" || payload.options !== undefined || payload.generation !== undefined || payload.selection !== undefined)) {
+			throw new ManagedSessionContractError("malformed", "live status metadata is permitted only on an accepted status control result");
+		}
+		const context = (payload.liveStatus as { context?: { usedTokens: number; limitTokens: number } } | undefined)?.context;
+		if (context && context.usedTokens > context.limitTokens) {
+			throw new ManagedSessionContractError("malformed", "live status context usage cannot exceed its limit");
 		}
 	}
 	if (envelope.type === "checkpoint.offer") {

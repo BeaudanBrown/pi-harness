@@ -36,6 +36,19 @@ test("v2 ordinary generation authorization metadata remains role-strict", () => 
 	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, options: ["one"] } }), /without options/);
 });
 
+test("v2 live status metadata is strict, bounded, and exclusive", () => {
+	const value = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "status", conversationId, role: "ordinary_adapter", type: "control.result",
+		payload: { controlId: `control_${"e".repeat(32)}`, status: "ok", message: "status", liveStatus: {
+			state: "idle", model: "local-llm/qwen", thinking: "high", context: { usedTokens: 12, limitTokens: 100 },
+		} } };
+	assert.deepEqual(parseManagedSessionV2Envelope(value), value);
+	assert.deepEqual(parseManagedSessionV2Envelope({ ...value, role: "coordinator_adapter" }), { ...value, role: "coordinator_adapter" });
+	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, options: ["one"] } }), /live status metadata/);
+	assert.throws(() => parseManagedSessionV2Envelope({ ...value, payload: { ...value.payload, liveStatus: {
+		...value.payload.liveStatus, context: { usedTokens: 101, limitTokens: 100 },
+	} } }), /cannot exceed/);
+});
+
 test("v2 ordinary model and thinking selection metadata remains role-strict", () => {
 	const value = { protocolVersion: MANAGED_SESSION_V2_VERSION, messageId: "model-control", conversationId, role: "ordinary_adapter", type: "control.result",
 		payload: { controlId: `control_${"d".repeat(32)}`, status: "ok", message: "selected", selection: { model: "local-llm/qwen" } } };

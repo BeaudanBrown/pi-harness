@@ -99,7 +99,8 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		onEnvelope: async (envelope) => {
 			assert.equal(envelope.type, "control.deliver");
 			assert.equal(envelope.payload.controlId, controlId);
-			await replayClient.controlResult(controlId, "ok", "Durable control handled.");
+			await replayClient.controlResult(controlId, "ok", "Durable control handled.", undefined, undefined, undefined,
+				{ state: "idle", model: "openai/default", thinking: "medium", context: { usedTokens: 100, limitTokens: 1000 } });
 			resolveControl();
 		},
 	});
@@ -107,7 +108,8 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	await controlHandled;
 	assert.equal(running.registry.pendingControls(conversationId).length, 0);
 	assert.equal(running.registry.controlResultState(conversationId, controlId), "completed");
-	await replayClient.controlResult(controlId, "ok", "Durable control handled.");
+	await replayClient.controlResult(controlId, "ok", "Durable control handled.", undefined, undefined, undefined,
+		{ state: "idle", model: "openai/default", thinking: "medium", context: { usedTokens: 100, limitTokens: 1000 } });
 	const modelControlId = deriveControlId(conversationId, "$model-selection");
 	await running.registry.recordPendingControl(conversationId, {
 		controlId: modelControlId, matrixEventId: "$model-selection", name: "model", argument: "local-llm/qwen",
@@ -140,8 +142,10 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	const controlNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${controlId}`);
 	const modelNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${modelControlId}`);
 	const thinkingNoticeEntryId = deriveTranscriptEntryId(sessionId, `notice:${thinkingControlId}`);
-	assert.equal(requests.filter((request) => request.path.includes(`/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`)).length, 1,
-		"lost control.result acknowledgements retry without duplicate Matrix projection");
+	const statusRequests = requests.filter((request) => request.path.includes(`/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`));
+	assert.equal(statusRequests.length, 1, "lost control.result acknowledgements retry without duplicate Matrix projection");
+	assert.match(statusRequests[0]?.body ?? "", /Saved model:/, "relay composes durable state with the adapter live snapshot");
+	assert.doesNotMatch(statusRequests[0]?.body ?? "", /roomId|workspacePath|matrixEventId/, "status remains redacted");
 	failLeave = true;
 	await assert.rejects(() => replayClient.selfDelete(), /Relay operation failed/);
 	assert.equal(running.registry.snapshot().conversations.length, 1, "failed Matrix leave must restore relay persistence and attachment");

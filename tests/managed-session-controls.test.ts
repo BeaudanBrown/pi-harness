@@ -352,8 +352,9 @@ test("all joined Matrix and bridge-puppet senders have equal authority while exa
 
 test("dormant and starting controls are deterministic and never launch an aborted wake", async (t) => {
 	const { root, registry, manifest } = await fixture();
+	await registry.recordLaunchError(manifest.conversationId, "launch_failed", "/private/workspace must remain hidden");
 	let launchCount = 0; const sent: Array<{ transaction: string; body: string }> = [];
-	const responses = [sync([event("$steer", "!steer change"), event("$abort", "!abort")]),
+	const responses = [sync([event("$steer", "!steer change"), event("$abort", "!abort"), event("$status", "!status")]),
 		sync([event("$prompt", "wake task"), event("$queued-abort", "!abort")])];
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
@@ -368,17 +369,19 @@ test("dormant and starting controls are deterministic and never launch an aborte
 	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => { launchCount += 1; }, async () => undefined,
 		(source, target, body) => projector.projectNotice(target.conversationId, source, body));
 	router.start();
-	for (let attempt = 0; attempt < 100 && sent.length < 3; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
+	for (let attempt = 0; attempt < 100 && sent.length < 4; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 20));
 	await router.stop();
 	assert.equal(launchCount, 0);
 	assert.equal(registry.conversationState(manifest.conversationId), "dormant");
 	assert.equal(registry.pendingInputs(manifest.conversationId).every((input) => input.status === "cancelled"), true);
-	assert.deepEqual(sent.map((item) => item.body), [
-		"No active run to steer; managed conversation remains dormant.",
-		"No active run to abort; managed conversation remains dormant.",
-		"No active run to abort; managed conversation remains dormant.",
-	]);
-	assert.equal(new Set(sent.map((item) => item.transaction)).size, 3);
+	assert.equal(sent[0]?.body, "No active run to steer; managed conversation remains dormant.");
+	assert.equal(sent[1]?.body, "No active run to abort; managed conversation remains dormant.");
+	assert.match(sent[2]?.body ?? "", /State: dormant; Pi unavailable; adapter disconnected/);
+	assert.match(sent[2]?.body ?? "", /Model: unavailable/);
+	assert.match(sent[2]?.body ?? "", /Latest launch failure: launch_failed at/);
+	assert.doesNotMatch(sent[2]?.body ?? "", /private|workspace/);
+	assert.equal(sent[3]?.body, "No active run to abort; managed conversation remains dormant.");
+	assert.equal(new Set(sent.map((item) => item.transaction)).size, 4);
 });
 
 test("abort arriving during an in-progress wake cancels queued work and is never recovered", async (t) => {

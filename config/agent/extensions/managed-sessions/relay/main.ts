@@ -7,6 +7,7 @@ import {
 	deriveConversationId,
 	deriveGenerationId,
 	type ConversationManifest,
+	type ManagedAdapterLiveStatus,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
@@ -30,6 +31,7 @@ import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
 import { BlobSpool } from "./blob-spool.js";
 import { ManagedImageTransport } from "./image-media.js";
 import { ManagedArtifactExporter } from "./artifact-export.js";
+import { renderManagedConversationStatus } from "./status.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -171,13 +173,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			onEnvelope: async (envelope, attachment) => {
 				if (envelope.type === "control.result") {
 					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[];
-						generation?: { model?: string; thinking?: string }; selection?: { model: string } | { thinking: string } };
+						generation?: { model?: string; thinking?: string }; selection?: { model: string } | { thinking: string }; liveStatus?: ManagedAdapterLiveStatus };
 					const resultState = registry.controlResultState(attachment.conversationId, payload.controlId);
 					if (resultState === "unknown") throw new RelayRegistryError("not_found", "Pending managed control was not found");
 					if (resultState === "pending") {
 						const manifest = registry.manifestByConversationId(attachment.conversationId);
 						if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation is unavailable");
 						const source = registry.pendingControls(attachment.conversationId).find((control) => control.controlId === payload.controlId);
+						if ((source?.name === "status") !== (payload.liveStatus !== undefined) ||
+							(payload.liveStatus !== undefined && (payload.status !== "ok" || payload.options || payload.generation || payload.selection))) {
+							throw new RelayRegistryError("invalid_state", "Live status metadata does not match an authorized status control");
+						}
 						if (payload.generation) {
 							if (!source || source.name !== "new" || source.argument !== "--confirm" || payload.status !== "ok" || payload.options || !hostLifecycle) {
 								throw new RelayRegistryError("invalid_state", "Fresh generation result does not match an authorized confirmed control");
@@ -199,6 +205,13 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 							if (selection.kind === "model") await registry.updateActiveGenerationModel(attachment.conversationId, selection.value);
 							else await registry.updateActiveGenerationThinking(attachment.conversationId, selection.value);
 						}
+						let projectedMessage = payload.message;
+						if (payload.liveStatus) {
+							const runtime = registry.snapshot().conversations.find((item) => item.conversationId === attachment.conversationId);
+							if (!runtime) throw new RelayRegistryError("not_found", "Managed runtime status is unavailable");
+							projectedMessage = renderManagedConversationStatus(manifest, runtime, payload.liveStatus,
+								registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, payload.controlId);
+						}
 						if (payload.options?.length) {
 							if (!source || (source.name !== "model" && source.name !== "thinking")) {
 								throw new RelayRegistryError("invalid_state", "Managed control options require a model or thinking scope");
@@ -206,7 +219,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 							const options = payload.options.map((option, index) => ({ answerId: `pi-control-${index}`, command: option }));
 							await controlPollPublisher.publish({ conversationId: manifest.conversationId, roomId: manifest.roomId,
 								sourceControl: source, scope: source.name, prompt: payload.message, options });
-						} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, payload.message);
+						} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, projectedMessage);
 						await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
 					}
 					await activityProjector!.endOperationFeedback(attachment.conversationId, payload.controlId);

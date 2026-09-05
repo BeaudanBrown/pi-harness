@@ -385,6 +385,8 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	assert.deepEqual(activeTools, ["read", "remote_checkpoint", "remote_artifact_export"], "managed conversation tools activate only for the live binding");
 	const send = async (id: number, name: string, argument?: string) => { relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: `control-${id}`, conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${String(id).padStart(32, "a")}`, name, ...(argument ? { argument } : {}) } } as ManagedSessionEnvelope); await new Promise((resolve) => setTimeout(resolve, 30)); };
+	await send(12, "status");
+	assert.deepEqual(relay.frames.at(-1)?.payload.liveStatus, { state: "busy", model: "scoped/model-0", thinking: "medium", context: { usedTokens: 90, limitTokens: 100 } });
 	await send(1, "model", "scoped/model-1");
 	assert.equal(setModelCalls, 0); assert.match(String(relay.frames.at(-1)?.payload.message), /busy/);
 	idle = true; await send(2, "model");
@@ -432,6 +434,8 @@ test("durable control marker restoration rejects extra, malformed, and unbounded
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: { model: "x".repeat(257) } }],
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: { thinking: "x".repeat(33) } }],
 		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", selection: { model: "scoped/model", thinking: "high" } }],
+		["pi-managed-session-control-result", { controlId: validId, status: "rejected", message: "done", liveStatus: { state: "idle", thinking: "off" } }],
+		["pi-managed-session-control-result", { controlId: validId, status: "ok", message: "done", liveStatus: { state: "idle", thinking: "off", context: { usedTokens: 2, limitTokens: 1 } } }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "provider/model", state: "started", extra: true }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "thinking", argument: "x".repeat(4_097), state: "started" }],
 		["pi-managed-session-control-execution", { controlId: validId, name: "model", argument: "", state: "started" }],
