@@ -1,11 +1,13 @@
 import { spawn } from "node:child_process";
 import { constants, createWriteStream } from "node:fs";
-import { cp, lstat, mkdir, open, readFile, realpath, writeFile } from "node:fs/promises";
+import { lstat, mkdir, open, readFile, realpath, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { once } from "node:events";
 import * as path from "node:path";
 import { resolveAgentProfile, withProjectWorkerOptIn, type AgentProfile } from "../agent-profiles/core.js";
 import { collectSessionUsage, readNestedModelUsage, type NestedModelUsage } from "../agent-profiles/usage.js";
+
+import { preserveAttempt, preservationSummary, type PreservationEvidence } from "./aloop-preservation.js";
 
 const ALOOP_ROOT = ".pi/tmp/aloop";
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000;
@@ -76,6 +78,8 @@ export type AloopAttemptOutcome = {
 	workerResult: AloopWorkerResult | null;
 	contract: AttemptContractAssessment;
 	process: { exitCode: number | null; signal: NodeJS.Signals | null; timedOut: boolean; cancelled: boolean; durationMs: number };
+	submission?: "valid" | "missing" | "invalid";
+	preservation?: PreservationEvidence;
 	modelUsage?: NestedModelUsage[];
 	artifacts: { directory: string; prompt: string; stdout: string; stderr: string; result: string; submission?: string; context?: string; diff?: string; stagedDiff?: string; untracked?: string };
 };
@@ -243,13 +247,16 @@ export function parseAloopPatchResult(document: string): AloopWorkerResult {
 
 export function assessAttemptContract(input: {
 	beforeHead: string;
-	afterHead: string;
-	commitCount: number;
-	beforeIsAncestor: boolean;
-	worktreeStatus: string;
+	afterHead: string | null;
+	commitCount: number | null;
+	beforeIsAncestor: boolean | null;
+	worktreeStatus: string | null;
 	workerStatus?: AloopWorkerResultStatus;
 }): AttemptContractAssessment {
 	const violations: string[] = [];
+	if (input.afterHead === null || input.commitCount === null || input.beforeIsAncestor === null || input.worktreeStatus === null) {
+		return { valid: false, commit: null, violations: ["Git settlement state is unknown; inspect retained workspace before acceptance."] };
+	}
 	if (!input.beforeIsAncestor) violations.push("The attempt rewrote or removed the starting commit.");
 	if ((input.workerStatus === "candidate-complete" || input.workerStatus === "already-satisfied") && input.worktreeStatus.trim()) {
 		violations.push("Successful candidate outcomes require a clean worktree.");
@@ -380,7 +387,7 @@ async function gitResult(cwd: string, args: string[], options: GitCommandOptions
 			settled = true;
 			cleanup();
 			if (error) reject(error);
-			else resolve({ code, stdout: stdout.trim(), stderr: stderr.trim() });
+			else resolve({ code, stdout, stderr: stderr.trim() });
 		};
 		const terminate = (reason: string) => {
 			if (settled) return;
@@ -391,8 +398,11 @@ async function gitResult(cwd: string, args: string[], options: GitCommandOptions
 		const timer = setTimeout(() => terminate(`Git command timed out after ${Math.trunc(timeoutMs)}ms`), timeoutMs);
 		timer.unref?.();
 		options.signal?.addEventListener("abort", abort, { once: true });
-		child.stdout.on("data", (chunk: Buffer) => { stdout += chunk.toString("utf8"); });
-		child.stderr.on("data", (chunk: Buffer) => { stderr += chunk.toString("utf8"); });
+		child.stdout.on("data", (chunk: Buffer) => {
+			stdout += chunk.toString("utf8");
+			if (Buffer.byteLength(stdout) > MAX_CAPTURE_BYTES) terminate("Git output exceeded capture limit");
+		});
+		child.stderr.on("data", (chunk: Buffer) => { stderr = appendTail(stderr, chunk); });
 		child.once("error", (error) => finish(error));
 		child.once("close", (code) => finish(undefined, code));
 		if (options.signal?.aborted) abort();
@@ -402,18 +412,11 @@ async function gitResult(cwd: string, args: string[], options: GitCommandOptions
 async function git(cwd: string, args: string[], options: GitCommandOptions = {}): Promise<string> {
 	const result = await gitResult(cwd, args, options);
 	if (result.code !== 0) throw new Error((result.stderr || result.stdout || `git ${args.join(" ")} failed`).trim());
-	return result.stdout;
+	return result.stdout.trim();
 }
 
 async function worktreeStatus(cwd: string, options: GitCommandOptions = {}): Promise<string> {
 	return await git(cwd, ["status", "--porcelain=v1", "--untracked-files=all"], options);
-}
-
-async function isAncestor(cwd: string, ancestor: string, descendant: string, options: GitCommandOptions = {}): Promise<boolean> {
-	const result = await gitResult(cwd, ["merge-base", "--is-ancestor", ancestor, descendant], options);
-	if (result.code === 0) return true;
-	if (result.code === 1) return false;
-	throw new Error(result.stderr || "git merge-base --is-ancestor failed.");
 }
 
 export async function resolveProjectWorkerResources(
@@ -539,11 +542,14 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 			if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 		}
 	}
-	const settlementGitOptions: GitCommandOptions = {};
-	const afterHead = await git(input.cwd, ["rev-parse", "HEAD"], settlementGitOptions);
-	const worktreeStatusAfter = await worktreeStatus(input.cwd, settlementGitOptions);
-	const beforeIsAncestor = await isAncestor(input.cwd, beforeHead, afterHead, settlementGitOptions);
-	const commitCount = beforeIsAncestor ? Number(await git(input.cwd, ["rev-list", "--count", `${beforeHead}..${afterHead}`], settlementGitOptions)) : 0;
+	const settlementGitOptions: GitCommandOptions = { deadlineMs: Date.now() + 30_000 };
+	const preserved = await preserveAttempt({ cwd: input.cwd, directory, base: beforeHead,
+		git: (args) => gitResult(input.cwd, args, settlementGitOptions),
+	});
+	const afterHead = preserved.evidence.head;
+	const worktreeStatusAfter = preserved.status;
+	const beforeIsAncestor = preserved.ancestor;
+	const commitCount = preserved.evidence.commits;
 	let workerResult: AloopWorkerResult | null = null;
 	let parseError: string | null = null;
 	try {
@@ -556,25 +562,9 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 		beforeHead, afterHead, commitCount, beforeIsAncestor, worktreeStatus: worktreeStatusAfter,
 		workerStatus: workerResult?.status,
 	});
-	const [diff, stagedDiff, untrackedRaw] = await Promise.all([
-		gitResult(input.cwd, ["diff", "--binary"], settlementGitOptions),
-		gitResult(input.cwd, ["diff", "--cached", "--binary"], settlementGitOptions),
-		gitResult(input.cwd, ["ls-files", "--others", "--exclude-standard", "-z"], settlementGitOptions),
-	]);
-	const untrackedFiles = untrackedRaw.stdout.split("\0").filter((value) => value && !value.startsWith(`${ALOOP_ROOT}/`));
-	await Promise.all([
-		writeFile(diffPath, diff.stdout, { encoding: "utf8", mode: 0o600, flag: "wx" }),
-		writeFile(stagedDiffPath, stagedDiff.stdout, { encoding: "utf8", mode: 0o600, flag: "wx" }),
-		writeFile(untrackedPath, `${JSON.stringify(untrackedFiles, null, 2)}\n`, { encoding: "utf8", mode: 0o600, flag: "wx" }),
-	]);
-	if (untrackedFiles.length > 0) {
-		const copies = path.join(directory, "untracked");
-		await mkdir(copies, { recursive: true, mode: 0o700 });
-		for (const file of untrackedFiles) {
-			const target = path.join(copies, file);
-			await mkdir(path.dirname(target), { recursive: true, mode: 0o700 });
-			await cp(path.join(input.cwd, file), target, { recursive: true, force: false, dereference: false });
-		}
+	if (preserved.evidence.capture !== "complete") {
+		contract.valid = false;
+		contract.violations.push("Preservation incomplete; inspect retained workspace before acceptance.");
 	}
 	const submissionMissing = workerResult === null && parseError === null;
 	const status = processResult.timedOut ? "timeout"
@@ -586,7 +576,7 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 							: parseError ? "invalid-result"
 								: "completed";
 	const fallback = contract.violations.join(" ") || (submissionMissing ? "Worker exited without aloop_submit_result." : `Worker exited with code ${processResult.exitCode ?? "unknown"}.`);
-	const summary = boundedText(workerResult?.summary ?? launchError ?? parseError ?? fallback, MAX_SUMMARY_BYTES);
+	const summary = `${preservationSummary(preserved.evidence)}\nWorker report: ${boundedText(workerResult?.summary ?? launchError ?? parseError ?? fallback, MAX_SUMMARY_BYTES)}`;
 	let stdoutDocument = "";
 	try { stdoutDocument = await readFile(stdoutPath, "utf8"); } catch (error) {
 		if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
@@ -602,6 +592,8 @@ export async function runAloopWorker(input: AloopWorkerInput): Promise<AloopAtte
 		commit: contract.commit,
 		workerResult,
 		contract,
+		submission: parseError ? "invalid" : submissionMissing ? "missing" : "valid",
+		preservation: preserved.evidence,
 		process: {
 			exitCode: processResult.exitCode,
 			signal: processResult.signal,

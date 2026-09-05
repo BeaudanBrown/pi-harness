@@ -181,6 +181,34 @@ A verification run must begin and end at the same clean HEAD. When the policy is
 missing, malformed, or required infrastructure is unavailable, the supervisor
 records the gap and stops rather than inventing a passing check.
 
+## Preservation evidence
+
+New worker results retain execution status independently of `submission`
+(`valid`, `missing`, or `invalid`) and versioned `preservation` evidence. This
+records HEAD, commit count, staged/unstaged/untracked path counts, capture
+completeness, and bounded operation-failure labels. Failed inspection yields
+`null` (unknown), never a zero-change claim. Both timeout and cancellation
+results include these facts in their deterministic summaries.
+
+Postflight Git commands share a separate 30-second inspection deadline. Git
+output and each patch are capped at 10 MiB; untracked content is capped at
+1,000 files and 10 MiB total. Unsupported untracked entries, including symlinks,
+are retained in the source workspace and make preservation incomplete. Failed
+patch commands do not create misleading empty successful patch artifacts.
+Captured patches preserve their trailing bytes. Preservation is diagnostic
+recovery material, not a disk-loss backup or a security sandbox.
+
+Incomplete preservation blocks automatic acceptance, including after reloading
+a new-format result. Non-accepted handoffs use a deterministic Git/preservation
+summary rather than model-authored claims about whether changes exist. Original
+files are never deleted, staged, or committed by preservation. Inspect and
+explicitly settle retained work before another attempt. Historical results
+without this evidence retain their existing recovery behavior.
+
+This does not yet add atomic final-result replacement, discovery of interrupted
+records without valid results, automatic dirty-worktree recovery, isolated
+worktrees, or a headless driver. Those remain subsequent reliability slices.
+
 ## Resume and recovery
 
 Pi conversation state is convenient but not authoritative. To resume after an

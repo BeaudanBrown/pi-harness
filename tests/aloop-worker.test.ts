@@ -375,10 +375,39 @@ test("timed-out full workers preserve dirty partial work and reconstruction arti
 			...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 250,
 		});
 		assert.equal(outcome.status, "timeout");
+		assert.equal(outcome.preservation?.capture, "complete");
+		assert.equal(outcome.preservation?.untracked, 1);
+		assert.match(outcome.summary, /0 commits; 0 staged, 0 unstaged, 1 untracked paths/);
+		const persisted = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.result), "utf8"));
+		assert.deepEqual(persisted.preservation, outcome.preservation);
 		const untracked = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.untracked!), "utf8"));
 		assert.deepEqual(untracked, ["timeout-partial.txt"]);
 		assert.equal(await readFile(path.join(cwd, outcome.artifacts.directory, "untracked/timeout-partial.txt"), "utf8"), "preserve me\n");
 	} finally { await rm(cwd, { recursive: true, force: true }); }
+});
+
+test("failed postflight HEAD inspection persists unknown rather than invented zero-change state", async () => {
+	const cwd = await createRepository();
+	const originalPath = process.env.PATH;
+	try {
+		const realGit = (await exec("sh", ["-c", "command -v git"])).stdout.trim();
+		const bin = path.join(cwd, ".pi", "fault-bin");
+		await mkdir(bin, { recursive: true });
+		await writeFile(path.join(bin, "git"), `#!/bin/sh\nif [ "$1" = rev-parse ] && [ -f timeout-partial.txt ]; then exit 1; fi\nexec "${realGit}" "$@"\n`);
+		await chmod(path.join(bin, "git"), 0o755);
+		process.env.PATH = `${bin}:${originalPath}`;
+		const outcome = await runAloopWorker({ ...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 250 });
+		const record = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.result), "utf8"));
+		assert.equal(record.afterHead, null);
+		assert.equal(record.commitCount, null);
+		assert.equal(outcome.preservation?.commits, null);
+		assert.equal(outcome.contract.valid, false);
+		assert.match(outcome.summary, /unknown commits/);
+		assert.equal(await readFile(path.join(cwd, "timeout-partial.txt"), "utf8"), "preserve me\n");
+	} finally {
+		process.env.PATH = originalPath;
+		await rm(cwd, { recursive: true, force: true });
+	}
 });
 
 test("timeouts terminate the complete worker process group", async () => {

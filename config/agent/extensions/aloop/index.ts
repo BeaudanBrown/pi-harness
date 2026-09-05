@@ -35,11 +35,14 @@ const STATUS_KEY = "aloop";
 const MAX_COMMENT_LIMIT = 20;
 const MAX_COMMENT_BODY = 20_000;
 
+import { parsePreservationEvidence, preservationSummary, type PreservationEvidence } from "../github-issues/aloop-preservation.js";
+
 type PendingHandoff = {
+	preservation?: PreservationEvidence;
 	issue: number;
 	commit: string | null;
 	artifactDirectory: string;
-	patchArtifacts?: Array<{ commit: string | null; artifactDirectory: string; status: string }>;
+	patchArtifacts?: Array<{ commit: string | null; artifactDirectory: string; status: string; preservation?: PreservationEvidence }>;
 };
 
 
@@ -127,6 +130,7 @@ export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRec
 			const result = JSON.parse(await readFile(resultPath, "utf8"));
 			const artifactDirectory = `.pi/tmp/aloop/${entry.name}`;
 			if (result?.artifacts?.directory !== artifactDirectory) continue;
+			let preservation = parsePreservationEvidence(result.preservation);
 			let commit = result.commit === null ? null : typeof result.commit === "string" && /^[0-9a-f]{7,64}$/i.test(result.commit) ? result.commit : undefined;
 			if (commit === undefined || typeof result.status !== "string") continue;
 			try {
@@ -136,6 +140,8 @@ export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRec
 					const patches = JSON.parse(await readFile(patchPath, "utf8"));
 					if (Array.isArray(patches)) {
 						for (const patch of patches) {
+							const patchPreservation = parsePreservationEvidence(patch.preservation);
+							if (patchPreservation?.capture === "incomplete") preservation = patchPreservation;
 							if (typeof patch?.artifactDirectory === "string") patchArtifactDirectories.add(patch.artifactDirectory);
 							if (typeof patch?.commit === "string" && /^[0-9a-f]{7,64}$/i.test(patch.commit)) commit = patch.commit;
 						}
@@ -144,7 +150,7 @@ export async function scanAttemptArtifacts(cwd: string): Promise<AloopAttemptRec
 			} catch (error) {
 				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
 			}
-			records.push({ issue: Number(match[1]), commit, artifactDirectory, status: result.status });
+			records.push({ issue: Number(match[1]), commit, artifactDirectory, status: result.status, preservation });
 		} catch {
 			// Ignore incomplete or malformed attempt artifacts; they carry no recoverable structured outcome.
 		}
@@ -739,7 +745,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				} finally {
 					clearInterval(heartbeat);
 				}
-				pendingHandoffs.push({ issue: issue.number, commit: outcome.commit, artifactDirectory: outcome.artifacts.directory });
+				pendingHandoffs.push({ issue: issue.number, commit: outcome.commit, artifactDirectory: outcome.artifacts.directory, preservation: outcome.preservation });
 				if (outcome.modelUsage?.length) pi.appendEntry("aloop-model-usage", { issue: issue.number, kind: "full-worker", usage: outcome.modelUsage });
 				const text = [
 					`Attempt status: ${outcome.status}`,
@@ -827,7 +833,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 					issueContext: context, issueBaseCommit: issueBaseCommits.get(issue.number), projectWorkerResources: policy.workerResources,
 					modelRef, timeoutMs: Math.min(params.timeout_ms ?? MAX_PATCH_TIMEOUT_MS, MAX_PATCH_TIMEOUT_MS), spawnDeadlineMs: runBudget.deadlineMs, signal,
 				});
-				pending.patchArtifacts = [...(pending.patchArtifacts ?? []), { commit: outcome.commit, artifactDirectory: outcome.artifacts.directory, status: outcome.status }];
+				if (outcome.preservation?.capture === "incomplete") pending.preservation = outcome.preservation;
+				pending.patchArtifacts = [...(pending.patchArtifacts ?? []), { commit: outcome.commit, artifactDirectory: outcome.artifacts.directory, status: outcome.status, preservation: outcome.preservation }];
 				if (outcome.commit) pending.commit = outcome.commit;
 				const patchRecordPath = path.resolve(ctx.cwd, pending.artifactDirectory, "patch-attempts.json");
 				const artifactRoot = path.resolve(ctx.cwd, ".pi/tmp/aloop");
@@ -906,6 +913,12 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const base = issueBaseCommits.get(params.issue) ?? head;
 			const review = attemptReviews.get(params.issue);
 			const verification = [...params.verification];
+			if (pending.preservation) {
+				verification.unshift(`Worker preservation: ${pending.preservation.capture}.`);
+				if (params.outcome === "accepted" && pending.preservation.capture !== "complete") {
+					throw new Error("Accepted finalization requires complete preservation evidence; inspect retained workspace before continuing.");
+				}
+			}
 			const checkpoints = checkpointState(issue);
 			const attestedResolutions = new Set<string>();
 			for (const marker of checkpoints.open) if (checkpoints.resolved.includes(marker) && await decisionAttested(ctx.cwd, marker)) attestedResolutions.add(marker);
@@ -945,7 +958,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const validated = validatedAcceptedCurrentStateHandoff(issue, head, supervisorLogin);
 				if (!validated || validated.body !== publishedComment?.body) throw new Error("Published accepted handoff is not the latest fully reviewed and verified current-state snapshot.");
 			}
-			const handoff = publishedHandoff ?? { version: 3 as const, issue: params.issue, issueBaseCommit: base, commitRange: `${base}..${head}`, outcome: params.outcome, summary: params.summary, outstandingFindings: params.outstanding_findings, decisions: params.decisions, verification, nextAction: params.next_action, attemptKey, timestamp: new Date().toISOString() };
+			const handoff = publishedHandoff ?? { version: 3 as const, issue: params.issue, issueBaseCommit: base, commitRange: `${base}..${head}`, outcome: params.outcome, summary: pending.preservation && params.outcome !== "accepted" ? preservationSummary(pending.preservation, false) : params.summary, outstandingFindings: params.outstanding_findings, decisions: params.decisions, verification, nextAction: params.next_action, attemptKey, timestamp: new Date().toISOString() };
 			const body = publishedComment?.body ?? formatAloopHandoffV3(handoff);
 			if (params.outcome === "accepted") {
 				const durable = parseAloopHandoffV3(body);
