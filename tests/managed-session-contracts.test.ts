@@ -185,6 +185,28 @@ test("role and operation combinations enforce capabilities", () => {
 		assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, role: "ordinary_adapter", payload: { request } }));
 	}
 	assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, payload: { request: { operation: "project.reconcile.apply", reconciliationKey, confirmed: false } } }));
+	const removalKey = `worktree_remove_${"b".repeat(32)}`;
+	for (const request of [
+		{ operation: "worktree.list", rootKey: "projects", workspace: "pi-harness" },
+		{ operation: "worktree.create", creationKey: "worktree-create", rootKey: "projects", workspace: "pi-harness", baseRef: "main", branch: "feature/example" },
+		{ operation: "worktree.conversation.create", creationKey: "worktree-bundle", rootKey: "projects", workspace: "pi-harness", baseRef: "refs/heads/main", branch: "feature/bundle", concept: "bundle work" },
+		{ operation: "worktree.remove.preview", rootKey: "projects", workspace: "pi-harness-feature", mergeTarget: "main" },
+		{ operation: "worktree.remove.apply", removalKey, confirmed: true },
+		{ operation: "worktree.conversation.cleanup.preview", targetConversationId: conversationId, mergeTarget: "main" },
+		{ operation: "worktree.conversation.cleanup.apply", removalKey, confirmed: true },
+		{ operation: "worktree.branch.delete", removalKey, confirmed: true },
+	]) {
+		assert.equal(parseManagedSessionEnvelope({ ...lifecycle, payload: { request } }).type, "lifecycle.request");
+		assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, role: "ordinary_adapter", payload: { request } }));
+	}
+	for (const operation of ["worktree.remove.apply", "worktree.conversation.cleanup.apply", "worktree.branch.delete"]) {
+		assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, payload: { request: { operation, removalKey, confirmed: false } } }));
+	}
+	assert.throws(() => parseManagedSessionEnvelope({ ...lifecycle, payload: { request: { operation: "worktree.create", creationKey: "bad", rootKey: "projects", workspace: "pi-harness", baseRef: "HEAD~1", branch: "feature/bad" } } }));
+	assert.equal(parseManagedSessionEnvelope({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "worktree-result", conversationId, role: "relay", type: "lifecycle.result",
+		inReplyTo: "lifecycle-1", payload: { operation: "worktree.list", rootKey: "projects", workspace: "pi-harness", worktrees: [
+			{ workspace: "pi-harness-topic", branch: "topic@2026", head: "a".repeat(40), isMain: false, locked: false, clean: true, conversations: [] },
+		], intents: [] } }).type, "lifecycle.result", "safe existing Git branch names remain representable in inventory responses");
 	assert.throws(() => parseManagedSessionEnvelope({ ...projectCreate, payload: { request: { ...projectCreate.payload.request, projectSpace: "caller-selected" } } }),
 		"coordinators cannot select grouping through display names or Matrix Space IDs");
 	for (const request of [

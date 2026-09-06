@@ -322,6 +322,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			activity = undefined;
 		};
 
+		const worktreeCreationKey = (rootKey: string, workspace: string, baseRef: string, branch: string): string =>
+			`worktree-${createHash("sha256").update("pi-managed-sessions:coordinator-worktree:v1\0").update(rootKey).update("\0").update(workspace).update("\0").update(baseRef).update("\0").update(branch).digest("hex").slice(0, 32)}`;
+		const gitRef = Type.String({ minLength: 1, maxLength: 255, pattern: "^[A-Za-z0-9][A-Za-z0-9._/@+/-]*$" });
 		const lifecycle = async (request: Record<string, unknown>) => {
 			if (!binding || !client?.connected) throw new ManagedAdapterError("Coordinator relay connection is unavailable");
 			const coordinatorClient = client;
@@ -357,6 +360,42 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				execute: async (_toolCallId, params) => lifecycle({ operation: "project.create",
 					creationKey: deriveProjectCreationKey(params.rootKey, params.workspace),
 					rootKey: params.rootKey, workspace: params.workspace, concept: params.concept }) });
+			pi.registerTool({ name: "remote_worktree_list", label: "List Git Worktrees",
+				description: "List host-validated worktrees, branch/head, clean/locked state, and bound conversations for one Git project directly under a configured root.",
+				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "worktree.list", rootKey: params.rootKey, workspace: params.workspace }) });
+			for (const bundled of [false, true] as const) pi.registerTool({
+				name: bundled ? "remote_worktree_conversation_create" : "remote_worktree_create",
+				label: bundled ? "Create Worktree and Conversation" : "Create Git Worktree",
+				description: bundled
+					? "Create a new branch and deterministic sibling worktree from an explicit existing ref, then create an idle managed conversation there. Send the task only after entering the resulting room."
+					: "Create a new branch and deterministic sibling worktree from an explicit existing ref without creating a room or sending a task.",
+				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }), baseRef: gitRef, branch: gitRef,
+					...(bundled ? { concept: Type.String({ minLength: 1, maxLength: 128 }) } : {}) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: bundled ? "worktree.conversation.create" : "worktree.create",
+					creationKey: worktreeCreationKey(params.rootKey, params.workspace, params.baseRef, params.branch), rootKey: params.rootKey, workspace: params.workspace,
+					baseRef: params.baseRef, branch: params.branch, ...(bundled ? { concept: (params as typeof params & { concept: string }).concept } : {}) }),
+			});
+			pi.registerTool({ name: "remote_worktree_remove_preview", label: "Preview Git Worktree Removal",
+				description: "Preview and bind a safe removal key for one linked worktree. No mutation occurs; dirty, ignored, locked, root, active, and merge state are reported or refused.",
+				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }), mergeTarget: Type.Optional(gitRef) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "worktree.remove.preview", ...params }) });
+			pi.registerTool({ name: "remote_worktree_remove_apply", label: "Remove Git Worktree",
+				description: "Remove exactly one clean, unlocked, inactive linked worktree using a stable preview key. The branch and managed conversations are preserved.",
+				parameters: Type.Object({ removalKey: Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "worktree.remove.apply", removalKey: params.removalKey, confirmed: params.confirm }) });
+			pi.registerTool({ name: "remote_worktree_cleanup_preview", label: "Preview Worktree and Conversation Cleanup",
+				description: "Preview bundled exact-process stop, clean linked-worktree removal, and existing bridge deletion while preserving Git/Pi/Matrix server history.",
+				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), mergeTarget: Type.Optional(gitRef) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "worktree.conversation.cleanup.preview", targetConversationId: params.conversationId, ...(params.mergeTarget ? { mergeTarget: params.mergeTarget } : {}) }) });
+			pi.registerTool({ name: "remote_worktree_cleanup_apply", label: "Clean Up Worktree and Conversation",
+				description: "Apply one confirmed bundled cleanup preview with durable forward recovery. Branch deletion remains separate.",
+				parameters: Type.Object({ removalKey: Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "worktree.conversation.cleanup.apply", removalKey: params.removalKey, confirmed: params.confirm }) });
+			pi.registerTool({ name: "remote_worktree_branch_delete", label: "Delete Merged Worktree Branch",
+				description: "Separately confirm deletion of the removed worktree's local branch only when its unchanged tip is fully merged into the explicit previewed target and is checked out nowhere.",
+				parameters: Type.Object({ removalKey: Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "worktree.branch.delete", removalKey: params.removalKey, confirmed: params.confirm }) });
 			pi.registerTool({ name: "remote_session_start", label: "Start Managed Conversation",
 				description: "Create an idle managed Pi conversation in an existing depth-one checkout. The host groups linked Git worktrees by common-directory identity. Do not include an objective or task context; the first Matrix message is the first task.",
 				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }),

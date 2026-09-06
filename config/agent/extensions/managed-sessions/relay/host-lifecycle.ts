@@ -1,6 +1,6 @@
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, lstat, open, readFile, rename, rm } from "node:fs/promises";
+import { chmod, lstat, open, readFile, readdir, rename, rm } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
 	MANAGED_SESSION_STATE_VERSION,
@@ -96,6 +96,83 @@ interface ProjectCreationIntent {
 	sessionPersisted: boolean; projectSpaceId?: string; hostSpaceLinked?: boolean; roomId?: string; roomLinked?: boolean;
 }
 
+interface WorktreePlan {
+	rootKey: string; sourceWorkspace: string; projectWorkspace: string; targetWorkspace: string; commonDir: string; mainPath: string;
+	targetPath: string; baseRef: string; baseCommit: string; branch: string;
+}
+
+interface WorktreeCreationIntent extends WorktreePlan {
+	creationKey: string; requestedBaseRef: string; worktreeKey: string; phase: "planned" | "created"; concept?: string; conversationCreationKey?: string;
+}
+
+interface WorktreeRemovalIntent {
+	removalKey: string; rootKey: string; workspace: string; projectWorkspace: string; path: string; commonDir: string; mainPath: string;
+	branch: string; head: string; clean: boolean; locked: boolean; mergeTarget?: string; mergeCommit?: string; merged?: boolean;
+	targetConversationId?: string; phase: "planned" | "stopped" | "removed" | "bridge_deleted" | "branch_deleted";
+}
+
+function boundedHostString(item: Record<string, unknown>, field: string, max = 4096): string {
+	const value = item[field];
+	if (typeof value !== "string" || value.length < 1 || value.length > max || /[\u0000-\u001f\u007f]/.test(value)) {
+		throw new RelayRegistryError("invalid_state", `Managed worktree ${field} is malformed`);
+	}
+	return value;
+}
+
+function parseWorktreePlan(value: unknown): WorktreePlan {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Managed worktree plan is malformed");
+	const item = value as Record<string, unknown>;
+	const fields = ["rootKey", "sourceWorkspace", "projectWorkspace", "targetWorkspace", "commonDir", "mainPath", "targetPath", "baseRef", "baseCommit", "branch"];
+	if (Object.keys(item).some((key) => !fields.includes(key))) throw new RelayRegistryError("invalid_state", "Managed worktree plan has unexpected fields");
+	const result = Object.fromEntries(fields.map((field) => [field, boundedHostString(item, field, field.endsWith("Path") || field === "commonDir" ? 4096 : 255)])) as unknown as WorktreePlan;
+	if (!/^refs\/(heads|remotes|tags)\//.test(result.baseRef) || !/^[a-f0-9]{40,64}$/.test(result.baseCommit) ||
+		![result.rootKey, result.sourceWorkspace, result.projectWorkspace, result.targetWorkspace].every((field) => /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(field)) ||
+		![result.commonDir, result.mainPath, result.targetPath].every(isAbsolute)) throw new RelayRegistryError("invalid_state", "Managed worktree plan identity is invalid");
+	return result;
+}
+
+function parseWorktreeCreationIntent(value: unknown): WorktreeCreationIntent {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Managed worktree creation intent is malformed");
+	const item = value as Record<string, unknown>;
+	const planFields = ["rootKey", "sourceWorkspace", "projectWorkspace", "targetWorkspace", "commonDir", "mainPath", "targetPath", "baseRef", "baseCommit", "branch"];
+	const plan = parseWorktreePlan(Object.fromEntries(planFields.map((field) => [field, item[field]])));
+	const allowed = new Set([...planFields, "creationKey", "requestedBaseRef", "worktreeKey", "phase", "concept", "conversationCreationKey"]);
+	if (Object.keys(item).some((key) => !allowed.has(key)) || !/^worktree_[a-f0-9]{32}$/.test(String(item.worktreeKey)) ||
+		!["planned", "created"].includes(String(item.phase)) || typeof item.creationKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item.creationKey) ||
+		typeof item.requestedBaseRef !== "string" || item.requestedBaseRef.length > 255 || typeof item.worktreeKey !== "string" ||
+		[item.concept, item.conversationCreationKey].some((field) => field !== undefined && (typeof field !== "string" || field.length < 1 || field.length > 128 || /[\u0000-\u001f\u007f]/.test(field)))) {
+		throw new RelayRegistryError("invalid_state", "Managed worktree creation intent is malformed");
+	}
+	return { ...plan, creationKey: String(item.creationKey), requestedBaseRef: String(item.requestedBaseRef), worktreeKey: String(item.worktreeKey), phase: item.phase as WorktreeCreationIntent["phase"],
+		...(item.concept ? { concept: String(item.concept) } : {}), ...(item.conversationCreationKey ? { conversationCreationKey: String(item.conversationCreationKey) } : {}) };
+}
+
+function parseWorktreeRemovalIntent(value: unknown): WorktreeRemovalIntent {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Managed worktree removal intent is malformed");
+	const item = value as Record<string, unknown>;
+	const required = ["removalKey", "rootKey", "workspace", "projectWorkspace", "path", "commonDir", "mainPath", "branch", "head", "phase"];
+	const optional = ["clean", "locked", "mergeTarget", "mergeCommit", "merged", "targetConversationId"];
+	if (Object.keys(item).some((key) => ![...required, ...optional].includes(key)) || required.some((field) => typeof item[field] !== "string") ||
+		!/^worktree_remove_[a-f0-9]{32}$/.test(String(item.removalKey)) || !["planned", "stopped", "removed", "bridge_deleted", "branch_deleted"].includes(String(item.phase)) ||
+		typeof item.clean !== "boolean" || typeof item.locked !== "boolean" || (item.merged !== undefined && typeof item.merged !== "boolean") ||
+		![item.rootKey, item.workspace, item.projectWorkspace].every((field) => typeof field === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(field)) ||
+		![item.path, item.commonDir, item.mainPath].every((field) => typeof field === "string" && field.length <= 4096 && isAbsolute(field)) ||
+		typeof item.branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/@+/-]{0,254}$/.test(item.branch) || typeof item.head !== "string" || !/^[a-f0-9]{40,64}$/.test(item.head) ||
+		[item.mergeTarget, item.mergeCommit, item.merged].some((field) => field !== undefined) && [item.mergeTarget, item.mergeCommit, item.merged].some((field) => field === undefined) ||
+		(item.mergeTarget !== undefined && (typeof item.mergeTarget !== "string" || !/^refs\/(heads|remotes|tags)\//.test(item.mergeTarget))) ||
+		(item.mergeCommit !== undefined && (typeof item.mergeCommit !== "string" || !/^[a-f0-9]{40,64}$/.test(item.mergeCommit))) ||
+		(item.targetConversationId !== undefined && (typeof item.targetConversationId !== "string" || !/^conv_[a-f0-9]{32}$/.test(item.targetConversationId)))) {
+		throw new RelayRegistryError("invalid_state", "Managed worktree removal intent is malformed");
+	}
+	return item as unknown as WorktreeRemovalIntent;
+}
+
+function lifecycleDigest(domain: string, ...parts: string[]): string {
+	const hash = createHash("sha256").update(`pi-managed-sessions:${domain}:v1\0`);
+	for (const part of parts) hash.update(`${Buffer.byteLength(part)}:`).update(part);
+	return hash.digest("hex").slice(0, 32);
+}
+
 function parseProjectCreationIntent(value: unknown): ProjectCreationIntent {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Project creation intent is malformed");
 	const item = value as Record<string, unknown>;
@@ -111,6 +188,21 @@ function parseProjectCreationIntent(value: unknown): ProjectCreationIntent {
 		throw new RelayRegistryError("invalid_state", "Project creation intent is malformed");
 	}
 	return item as unknown as ProjectCreationIntent;
+}
+
+async function ensureWorktreeIntentCapacity(directory: string): Promise<void> {
+	const path = await ensurePrivateDirectory(directory);
+	const entries = await readdir(path);
+	if (entries.filter((entry) => entry.endsWith(".json")).length >= 1_024) throw new RelayRegistryError("capacity_reached", "Managed worktree lifecycle intent capacity was reached");
+}
+
+async function readPrivateIntent<T>(file: AtomicJsonFile<T>): Promise<T | undefined> {
+	const value = await file.read(); if (value === undefined) return undefined;
+	const info = await lstat(file.path);
+	if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (process.getuid?.() !== undefined && info.uid !== process.getuid!())) {
+		throw new RelayRegistryError("invalid_state", "Managed lifecycle intent is not a private relay-user file");
+	}
+	return value;
 }
 
 async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1): Promise<{ sessionId: string; boundaryEntryId: string }> {
@@ -165,6 +257,7 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 export class HostLifecycle {
 	private readonly launches = new Map<string, Promise<void>>();
 	private readonly creations = new Map<string, Promise<Record<string, unknown>>>();
+	private readonly worktreeOperations = new Map<string, Promise<unknown>>();
 	private readonly provisions = new Map<string, Promise<{ roomId: string; projectSpace: string }>>();
 	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
 	private readonly reconciler: ProjectReconciler;
@@ -195,6 +288,20 @@ export class HostLifecycle {
 		const request = envelope.payload.request as Record<string, unknown>;
 		switch (request.operation) {
 			case "workspace.list": return { operation: "workspace.list", workspaces: await this.workspaceList() };
+			case "worktree.list": return this.worktreeList(String(request.rootKey), String(request.workspace));
+			case "worktree.create": return this.createWorktree(request as never, false);
+			case "worktree.conversation.create": return this.createWorktree(request as never, true);
+			case "worktree.remove.preview": return this.previewWorktreeRemoval(request as never);
+			case "worktree.remove.apply":
+				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Worktree removal requires explicit confirmation");
+				return this.applyWorktreeRemoval(String(request.removalKey), false);
+			case "worktree.conversation.cleanup.preview": return this.previewConversationCleanup(String(request.targetConversationId), request.mergeTarget === undefined ? undefined : String(request.mergeTarget));
+			case "worktree.conversation.cleanup.apply":
+				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Bundled worktree cleanup requires explicit confirmation");
+				return this.applyWorktreeRemoval(String(request.removalKey), true);
+			case "worktree.branch.delete":
+				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Managed branch deletion requires separate explicit confirmation");
+				return this.deleteWorktreeBranch(String(request.removalKey));
 			case "conversation.list": return { operation: "conversation.list", conversations: this.options.registry.listConversations() };
 			case "conversation.status": return this.status(String(request.targetConversationId));
 			case "project.create": return this.createProject(request as never);
@@ -267,8 +374,8 @@ export class HostLifecycle {
 	}
 
 	async wake(manifest: ConversationManifest): Promise<void> {
-		if (manifest.kind === "coordinator") throw new RelayRegistryError("permission_denied", "Coordinator wake uses its dedicated launcher");
-		await this.launchProject(manifest);
+		if (manifest.kind === "coordinator" || !manifest.placement) throw new RelayRegistryError("permission_denied", "Coordinator wake uses its dedicated launcher");
+		await this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement), async () => { await this.launchProject(manifest); return {}; });
 	}
 
 	async requestNewGeneration(manifest: ConversationManifest, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<void> {
@@ -345,6 +452,175 @@ export class HostLifecycle {
 		return result.workspaces as Array<{ rootKey: string; workspace: string }>;
 	}
 
+	private workspaceOperationKey(placement: WorkspaceIdentity): string { return `workspace:${placement.rootKey}:${placement.workspace}`; }
+
+	private runWorktreeOperation<T>(key: string, operation: () => Promise<T>): Promise<T> {
+		const running = this.worktreeOperations.get(key); if (running) return running as Promise<T>;
+		const work = operation().finally(() => { if (this.worktreeOperations.get(key) === work) this.worktreeOperations.delete(key); });
+		this.worktreeOperations.set(key, work); return work;
+	}
+
+	private async worktreeList(rootKey: string, workspace: string): Promise<Record<string, unknown>> {
+		const result = await this.invoke("worktree-list", { rootKey, workspace });
+		if (result.rootKey !== rootKey || typeof result.projectWorkspace !== "string" || typeof result.commonDir !== "string" || !isAbsolute(result.commonDir) || !Array.isArray(result.worktrees) || result.worktrees.length > 256 ||
+			Object.keys(result).some((field) => !["rootKey", "projectWorkspace", "commonDir", "worktrees"].includes(field))) {
+			throw new RelayRegistryError("launch_failed", "Worktree launcher returned an invalid inventory");
+		}
+		const worktrees = result.worktrees.map((value) => {
+			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("launch_failed", "Worktree launcher returned an invalid inventory item");
+			const item = value as Record<string, unknown>;
+			if (typeof item.workspace !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(item.workspace) || typeof item.head !== "string" || !/^[a-f0-9]{40,64}$/.test(item.head) ||
+				typeof item.isMain !== "boolean" || typeof item.locked !== "boolean" || typeof item.clean !== "boolean" ||
+				(item.branch !== undefined && (typeof item.branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/@+/-]{0,254}$/.test(item.branch))) || Object.keys(item).some((field) => !["workspace", "head", "branch", "isMain", "locked", "clean"].includes(field))) {
+				throw new RelayRegistryError("launch_failed", "Worktree launcher returned an invalid inventory item");
+			}
+			const conversations = this.options.registry.listManifests().filter((manifest) => manifest.kind === "project" && manifest.placement?.rootKey === rootKey && manifest.placement.workspace === item.workspace)
+				.map((manifest) => manifest.conversationId).slice(0, 256);
+			return { ...item, conversations };
+		});
+		return { operation: "worktree.list", rootKey, workspace, worktrees, intents: await this.worktreeIntentStatuses(result.commonDir) };
+	}
+
+	private async worktreeIntentStatuses(commonDir: string): Promise<Array<Record<string, unknown>>> {
+		const directory = join(resolve(this.options.projectSessionDirectory), "worktrees");
+		let names: string[];
+		try { names = (await readdir(directory)).filter((name) => name.endsWith(".json")); }
+		catch (error) { if (error instanceof Error && "code" in error && error.code === "ENOENT") return []; throw error; }
+		if (names.length > 1_024) throw new RelayRegistryError("capacity_reached", "Managed worktree lifecycle intent capacity was exceeded");
+		const statuses: Array<Record<string, unknown>> = [];
+		for (const name of names.sort()) {
+			const path = join(directory, name); const info = await lstat(path);
+			if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || (process.getuid?.() !== undefined && info.uid !== process.getuid!())) {
+				throw new RelayRegistryError("invalid_state", "Managed worktree lifecycle intent is not a private relay-user file");
+			}
+			let value: unknown; try { value = JSON.parse(await readFile(path, "utf8")); } catch { throw new RelayRegistryError("invalid_state", "Managed worktree lifecycle intent is malformed"); }
+			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Managed worktree lifecycle intent is malformed");
+			const item = value as Record<string, unknown>;
+			if (item.worktreeKey !== undefined) {
+				const intent = parseWorktreeCreationIntent(value); if (intent.commonDir === commonDir) statuses.push({ kind: "creation", key: intent.worktreeKey, workspace: intent.targetWorkspace, branch: intent.branch, phase: intent.phase });
+			} else {
+				const intent = parseWorktreeRemovalIntent(value); if (intent.commonDir === commonDir) statuses.push({ kind: "removal", key: intent.removalKey, workspace: intent.workspace, branch: intent.branch, phase: intent.phase });
+			}
+		}
+		return statuses;
+	}
+
+	private createWorktree(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean): Promise<Record<string, unknown>> {
+		return this.runWorktreeOperation(`create:${request.creationKey}`, () => this.createWorktreeOnce(request, bundled));
+	}
+
+	private async createWorktreeOnce(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean): Promise<Record<string, unknown>> {
+		if (bundled !== Boolean(request.concept)) throw new RelayRegistryError("invalid_state", "Bundled worktree creation requires one conversation concept");
+		const intentPath = join(resolve(this.options.projectSessionDirectory), "worktrees", `${lifecycleDigest("worktree-intent", request.creationKey)}.json`);
+		const file = new AtomicJsonFile(intentPath, parseWorktreeCreationIntent);
+		let intent = await readPrivateIntent(file); const retry = intent !== undefined;
+		if (intent) {
+			for (const [field, value] of Object.entries({ creationKey: request.creationKey, rootKey: request.rootKey, sourceWorkspace: request.workspace, requestedBaseRef: request.baseRef, branch: request.branch,
+				...(request.concept ? { concept: request.concept } : {}) })) if ((intent as unknown as Record<string, unknown>)[field] !== value) {
+				throw new RelayRegistryError("invalid_state", "Worktree creation retry conflicts with its durable intent");
+			}
+		} else {
+			const plan = parseWorktreePlan(await this.invoke("worktree-create-preview", { rootKey: request.rootKey, workspace: request.workspace, baseRef: request.baseRef, branch: request.branch }));
+			const worktreeKey = `worktree_${lifecycleDigest("worktree", this.options.hostId, plan.rootKey, plan.commonDir, plan.branch)}`;
+			const conversationCreationKey = request.concept ? `worktree-conversation-${lifecycleDigest("worktree-conversation", worktreeKey, request.concept)}` : undefined;
+			intent = { ...plan, creationKey: request.creationKey, requestedBaseRef: request.baseRef, worktreeKey, phase: "planned", ...(request.concept ? { concept: request.concept, conversationCreationKey } : {}) };
+			await ensureWorktreeIntentCapacity(dirname(intentPath)); await file.write(intent);
+		}
+		const created = await this.runWorktreeOperation(`repository:${intent.commonDir}`, () => this.invoke("worktree-create-apply", { ...intent, resumeExisting: retry }));
+		if (created.rootKey !== intent.rootKey || created.workspace !== intent.targetWorkspace || created.branch !== intent.branch || created.baseCommit !== intent.baseCommit ||
+			Object.keys(created).some((field) => !["rootKey", "workspace", "branch", "baseCommit"].includes(field))) throw new RelayRegistryError("launch_failed", "Worktree launcher returned an invalid creation result");
+		if (intent.phase !== "created") { intent = { ...intent, phase: "created" }; await file.write(intent); }
+		if (!bundled) return { operation: "worktree.create", worktreeKey: intent.worktreeKey, rootKey: intent.rootKey, workspace: intent.targetWorkspace, branch: intent.branch, baseCommit: intent.baseCommit };
+		const conversationCreationKey = intent.conversationCreationKey; const concept = intent.concept;
+		if (!conversationCreationKey || !concept) throw new RelayRegistryError("invalid_state", "Bundled worktree creation lost its conversation identity");
+		const started = await this.start({ creationKey: conversationCreationKey, concept, placement: { rootKey: intent.rootKey, workspace: intent.targetWorkspace, relativeCwd: "" } });
+		const conversationId = String(started.targetConversationId); const manifest = this.projectManifest(conversationId);
+		const roomLink = `https://matrix.to/#/${encodeURIComponent(manifest.roomId)}`;
+		return { operation: "worktree.conversation.create", worktreeKey: intent.worktreeKey, rootKey: intent.rootKey, workspace: intent.targetWorkspace,
+			branch: intent.branch, baseCommit: intent.baseCommit, targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId), roomLink };
+	}
+
+	private async previewWorktreeRemoval(request: { rootKey: string; workspace: string; mergeTarget?: string }, targetConversationId?: string): Promise<Record<string, unknown>> {
+		const raw = await this.invoke("worktree-remove-preview", request);
+		const placeholder = `worktree_remove_${"0".repeat(32)}`;
+		const parsed = parseWorktreeRemovalIntent({ ...raw, removalKey: placeholder, phase: "planned", ...(targetConversationId ? { targetConversationId } : {}) });
+		const removalKey = `worktree_remove_${lifecycleDigest("worktree-removal", this.options.hostId, parsed.rootKey, parsed.commonDir, parsed.workspace, parsed.branch, parsed.head, parsed.mergeTarget ?? "", targetConversationId ?? "independent")}`;
+		const intent: WorktreeRemovalIntent = { ...parsed, removalKey };
+		const file = new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${removalKey}.json`), parseWorktreeRemovalIntent);
+		const existing = await readPrivateIntent(file);
+		if (existing && JSON.stringify(existing) !== JSON.stringify(intent)) throw new RelayRegistryError("invalid_state", "Worktree removal preview key conflicts with an existing intent");
+		if (!existing) { await ensureWorktreeIntentCapacity(dirname(file.path)); await file.write(intent); }
+		const activeConversations = this.options.registry.listManifests().filter((manifest) => manifest.kind === "project" && manifest.placement?.rootKey === intent.rootKey && manifest.placement.workspace === intent.workspace &&
+			this.options.registry.conversationState(manifest.conversationId) !== "dormant").map((manifest) => manifest.conversationId).slice(0, 256);
+		return { operation: targetConversationId ? "worktree.conversation.cleanup.preview" : "worktree.remove.preview", removalKey, rootKey: intent.rootKey, workspace: intent.workspace,
+			branch: intent.branch, head: intent.head, clean: intent.clean, locked: intent.locked, activeConversations, ...(targetConversationId ? { targetConversationId } : {}),
+			...(intent.mergeTarget ? { mergeTarget: intent.mergeTarget, merged: intent.merged } : {}) };
+	}
+
+	private previewConversationCleanup(conversationId: string, mergeTarget?: string): Promise<Record<string, unknown>> {
+		const manifest = this.projectManifest(conversationId);
+		if (!manifest.placement || manifest.placement.relativeCwd !== "") throw new RelayRegistryError("invalid_state", "Bundled worktree cleanup requires a checkout-root conversation");
+		return this.previewWorktreeRemoval({ rootKey: manifest.placement.rootKey, workspace: manifest.placement.workspace, ...(mergeTarget ? { mergeTarget } : {}) }, conversationId);
+	}
+
+	private applyWorktreeRemoval(removalKey: string, bundled: boolean): Promise<Record<string, unknown>> {
+		return this.runWorktreeOperation(`remove:${removalKey}`, () => this.applyWorktreeRemovalOnce(removalKey, bundled));
+	}
+
+	private async applyWorktreeRemovalOnce(removalKey: string, bundled: boolean): Promise<Record<string, unknown>> {
+		const file = new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${removalKey}.json`), parseWorktreeRemovalIntent);
+		const intent = await readPrivateIntent(file); if (!intent || intent.removalKey !== removalKey) throw new RelayRegistryError("not_found", "Managed worktree removal preview was not found");
+		if (bundled !== Boolean(intent.targetConversationId)) throw new RelayRegistryError("invalid_state", "Worktree removal mode conflicts with its preview");
+		if (!intent.clean || intent.locked) throw new RelayRegistryError("invalid_state", "Managed worktree must be clean and unlocked before removal");
+		return this.runWorktreeOperation(this.workspaceOperationKey({ rootKey: intent.rootKey, workspace: intent.workspace, relativeCwd: "" }),
+			() => this.applyWorktreeRemovalLocked(file, intent, bundled));
+	}
+
+	private async applyWorktreeRemovalLocked(file: AtomicJsonFile<WorktreeRemovalIntent>, initialIntent: WorktreeRemovalIntent, bundled: boolean): Promise<Record<string, unknown>> {
+		let intent = initialIntent; const removalKey = intent.removalKey;
+		const removal = intent;
+		const bound = this.options.registry.listManifests().filter((manifest) => manifest.kind === "project" && manifest.placement?.rootKey === removal.rootKey && manifest.placement.workspace === removal.workspace);
+		if (!bundled && bound.some((manifest) => this.options.registry.conversationState(manifest.conversationId) !== "dormant")) throw new RelayRegistryError("invalid_state", "An active managed conversation is using this worktree");
+		if (bundled && bound.some((manifest) => manifest.conversationId !== removal.targetConversationId && this.options.registry.conversationState(manifest.conversationId) !== "dormant")) {
+			throw new RelayRegistryError("invalid_state", "Another active managed conversation is using this worktree");
+		}
+		const selected = bundled ? this.options.registry.manifestByConversationId(intent.targetConversationId!) : undefined;
+		if (selected && intent.phase !== "planned" && this.options.registry.conversationState(selected.conversationId) !== "dormant") {
+			throw new RelayRegistryError("invalid_state", "Bundled cleanup preview became stale when its selected conversation resumed");
+		}
+		if (bundled && intent.phase === "planned") {
+			const target = this.options.registry.manifestByConversationId(intent.targetConversationId!);
+			if (target && this.options.registry.conversationState(target.conversationId) === "starting") throw new RelayRegistryError("invalid_state", "Bundled worktree cleanup cannot interrupt a starting conversation");
+			if (target && this.options.registry.conversationState(target.conversationId) === "active") await this.stop(target.conversationId);
+			intent = { ...intent, phase: "stopped" }; await file.write(intent);
+		}
+		if (["planned", "stopped"].includes(intent.phase)) {
+			await this.runWorktreeOperation(`repository:${intent.commonDir}`, () => this.invoke("worktree-remove-apply", { ...intent, resumeExisting: true }));
+			intent = { ...intent, phase: "removed" }; await file.write(intent);
+		}
+		let bridgeDeleted: boolean | undefined;
+		if (bundled && intent.phase === "removed") {
+			const target = this.options.registry.manifestByConversationId(intent.targetConversationId!);
+			if (target) await this.delete(target.conversationId);
+			intent = { ...intent, phase: "bridge_deleted" }; await file.write(intent); bridgeDeleted = true;
+		} else if (bundled) bridgeDeleted = true;
+		return { operation: bundled ? "worktree.conversation.cleanup.apply" : "worktree.remove.apply", removalKey, workspaceRemoved: true, ...(bridgeDeleted ? { bridgeDeleted } : {}) };
+	}
+
+	private deleteWorktreeBranch(removalKey: string): Promise<Record<string, unknown>> {
+		return this.runWorktreeOperation(`branch:${removalKey}`, async () => {
+			const file = new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${removalKey}.json`), parseWorktreeRemovalIntent);
+			let intent = await readPrivateIntent(file); if (!intent || intent.removalKey !== removalKey) throw new RelayRegistryError("not_found", "Managed worktree removal preview was not found");
+			if (!["removed", "bridge_deleted", "branch_deleted"].includes(intent.phase) || !intent.mergeTarget || !intent.mergeCommit || intent.merged !== true) {
+				throw new RelayRegistryError("invalid_state", "Branch deletion requires a completed removal previewed as fully merged");
+			}
+			const result = await this.runWorktreeOperation(`repository:${intent.commonDir}`, () => this.invoke("worktree-branch-delete", { ...intent, resumeExisting: true }));
+			if (result.branch !== intent.branch || result.deleted !== true || Object.keys(result).some((field) => !["branch", "deleted"].includes(field))) throw new RelayRegistryError("launch_failed", "Worktree launcher returned an invalid branch deletion result");
+			if (intent.phase !== "branch_deleted") { intent = { ...intent, phase: "branch_deleted" }; await file.write(intent); }
+			return { operation: "worktree.branch.delete", removalKey, branch: intent.branch, branchDeleted: true };
+		});
+	}
+
 	private status(conversationId: string): Record<string, unknown> {
 		this.options.registry.manifestByConversationId(conversationId) ?? (() => { throw new RelayRegistryError("not_found", "Managed conversation was not found"); })();
 		return { operation: "conversation.status", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };
@@ -408,14 +684,19 @@ export class HostLifecycle {
 			conversationState: this.options.registry.conversationState(manifest.conversationId), roomLink };
 	}
 
-	private async start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
+	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
+		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }): Promise<Record<string, unknown>> {
+		return this.runWorktreeOperation(this.workspaceOperationKey(request.placement), () => this.startOnce(request, provisioned));
+	}
+
+	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
 		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }): Promise<Record<string, unknown>> {
 		const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
 		const existing = this.options.registry.manifestByCreationKey(request.creationKey);
 		if (existing) {
 			if (existing.kind !== "project" || existing.conversationId !== conversationId || existing.concept !== request.concept ||
 				JSON.stringify(existing.placement) !== JSON.stringify(request.placement)) throw new RelayRegistryError("invalid_state", "Conversation start retry conflicts with existing identity");
-			await this.resume(existing.conversationId);
+			await this.resumeOnce(existing.conversationId);
 			return { operation: "conversation.start", targetConversationId: existing.conversationId, conversationState: this.options.registry.conversationState(existing.conversationId) };
 		}
 		if (this.options.registry.listManifests().some((item) => item.concept === request.concept)) throw new RelayRegistryError("invalid_state", "Managed conversation concept already exists on this host");
@@ -440,7 +721,12 @@ export class HostLifecycle {
 		return { operation: "conversation.start", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };
 	}
 
-	private async resume(conversationId: string): Promise<Record<string, unknown>> {
+	private resume(conversationId: string): Promise<Record<string, unknown>> {
+		const manifest = this.projectManifest(conversationId);
+		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => this.resumeOnce(conversationId));
+	}
+
+	private async resumeOnce(conversationId: string): Promise<Record<string, unknown>> {
 		const manifest = this.projectManifest(conversationId);
 		await this.invoke("root-ensure", manifest.placement!);
 		if (this.options.registry.conversationState(conversationId) !== "active") await this.launchProject(manifest);

@@ -25,6 +25,9 @@ const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null
 
 export const ConversationIdSchema = stableId("conv");
 const ReconciliationKeySchema = Type.String({ pattern: "^reconcile_[a-f0-9]{32}$" });
+const WorktreeKeySchema = Type.String({ pattern: "^worktree_[a-f0-9]{32}$" });
+const WorktreeRemovalKeySchema = Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" });
+const GitRefSchema = Type.String({ minLength: 1, maxLength: 255, pattern: "^[A-Za-z0-9][A-Za-z0-9._/@+/-]*$" });
 export const DeliveryIdSchema = stableId("delivery");
 export const TranscriptEntryIdSchema = stableId("entry");
 export const ChunkIdSchema = stableId("chunk");
@@ -84,6 +87,14 @@ const checkpointPayload = Type.Union([
 const adapterRole = Type.Union([Type.Literal("ordinary_adapter"), Type.Literal("coordinator_adapter")]);
 const lifecycleArguments = Type.Union([
 	strictObject({ operation: Type.Literal("workspace.list") }),
+	strictObject({ operation: Type.Literal("worktree.list"), rootKey: identifier, workspace: boundedString(128) }),
+	strictObject({ operation: Type.Literal("worktree.create"), creationKey: identifier, rootKey: identifier, workspace: boundedString(128), baseRef: GitRefSchema, branch: GitRefSchema }),
+	strictObject({ operation: Type.Literal("worktree.conversation.create"), creationKey: identifier, rootKey: identifier, workspace: boundedString(128), baseRef: GitRefSchema, branch: GitRefSchema, concept: boundedString(128) }),
+	strictObject({ operation: Type.Literal("worktree.remove.preview"), rootKey: identifier, workspace: boundedString(128), mergeTarget: Type.Optional(GitRefSchema) }),
+	strictObject({ operation: Type.Literal("worktree.remove.apply"), removalKey: WorktreeRemovalKeySchema, confirmed: Type.Literal(true) }),
+	strictObject({ operation: Type.Literal("worktree.conversation.cleanup.preview"), targetConversationId: ConversationIdSchema, mergeTarget: Type.Optional(GitRefSchema) }),
+	strictObject({ operation: Type.Literal("worktree.conversation.cleanup.apply"), removalKey: WorktreeRemovalKeySchema, confirmed: Type.Literal(true) }),
+	strictObject({ operation: Type.Literal("worktree.branch.delete"), removalKey: WorktreeRemovalKeySchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("conversation.list") }),
 	strictObject({ operation: Type.Literal("conversation.status"), targetConversationId: ConversationIdSchema }),
 	strictObject({ operation: Type.Literal("project.reconcile.preview") }),
@@ -330,6 +341,23 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			operation: Type.Literal("workspace.list"),
 			workspaces: Type.Array(strictObject({ rootKey: identifier, workspace: boundedString(128) }), { maxItems: 4_096 }),
 		}),
+		strictObject({
+			operation: Type.Literal("worktree.list"), rootKey: identifier, workspace: boundedString(128),
+			worktrees: Type.Array(strictObject({ workspace: boundedString(128), branch: Type.Optional(GitRefSchema), head: Type.String({ pattern: "^[a-f0-9]{40,64}$" }),
+				isMain: Type.Boolean(), locked: Type.Boolean(), clean: Type.Boolean(), conversations: Type.Array(ConversationIdSchema, { maxItems: 256 }) }), { maxItems: 256 }),
+			intents: Type.Array(strictObject({ kind: Type.Union([Type.Literal("creation"), Type.Literal("removal")]), key: Type.Union([WorktreeKeySchema, WorktreeRemovalKeySchema]),
+				workspace: boundedString(128), branch: GitRefSchema, phase: Type.Union([Type.Literal("planned"), Type.Literal("created"), Type.Literal("stopped"), Type.Literal("removed"), Type.Literal("bridge_deleted"), Type.Literal("branch_deleted")]) }), { maxItems: 1_024 }),
+		}),
+		strictObject({ operation: Type.Union([Type.Literal("worktree.create"), Type.Literal("worktree.conversation.create")]),
+			worktreeKey: WorktreeKeySchema, rootKey: identifier, workspace: boundedString(128), branch: GitRefSchema, baseCommit: Type.String({ pattern: "^[a-f0-9]{40,64}$" }),
+			targetConversationId: Type.Optional(ConversationIdSchema), conversationState: Type.Optional(Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")])), roomLink: Type.Optional(boundedString(512)) }),
+		strictObject({ operation: Type.Union([Type.Literal("worktree.remove.preview"), Type.Literal("worktree.conversation.cleanup.preview")]),
+			removalKey: WorktreeRemovalKeySchema, rootKey: identifier, workspace: boundedString(128), branch: GitRefSchema, head: Type.String({ pattern: "^[a-f0-9]{40,64}$" }),
+			clean: Type.Boolean(), locked: Type.Boolean(), activeConversations: Type.Array(ConversationIdSchema, { maxItems: 256 }),
+			targetConversationId: Type.Optional(ConversationIdSchema), mergeTarget: Type.Optional(GitRefSchema), merged: Type.Optional(Type.Boolean()) }),
+		strictObject({ operation: Type.Union([Type.Literal("worktree.remove.apply"), Type.Literal("worktree.conversation.cleanup.apply")]),
+			removalKey: WorktreeRemovalKeySchema, workspaceRemoved: Type.Literal(true), bridgeDeleted: Type.Optional(Type.Boolean()) }),
+		strictObject({ operation: Type.Literal("worktree.branch.delete"), removalKey: WorktreeRemovalKeySchema, branch: GitRefSchema, branchDeleted: Type.Literal(true) }),
 		strictObject({
 			operation: Type.Literal("conversation.list"),
 			conversations: Type.Array(strictObject({

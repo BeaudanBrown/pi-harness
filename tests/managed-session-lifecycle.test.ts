@@ -95,6 +95,141 @@ test("packaged project-create launcher confines creation, initializes only local
 	assert.equal(await readFile(join(workspaceRoot, "foreign", "foreign.txt"), "utf8"), "untouched");
 });
 
+test("packaged worktree launcher creates, inventories, safely removes, and separately deletes merged branches", async (t) => {
+	const launcher = process.env.PI_MANAGED_TEST_LAUNCHER; if (!launcher) return t.skip("packaged launcher is unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-worktree-lifecycle-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const workspaceRoot = join(root, "roots"); const main = join(workspaceRoot, "project"); await mkdir(main, { recursive: true });
+	execFileSync("git", ["-C", main, "init", "-b", "main"]); execFileSync("git", ["-C", main, "config", "user.email", "test@example.com"]);
+	execFileSync("git", ["-C", main, "config", "user.name", "Test"]); execFileSync("git", ["-C", main, "commit", "--allow-empty", "-m", "root"]);
+	const env = { ...process.env, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: workspaceRoot }), PI_MANAGED_TEST_TMUX_SOCKET: `unused-${process.pid}` };
+	const invoke = (operation: string, request: Record<string, unknown>) => JSON.parse(execFileSync(launcher, ["managed", operation], {
+		input: `${JSON.stringify(request)}\n`, encoding: "utf8", env,
+	})) as Record<string, unknown>;
+	const plan = invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "main", branch: "feature/example" });
+	assert.match(String(plan.targetWorkspace), /^project-feature-example-[a-f0-9]{8}$/); assert.equal(plan.baseRef, "refs/heads/main");
+	assert.equal(plan.baseCommit, execFileSync("git", ["-C", main, "rev-parse", "HEAD"], { encoding: "utf8" }).trim());
+	const created = invoke("worktree-create-apply", { ...plan, resumeExisting: false }); const linked = join(workspaceRoot, String(plan.targetWorkspace));
+	assert.equal(created.workspace, plan.targetWorkspace); assert.equal(execFileSync("git", ["-C", linked, "branch", "--show-current"], { encoding: "utf8" }).trim(), "feature/example");
+	assert.deepEqual(invoke("worktree-create-apply", { ...plan, resumeExisting: true }), created, "completed creation retries reuse only the exact registered worktree");
+	const inventory = invoke("worktree-list", { rootKey: "projects", workspace: "project" }) as { worktrees: Array<Record<string, unknown>> };
+	assert.equal(inventory.worktrees.length, 2); assert.equal(inventory.worktrees.find((item) => item.workspace === plan.targetWorkspace)?.clean, true);
+
+	await writeFile(join(linked, ".gitignore"), "ignored\n"); execFileSync("git", ["-C", linked, "add", ".gitignore"]); execFileSync("git", ["-C", linked, "commit", "-m", "ignore"]);
+	await writeFile(join(linked, "ignored"), "must not be silently deleted");
+	for (let index = 0; index < 512; index += 1) await writeFile(join(linked, `ignored-${index}`), "bounded dirtiness scan");
+	const dirty = invoke("worktree-remove-preview", { rootKey: "projects", workspace: plan.targetWorkspace, mergeTarget: "main" });
+	assert.equal(dirty.clean, false); assert.throws(() => invoke("worktree-remove-apply", { ...dirty, resumeExisting: true }), "ignored residue blocks removal");
+	await rm(join(linked, "ignored"));
+	for (let index = 0; index < 512; index += 1) await rm(join(linked, `ignored-${index}`));
+	execFileSync("git", ["-C", main, "merge", "--ff-only", "feature/example"]);
+	const removable = invoke("worktree-remove-preview", { rootKey: "projects", workspace: plan.targetWorkspace, mergeTarget: "main" });
+	assert.deepEqual({ clean: removable.clean, locked: removable.locked, merged: removable.merged }, { clean: true, locked: false, merged: true });
+	execFileSync("git", ["-C", main, "worktree", "lock", linked]);
+	const locked = invoke("worktree-remove-preview", { rootKey: "projects", workspace: plan.targetWorkspace, mergeTarget: "main" }); assert.equal(locked.locked, true);
+	assert.throws(() => invoke("worktree-remove-apply", { ...locked, resumeExisting: true })); execFileSync("git", ["-C", main, "worktree", "unlock", linked]);
+	assert.equal(invoke("worktree-remove-apply", { ...removable, resumeExisting: true }).removed, true); assert.equal(execFileSync("git", ["-C", main, "branch", "--list", "feature/example"], { encoding: "utf8" }).trim().length > 0, true);
+	assert.equal(invoke("worktree-remove-apply", { ...removable, resumeExisting: true }).removed, true, "post-side-effect retry recognizes exact absence");
+	assert.equal(invoke("worktree-branch-delete", { ...removable, resumeExisting: true }).deleted, true);
+	assert.equal(invoke("worktree-branch-delete", { ...removable, resumeExisting: true }).deleted, true, "branch deletion retry is idempotent");
+	assert.throws(() => invoke("worktree-remove-preview", { rootKey: "projects", workspace: "project" }), "the main checkout cannot be removed");
+
+	const recoveryPlan = invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "main", branch: "recovery" });
+	execFileSync("git", ["-C", main, "branch", "recovery", String(recoveryPlan.baseCommit)]); await mkdir(String(recoveryPlan.targetPath));
+	assert.throws(() => invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "main", branch: "recovery" }), "a pre-existing branch has no implicit ownership");
+	assert.equal(invoke("worktree-create-apply", { ...recoveryPlan, resumeExisting: true }).workspace, recoveryPlan.targetWorkspace,
+		"retry recovers the branch-created and empty-directory crash boundary");
+	const stalePlan = invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "main", branch: "stale-removal" });
+	invoke("worktree-create-apply", { ...stalePlan, resumeExisting: false });
+	const staleRemoval = invoke("worktree-remove-preview", { rootKey: "projects", workspace: stalePlan.targetWorkspace, mergeTarget: "main" });
+	execFileSync("git", ["-C", main, "worktree", "remove", String(stalePlan.targetPath)]); execFileSync("git", ["-C", main, "commit", "--allow-empty", "-m", "move stale branch"]);
+	execFileSync("git", ["-C", main, "branch", "-f", "stale-removal", "main"]);
+	assert.throws(() => invoke("worktree-remove-apply", { ...staleRemoval, resumeExisting: true }), "absent-checkout recovery rejects a moved branch tip");
+	const nested = join(workspaceRoot, "nested", "worktree"); await mkdir(join(workspaceRoot, "nested")); execFileSync("git", ["-C", main, "worktree", "add", "-b", "nested-worktree", nested]);
+	assert.throws(() => invoke("worktree-list", { rootKey: "projects", workspace: "project" }), "inventory fails closed on a registered nested checkout under the root");
+	execFileSync("git", ["-C", main, "worktree", "remove", nested]);
+	assert.throws(() => invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "HEAD~1", branch: "bad-revision" }));
+	assert.throws(() => invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "main", branch: "../escape" }));
+	execFileSync("git", ["-C", main, "tag", "main"]);
+	assert.throws(() => invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "main", branch: "ambiguous-base" }), "ambiguous shorthand refs fail closed");
+});
+
+test("host lifecycle persists idempotent worktree creation and confirmation-bound removal", async (t) => {
+	const launcher = process.env.PI_MANAGED_TEST_LAUNCHER; if (!launcher) return t.skip("packaged launcher is unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-host-worktree-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const workspaceRoot = join(root, "roots"); const main = join(workspaceRoot, "project"); const runtime = join(root, "runtime"); const manifests = join(root, "manifests"); const sessions = join(root, "sessions");
+	await mkdir(main, { recursive: true }); execFileSync("git", ["-C", main, "init", "-b", "main"]); execFileSync("git", ["-C", main, "config", "user.email", "test@example.com"]);
+	execFileSync("git", ["-C", main, "config", "user.name", "Test"]); execFileSync("git", ["-C", main, "commit", "--allow-empty", "-m", "root"]);
+	const registry = new RelayRegistry(hostId, runtime, new ConversationManifestStore(manifests)); await registry.load();
+	const matrix = new ManagedMatrixClient(matrixConfig, async () => { throw new Error("Matrix is outside independent worktree lifecycle"); });
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") });
+	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath, registry, matrix, server,
+		environment: { ...process.env, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: workspaceRoot }), PI_MANAGED_TEST_TMUX_SOCKET: `unused-${process.pid}` } });
+	const coordinatorId = deriveConversationId(hostId, "coordinator");
+	const createRequest = { operation: "worktree.create", creationKey: "host-worktree-create", rootKey: "projects", workspace: "project", baseRef: "main", branch: "feature/host" };
+	const created = await lifecycle.request(lifecycleEnvelope(coordinatorId, createRequest));
+	assert.equal(created.operation, "worktree.create"); assert.match(String(created.worktreeKey), /^worktree_[a-f0-9]{32}$/);
+	const targetWorkspace = String(created.workspace); const intentFiles = await readdir(join(sessions, "worktrees")); assert.equal(intentFiles.length, 1);
+	const intent = JSON.parse(await readFile(join(sessions, "worktrees", intentFiles[0]!), "utf8")); assert.equal(intent.phase, "created");
+	execFileSync("git", ["-C", main, "commit", "--allow-empty", "-m", "main advances"]);
+	assert.deepEqual(await lifecycle.request(lifecycleEnvelope(coordinatorId, createRequest)), created, "completed retry remains valid after the source ref advances");
+	const listed = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.list", rootKey: "projects", workspace: "project" }));
+	assert.equal((listed.worktrees as Array<Record<string, unknown>>).some((item) => item.workspace === targetWorkspace && item.clean === true), true);
+	assert.deepEqual(listed.intents, [{ kind: "creation", key: created.worktreeKey, workspace: targetWorkspace, branch: "feature/host", phase: "created" }]);
+	const preview = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.preview", rootKey: "projects", workspace: targetWorkspace, mergeTarget: "main" }));
+	assert.equal(preview.merged, true); assert.match(String(preview.removalKey), /^worktree_remove_[a-f0-9]{32}$/);
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.apply", removalKey: preview.removalKey, confirmed: false })), /explicit confirmation/);
+	const removed = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.apply", removalKey: preview.removalKey, confirmed: true }));
+	assert.deepEqual({ workspaceRemoved: removed.workspaceRemoved, bridgeDeleted: removed.bridgeDeleted }, { workspaceRemoved: true, bridgeDeleted: undefined });
+	assert.ok(execFileSync("git", ["-C", main, "branch", "--list", "feature/host"], { encoding: "utf8" }).trim());
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.branch.delete", removalKey: preview.removalKey, confirmed: false })), /separate explicit confirmation/);
+	assert.equal((await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.branch.delete", removalKey: preview.removalKey, confirmed: true }))).branchDeleted, true);
+	assert.equal(execFileSync("git", ["-C", main, "branch", "--list", "feature/host"], { encoding: "utf8" }).trim(), "");
+});
+
+test("bundled worktree conversation creation and cleanup recover forward without deleting Pi history", { timeout: 20_000 }, async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "pi-bundled-worktree-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const workspaceRoot = join(root, "roots"); const main = join(workspaceRoot, "project"); const linked = join(workspaceRoot, "project-feature-bundled-deadbeef");
+	const runtime = join(root, "runtime"); const manifests = join(root, "manifests"); const sessions = join(root, "sessions"); const record = join(root, "launch.json"); const removalAttempt = join(root, "removal-attempt");
+	await mkdir(join(main, ".git"), { recursive: true });
+	const registry = new RelayRegistry(hostId, runtime, new ConversationManifestStore(manifests)); await registry.load();
+	let room = 0; let leaveAttempts = 0;
+	const matrix = new ManagedMatrixClient(matrixConfig, async (input) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("/createRoom")) return Response.json({ room_id: `!bundle${++room}:example.com` });
+		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
+			...(decodeURIComponent(path).includes("!bundle1:example.com") ? { type: "m.space" } : {}) });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.endsWith("/leave") && leaveAttempts++ === 0) return new Response("injected leave outage", { status: 503 });
+		return Response.json({ event_id: "$ok" });
+	}, [], { maxAttempts: 1 });
+	const launcher = join(root, "launcher");
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworktree-create-preview) printf '${JSON.stringify({ rootKey: "projects", sourceWorkspace: "project", projectWorkspace: "project", targetWorkspace: "project-feature-bundled-deadbeef", commonDir: join(main, ".git"), mainPath: main, targetPath: linked, baseRef: "refs/heads/main", baseCommit: "a".repeat(40), branch: "feature/bundled" })}\\n';;\nworktree-create-apply) mkdir -p '${linked}/.git'; printf '{"rootKey":"projects","workspace":"project-feature-bundled-deadbeef","branch":"feature/bundled","baseCommit":"${"a".repeat(40)}"}\\n';;\nworkspace-resolve) name=$(field workspace); printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_${"a".repeat(32)}","projectDisplayName":"project","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$name";;\nroot-ensure) printf '{"sessionName":"project","workspacePath":"${linked}"}\\n';;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) conversation=$(field conversationId); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > '${record}'; printf '{"conversationId":"%s","sessionName":"project","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"project-feature-bundled-deadbeef","relativeCwd":"","role":"conversation"}\\n' "$conversation";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nworktree-remove-preview) printf '${JSON.stringify({ rootKey: "projects", workspace: "project-feature-bundled-deadbeef", projectWorkspace: "project", path: linked, commonDir: join(main, ".git"), mainPath: main, branch: "feature/bundled", head: "a".repeat(40), clean: true, locked: false, mergeTarget: "refs/heads/main", mergeCommit: "b".repeat(40), merged: true })}\\n';;\nworktree-remove-apply) if test ! -e '${removalAttempt}'; then touch '${removalAttempt}'; exit 1; fi; rm -rf '${linked}'; printf '{"rootKey":"projects","workspace":"project-feature-bundled-deadbeef","branch":"feature/bundled","head":"${"a".repeat(40)}","removed":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\nworktree-branch-delete) printf '{"branch":"feature/bundled","deleted":true}\\n';;\n*) exit 2;;\nesac\n`);
+	await chmod(launcher, 0o700);
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") }); await server.start(); t.after(async () => server.close());
+	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath, registry, matrix, server, environment: { ...process.env } });
+	const coordinatorId = deriveConversationId(hostId, "coordinator"); const create = { operation: "worktree.conversation.create", creationKey: "bundle-create", rootKey: "projects", workspace: "project", baseRef: "main", branch: "feature/bundled", concept: "bundled work" };
+	const attaching = attachFromRecord(record, server, registry); const created = await lifecycle.request(lifecycleEnvelope(coordinatorId, create)); const socket = await attaching;
+	const conversationId = String(created.targetConversationId); const sessionFile = join(sessions, conversationId, "session.jsonl"); const history = await readFile(sessionFile, "utf8");
+	assert.equal(history.trim().split("\n").length, 2); assert.equal(registry.manifestByConversationId(conversationId)?.projectSpace, "!bundle1:example.com");
+	const independentPreview = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.preview", rootKey: "projects", workspace: "project-feature-bundled-deadbeef", mergeTarget: "main" }));
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.apply", removalKey: independentPreview.removalKey, confirmed: true })), /active managed conversation/);
+	const preview = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.preview", targetConversationId: conversationId, mergeTarget: "main" }));
+	assert.deepEqual(preview.activeConversations, [conversationId]); setTimeout(() => socket.destroy(), 25);
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /worktree-remove-apply failed/);
+	await writeFile(record, "", "utf8"); const reattaching = attachFromRecord(record, server, registry);
+	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.resume", targetConversationId: conversationId })); const resumedSocket = await reattaching;
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /selected conversation resumed/,
+		"a retry cannot remove the checkout after the selected conversation resumes beyond the persisted stop phase");
+	setTimeout(() => resumedSocket.destroy(), 25); await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.stop", targetConversationId: conversationId }));
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /Matrix POST/);
+	assert.equal(registry.manifestByConversationId(conversationId)?.kind, "project", "failed leave restores bridge state after worktree removal");
+	const cleaned = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true }));
+	assert.deepEqual({ workspaceRemoved: cleaned.workspaceRemoved, bridgeDeleted: cleaned.bridgeDeleted }, { workspaceRemoved: true, bridgeDeleted: true });
+	assert.equal(registry.manifestByConversationId(conversationId), undefined); assert.equal(await readFile(sessionFile, "utf8"), history, "bundled cleanup preserves Pi history");
+	assert.equal((await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.branch.delete", removalKey: preview.removalKey, confirmed: true }))).branchDeleted, true);
+});
+
 test("idempotent Matrix provisioning recovers an uncertain create response without a duplicate Space", async () => {
 	let postCalls = 0; const alias = "pi-0123456789abcdef0123456789abcdef-space";
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {

@@ -11,6 +11,7 @@ pkgs.writeShellApplication {
     [[ "''${1-}" == managed ]]
     operation="''${2-}"
     request=$(cat)
+    ${builtins.readFile ./managed-worktree-lifecycle.sh}
     result=$(printf '%s\n' "$request" | ${launcherPackage}/${launcherExecutable} "$@")
     if [[ "$operation" != workspace-resolve && "$operation" != project-create ]]; then
       printf '%s\n' "$result"
