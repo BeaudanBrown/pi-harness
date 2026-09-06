@@ -15,7 +15,7 @@ import {
 	parseNdjsonEnvelope,
 	type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { BoundAdapterClient, CoordinatorAdapterClient, requestSelfBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { createManagedSessionAdapterExtension } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
@@ -73,13 +73,14 @@ class FakeRelay {
 	private server?: Server;
 	private counter = 0;
 
-	private constructor(root: string, private readonly lifecycleDelayMs = 0, private readonly attachmentDelayMs = 0) {
+	private constructor(root: string, private readonly lifecycleDelayMs = 0, private readonly attachmentDelayMs = 0,
+		private readonly transcriptDelayMs = 0, private readonly selfStatusDelayMs = 0) {
 		this.root = root;
 		this.socketPath = join(root, "relay.sock");
 	}
 
-	static async start(lifecycleDelayMs = 0, attachmentDelayMs = 0): Promise<FakeRelay> {
-		const relay = new FakeRelay(await mkdtemp(join(tmpdir(), "pi-adapter-relay-")), lifecycleDelayMs, attachmentDelayMs);
+	static async start(lifecycleDelayMs = 0, attachmentDelayMs = 0, transcriptDelayMs = 0, selfStatusDelayMs = 0): Promise<FakeRelay> {
+		const relay = new FakeRelay(await mkdtemp(join(tmpdir(), "pi-adapter-relay-")), lifecycleDelayMs, attachmentDelayMs, transcriptDelayMs, selfStatusDelayMs);
 		relay.server = createServer((socket) => relay.accept(socket));
 		await new Promise<void>((resolve, reject) => {
 			relay.server!.once("error", reject);
@@ -148,9 +149,13 @@ class FakeRelay {
 		} else if (envelope.type === "aloop.notice") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "aloop.acknowledge", payload: { lifecycleId: envelope.payload.lifecycleId, status: "projected" } }));
 		} else if (envelope.type === "transcript.offer") {
-			socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
+			setTimeout(() => {
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
+			}, this.transcriptDelayMs);
 		} else if (envelope.type === "self.status") {
-			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }));
+			if (this.selfStatusDelayMs >= 0) setTimeout(() => {
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }));
+			}, this.selfStatusDelayMs);
 		} else if (envelope.type === "self.delete") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.delete", status: "ok" } }));
 		} else if (envelope.type === "lifecycle.request") {
@@ -271,6 +276,59 @@ test("coordinator lifecycle requests allow the bounded launcher duration", async
 	await client.connect();
 	const result = await client.lifecycleRequest({ operation: "workspace.list" });
 	assert.equal(result.type, "lifecycle.result");
+});
+
+test("transcript projection tolerates relay Matrix work beyond the short IPC request timeout", async (t) => {
+	const relay = await FakeRelay.start(0, 0, 5_100);
+	t.after(() => relay.close());
+	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		onEnvelope: () => undefined });
+	t.after(() => client.close());
+	await client.connect();
+	const entryId = deriveTranscriptEntryId(sessionId, "slow-final");
+	const result = await client.offerTranscript({ entryId, piSessionId: sessionId, piEntryKey: "slow-final",
+		kind: "assistant_final", body: "A final response delayed by bounded Matrix retry work." });
+	assert.equal(result.type, "transcript.acknowledge");
+	assert.equal(client.connected, true);
+});
+
+test("a valid response arriving just after an IPC timeout does not disconnect the adapter", async (t) => {
+	const relay = await FakeRelay.start(0, 0, 0, 5_100);
+	t.after(() => relay.close());
+	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		onEnvelope: () => undefined });
+	t.after(() => client.close());
+	await client.connect();
+	await assert.rejects(client.selfStatus(), (error: unknown) => error instanceof ManagedAdapterError && error.code === "timeout");
+	await new Promise((resolve) => setTimeout(resolve, 200));
+	assert.equal(client.connected, true, "a recognized late correlation is ignored without forcing recovery and transcript backlog");
+});
+
+test("a mismatched late correlation fails closed", async (t) => {
+	const relay = await FakeRelay.start(0, 0, 0, 6_000);
+	t.after(() => relay.close());
+	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		onEnvelope: () => undefined });
+	t.after(() => client.close());
+	await client.connect();
+	await assert.rejects(client.selfStatus(), (error: unknown) => error instanceof ManagedAdapterError && error.code === "timeout");
+	const requestId = relay.frames.at(-1)!.messageId;
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "mismatched-late-response", conversationId, role: "relay",
+		inReplyTo: requestId, type: "input.result", payload: { deliveryId: deriveDeliveryId(conversationId, "$unrelated"), status: "accepted" } });
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(client.connected, false);
+});
+
+test("adapter request concurrency is bounded", async (t) => {
+	const relay = await FakeRelay.start(0, 0, 0, -1);
+	t.after(() => relay.close());
+	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		onEnvelope: () => undefined });
+	await client.connect();
+	const pending = Array.from({ length: 256 }, () => client.selfStatus());
+	await assert.rejects(client.selfStatus(), (error: unknown) => error instanceof ManagedAdapterError && error.code === "capacity_reached");
+	await client.close();
+	assert.equal((await Promise.allSettled(pending)).every((result) => result.status === "rejected"), true);
 });
 
 test("ordinary adapter speaks only fixed role-bound operations and deduplicates request correlation", async (t) => {

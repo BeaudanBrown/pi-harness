@@ -13,7 +13,11 @@ import type { AdapterRole, SessionBinding } from "./state.js";
 import { artifactChunks, type WorkspaceArtifact } from "./artifact-export.js";
 
 const REQUEST_TIMEOUT_MS = 5_000;
-const LIFECYCLE_REQUEST_TIMEOUT_MS = 120_000;
+// Relay operations that project to Matrix may legitimately span the client's bounded
+// rate-limit retries (up to four two-minute waits) before returning their durable result.
+const RELAY_SIDE_EFFECT_TIMEOUT_MS = 10 * 60_000;
+const MAX_PENDING_REQUESTS = 256;
+const MAX_EXPIRED_REQUEST_IDS = 4_096;
 
 export class ManagedAdapterError extends Error {
 	constructor(message: string, readonly code = "adapter_error") {
@@ -26,6 +30,39 @@ interface PendingRequest {
 	resolve: (envelope: ManagedSessionEnvelope) => void;
 	reject: (error: Error) => void;
 	timer: NodeJS.Timeout;
+}
+
+interface ResponseExpectation {
+	type: ManagedSessionEnvelope["type"];
+	fields: ReadonlyArray<readonly [string, string | number]>;
+}
+
+function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation {
+	const payload = request.payload as Record<string, unknown>;
+	switch (request.type) {
+		case "attachment.attach": return { type: "attachment.accepted", fields: [] };
+		case "input.acknowledge": return { type: "input.result", fields: [["deliveryId", String(payload.deliveryId)], ["status", String(payload.status)]] };
+		case "activity.update": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "updated"]] };
+		case "activity.finalize": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "finalized"]] };
+		case "control.result": return { type: "self.result", fields: [["operation", "control.result"], ["status", "ok"]] };
+		case "artifact.begin":
+		case "artifact.chunk": return { type: "artifact.acknowledge", fields: [["uploadId", String(payload.uploadId)]] };
+		case "media.reject": return { type: "media.result", fields: [["deliveryId", String(payload.deliveryId)], ["blobId", String(payload.blobId)], ["status", "rejected"]] };
+		case "transcript.offer": return { type: "transcript.acknowledge", fields: [["entryId", String(payload.entryId)], ["status", "projected"]] };
+		case "checkpoint.offer": return { type: "checkpoint.acknowledge", fields: [["checkpointId", String(payload.checkpointId)], ["status", "projected"]] };
+		case "aloop.notice": return { type: "aloop.acknowledge", fields: [["lifecycleId", String(payload.lifecycleId)], ["status", "projected"]] };
+		case "self.status": return { type: "self.result", fields: [["operation", "self.status"], ["status", "ok"]] };
+		case "self.delete": return { type: "self.result", fields: [["operation", "self.delete"], ["status", "ok"]] };
+		case "lifecycle.request": return { type: "lifecycle.result", fields: [["operation", String((payload.request as Record<string, unknown>).operation)]] };
+		default: throw new ManagedAdapterError(`Unsupported correlated adapter request ${request.type}`, "invalid_message");
+	}
+}
+
+function matchesExpectedResponse(expectation: ResponseExpectation, response: ManagedSessionEnvelope): boolean {
+	if (response.type === "error") return true;
+	if (response.type !== expectation.type) return false;
+	const payload = response.payload as Record<string, unknown>;
+	return expectation.fields.every(([field, value]) => payload[field] === value);
 }
 
 function messageId(prefix: string): string {
@@ -55,6 +92,7 @@ export class BoundAdapterClient {
 	#generation = 1;
 	#closing = false;
 	#inboundWork: Promise<void> = Promise.resolve();
+	#expiredRequests = new Map<string, ResponseExpectation>();
 	#media = new Map<string, { descriptor: Omit<ReceivedImage, "data"> & { chunkCount: number }; chunks: Buffer[] }>();
 
 	constructor(protected readonly options: BoundAdapterOptions) {}
@@ -104,7 +142,7 @@ export class BoundAdapterClient {
 			role: this.options.role,
 			type: "input.acknowledge",
 			payload: { deliveryId, status, ...(piEntryId ? { piEntryId } : {}), ...(completionKind ? { completionKind } : {}) },
-		});
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "input.result" || result.payload.deliveryId !== deliveryId || result.payload.status !== status) {
 			throw new ManagedAdapterError("Relay did not confirm input acknowledgement", "invalid_response");
 		}
@@ -116,7 +154,7 @@ export class BoundAdapterClient {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("activity"), conversationId: this.options.binding.conversationId,
 			role: "ordinary_adapter", type: finalize ? "activity.finalize" : "activity.update", payload,
-		});
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "activity.acknowledge" || result.payload.activityId !== payload.activityId || result.payload.revision !== payload.revision ||
 			result.payload.status !== (finalize ? "finalized" : "updated")) throw new ManagedAdapterError("Relay did not confirm activity projection", "invalid_response");
 	}
@@ -129,7 +167,7 @@ export class BoundAdapterClient {
 			role: this.options.role, type: "control.result",
 			payload: { controlId, status, message: message.slice(0, 4_096), ...(options ? { options: options.slice(0, 20) } : {}),
 				...(generation ? { generation } : {}), ...(selection ? { selection } : {}), ...(liveStatus ? { liveStatus } : {}) },
-		});
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "self.result" || result.payload.operation !== "control.result" || result.payload.status !== "ok") {
 			throw new ManagedAdapterError("Relay did not confirm control result", "invalid_response");
 		}
@@ -142,7 +180,7 @@ export class BoundAdapterClient {
 			mimeType: artifact.mimeType, mediaType: artifact.mediaType, byteLength: artifact.byteLength, chunkCount: chunks.length,
 			...(artifact.width === undefined ? {} : { width: artifact.width }), ...(artifact.height === undefined ? {} : { height: artifact.height }) };
 		const begin = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("artifact-begin"),
-			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "artifact.begin", payload }, LIFECYCLE_REQUEST_TIMEOUT_MS);
+			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "artifact.begin", payload }, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (begin.type !== "artifact.acknowledge" || begin.payload.uploadId !== artifact.uploadId || !["ready", "sent"].includes(String(begin.payload.status))) {
 			throw new ManagedAdapterError("Relay did not accept artifact export", "invalid_response");
 		}
@@ -151,7 +189,7 @@ export class BoundAdapterClient {
 			const chunk = chunks[index]!;
 			const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("artifact-chunk"),
 				conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "artifact.chunk", payload: { uploadId: artifact.uploadId,
-					blobId: artifact.blobId, index, sha256: createHash("sha256").update(chunk).digest("hex"), data: chunk.toString("base64") } }, LIFECYCLE_REQUEST_TIMEOUT_MS);
+					blobId: artifact.blobId, index, sha256: createHash("sha256").update(chunk).digest("hex"), data: chunk.toString("base64") } }, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 			const expected = index + 1 === chunks.length ? "sent" : "ready";
 			if (result.type !== "artifact.acknowledge" || result.payload.uploadId !== artifact.uploadId || result.payload.status !== expected) {
 				throw new ManagedAdapterError("Relay did not confirm artifact transfer", "invalid_response");
@@ -161,7 +199,8 @@ export class BoundAdapterClient {
 
 	async rejectMedia(deliveryId: string, blobId: string, reason: "unsupported_model" | "invalid_media"): Promise<void> {
 		const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("media-reject"),
-			conversationId: this.options.binding.conversationId, role: this.options.role, type: "media.reject", payload: { deliveryId, blobId, reason } });
+			conversationId: this.options.binding.conversationId, role: this.options.role, type: "media.reject", payload: { deliveryId, blobId, reason } },
+			RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "media.result" || result.payload.deliveryId !== deliveryId || result.payload.blobId !== blobId || result.payload.status !== "rejected") {
 			throw new ManagedAdapterError("Relay did not confirm media rejection", "invalid_response");
 		}
@@ -178,7 +217,7 @@ export class BoundAdapterClient {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("transcript"), conversationId: this.options.binding.conversationId,
 			role: this.options.role, type: "transcript.offer", payload: entry,
-		});
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "transcript.acknowledge" || result.payload.entryId !== entry.entryId || result.payload.status !== "projected") {
 			throw new ManagedAdapterError("Relay did not confirm transcript projection", "invalid_response");
 		}
@@ -190,7 +229,7 @@ export class BoundAdapterClient {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("checkpoint"), conversationId: this.options.binding.conversationId,
 			role: this.options.role, type: "checkpoint.offer", payload: checkpoint,
-		});
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "checkpoint.acknowledge" || result.payload.checkpointId !== checkpoint.checkpointId || result.payload.status !== "projected") {
 			throw new ManagedAdapterError("Relay did not confirm checkpoint projection", "invalid_response");
 		}
@@ -203,7 +242,7 @@ export class BoundAdapterClient {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("aloop"), conversationId: this.options.binding.conversationId,
 			role: "ordinary_adapter", type: "aloop.notice", payload,
-		});
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "aloop.acknowledge" || result.payload.lifecycleId !== payload.lifecycleId || result.payload.status !== "projected") {
 			throw new ManagedAdapterError("Relay did not confirm aloop lifecycle projection", "invalid_response");
 		}
@@ -223,7 +262,7 @@ export class BoundAdapterClient {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("delete"), conversationId: this.options.binding.conversationId,
 			role: "ordinary_adapter", type: "self.delete", payload: { confirmed: true },
-		});
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 	}
 
 	async close(reason: "shutdown" | "session_change" | "stop" | "bridge_delete" = "shutdown"): Promise<void> {
@@ -245,9 +284,12 @@ export class BoundAdapterClient {
 	protected request(envelope: ManagedSessionEnvelope, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ManagedSessionEnvelope> {
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return Promise.reject(new ManagedAdapterError("Relay connection is unavailable"));
+		if (this.#pending.size >= MAX_PENDING_REQUESTS) return Promise.reject(new ManagedAdapterError("Relay request capacity was reached", "capacity_reached"));
+		const expectation = expectedResponse(envelope);
 		return new Promise((resolve, reject) => {
 			const timer = setTimeout(() => {
 				this.#pending.delete(envelope.messageId);
+				this.rememberExpiredRequest(envelope.messageId, expectation);
 				reject(new ManagedAdapterError("Relay request timed out", "timeout"));
 			}, timeoutMs);
 			this.#pending.set(envelope.messageId, { resolve, reject, timer });
@@ -283,7 +325,13 @@ export class BoundAdapterClient {
 			}
 			if (envelope.inReplyTo) {
 				const pending = this.#pending.get(envelope.inReplyTo);
-				if (!pending) { this.#socket?.destroy(); return; }
+				if (!pending) {
+					const expectation = this.#expiredRequests.get(envelope.inReplyTo);
+					if (expectation && matchesExpectedResponse(expectation, envelope)) {
+						this.#expiredRequests.delete(envelope.inReplyTo); continue;
+					}
+					this.#socket?.destroy(); return;
+				}
 				clearTimeout(pending.timer);
 				this.#pending.delete(envelope.inReplyTo);
 				if (envelope.type === "error") pending.reject(responseError(envelope));
@@ -325,11 +373,21 @@ export class BoundAdapterClient {
 			caption: transfer.descriptor.caption, data });
 	}
 
+	private rememberExpiredRequest(requestId: string, expectation: ResponseExpectation): void {
+		if (this.#expiredRequests.size >= MAX_EXPIRED_REQUEST_IDS) {
+			// Do not evict a correlation while its valid response could still arrive on
+			// this connection. Reconnect instead and discard all old-socket responses.
+			this.#socket?.destroy(); return;
+		}
+		this.#expiredRequests.set(requestId, expectation);
+	}
+
 	private handleClose(): void {
 		this.#socket = undefined;
 		this.#attachmentId = undefined;
 		this.#buffer = Buffer.alloc(0);
 		this.#media.clear();
+		this.#expiredRequests.clear();
 		for (const pending of this.#pending.values()) {
 			clearTimeout(pending.timer);
 			pending.reject(new ManagedAdapterError("Relay connection closed"));
@@ -345,7 +403,7 @@ export class CoordinatorAdapterClient extends BoundAdapterClient {
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("lifecycle"), conversationId: this.options.binding.conversationId,
 			role: "coordinator_adapter", type: "lifecycle.request", payload: { request },
-		}, LIFECYCLE_REQUEST_TIMEOUT_MS);
+		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (result.type !== "lifecycle.result") throw new ManagedAdapterError("Relay did not return a lifecycle result", "invalid_response");
 		return result;
 	}
@@ -373,7 +431,7 @@ export async function requestSelfBind(options: {
 			},
 		};
 		socket.write(encodeNdjsonEnvelope(request));
-		const response = await readSingleEnvelope(socket, REQUEST_TIMEOUT_MS);
+		const response = await readSingleEnvelope(socket, RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (response.role !== "relay" || response.inReplyTo !== request.messageId || response.type !== "self.result" ||
 			response.payload.operation !== "self.bind" || response.payload.status !== "ok" ||
 			typeof response.payload.boundConversationId !== "string") throw responseError(response);
