@@ -313,8 +313,31 @@ let
           "''${generation_args[@]}" \
           "$@"
         ;;
+      "")
+        # The launcher's private PATH can be inherited by the shared tmux server.
+        # With no trusted role, preserve ordinary interactive `pi` behavior and
+        # discard any stale managed identity before entering the normal wrapper.
+        unset \
+          PI_MANAGED_SESSION_LAUNCH_ROLE \
+          PI_MANAGED_PROJECT_SESSION_FILE \
+          PI_MANAGED_COORDINATOR_CWD \
+          PI_MANAGED_COORDINATOR_SESSION_FILE \
+          PI_MANAGED_SESSION_ATTACHMENT_NONCE \
+          PI_MANAGED_SESSION_CONVERSATION_ID \
+          PI_MANAGED_SESSION_CONCEPT \
+          PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID \
+          PI_MANAGED_SESSION_ROOT_KEY \
+          PI_MANAGED_SESSION_WORKSPACE \
+          PI_MANAGED_SESSION_RELATIVE_CWD \
+          PI_MANAGED_SESSION_WORKSPACE_PATH \
+          PI_MANAGED_SESSION_MODEL \
+          PI_MANAGED_SESSION_THINKING \
+          PI_HARNESS_AGENT_PROFILE \
+          PI_MANAGED_LOCAL_MODEL_TOOLS
+        exec ${piWithRuntime}/bin/pi "$@"
+        ;;
       *)
-        echo "pi-managed-session: trusted launch role is required" >&2
+        echo "pi-managed-session: trusted launch role is invalid" >&2
         exit 1
         ;;
     esac

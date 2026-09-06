@@ -37,13 +37,24 @@ export default function(pi) {
       }
     }
     const diagnosis = await diagnoseCommandResult(new Proxy({}, { get() { throw new Error("model context must not be read"); } }), { name: "check", command: ["must-not-run"], task: "diagnose" }, { code: null, cancelled: true, timedOut: false, stdout: "", stderr: "", durationMs: 0, logPath: "not-run" }, "", AbortSignal.abort());
-    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? "") }));
+    const managedEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
+      name.startsWith("PI_MANAGED_SESSION_") || name.startsWith("PI_MANAGED_PROJECT_") || name.startsWith("PI_MANAGED_COORDINATOR_") || name === "PI_HARNESS_AGENT_PROFILE" || name === "PI_MANAGED_LOCAL_MODEL_TOOLS"));
+    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
   });
 }
 `);
-  const env = { HOME: join(cwd, "home"), PATH: projectPath ? join(cwd, "bin") : "", ENGINEERING_PROBE_RESULT: resultPath };
+  const env = { HOME: join(cwd, "home"), PATH: projectPath ? join(cwd, "bin") : "", XDG_RUNTIME_DIR: cwd, ENGINEERING_PROBE_RESULT: resultPath };
   if (role === "project") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "session.jsonl") });
   if (role === "coordinator") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "coordinator", PI_MANAGED_COORDINATOR_CWD: cwd, PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "coordinator.jsonl") });
+  if (role === "fallback") Object.assign(env, {
+    PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "stale-project.jsonl"), PI_MANAGED_COORDINATOR_CWD: cwd,
+    PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "stale-coordinator.jsonl"), PI_MANAGED_SESSION_ATTACHMENT_NONCE: "a".repeat(32),
+    PI_MANAGED_SESSION_CONVERSATION_ID: "conv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PI_MANAGED_SESSION_CONCEPT: "stale",
+    PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: "boundary", PI_MANAGED_SESSION_ROOT_KEY: "projects",
+    PI_MANAGED_SESSION_WORKSPACE: "stale", PI_MANAGED_SESSION_RELATIVE_CWD: "nested", PI_MANAGED_SESSION_WORKSPACE_PATH: cwd,
+    PI_MANAGED_SESSION_MODEL: "stale/model", PI_MANAGED_SESSION_THINKING: "high", PI_HARNESS_AGENT_PROFILE: "managed-project",
+    PI_MANAGED_LOCAL_MODEL_TOOLS: "bash"
+  });
   await new Promise((resolve, reject) => {
     const child = spawn(launcher, ["--mode", "rpc", "--no-session", "--approve", "--extension", extension], { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
     let stderr = "", buffer = "";
@@ -63,11 +74,12 @@ export default function(pi) {
   return { result: JSON.parse(await readFile(resultPath, "utf8")), cwd };
 }
 
-for (const [name, launcher, role] of [["normal", normal, undefined], ["managed project", managed, "project"]]) {
+for (const [name, launcher, role] of [["normal", normal, undefined], ["managed project", managed, "project"], ["managed ordinary fallback", managed, "fallback"]]) {
   test(`${name} packaged launcher supplies the engineering baseline from empty PATH`, async (t) => {
     const { result } = await probe(t, launcher, role, false);
     assert.equal(result.injected, true);
     assert.equal(result.diagnosisAborted, true, "already-aborted diagnosis must not select or start a model");
+    if (role === "fallback") assert.deepEqual(result.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
     for (const [name, tool] of Object.entries(result.tools)) { assert.equal(tool.code, 0, name); assert.ok(tool.path, name); if ("versionExit" in tool) assert.equal(tool.versionExit, 0, name); }
   });
   test(`${name} preserves project executable precedence`, async (t) => {
@@ -75,6 +87,18 @@ for (const [name, launcher, role] of [["normal", normal, undefined], ["managed p
     assert.equal(result.tools.git.path, join(cwd, "bin/git"));
   });
 }
+test("managed launcher rejects an unsupported non-empty role", async () => {
+  const result = await new Promise((resolve, reject) => {
+    const child = spawn(managed, [], { env: { PI_MANAGED_SESSION_LAUNCH_ROLE: "untrusted" }, stdio: ["ignore", "ignore", "pipe"] });
+    let stderr = "";
+    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stderr }));
+  });
+  assert.equal(result.code, 1);
+  assert.equal(result.stderr, "pi-managed-session: trusted launch role is invalid\n");
+});
+
 for (const [name, launcher, role] of [["local", local, undefined], ["coordinator", managed, "coordinator"]]) {
   test(`${name} launcher does not explicitly inject the engineering baseline`, async (t) => {
     const { result } = await probe(t, launcher, role, false);
