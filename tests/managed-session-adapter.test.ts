@@ -725,7 +725,7 @@ test("managed aloop projects only durable lifecycle summaries and hides routine 
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
-test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoint boundaries", async (t) => {
+test("managed adapter steers busy Matrix prompts and replay while preserving idle, explicit follow-up and checkpoint semantics", async (t) => {
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
 	let leaf = "binding"; let sequence = 0; let idle = true; let aborts = 0;
@@ -747,7 +747,7 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
 			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
-	const send = async (eventId: string, kind: "prompt" | "steer", body: string, senderUserId?: string) => {
+	const send = async (eventId: string, kind: "prompt" | "steer" | "follow_up", body: string, senderUserId?: string) => {
 		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-${eventId.replace(/[^A-Za-z0-9]/g, "")}`, conversationId, role: "relay", type: "input.deliver",
 			payload: { deliveryId: deriveDeliveryId(conversationId, eventId), matrixEventId: eventId, ...(senderUserId ? { senderUserId } : {}), kind, body } });
 		await new Promise((resolve) => setTimeout(resolve, 30));
@@ -767,9 +767,9 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 		"the intentional hard stop cannot overwrite a projected checkpoint with a generic model error");
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "completed"));
-	idle = false; await send("$follow", "prompt", "busy follow-up"); await send("$steer", "steer", "redirect");
+	idle = false; await send("$busy", "prompt", "busy message"); await send("$steer", "steer", "redirect"); await send("$legacy", "follow_up", "explicit follow-up");
 	assert.deepEqual(deliveriesSeen, [{ text: "Matrix participant @alice:example.com:\n\nidle task" },
-		{ text: "busy follow-up", deliverAs: "followUp" }, { text: "redirect", deliverAs: "steer" }]);
+		{ text: "busy message", deliverAs: "steer" }, { text: "redirect", deliverAs: "steer" }, { text: "explicit follow-up", deliverAs: "followUp" }]);
 	assert.equal(restoreDeliveries(branch).get(deriveDeliveryId(conversationId, "$idle"))?.senderUserId, "@alice:example.com");
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 
@@ -787,7 +787,7 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 		registerTool: () => undefined, getCommands: () => [], appendEntry: (customType: string, data: unknown) => { const id = `recovery-${++sequence}`;
 			recoveryBranch.push({ ...custom(id, customType, data), parentId: recoveryLeaf }); recoveryLeaf = id; },
 		sendMessage: (_message: unknown, options: { triggerTurn?: boolean }) => { if (options.triggerTurn) resumeTriggers += 1; },
-		sendUserMessage: (text: string, options: { onPromptExpanded?: (text: string) => void }) => { reinjectedExpanded += 1; options.onPromptExpanded?.(text);
+		sendUserMessage: (text: string, options: { deliverAs?: string; onPromptExpanded?: (text: string) => void }) => { assert.equal(options.deliverAs, "steer"); reinjectedExpanded += 1; options.onPromptExpanded?.(text);
 			const id = `recovery-user-${++sequence}`; recoveryBranch.push({ type: "message", id, parentId: recoveryLeaf, message: { role: "user", content: text } }); recoveryLeaf = id; } } as unknown as ExtensionAPI;
 	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(recoveryApi);
 	const recoveryCtx: any = { ...ctx, sessionManager: { ...ctx.sessionManager, getBranch: () => recoveryBranch, getLeafId: () => recoveryLeaf } };
@@ -832,12 +832,12 @@ test("managed images become one ordered text-plus-image turn and unsupported mod
 			registerTool: () => undefined, getCommands: () => [], getActiveTools: () => [], setActiveTools: () => undefined,
 			appendEntry: (customType: string, data: unknown) => { const id = `media-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id; },
 			sendMessage: () => undefined,
-			sendUserMessage: (content: unknown, options: { onPromptExpanded?: (text: string) => void }) => { sent.push(content);
+			sendUserMessage: (content: unknown, options: { deliverAs?: string; onPromptExpanded?: (text: string) => void }) => { assert.equal(options.deliverAs, "steer", "busy images steer as one caption-plus-image turn"); sent.push(content);
 				options.onPromptExpanded?.(String((content as Array<{ type: string; text?: string }>)[0]?.text));
 				const id = `media-user-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content } }); leaf = id; },
 		} as unknown as ExtensionAPI;
 		createManagedSessionAdapterExtension(adapterRole, { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
-		const ctx: any = { hasUI: false, isIdle: () => true, abort: () => undefined, shutdown: () => undefined,
+		const ctx: any = { hasUI: false, isIdle: () => false, abort: () => undefined, shutdown: () => undefined,
 			model: { provider: "test", id: "model", input: imageCapable ? ["text", "image"] : ["text"], contextWindow: 10_000 },
 			getContextUsage: () => ({ tokens: 1 }), sessionManager: { getSessionId: () => sessionId, getBranch: () => branch,
 				getLeafId: () => leaf, getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };

@@ -683,7 +683,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			};
 			try {
 				pi.sendUserMessage([{ type: "text", text: attributedCaption }, { type: "image", data: image.data.toString("base64"), mimeType: image.mimeType }], {
-					...(ctx.isIdle() ? {} : { deliverAs: "followUp" as const }), expandPromptTemplates: false, onPromptExpanded: recordExpanded,
+					...(ctx.isIdle() ? {} : { deliverAs: "steer" as const }), expandPromptTemplates: false, onPromptExpanded: recordExpanded,
 				});
 			} catch (error) { inFlightDeliveries.delete(image.deliveryId); throw error; }
 		}
@@ -736,7 +736,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 			if (payload.body === undefined) throw new ManagedAdapterError("Relay delivery omitted input body");
 			const idle = ctx.isIdle();
-			const deliverAs = idle ? undefined : payload.kind === "steer" ? "steer" : "followUp";
+			const deliverAs = idle ? undefined : payload.kind === "follow_up" ? "followUp" : "steer";
 			let provenanceRecorded = false;
 			const recordExpanded = (expandedText: string) => {
 				if (provenanceRecorded) return;
@@ -968,7 +968,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					const dispatching: DeliveryMarker = { ...marker, status: "reinjecting" };
 					recordDelivery(ctx, dispatching); inFlightDeliveries.add(deliveryId); pendingUserPersistence.push(dispatching);
 					pi.sendUserMessage(dispatching.expandedText!, {
-						...(ctx.isIdle() ? {} : { deliverAs: marker.kind === "steer" ? "steer" as const : "followUp" as const }),
+						...(ctx.isIdle() ? {} : { deliverAs: marker.kind === "follow_up" ? "followUp" as const : "steer" as const }),
 						expandPromptTemplates: false, onPromptExpanded: () => undefined,
 					});
 				}

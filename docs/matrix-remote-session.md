@@ -74,9 +74,10 @@ conversation, so authorized operator text routes directly without any host
 prefix. Valid replies to that room's bot use the same sender verification and
 fallback stripping; malformed or foreign relations remain ignored.
 
-Idle prompts start immediately. Ordinary input received while Pi is busy queues
-as a `followUp`; `!steer` strips its control prefix and queues the remaining text
-with Pi's `steer` semantics. Exact `!abort` requests `ctx.abort()` and does not
+Idle prompts start immediately. In managed relay rooms, ordinary input received
+while Pi is busy uses Pi's `steer` semantics; the legacy host-prefixed transport
+still queues ordinary busy input as a `followUp`. In both transports, `!steer`
+strips its control prefix and queues the remaining text with `steer` semantics. Exact `!abort` requests `ctx.abort()` and does not
 create a user turn. All controls pass the same room and operator checks as normal
 prompts.
 
