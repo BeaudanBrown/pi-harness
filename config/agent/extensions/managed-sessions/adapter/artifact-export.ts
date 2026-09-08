@@ -1,9 +1,10 @@
 import { constants } from "node:fs";
 import { lstat, open, realpath } from "node:fs/promises";
-import { basename, extname, isAbsolute, relative, resolve } from "node:path";
+import { basename, extname, isAbsolute, resolve } from "node:path";
 import { createHash } from "node:crypto";
 import { MAX_BLOB_BYTES, MAX_MEDIA_CHUNK_BYTES, deriveBlobId, deriveUploadId } from "../v2-contracts.js";
 import type { WorkspaceIdentity } from "../contracts.js";
+import { validateImageDecode } from "../image-validation.js";
 
 export type ArtifactMediaType = "image" | "audio" | "file";
 export interface WorkspaceArtifact {
@@ -68,7 +69,7 @@ async function validateContent(data: Buffer, extension: string, mimeType: string
 	if (data.length >= 4 && (starts("\x7fELF", "latin1") || starts("MZ") || ["feedface", "feedfacf", "cefaedfe", "cffaedfe"].includes(data.subarray(0, 4).toString("hex"))) || starts("#!")) {
 		throw new Error("Executable artifacts are not exportable");
 	}
-	if (mimeType.startsWith("image/")) { const result = imageDimensions(data, mimeType); assertCompleteContainer(data, mimeType); return { mediaType: "image", ...result }; }
+	if (mimeType.startsWith("image/")) { const result = imageDimensions(data, mimeType); assertCompleteContainer(data, mimeType); await validateImageDecode(data, mimeType); return { mediaType: "image", ...result }; }
 	if (mimeType === "audio/mpeg" && !(starts("ID3") || data.length >= 2 && data[0] === 0xff && (data[1]! & 0xe0) === 0xe0) ||
 		mimeType === "audio/ogg" && !starts("OggS") || mimeType === "audio/wav" && !(starts("RIFF") && data.subarray(8, 12).toString("ascii") === "WAVE") ||
 		mimeType === "audio/flac" && !starts("fLaC") || mimeType === "audio/mp4" && !(data.length >= 12 && data.subarray(4, 8).toString("ascii") === "ftyp")) throw new Error("Artifact audio content does not match its filename");
@@ -91,23 +92,45 @@ export async function resolveWorkspaceArtifact(options: {
 	const segments = requested.split("/");
 	if (segments.some((segment) => !segment || segment === "." || segment === ".." || segment.startsWith(".") || CONTROL_SEGMENTS.has(segment) || SENSITIVE_FILENAMES.test(segment))) throw new Error("Artifact path enters a hidden, control, or sensitive path");
 	if (!isAbsolute(options.workspacePath)) throw new Error("Managed workspace path is not host-resolved");
-	const workspaceRoot = await realpath(options.workspacePath); const cwd = await realpath(options.cwd);
+	const workspaceRoot = await realpath(options.workspacePath);
+	const rootIdentity = await lstat(workspaceRoot);
+	if (!rootIdentity.isDirectory() || rootIdentity.isSymbolicLink()) throw new Error("Managed workspace root is not a directory");
+	const cwd = await realpath(options.cwd);
 	if (basename(workspaceRoot) !== options.placement.workspace || cwd !== resolve(workspaceRoot, options.placement.relativeCwd)) throw new Error("Managed working directory no longer matches its host-resolved placement");
-	const candidate = resolve(workspaceRoot, requested); const canonical = await realpath(candidate);
-	const confined = relative(workspaceRoot, canonical);
-	if (!confined || confined === ".." || confined.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) || isAbsolute(confined)) throw new Error("Artifact path escapes the managed workspace");
-	const info = await lstat(candidate);
-	if (!info.isFile() || info.isSymbolicLink()) throw new Error("Artifact must be one regular non-symlink file");
-	const handle = await open(canonical, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+	// Pin each directory descriptor and never follow a user-controlled link. Node
+	// lacks openat; the Linux host relay uses procfs descriptor-relative opens.
+	if (process.platform !== "linux") throw new Error("Symlink-safe artifact traversal requires the Linux managed host");
+	const handles: Awaited<ReturnType<typeof open>>[] = [];
 	let data: Buffer;
 	try {
+		let directory = await open(workspaceRoot, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+		handles.push(directory);
+		const pinnedRoot = directory;
+		const openedRoot = await pinnedRoot.stat();
+		if (openedRoot.dev !== rootIdentity.dev || openedRoot.ino !== rootIdentity.ino || await realpath(`/proc/self/fd/${pinnedRoot.fd}`) !== workspaceRoot) {
+			throw new Error("Managed workspace root changed during validation");
+		}
+		for (const segment of segments.slice(0, -1)) {
+			directory = await open(`/proc/self/fd/${directory.fd}/${segment}`, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW);
+			handles.push(directory);
+		}
+		const handle = await open(`/proc/self/fd/${directory.fd}/${segments.at(-1)!}`, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+		handles.push(handle);
 		const opened = await handle.stat();
-		if (!opened.isFile() || opened.size < 1 || opened.size > MAX_BLOB_BYTES || opened.dev !== info.dev || opened.ino !== info.ino) throw new Error("Artifact changed or exceeded the size limit during validation");
-		data = await handle.readFile();
+		if (!opened.isFile() || opened.size < 1 || opened.size > MAX_BLOB_BYTES) throw new Error("Artifact must be a bounded regular file");
+		// Read a fixed allocation: concurrent growth must not cause an unbounded readFile.
+		data = Buffer.alloc(opened.size);
+		let offset = 0;
+		while (offset < data.length) { const read = await handle.read(data, offset, data.length - offset, offset); if (!read.bytesRead) break; offset += read.bytesRead; }
 		const after = await handle.stat();
-		if (after.size !== data.length || after.mtimeMs !== opened.mtimeMs || after.ino !== opened.ino) throw new Error("Artifact changed while it was being read");
-	} finally { await handle.close(); }
-	const filename = basename(canonical); const extension = extname(filename).toLowerCase();
+		const currentRoot = await lstat(workspaceRoot);
+		if (currentRoot.dev !== openedRoot.dev || currentRoot.ino !== openedRoot.ino || await realpath(`/proc/self/fd/${pinnedRoot.fd}`) !== workspaceRoot) throw new Error("Managed workspace root changed while reading");
+		if (offset !== data.length || after.size !== data.length || after.mtimeMs !== opened.mtimeMs || after.ctimeMs !== opened.ctimeMs) throw new Error("Artifact changed while it was being read");
+	} catch (error) {
+		if (error instanceof Error && "code" in error && ["ELOOP", "ENOTDIR"].includes(String(error.code))) throw new Error("Artifact path contains a symlink or non-directory");
+		throw error;
+	} finally { for (const handle of handles.reverse()) await handle.close(); }
+	const filename = segments.at(-1)!; const extension = extname(filename).toLowerCase();
 	if (!filename || filename.length > 255 || /[\\/\u0000-\u001f\u007f]/.test(filename) || SENSITIVE_FILENAMES.test(filename) || SENSITIVE_EXTENSIONS.has(extension)) throw new Error("Artifact filename is unsafe or sensitive");
 	if (!ALLOWED_EXTENSIONS.has(extension)) throw new Error("Artifact type is not in the conservative export allowlist");
 	const mimeType = MIME_BY_EXTENSION[extension]!;

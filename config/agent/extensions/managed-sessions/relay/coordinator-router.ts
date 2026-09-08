@@ -186,6 +186,7 @@ export class CoordinatorRouter {
 	}
 
 	async attachmentReady(conversationId = this.manifest.conversationId): Promise<void> {
+		if (this.registry.isRefreshing(conversationId)) return;
 		if (this.registry.hasGenerationBoundary(conversationId)) {
 			for (const control of this.registry.pendingControls(conversationId).filter((item) => item.name === "new" && item.argument === "--confirm")) {
 				await this.beginOperationFeedback(conversationId, control.controlId);
@@ -313,6 +314,7 @@ export class CoordinatorRouter {
 
 	private async deliverRecordedControl(manifest: ConversationManifest, eventId: string,
 		pending: ReturnType<RelayRegistry["pendingControls"]>[number]): Promise<void> {
+		if (this.registry.isRefreshing(manifest.conversationId)) return;
 		const envelope = this.controlEnvelope(manifest.conversationId, pending);
 		if (this.server.sendToConversation(envelope)) return;
 		await this.wakeForControl(manifest);
@@ -327,6 +329,7 @@ export class CoordinatorRouter {
 	}
 
 	private async wakeForControl(manifest: ConversationManifest): Promise<void> {
+		if (this.registry.isRefreshing(manifest.conversationId)) return;
 		if (!this.launching.has(manifest.conversationId)) {
 			const work = (async () => {
 				await this.registry.beginLaunch(manifest.conversationId);
@@ -352,6 +355,7 @@ export class CoordinatorRouter {
 	}
 
 	private async deliverRecordedInput(manifest: ConversationManifest, input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
+		if (this.registry.isRefreshing(manifest.conversationId)) return;
 		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
 		const state = this.registry.conversationState(manifest.conversationId);
 		const delivered = input.media ? await this.media?.deliver(this.server, manifest.conversationId, input) ?? false
@@ -443,6 +447,7 @@ export class CoordinatorRouter {
 	}
 
 	private async ensureWake(manifest: ConversationManifest): Promise<void> {
+		if (this.registry.isRefreshing(manifest.conversationId)) return;
 		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
 		if (this.registry.conversationState(manifest.conversationId) === "active") return;
 		const pending = this.registry.pendingInputs(manifest.conversationId)

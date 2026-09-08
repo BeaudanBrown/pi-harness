@@ -755,9 +755,24 @@ export class RelayRegistry {
 	liveMediaBlobIds(): Set<string> {
 		return new Set(this.state.conversations.flatMap((conversation) => [
 			...conversation.pendingInputs.filter((input) => input.media && input.status !== "completed" && input.status !== "cancelled").map((input) => input.media!.blobId),
-			...conversation.artifactExports.filter((artifact) => artifact.state !== "sent").map((artifact) => artifact.blobId),
+			...conversation.artifactExports.filter((artifact) => artifact.state !== "sent" && !artifact.failure).map((artifact) => artifact.blobId),
 		]));
 	}
+
+	private readonly refreshing = new Set<string>();
+
+	isRefreshing(conversationId: string): boolean { return this.refreshing.has(conversationId); }
+
+	beginRefresh(conversationId: string): void {
+		const conversation = this.runtimeConversation(conversationId);
+		if (this.refreshing.has(conversationId) || conversation.state === "starting" || this.hasGenerationBoundary(conversationId) ||
+			conversation.pendingControls.length || conversation.pendingInputs.some((input) => input.status === "persisted" || input.status === "delivered")) {
+			throw new RelayRegistryError("invalid_state", "Refresh refused: conversation is busy or has unsettled work");
+		}
+		this.refreshing.add(conversationId);
+	}
+
+	endRefresh(conversationId: string): void { this.refreshing.delete(conversationId); }
 
 	artifactExports(conversationId?: string): Array<{ conversationId: string; artifact: RuntimeConversation["artifactExports"][number] }> {
 		return this.state.conversations.filter((conversation) => !conversationId || conversation.conversationId === conversationId)

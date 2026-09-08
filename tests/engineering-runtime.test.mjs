@@ -39,12 +39,12 @@ export default function(pi) {
     const diagnosis = await diagnoseCommandResult(new Proxy({}, { get() { throw new Error("model context must not be read"); } }), { name: "check", command: ["must-not-run"], task: "diagnose" }, { code: null, cancelled: true, timedOut: false, stdout: "", stderr: "", durationMs: 0, logPath: "not-run" }, "", AbortSignal.abort());
     const managedEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
       name.startsWith("PI_MANAGED_SESSION_") || name.startsWith("PI_MANAGED_PROJECT_") || name.startsWith("PI_MANAGED_COORDINATOR_") || name === "PI_HARNESS_AGENT_PROFILE" || name === "PI_MANAGED_LOCAL_MODEL_TOOLS"));
-    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
+    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
   });
 }
 `);
   const env = { HOME: join(cwd, "home"), PATH: projectPath ? join(cwd, "bin") : "", XDG_RUNTIME_DIR: cwd, ENGINEERING_PROBE_RESULT: resultPath };
-  if (role === "project") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "session.jsonl") });
+  if (role === "project") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "session.jsonl"), PI_MANAGED_SESSIONS_IMAGE_NORMALIZER: "/untrusted/project-decoder" });
   if (role === "coordinator") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "coordinator", PI_MANAGED_COORDINATOR_CWD: cwd, PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "coordinator.jsonl") });
   if (role === "fallback") Object.assign(env, {
     PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "stale-project.jsonl"), PI_MANAGED_COORDINATOR_CWD: cwd,
@@ -78,6 +78,7 @@ for (const [name, launcher, role] of [["normal", normal, undefined], ["managed p
   test(`${name} packaged launcher supplies the engineering baseline from empty PATH`, async (t) => {
     const { result } = await probe(t, launcher, role, false);
     assert.equal(result.injected, true);
+    if (role === "project") assert.equal(result.decoder, process.env.PI_HARNESS_EXPECTED_IMAGE_DECODER, "post-direnv dispatch resets an inherited decoder override");
     assert.equal(result.diagnosisAborted, true, "already-aborted diagnosis must not select or start a model");
     if (role === "fallback") assert.deepEqual(result.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
     for (const [name, tool] of Object.entries(result.tools)) { assert.equal(tool.code, 0, name); assert.ok(tool.path, name); if ("versionExit" in tool) assert.equal(tool.versionExit, 0, name); }

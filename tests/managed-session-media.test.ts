@@ -13,6 +13,8 @@ import { authorizedRoomEvents } from "../config/agent/extensions/managed-session
 import { CAPTIONLESS_IMAGE_PROMPT, ManagedImageTransport } from "../config/agent/extensions/managed-sessions/relay/image-media.js";
 import { ManagedMatrixClient, ManagedMatrixError } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 
+import { validateImageDecode } from "../config/agent/extensions/managed-sessions/image-validation.js";
+
 const execFileAsync = promisify(execFile);
 const config = { homeserver: "https://matrix.example.com", accessToken: "secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
 const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
@@ -50,6 +52,20 @@ test("authenticated media download validates declared and streamed bounds withou
 	assert.deepEqual(requests, [{ path: "/_matrix/client/v1/media/download/example.com/media", authorization: "Bearer secret" }]);
 	await assert.rejects(() => client.downloadMedia("https://example.com/media", png.length), (error: unknown) => error instanceof ManagedMatrixError && error.code === "invalid_response");
 	await assert.rejects(() => client.downloadMedia("mxc://example.com/media", png.length - 1), /length|stream/);
+});
+
+test("media download accepts absent length but rejects malformed headers and incorrect streamed totals", async () => {
+	for (const header of [null, "68", "", "invalid", "-1", "1.5", "9007199254740992", "67"]) {
+		const headers: Record<string, string> = { "content-type": "image/png" };
+		if (header !== null) headers["content-length"] = header;
+		const client = new ManagedMatrixClient(config, async () => new Response(png, { headers }), [], { maxAttempts: 1 });
+		if (header === null || header === "68") assert.deepEqual((await client.downloadMedia("mxc://example.com/media", png.length)).bytes, png);
+		else await assert.rejects(() => client.downloadMedia("mxc://example.com/media", png.length), /malformed|disagreed/);
+	}
+	for (const delta of [-1, 1]) {
+		const client = new ManagedMatrixClient(config, async () => new Response(png), [], { maxAttempts: 1 });
+		await assert.rejects(() => client.downloadMedia("mxc://example.com/media", png.length + delta), /exceeded|truncated/);
+	}
 });
 
 test("blob spool is content-addressed, digest verified, private, atomic, and never cleans live recovery state", async (t) => {
@@ -118,6 +134,7 @@ test("production ImageMagick normalization supports JPEG, PNG, and WebP while st
 		const generate = extension === "webp" ? ["-size", "2x1", "xc:red", "-size", "2x1", "xc:blue", "-delay", "10", "-loop", "0", "-set", "comment", "private-metadata", source]
 			: ["-size", "2x1", "xc:red", "-set", "comment", "private-metadata", source];
 		await execFileAsync(magick, generate); current = await readFile(source); currentMime = mime;
+		await validateImageDecode(current, mime, magick);
 		const accepted = await transport.accept(deriveConversationId("host", extension), { kind: "image", eventId: `$${extension}`, senderUserId: config.operatorUserId, mxcUrl: `mxc://example.com/${extension}`,
 			declaredMimeType: mime, declaredSize: current.length, declaredWidth: 2, declaredHeight: 1 });
 		const metadata = (await spool.list()).find((blob) => blob.blobId === accepted.image.blobId)!;

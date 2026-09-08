@@ -260,6 +260,7 @@ export class HostLifecycle {
 	private readonly worktreeOperations = new Map<string, Promise<unknown>>();
 	private readonly provisions = new Map<string, Promise<{ roomId: string; projectSpace: string }>>();
 	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
+	private readonly refreshWaiters = new Map<string, { refreshId: string; resolve: (ready: boolean) => void }>();
 	private readonly reconciler: ProjectReconciler;
 
 	constructor(private readonly options: {
@@ -286,6 +287,9 @@ export class HostLifecycle {
 	async request(envelope: ManagedSessionEnvelope): Promise<Record<string, unknown>> {
 		if (envelope.role !== "coordinator_adapter" || envelope.type !== "lifecycle.request") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle capability is required");
 		const request = envelope.payload.request as Record<string, unknown>;
+		if (typeof request.targetConversationId === "string" && this.options.registry.isRefreshing(request.targetConversationId) && request.operation !== "conversation.status") {
+			throw new RelayRegistryError("invalid_state", "Conversation refresh is already in progress");
+		}
 		switch (request.operation) {
 			case "workspace.list": return { operation: "workspace.list", workspaces: await this.workspaceList() };
 			case "worktree.list": return this.worktreeList(String(request.rootKey), String(request.workspace));
@@ -314,6 +318,9 @@ export class HostLifecycle {
 				return this.reconciler.cleanup(String(request.reconciliationKey));
 			case "conversation.start": return this.start(request as never);
 			case "conversation.resume": return this.resume(String(request.targetConversationId));
+			case "conversation.refresh":
+				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Refresh requires explicit confirmation");
+				return this.refresh(String(request.targetConversationId));
 			case "conversation.stop": return this.stop(String(request.targetConversationId));
 			case "conversation.delete": {
 				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Conversation bridge deletion requires explicit confirmation");
@@ -733,6 +740,53 @@ export class HostLifecycle {
 		return { operation: "conversation.resume", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };
 	}
 
+	acceptRefreshResult(conversationId: string, refreshId: string, status: string): void {
+		const waiter = this.refreshWaiters.get(conversationId);
+		if (!waiter || waiter.refreshId !== refreshId) throw new RelayRegistryError("invalid_state", "Refresh request is no longer pending");
+		waiter.resolve(status === "ready");
+	}
+
+	private async refresh(conversationId: string): Promise<Record<string, unknown>> {
+		const manifest = this.projectManifest(conversationId);
+		this.options.registry.beginRefresh(conversationId);
+		try {
+			return await this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), async () => {
+				// Resolve configuration before touching the running process.
+				await this.resolveWorkspaceIdentity(manifest.placement!);
+				const window = this.options.registry.managedWindow(conversationId);
+				if (this.options.registry.conversationState(conversationId) === "active") {
+					if (!window) throw new RelayRegistryError("invalid_state", "Refresh requires an exact managed window");
+					const refreshId = `refresh-${randomBytes(16).toString("hex")}`;
+					let timer: NodeJS.Timeout | undefined;
+					try {
+						const ready = await new Promise<boolean>((resolve, reject) => {
+							this.refreshWaiters.set(conversationId, { refreshId, resolve });
+							timer = setTimeout(() => reject(new RelayRegistryError("invalid_state", "Refresh refused: live idle state could not be confirmed")), 10_000);
+							if (!this.options.server.sendToConversation({ protocolVersion: "1.0.0", messageId: refreshId, conversationId,
+								role: "relay", type: "refresh.request", payload: { refreshId } })) reject(new RelayRegistryError("invalid_state", "Refresh refused: adapter is disconnected"));
+						});
+						if (!ready) throw new RelayRegistryError("invalid_state", "Refresh refused: Pi is busy; no work was cancelled");
+					} finally { if (timer) clearTimeout(timer); this.refreshWaiters.delete(conversationId); }
+					// The adapter shuts down gracefully only if still idle. Never force
+					// an attached process to exit, even after a successful idle response.
+					for (let attempt = 0; attempt < 100 && this.options.registry.conversationState(conversationId) === "active"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 100));
+					if (this.options.registry.conversationState(conversationId) !== "dormant") throw new RelayRegistryError("invalid_state", "Refresh refused: Pi did not shut down idle");
+					await this.invoke("window-terminate", { conversationId, windowId: window.windowId, paneId: window.paneId });
+					await this.options.registry.setManagedWindow(conversationId, null);
+				} else {
+					const inspected = await this.invoke("window-inspect", { conversationId });
+					if (inspected.exists !== false) throw new RelayRegistryError("invalid_state", "Refresh refused: an unattached process cannot be proven idle");
+					await this.options.registry.setManagedWindow(conversationId, null);
+				}
+				await this.launchProject(manifest);
+				return { operation: "conversation.refresh", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };
+			});
+		} finally {
+			this.options.registry.endRefresh(conversationId);
+			if (this.options.registry.conversationState(conversationId) === "active") await this.options.generationReady?.(conversationId);
+		}
+	}
+
 	private async stop(conversationId: string): Promise<Record<string, unknown>> {
 		this.projectManifest(conversationId);
 		const window = this.options.registry.managedWindow(conversationId);
@@ -809,6 +863,9 @@ export class HostLifecycle {
 					PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID: manifest.bindingBoundaryEntryId,
 					PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce, PI_MANAGED_PROJECT_SESSION_FILE: sessionFile,
 					PI_MANAGED_SESSION_WORKSPACE_PATH: resolved.workspacePath,
+					PI_MANAGED_SESSION_ROOT_KEY: manifest.placement.rootKey,
+					PI_MANAGED_SESSION_WORKSPACE: manifest.placement.workspace,
+					PI_MANAGED_SESSION_RELATIVE_CWD: manifest.placement.relativeCwd,
 					...((manifest.selectedModel ?? activeGeneration.model) ? { PI_MANAGED_SESSION_MODEL: manifest.selectedModel ?? activeGeneration.model } : {}),
 					...((manifest.selectedThinking ?? activeGeneration.thinking) ? { PI_MANAGED_SESSION_THINKING: manifest.selectedThinking ?? activeGeneration.thinking } : {}),
 				});

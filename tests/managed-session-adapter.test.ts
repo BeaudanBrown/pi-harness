@@ -67,6 +67,7 @@ function custom(id: string, customType: string, data: unknown) {
 
 class FakeRelay {
 	readonly frames: ManagedSessionEnvelope[] = [];
+	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
 	readonly socketPath: string;
@@ -134,12 +135,14 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active" } }));
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
 		} else if (envelope.type === "media.reject") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "media.result", payload: { deliveryId: envelope.payload.deliveryId, blobId: envelope.payload.blobId, status: "rejected" } }));
+		} else if (envelope.type === "refresh.result") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "refresh.result", status: "ok" } }));
 		} else if (envelope.type === "control.result") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "control.result", status: "ok" } }));
 		} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
@@ -393,7 +396,7 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_project_reconcile_preview", "remote_project_reconcile_apply",
 			"remote_project_space_cleanup", "remote_project_create", "remote_worktree_list", "remote_worktree_create", "remote_worktree_conversation_create",
 			"remote_worktree_remove_preview", "remote_worktree_remove_apply", "remote_worktree_cleanup_preview", "remote_worktree_cleanup_apply",
-			"remote_worktree_branch_delete", "remote_session_start", "remote_session_resume", "remote_session_stop", "remote_session_delete",
+			"remote_worktree_branch_delete", "remote_session_start", "remote_session_resume", "remote_session_stop", "remote_session_refresh", "remote_session_delete",
 		]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));
 	}
@@ -441,7 +444,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 		getContextUsage: () => ({ tokens: contextTokens }), compact: ({ customInstructions, onComplete }: any) => { compactFocus = customInstructions; contextTokens = 40; onComplete({ estimatedTokensAfter: 40 }); },
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
-	assert.deepEqual(activeTools, ["read", "remote_checkpoint", "remote_artifact_export"], "managed conversation tools activate only for the live binding");
+	assert.deepEqual(activeTools, ["read", "remote_checkpoint"], "checkpoint activates on binding, but export requires complete placement");
 	const send = async (id: number, name: string, argument?: string) => { relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: `control-${id}`, conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${String(id).padStart(32, "a")}`, name, ...(argument ? { argument } : {}) } } as ManagedSessionEnvelope); await new Promise((resolve) => setTimeout(resolve, 30)); };
 	await send(12, "status");
@@ -792,6 +795,31 @@ test("managed adapter preserves idle/follow-up/steer expansion and hard checkpoi
 	assert.equal(resumeTriggers, 1, "persisted unfinished delivery resumes without reinjecting its Pi user entry");
 	assert.equal(reinjectedExpanded, 1, "expanded-before-persistence crash is reinjected exactly once from its durable expansion");
 	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
+});
+
+test("refresh adapter refuses busy and queued work, shuts down idle without abort, and enables export with complete placement", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
+	relay.placement = { rootKey: "projects", workspace: "workspace", relativeCwd: "sub" };
+	const handlers = new Map<string, (...args: any[]) => any>(); let activeTools: string[] = ["read"]; let idle = false; let queued = false; let shutdowns = 0;
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined, registerTool: () => undefined,
+		getCommands: () => [], getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; }, appendEntry: () => undefined,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce,
+		PI_MANAGED_SESSION_WORKSPACE_PATH: "/tmp/workspace" })(api);
+	const ctx: any = { hasUI: false, isIdle: () => idle, hasPendingMessages: () => queued, shutdown: () => { shutdowns++; }, abort: () => assert.fail("refresh must not abort"),
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	assert.ok(activeTools.includes("remote_artifact_export"));
+	for (const [index, state] of [[false, false], [true, true], [true, false]].entries()) {
+		[idle, queued] = state as [boolean, boolean];
+		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `refresh-${index}`, conversationId, role: "relay", type: "refresh.request", payload: { refreshId: `refresh-${index}` } });
+		for (let attempt = 0; attempt < 100 && !relay.frames.some((frame) => frame.type === "refresh.result" && frame.payload.refreshId === `refresh-${index}`); attempt++) await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.equal(relay.frames.find((frame) => frame.type === "refresh.result" && frame.payload.refreshId === `refresh-${index}`)?.payload.status, index === 2 ? "ready" : "busy");
+	}
+	for (let attempt = 0; attempt < 100 && !shutdowns; attempt++) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(shutdowns, 1);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
 test("managed images become one ordered text-plus-image turn and unsupported models reject without fallback", async (t) => {

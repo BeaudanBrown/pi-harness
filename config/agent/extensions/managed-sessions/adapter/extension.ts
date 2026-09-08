@@ -251,7 +251,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (role !== "ordinary_adapter" || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
 			const managed = ["remote_checkpoint", "remote_artifact_export"];
 			const names = pi.getActiveTools().filter((name) => !managed.includes(name));
-			pi.setActiveTools(active ? [...names, ...managed] : names);
+			pi.setActiveTools(active ? [...names, "remote_checkpoint", ...(config.placement && config.workspacePath ? ["remote_artifact_export"] : [])] : names);
 		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
 		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
@@ -410,6 +410,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }) }, { additionalProperties: false }),
 				execute: async (_id, params) => lifecycle({ operation: `conversation.${operation}`, targetConversationId: params.conversationId }),
 			});
+			pi.registerTool({ name: "remote_session_refresh", label: "Refresh Managed Conversation",
+				description: "Restart an idle project conversation using freshly resolved installed host configuration. Preserves its room, session history, generation, preferences and queued input. Refuses busy or unresponsive processes; never rebuilds packages.",
+				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "conversation.refresh", targetConversationId: params.conversationId, confirmed: params.confirm }) });
 			pi.registerTool({ name: "remote_session_delete", label: "Delete Managed Bridge",
 				description: "Delete only relay/Matrix bridge state after explicit confirmation. Pi session, process, managed window, workspace, and project files are preserved.",
 				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
@@ -455,7 +459,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				promptSnippet: "Use remote_artifact_export only when you intentionally want to send one workspace artifact to the operator's managed Matrix room.",
 				parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 512, description: "Path relative to the managed workspace root" }) }, { additionalProperties: false }),
 				execute: async (toolCallId, params) => {
-					if (!binding || !client?.connected || !config.placement || !config.workspacePath) throw new ManagedAdapterError("remote_artifact_export requires an active host-resolved managed project conversation");
+					if (!binding) throw new ManagedAdapterError("Artifact export unavailable: no managed binding");
+					if (!client?.connected) throw new ManagedAdapterError("Artifact export unavailable: relay disconnected");
+					if (!config.placement || !config.workspacePath) throw new ManagedAdapterError("Artifact export unavailable: incomplete host placement; refresh this project conversation after updating the host configuration");
 					const artifact = await resolveWorkspaceArtifact({ requestedPath: params.path, cwd: process.cwd(), workspacePath: config.workspacePath, placement: config.placement,
 						conversationId: binding.conversationId, toolCallId });
 					await client.exportArtifact(artifact);
@@ -866,6 +872,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		async function handleEnvelope(envelope: ManagedSessionEnvelope): Promise<void> {
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
+			if (envelope.type === "refresh.request") {
+				const idle = () => ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !inFlightDeliveries.size && !pendingUserPersistence.length;
+				if (role !== "ordinary_adapter" || !client) throw new ManagedAdapterError("Refresh requires a managed project");
+				const ready = idle();
+				await client.refreshResult(String(envelope.payload.refreshId), ready ? "ready" : "busy");
+				// Never abort: if work raced the acknowledgment, the host times out
+				// unchanged rather than killing it. Shutdown runs native cleanup.
+				if (ready && idle()) ctx.shutdown();
+				return;
+			}
 			if (envelope.type === "control.deliver") return handleControl(envelope, ctx);
 			if (envelope.type === "input.deliver") return handleDelivery(envelope, ctx);
 			if (envelope.type === "termination.request") {
@@ -927,6 +943,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					await next.close("shutdown").catch(() => undefined);
 					return;
 				}
+				// The authenticated manifest is authoritative even when an external
+				// tmux launcher only forwards the canonical workspace path.
+				if (next.placement) config.placement = next.placement;
 				setCheckpointActive(true);
 				reconnectAttempt = 0;
 				replayAcknowledgements();

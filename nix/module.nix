@@ -113,6 +113,7 @@ let
       exit 1
     fi
     export PI_MANAGED_SESSIONS_SOCKET="$XDG_RUNTIME_DIR/pi-managed-sessions/relay.sock"
+    export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER="${lib.getExe pkgs.imagemagick}"
   '';
   lspExtensionArray =
     if cfg.lsp.enable then
@@ -199,6 +200,7 @@ let
       project)
         : "''${PI_MANAGED_PROJECT_SESSION_FILE:?PI_MANAGED_PROJECT_SESSION_FILE is required}"
         export PI_HARNESS_AGENT_PROFILE="managed-project"
+        export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER="${lib.getExe pkgs.imagemagick}"
         export PI_MANAGED_LOCAL_MODEL_TOOLS=${lib.escapeShellArg managedLocalModelTools}
         export PI_HARNESS_RESOURCES_ROOT="${cfg.package.harnessResources}/share/pi-harness/agent"
         export PI_HARNESS_MATT_SKILLS_ROOT="${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills"

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { MAX_MEDIA_CHUNK_BYTES } from "../v2-contracts.js";
 import { deriveMatrixTransactionId } from "../contracts.js";
 import { BlobSpool } from "./blob-spool.js";
-import { ManagedMatrixClient } from "./matrix-client.js";
+import { ManagedMatrixClient, ManagedMatrixError } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 export interface ArtifactDescriptor {
@@ -19,18 +19,47 @@ type ArtifactRecord = ReturnType<RelayRegistry["artifactExports"]>[number]["arti
 export class ManagedArtifactExporter {
 	private readonly transfers = new Map<string, Transfer>();
 	private readonly projections = new Map<string, Promise<void>>();
-	constructor(private readonly spool: BlobSpool, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient) {}
+	private timer?: NodeJS.Timeout;
+	private closed = false;
+	private readonly retries = new Map<string, { attempts: number; after: number }>();
+	private readonly controller = new AbortController();
+	constructor(private readonly spool: BlobSpool, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient,
+		private readonly options: { retryMs?: number; notice?: (conversationId: string, uploadId: string) => Promise<void> } = {}) {}
+
+	start(): void {
+		if (this.timer || this.closed) return;
+		const tick = async () => {
+			try { await this.reconcile(); } finally {
+				if (!this.closed) { this.timer = setTimeout(() => { void tick().catch(() => undefined); }, this.options.retryMs ?? 5_000); this.timer.unref(); }
+			}
+		};
+		this.timer = setTimeout(() => { void tick().catch(() => undefined); }, 0); this.timer.unref();
+	}
+
+	async close(): Promise<void> {
+		this.closed = true; if (this.timer) clearTimeout(this.timer); this.controller.abort();
+		for (const transfer of this.transfers.values()) if (transfer.timer) clearTimeout(transfer.timer);
+		this.transfers.clear(); await Promise.allSettled(this.projections.values());
+	}
 
 	async reconcile(): Promise<void> {
-		for (const { conversationId, artifact } of this.registry.artifactExports()) if (artifact.state !== "sent") await this.project(conversationId, artifact);
+		for (const { conversationId, artifact } of this.registry.artifactExports()) {
+			if (this.closed) return;
+			if (artifact.failure) { await this.options.notice?.(conversationId, artifact.uploadId).catch(() => undefined); continue; }
+			if (artifact.state === "sent" || (this.retries.get(artifact.uploadId)?.after ?? 0) > Date.now()) continue;
+			try { await this.project(conversationId, artifact); }
+			catch { /* One failed export never prevents another conversation recovering. */ }
+		}
 	}
 
 	async begin(conversationId: string, descriptor: ArtifactDescriptor): Promise<"ready" | "sent"> {
+		if (this.closed) throw new RelayRegistryError("invalid_state", "Artifact exporter is stopping");
 		const manifest = this.registry.manifestByConversationId(conversationId);
 		if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Artifact export requires a managed project conversation");
 		const existing = this.registry.artifactExports(conversationId).find((item) => item.artifact.uploadId === descriptor.uploadId)?.artifact;
 		if (existing) {
 			this.assertSame(existing, descriptor);
+			if (existing.failure) throw new RelayRegistryError("matrix_unavailable", "Artifact export failed permanently; submit a new export after resolving the media service error");
 			if (existing.state !== "sent") await this.project(conversationId, existing);
 			return "sent";
 		}
@@ -48,6 +77,7 @@ export class ManagedArtifactExporter {
 	}
 
 	async chunk(conversationId: string, payload: { uploadId: string; blobId: string; index: number; sha256: string; data: string }): Promise<"ready" | "sent"> {
+		if (this.closed) throw new RelayRegistryError("invalid_state", "Artifact exporter is stopping");
 		const transfer = this.transfers.get(payload.uploadId);
 		if (!transfer || transfer.conversationId !== conversationId || transfer.descriptor.blobId !== payload.blobId || payload.index !== transfer.chunks.length) {
 			throw new RelayRegistryError("invalid_state", "Artifact chunks were missing, duplicated, or out of order");
@@ -71,9 +101,24 @@ export class ManagedArtifactExporter {
 	}
 
 	private async project(conversationId: string, initial: ArtifactRecord): Promise<void> {
+		if (this.closed) throw new RelayRegistryError("invalid_state", "Artifact exporter is stopping");
 		const current = this.projections.get(initial.uploadId);
 		if (current) return current;
-		const work = this.projectOnce(conversationId, initial).finally(() => this.projections.delete(initial.uploadId));
+		const work = this.projectOnce(conversationId, initial).then(() => { this.retries.delete(initial.uploadId); }).catch(async (error) => {
+			if (!this.closed) {
+				if (error instanceof ManagedMatrixError && !error.retryable && error.code !== "cancelled") {
+					const current = this.registry.artifactExports(conversationId).find((item) => item.artifact.uploadId === initial.uploadId)?.artifact;
+					if (current && current.state !== "sent") {
+						await this.registry.recordArtifactExport(conversationId, { ...current, failure: "media_unavailable" });
+						await this.spool.remove(current.blobId, this.registry.liveMediaBlobIds()).catch(() => undefined);
+					}
+				} else {
+					const attempts = Math.min(10, (this.retries.get(initial.uploadId)?.attempts ?? 0) + 1);
+					this.retries.set(initial.uploadId, { attempts, after: Date.now() + Math.min(300_000, (this.options.retryMs ?? 5_000) * 2 ** (attempts - 1)) });
+				}
+			}
+			throw error;
+		}).finally(() => this.projections.delete(initial.uploadId));
 		this.projections.set(initial.uploadId, work); return work;
 	}
 
@@ -81,24 +126,26 @@ export class ManagedArtifactExporter {
 		let artifact = this.registry.artifactExports(conversationId).find((item) => item.artifact.uploadId === initial.uploadId)?.artifact ?? initial;
 		const manifest = this.registry.manifestByConversationId(conversationId);
 		if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("not_found", "Artifact conversation is unavailable");
+		if (artifact.failure) throw new RelayRegistryError("matrix_unavailable", "Artifact export failed permanently");
+		const signal = AbortSignal.any([this.controller.signal, AbortSignal.timeout(60_000)]);
 		if (artifact.state === "spooled") {
-			const reservation = await this.matrix.createMedia(); artifact = { ...artifact, state: "created", mxcUrl: reservation.contentUri, reservationExpiresAt: reservation.unusedExpiresAt };
+			const reservation = await this.matrix.createMedia(signal); artifact = { ...artifact, state: "created", mxcUrl: reservation.contentUri, reservationExpiresAt: reservation.unusedExpiresAt };
 			await this.registry.recordArtifactExport(conversationId, artifact);
 		}
 		if (artifact.state === "created" && Date.parse(artifact.reservationExpiresAt!) <= Date.now()) {
-			const reservation = await this.matrix.createMedia(); artifact = { ...artifact, mxcUrl: reservation.contentUri, reservationExpiresAt: reservation.unusedExpiresAt };
+			const reservation = await this.matrix.createMedia(signal); artifact = { ...artifact, mxcUrl: reservation.contentUri, reservationExpiresAt: reservation.unusedExpiresAt };
 			await this.registry.recordArtifactExport(conversationId, artifact);
 		}
 		if (artifact.state === "created") {
 			const bytes = await this.spool.read({ blobId: artifact.blobId, sha256: artifact.sha256, mimeType: artifact.mimeType,
 				byteLength: artifact.byteLength, width: artifact.width ?? 1, height: artifact.height ?? 1 });
-			await this.matrix.uploadMedia(artifact.mxcUrl!, artifact.filename, artifact.mimeType, bytes);
+			await this.matrix.uploadMedia(artifact.mxcUrl!, artifact.filename, artifact.mimeType, bytes, signal);
 			artifact = { ...artifact, state: "uploaded" }; await this.registry.recordArtifactExport(conversationId, artifact);
 		}
 		if (artifact.state === "uploaded") {
 			const eventId = await this.matrix.sendMedia(manifest.roomId, artifact.transactionId, { contentUri: artifact.mxcUrl!, filename: artifact.filename,
 				mimeType: artifact.mimeType, mediaType: artifact.mediaType, byteLength: artifact.byteLength,
-				...(artifact.width === undefined ? {} : { width: artifact.width }), ...(artifact.height === undefined ? {} : { height: artifact.height }) });
+				...(artifact.width === undefined ? {} : { width: artifact.width }), ...(artifact.height === undefined ? {} : { height: artifact.height }) }, signal);
 			artifact = { ...artifact, state: "sent", eventId }; await this.registry.recordArtifactExport(conversationId, artifact);
 			await this.spool.remove(artifact.blobId, this.registry.liveMediaBlobIds());
 		}

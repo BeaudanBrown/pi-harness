@@ -59,6 +59,28 @@ test("host-resolved workspace anchoring and bounded parsing reject lookalike roo
 		placement: { rootKey: "projects", workspace: "workspace", relativeCwd: "sub" }, conversationId, toolCallId: "malformed" }), /decode validation/);
 });
 
+test("artifact traversal rejects intermediate symlinks and hidden aliases; decoding rejects corrupt image data", async (t) => {
+	const root = await temporary(t); const workspace = join(root, "workspace"); await mkdir(join(workspace, ".pi"), { recursive: true });
+	await writeFile(join(workspace, ".pi", "report.txt"), "private fixture"); await symlink(join(workspace, ".pi"), join(workspace, "public"));
+	const options = { cwd: workspace, workspacePath: workspace, placement: { rootKey: "projects", workspace: "workspace", relativeCwd: "" }, conversationId, toolCallId: "safe-test" };
+	await assert.rejects(() => resolveWorkspaceArtifact({ ...options, requestedPath: "public/report.txt" }), /symlink/);
+	const corrupt = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64");
+	corrupt.fill(0, 41, 52); await writeFile(join(workspace, "corrupt.png"), corrupt);
+	await assert.rejects(() => resolveWorkspaceArtifact({ ...options, requestedPath: "corrupt.png" }), /decoding failed/);
+});
+
+test("artifact traversal rejects workspace replacement between validation and root open", async (t) => {
+	const root = await temporary(t); const workspace = join(root, "workspace"); const replacement = join(root, "replacement");
+	await mkdir(workspace); await mkdir(replacement); await writeFile(join(workspace, "file.txt"), "original"); await writeFile(join(replacement, "file.txt"), "replacement");
+	const fs: typeof import("node:fs/promises") = require("node:fs/promises"); const originalOpen = fs.open;
+	t.mock.method(fs, "open", async (...args: Parameters<typeof fs.open>) => {
+		if (args[0] === workspace) { await fs.rename(workspace, join(root, "old")); await fs.rename(replacement, workspace); }
+		return originalOpen(...args);
+	});
+	await assert.rejects(() => resolveWorkspaceArtifact({ requestedPath: "file.txt", cwd: workspace, workspacePath: workspace,
+		placement: { rootKey: "projects", workspace: "workspace", relativeCwd: "" }, conversationId, toolCallId: "root-race" }), /root changed/);
+});
+
 test("artifact IPC rejects changed chunk digests and unsafe image metadata", () => {
 	const data = Buffer.from("chunk"); const uploadId = `upload_${"a".repeat(32)}`; const blobId = `blob_${"b".repeat(32)}`;
 	const chunk = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "artifact-chunk", conversationId, role: "ordinary_adapter", type: "artifact.chunk",
@@ -88,6 +110,33 @@ test("artifact transfer reservations are bounded before incomplete chunks reach 
 	await assert.rejects(() => exporter.begin(conversationId, { uploadId: `upload_${"d".repeat(32)}`, blobId: `blob_${"e".repeat(32)}`, sha256: "f".repeat(64),
 		filename: "overflow.txt", mimeType: "text/plain", mediaType: "file", byteLength: 1, chunkCount: 1 }), /capacity/);
 	assert.equal((await spool.list()).length, 0);
+});
+
+test("artifact recovery isolates permanent errors and automatically retries transient failures without restart", async (t) => {
+	const root = await temporary(t); const { registry } = await registryFixture(root);
+	const spool = new BlobSpool(join(root, "spool")); await spool.initialize(new Set());
+	let reservation = 0; let transient = true; const sends: string[] = [];
+	const matrix = new ManagedMatrixClient(matrixConfig, async (input) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("/create")) return Response.json({ content_uri: `mxc://example.com/file${++reservation}`, unused_expires_at: Date.now() + 60_000 });
+		if (path.includes("/upload/") && path.endsWith("/file1")) return new Response("forbidden", { status: 403 });
+		if (path.includes("/upload/") && transient) return new Response("outage", { status: 503 });
+		if (path.includes("/upload/")) return Response.json({});
+		sends.push(path); return Response.json({ event_id: "$sent" });
+	}, [roomId], { maxAttempts: 1 });
+	const exporter = new ManagedArtifactExporter(spool, registry, matrix, { retryMs: 5 }); t.after(() => exporter.close());
+	for (let index = 1; index <= 2; index += 1) {
+		const data = Buffer.from(`file ${index}`); const sha256 = createHash("sha256").update(data).digest("hex");
+		const uploadId = `upload_${String(index).repeat(32)}`; const blobId = `blob_${String(index).repeat(32)}`;
+		await exporter.begin(conversationId, { uploadId, blobId, sha256, filename: "file.txt", mimeType: "text/plain", mediaType: "file", byteLength: data.length, chunkCount: 1 });
+		await assert.rejects(() => exporter.chunk(conversationId, { uploadId, blobId, index: 0, sha256, data: data.toString("base64") }), /HTTP/);
+	}
+	assert.equal(registry.artifactExports()[0]!.artifact.failure, "media_unavailable");
+	assert.equal(registry.artifactExports()[1]!.artifact.failure, undefined);
+	transient = false; exporter.start();
+	for (let attempt = 0; attempt < 100 && registry.artifactExports()[1]!.artifact.state !== "sent"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(registry.artifactExports()[1]!.artifact.state, "sent"); assert.equal(sends.length, 1);
+	await exporter.reconcile(); assert.equal(sends.length, 1, "recovery never resends terminal artifacts");
 });
 
 test("artifact export persists every side-effect boundary and recovers one stable Matrix event", async (t) => {

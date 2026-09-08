@@ -187,8 +187,16 @@ export class ManagedMatrixClient {
 					headers: { Authorization: `Bearer ${this.#accessToken}` }, signal });
 				if (!response.ok) throw new ManagedMatrixError("http", `Matrix GET /_matrix/client/v1/media/download returned HTTP ${response.status}`,
 					response.status, response.status === 429 || response.status >= 500);
-				const length = Number(response.headers.get("content-length"));
-				if (Number.isFinite(length) && (length !== declaredSize || length > MAX_BLOB_BYTES)) throw new ManagedMatrixError("invalid_response", "Matrix media length disagreed with its declaration");
+				const header = response.headers.get("content-length");
+				// Missing length is normal for streamed responses, not a declaration of zero.
+				if (header !== null && (!/^\d+$/.test(header) || !Number.isSafeInteger(Number(header)))) {
+					await response.body?.cancel();
+					throw new ManagedMatrixError("invalid_response", "Matrix media Content-Length is malformed");
+				}
+				if (header !== null && Number(header) !== declaredSize) {
+					await response.body?.cancel();
+					throw new ManagedMatrixError("invalid_response", "Matrix media length disagreed with its declaration");
+				}
 				if (!response.body) throw new ManagedMatrixError("invalid_response", "Matrix media response had no body");
 				const chunks: Buffer[] = []; let total = 0; const reader = response.body.getReader();
 				while (true) {

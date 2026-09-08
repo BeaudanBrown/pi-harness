@@ -66,6 +66,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let coordinatorRouter: CoordinatorRouter | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let activityProjector: ActivityProjector | undefined;
+	let closeArtifactExporter = async (): Promise<void> => undefined;
 	try {
 		await registry.load();
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
@@ -74,8 +75,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await media.initialize(registry.liveMediaBlobIds());
 		const authenticatedUserId = await matrix.whoami();
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
-		const artifactExporter = new ManagedArtifactExporter(spool, registry, matrix);
-		await artifactExporter.reconcile();
+		const artifactExporter = new ManagedArtifactExporter(spool, registry, matrix, {
+			notice: async (conversationId, uploadId) => eventProjector.projectNotice(conversationId, `${uploadId}:failed`,
+				"Artifact export failed permanently at the media service. Resolve the service error and request a new export; conversation history is preserved."),
+		});
+		closeArtifactExporter = () => artifactExporter.close();
 		const controlPollPublisher = new ControlPollPublisher(registry, matrix);
 		await controlPollPublisher.reconcile();
 		const coordinatorValues = [
@@ -225,6 +229,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					await activityProjector!.endOperationFeedback(attachment.conversationId, payload.controlId);
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
 				}
+				if (envelope.type === "refresh.result") {
+					if (!hostLifecycle) throw new Error("Managed lifecycle unavailable");
+					hostLifecycle.acceptRefreshResult(attachment.conversationId, String(envelope.payload.refreshId), String(envelope.payload.status));
+					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "refresh.result", status: "ok" });
+				}
 				if (envelope.type === "artifact.begin") {
 					if (attachment.role !== "ordinary_adapter") throw new RelayRegistryError("permission_denied", "Artifact export requires an ordinary managed adapter");
 					const status = await artifactExporter.begin(attachment.conversationId, envelope.payload as never);
@@ -328,6 +337,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (pendingReconciliation > 0) process.stderr.write(`pi-managed-session-relay: ${pendingReconciliation} managed project conversation(s) require explicit Space reconciliation\n`);
 		}
 		await server.start();
+		artifactExporter.start();
 		if (coordinator) {
 			const identity = coordinator;
 			coordinatorRouter = new CoordinatorRouter(identity.manifest, registry, matrix, server, async (manifest) => {
@@ -356,6 +366,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
 	} catch (error) {
+		await closeArtifactExporter().catch(() => undefined);
 		await coordinatorRouter?.stop().catch(() => undefined);
 		await activityProjector?.close().catch(() => undefined);
 		await server?.close({ preserveAttachments: true }).catch(() => undefined);
@@ -379,6 +390,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (stopped) return;
 			stopped = true;
 			clearTimeout(reconciliationTimer);
+			await closeArtifactExporter();
 			await coordinatorRouter?.stop();
 			await activityProjector?.close();
 			await server.close({ preserveAttachments: true });

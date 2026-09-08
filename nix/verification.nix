@@ -185,6 +185,7 @@ let
       export PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid
       export PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock
       export PI_MANAGED_SESSIONS_TEST_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}
+      export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}
       export PI_MANAGED_SESSIONS_TEST_TMUX=${pkgs.tmux}/bin/tmux
       export PI_MANAGED_TEST_LAUNCHER=${managedSessionLauncher}/bin/tmux_project
       export PI_MANAGED_SESSIONS_WORKSPACE_ROOTS="{\"projects\":\"$TMPDIR/workspaces\"}"
@@ -282,6 +283,7 @@ let
     PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
       PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
       PI_HARNESS_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
+      PI_HARNESS_EXPECTED_IMAGE_DECODER=${lib.getExe pkgs.imagemagick} \
       PI_HARNESS_WORKER_EXTENSION=${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts \
       node --test ${source}/tests/engineering-runtime.test.mjs
     PI_HARNESS_HEADLESS_PI=${piHarnessPackage}/bin/pi-aloop \

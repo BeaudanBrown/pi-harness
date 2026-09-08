@@ -41,6 +41,7 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 	const payload = request.payload as Record<string, unknown>;
 	switch (request.type) {
 		case "attachment.attach": return { type: "attachment.accepted", fields: [] };
+		case "refresh.result": return { type: "self.result", fields: [["operation", "refresh.result"]] };
 		case "input.acknowledge": return { type: "input.result", fields: [["deliveryId", String(payload.deliveryId)], ["status", String(payload.status)]] };
 		case "activity.update": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "updated"]] };
 		case "activity.finalize": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "finalized"]] };
@@ -90,6 +91,8 @@ export class BoundAdapterClient {
 	#pending = new Map<string, PendingRequest>();
 	#attachmentId?: string;
 	#generation = 1;
+	#placement?: WorkspaceIdentity;
+	get placement(): WorkspaceIdentity | undefined { return this.#placement ? { ...this.#placement } : undefined; }
 	#closing = false;
 	#inboundWork: Promise<void> = Promise.resolve();
 	#expiredRequests = new Map<string, ResponseExpectation>();
@@ -126,6 +129,7 @@ export class BoundAdapterClient {
 			});
 			if (response.type !== "attachment.accepted") throw responseError(response);
 			this.#attachmentId = String(response.payload.attachmentId);
+			this.#placement = response.payload.placement as WorkspaceIdentity | undefined;
 			this.#generation = Number.isSafeInteger(response.payload.generation) ? Number(response.payload.generation) : 1;
 		} catch (error) {
 			socket.destroy();
@@ -171,6 +175,11 @@ export class BoundAdapterClient {
 		if (result.type !== "self.result" || result.payload.operation !== "control.result" || result.payload.status !== "ok") {
 			throw new ManagedAdapterError("Relay did not confirm control result", "invalid_response");
 		}
+	}
+
+	async refreshResult(refreshId: string, status: "ready" | "busy"): Promise<void> {
+		await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("refresh-result"),
+			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "refresh.result", payload: { refreshId, status } });
 	}
 
 	async exportArtifact(artifact: WorkspaceArtifact): Promise<void> {

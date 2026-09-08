@@ -114,6 +114,7 @@ const lifecycleArguments = Type.Union([
 		placement: WorkspaceIdentitySchema,
 	}),
 	strictObject({ operation: Type.Literal("conversation.resume"), targetConversationId: ConversationIdSchema }),
+	strictObject({ operation: Type.Literal("conversation.refresh"), targetConversationId: ConversationIdSchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("conversation.stop"), targetConversationId: ConversationIdSchema }),
 	strictObject({
 		operation: Type.Literal("conversation.delete"),
@@ -156,6 +157,8 @@ const attachmentFields = {
 
 export const ManagedSessionEnvelopeSchema = Type.Union([
 	clientEnvelope(adapterRole, "attachment.attach", attachmentFields),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "refresh.result", { refreshId: identifier, status: Type.Union([Type.Literal("ready"), Type.Literal("busy")]) }),
+	relayEnvelope("refresh.request", { refreshId: identifier }),
 	clientEnvelope(adapterRole, "attachment.detach", {
 		attachmentId: identifier,
 		reason: Type.Union([
@@ -267,6 +270,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		request: lifecycleArguments,
 	}),
 	relayEnvelope("attachment.accepted", {
+		placement: Type.Optional(WorkspaceIdentitySchema),
 		attachmentId: identifier,
 		generation: Type.Optional(Type.Integer({ minimum: 1 })),
 		state: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
@@ -335,6 +339,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		}),
 		strictObject({ operation: Type.Literal("self.delete"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("control.result"), status: Type.Literal("ok") }),
+		strictObject({ operation: Type.Literal("refresh.result"), status: Type.Literal("ok") }),
 	])),
 	relayEnvelopeWithPayload("lifecycle.result", Type.Union([
 		strictObject({
@@ -374,7 +379,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		}),
 		strictObject({
 			operation: Type.Union([
-				Type.Literal("conversation.start"), Type.Literal("conversation.resume"), Type.Literal("conversation.stop"), Type.Literal("conversation.delete"),
+				Type.Literal("conversation.start"), Type.Literal("conversation.resume"), Type.Literal("conversation.refresh"), Type.Literal("conversation.stop"), Type.Literal("conversation.delete"),
 			]),
 			targetConversationId: ConversationIdSchema,
 			conversationState: Type.Optional(Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")])),
@@ -539,6 +544,7 @@ const artifactExport = strictObject({
 	height: Type.Optional(Type.Integer({ minimum: 1, maximum: 16_384 })),
 	transactionId: MatrixTransactionIdSchema,
 	state: Type.Union([Type.Literal("spooled"), Type.Literal("created"), Type.Literal("uploaded"), Type.Literal("sent")]),
+	failure: Type.Optional(Type.Literal("media_unavailable")),
 	mxcUrl: Type.Optional(boundedString(512)), reservationExpiresAt: Type.Optional(timestamp), eventId: Type.Optional(boundedString(255)), createdAt: timestamp,
 });
 const projectionEntry = strictObject({
@@ -669,7 +675,7 @@ export interface HostRuntimeState {
 		publishingCheckpointPoll: null | { checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string };
 		activeCheckpointPoll: null | { checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string; pollEventId: string };
 		closingCheckpointPolls: Array<{ checkpointId: string; originDeliveryId: string; entryId: string; transactionId: string; question: string; options: Array<{ answerId: string; text: string }>; intentHash: string; pollEventId: string; resolutionEventId: string; selectedAnswerId?: string; closureTransactionId: string; fallback: "Selection accepted" | "Answered by text" }>;
-		artifactExports: Array<{ uploadId: string; blobId: string; sha256: string; filename: string; mimeType: string; mediaType: "image" | "audio" | "file"; byteLength: number; width?: number; height?: number; transactionId: string; state: "spooled" | "created" | "uploaded" | "sent"; mxcUrl?: string; reservationExpiresAt?: string; eventId?: string; createdAt: string }>;
+		artifactExports: Array<{ uploadId: string; blobId: string; sha256: string; filename: string; mimeType: string; mediaType: "image" | "audio" | "file"; byteLength: number; width?: number; height?: number; transactionId: string; state: "spooled" | "created" | "uploaded" | "sent"; failure?: "media_unavailable"; mxcUrl?: string; reservationExpiresAt?: string; eventId?: string; createdAt: string }>;
 		projection: Array<{
 			entryId: string;
 			kind: string;
