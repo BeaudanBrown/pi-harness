@@ -170,8 +170,7 @@ export class ManagedMatrixClient {
 		this.assertManagedRoom(roomId); const response = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
 		return typeof response === "object" && response !== null && !Array.isArray(response) && typeof (response as JsonObject).sender === "string" ? String((response as JsonObject).sender) : undefined;
 	}
-	async downloadMedia(mxcUrl: string, declaredSize: number, signal?: AbortSignal): Promise<{ bytes: Buffer; mimeType?: string }> {
-		if (!Number.isSafeInteger(declaredSize) || declaredSize < 1 || declaredSize > MAX_BLOB_BYTES) throw new ManagedMatrixError("invalid_response", "Matrix media declaration exceeded the size limit");
+	async downloadMedia(mxcUrl: string, signal?: AbortSignal): Promise<{ bytes: Buffer; mimeType?: string }> {
 		let parsed: URL;
 		try { parsed = new URL(mxcUrl); } catch { throw new ManagedMatrixError("invalid_response", "Matrix media URL is malformed"); }
 		const mediaId = parsed.pathname.slice(1);
@@ -187,26 +186,11 @@ export class ManagedMatrixClient {
 					headers: { Authorization: `Bearer ${this.#accessToken}` }, signal });
 				if (!response.ok) throw new ManagedMatrixError("http", `Matrix GET /_matrix/client/v1/media/download returned HTTP ${response.status}`,
 					response.status, response.status === 429 || response.status >= 500);
-				const header = response.headers.get("content-length");
-				// Missing length is normal for streamed responses, not a declaration of zero.
-				if (header !== null && (!/^\d+$/.test(header) || !Number.isSafeInteger(Number(header)))) {
-					await response.body?.cancel();
-					throw new ManagedMatrixError("invalid_response", "Matrix media Content-Length is malformed");
-				}
-				if (header !== null && Number(header) !== declaredSize) {
-					await response.body?.cancel();
-					throw new ManagedMatrixError("invalid_response", "Matrix media length disagreed with its declaration");
-				}
+				// Matrix metadata is not a transport-integrity declaration. Fetch owns
+				// HTTP framing/decompression errors; no harness inbound size policy.
 				if (!response.body) throw new ManagedMatrixError("invalid_response", "Matrix media response had no body");
-				const chunks: Buffer[] = []; let total = 0; const reader = response.body.getReader();
-				while (true) {
-					const item = await reader.read(); if (item.done) break;
-					total += item.value.byteLength;
-					if (total > declaredSize || total > MAX_BLOB_BYTES) { await reader.cancel(); throw new ManagedMatrixError("invalid_response", "Matrix media stream exceeded its declaration"); }
-					chunks.push(Buffer.from(item.value));
-				}
-				if (total !== declaredSize) throw new ManagedMatrixError("invalid_response", "Matrix media stream was truncated");
-				return { bytes: Buffer.concat(chunks, total), mimeType: response.headers.get("content-type") ?? undefined };
+				const bytes = Buffer.from(await response.arrayBuffer());
+				return { bytes, mimeType: response.headers.get("content-type") ?? undefined };
 			} catch (error) {
 				if (error instanceof ManagedMatrixError) last = error;
 				else if (signal?.aborted || error instanceof Error && error.name === "AbortError") throw new ManagedMatrixError("cancelled", "Matrix request was cancelled");

@@ -18,16 +18,19 @@ export interface SpoolBlob {
 	width: number;
 	height: number;
 	createdAt: string;
+	inbound?: true;
 }
 
 function parseBlob(value: unknown): SpoolBlob {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("Malformed blob spool metadata");
 	const record = value as Record<string, unknown>;
-	if (Object.keys(record).sort().join(",") !== "blobId,byteLength,createdAt,height,mimeType,sha256,width" ||
+	if (Object.keys(record).filter((key) => key !== "inbound").sort().join(",") !== "blobId,byteLength,createdAt,height,mimeType,sha256,width" ||
+		(record.inbound !== undefined && record.inbound !== true) ||
 		typeof record.blobId !== "string" || !BLOB_ID.test(record.blobId) || typeof record.sha256 !== "string" || !DIGEST.test(record.sha256) ||
-		typeof record.mimeType !== "string" || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(record.mimeType) || record.mimeType.length > 127 || !Number.isSafeInteger(record.byteLength) || Number(record.byteLength) < 1 || Number(record.byteLength) > MAX_BLOB_BYTES ||
-		!Number.isSafeInteger(record.width) || Number(record.width) < 1 || Number(record.width) > 16_384 ||
-		!Number.isSafeInteger(record.height) || Number(record.height) < 1 || Number(record.height) > 16_384 || Number(record.width) * Number(record.height) > 40_000_000 ||
+		typeof record.mimeType !== "string" || !/^[a-z0-9][a-z0-9!#$&^_.+-]*\/[a-z0-9][a-z0-9!#$&^_.+-]*$/.test(record.mimeType) || record.mimeType.length > 127 || !Number.isSafeInteger(record.byteLength) || Number(record.byteLength) < 1 || (record.inbound !== true && Number(record.byteLength) > MAX_BLOB_BYTES) ||
+		!Number.isSafeInteger(record.width) || Number(record.width) < 1 ||
+		!Number.isSafeInteger(record.height) || Number(record.height) < 1 ||
+		(record.inbound !== true && (Number(record.width) > 16_384 || Number(record.height) > 16_384 || Number(record.width) * Number(record.height) > 40_000_000)) ||
 		typeof record.createdAt !== "string" || !Number.isFinite(Date.parse(record.createdAt))) throw new Error("Malformed blob spool metadata");
 	return record as unknown as SpoolBlob;
 }
@@ -75,14 +78,22 @@ export class BlobSpool {
 		await this.cleanup(liveBlobIds, now, 0);
 	}
 
-	async commit(blob: Omit<SpoolBlob, "createdAt">, bytes: Buffer, now = Date.now()): Promise<SpoolBlob> {
-		if (!BLOB_ID.test(blob.blobId) || !DIGEST.test(blob.sha256) || bytes.length !== blob.byteLength || bytes.length < 1 || bytes.length > this.#limits.maxBlobBytes ||
+	async commit(blob: Omit<SpoolBlob, "createdAt" | "inbound">, bytes: Buffer, now = Date.now()): Promise<SpoolBlob> {
+		return this.commitBlob(blob, bytes, now, false);
+	}
+
+	async commitInbound(blob: Omit<SpoolBlob, "createdAt" | "inbound">, bytes: Buffer, now = Date.now()): Promise<SpoolBlob> {
+		return this.commitBlob(blob, bytes, now, true);
+	}
+
+	private async commitBlob(blob: Omit<SpoolBlob, "createdAt" | "inbound">, bytes: Buffer, now: number, inbound: boolean): Promise<SpoolBlob> {
+		if (!BLOB_ID.test(blob.blobId) || !DIGEST.test(blob.sha256) || bytes.length !== blob.byteLength || bytes.length < 1 || (!inbound && bytes.length > this.#limits.maxBlobBytes) ||
 			createHash("sha256").update(bytes).digest("hex") !== blob.sha256) throw new Error("Blob commit failed digest or size validation");
 		await ensurePrivateDirectory(this.root);
 		await ensurePrivateDirectory(this.#metadataDirectory);
 		await ensurePrivateDirectory(this.#dataDirectory);
 		const existing = await this.metadata(blob.blobId);
-		const committed = parseBlob({ ...blob, createdAt: existing?.createdAt ?? new Date(now).toISOString() });
+		const committed = parseBlob({ ...blob, createdAt: existing?.createdAt ?? new Date(now).toISOString(), inbound: inbound ? true : undefined });
 		if (existing) {
 			if (JSON.stringify(existing) !== JSON.stringify(committed)) throw new Error("Conflicting blob identity");
 			await this.read(existing);
@@ -90,9 +101,9 @@ export class BlobSpool {
 		}
 		const metadata = await this.list();
 		const uniqueData = new Map<string, number>();
-		for (const item of metadata) uniqueData.set(item.sha256, item.byteLength);
+		for (const item of metadata) if (!item.inbound) uniqueData.set(item.sha256, item.byteLength);
 		const additionalBytes = uniqueData.has(blob.sha256) ? 0 : bytes.length;
-		if (metadata.length >= this.#limits.maxBlobs || [...uniqueData.values()].reduce((sum, size) => sum + size, 0) + additionalBytes > this.#limits.maxTotalBytes) throw new Error("Blob spool quota was reached");
+		if (metadata.length >= this.#limits.maxBlobs || (!inbound && [...uniqueData.values()].reduce((sum, size) => sum + size, 0) + additionalBytes > this.#limits.maxTotalBytes)) throw new Error("Blob spool quota was reached");
 		const dataPath = this.dataPath(blob.sha256);
 		try {
 			const info = await lstat(dataPath);

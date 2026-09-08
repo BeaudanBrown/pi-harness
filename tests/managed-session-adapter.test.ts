@@ -856,7 +856,7 @@ test("refresh adapter refuses busy and queued work, shuts down idle without abor
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
-test("managed images become one ordered text-plus-image turn and unsupported models reject without fallback", async (t) => {
+for (const byteLength of [16, 25 * 1024 * 1024 + 1]) test(`managed images preserve original bytes through Pi delivery and reject unsupported models: ${byteLength}`, async (t) => {
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const makeAdapter = async (imageCapable: boolean, adapterRole: "ordinary_adapter" | "coordinator_adapter" = "ordinary_adapter") => {
 		const adapterBinding = { ...binding, role: adapterRole };
@@ -878,15 +878,20 @@ test("managed images become one ordered text-plus-image turn and unsupported mod
 		await handlers.get("session_start")!({ reason: "resume" }, ctx);
 		return { branch, handlers, ctx, sent };
 	};
-	const bytes = Buffer.from("normalized-image"); const sha256 = createHash("sha256").update(bytes).digest("hex");
+	const bytes = Buffer.alloc(byteLength, 65); const sha256 = createHash("sha256").update(bytes).digest("hex");
 	const deliveryId = deriveDeliveryId(conversationId, "$image"); const blobId = `blob_${"a".repeat(32)}`;
 	const begin = () => ({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `begin-${Date.now()}`, conversationId, role: "relay" as const, type: "media.begin",
-		payload: { deliveryId, matrixEventId: "$image", senderUserId: "@signal_123:example.com", blobId, sha256, mimeType: "image/png", byteLength: bytes.length, width: 1, height: 1, chunkCount: 1, caption: "caption" } });
+		payload: { deliveryId, matrixEventId: "$image", senderUserId: "@signal_123:example.com", blobId, sha256, mimeType: "image/png", byteLength: bytes.length, width: 1, height: 1, chunkCount: Math.ceil(bytes.length / (32 * 1024)), caption: "caption" } });
 	const push = async () => {
-		relay.send(begin());
-		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `chunk-${Date.now()}`, conversationId, role: "relay", type: "media.chunk",
-			payload: { deliveryId, blobId, index: 0, sha256, data: bytes.toString("base64") } });
-		await new Promise((resolve) => setTimeout(resolve, 30));
+		const responses = () => relay.frames.filter((frame) => frame.type === "input.acknowledge" || frame.type === "media.reject").length;
+		const before = responses(); relay.send(begin());
+		for (let index = 0; index < Math.ceil(bytes.length / (32 * 1024)); index++) {
+			const chunk = bytes.subarray(index * 32 * 1024, (index + 1) * 32 * 1024);
+			relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `chunk-${Date.now()}-${index}`, conversationId, role: "relay", type: "media.chunk",
+				payload: { deliveryId, blobId, index, sha256: createHash("sha256").update(chunk).digest("hex"), data: chunk.toString("base64") } });
+		}
+		for (let i = 0; i < 500 && responses() === before; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.ok(responses() > before);
 	};
 	const capable = await makeAdapter(true);
 	relay.send(begin()); relay.disconnect();

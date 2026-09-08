@@ -47,11 +47,11 @@ const poll = Type.Union([
 	envelope("relay", "poll.resolve", strict({ pollId: id("poll"), resolution: Type.Union([strict({ kind: Type.Literal("vote"), optionIndex: Type.Integer({ minimum: 0, maximum: 7 }) }), strict({ kind: Type.Literal("text"), body: text(16_000) })]) })),
 ]);
 const mediaDescriptor = { blobId: id("blob"), mimeType: Type.Union([Type.Literal("image/jpeg"), Type.Literal("image/png"), Type.Literal("image/webp")]),
-	byteLength: Type.Integer({ minimum: 1, maximum: MAX_BLOB_BYTES }), sha256: digest,
-	width: Type.Integer({ minimum: 1, maximum: 16_384 }), height: Type.Integer({ minimum: 1, maximum: 16_384 }), chunkCount: Type.Integer({ minimum: 1, maximum: 800 }) };
+	byteLength: Type.Integer({ minimum: 1 }), sha256: digest,
+	width: Type.Integer({ minimum: 1 }), height: Type.Integer({ minimum: 1 }), chunkCount: Type.Integer({ minimum: 1 }) };
 const media = Type.Union([
 	envelope("relay", "media.begin", strict({ deliveryId: id("delivery"), matrixEventId: text(255), ...mediaDescriptor, caption: text(16_000) })),
-	envelope("relay", "media.chunk", strict({ deliveryId: id("delivery"), blobId: id("blob"), index: Type.Integer({ minimum: 0, maximum: 799 }), sha256: digest, data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }) })),
+	envelope("relay", "media.chunk", strict({ deliveryId: id("delivery"), blobId: id("blob"), index: Type.Integer({ minimum: 0 }), sha256: digest, data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }) })),
 	envelope("ordinary_adapter", "media.reject", strict({ deliveryId: id("delivery"), blobId: id("blob"), reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]) })),
 	envelope("coordinator_adapter", "media.reject", strict({ deliveryId: id("delivery"), blobId: id("blob"), reason: Type.Union([Type.Literal("unsupported_model"), Type.Literal("invalid_media")]) })),
 	envelope("ordinary_adapter", "artifact.begin", strict({ uploadId: id("upload"), blobId: id("blob"), sha256: digest, filename: text(255),
@@ -93,7 +93,7 @@ export function parseManagedSessionV2Envelope(value: unknown) {
 		if (context && context.usedTokens > context.limitTokens) throw new ManagedSessionContractError("malformed", "v2 live status context usage cannot exceed its limit");
 	}
 	if (envelope.type === "media.begin") {
-		if (Math.ceil(Number(envelope.payload.byteLength) / MAX_MEDIA_CHUNK_BYTES) !== envelope.payload.chunkCount || Number(envelope.payload.width) * Number(envelope.payload.height) > 40_000_000) {
+		if (Math.ceil(Number(envelope.payload.byteLength) / MAX_MEDIA_CHUNK_BYTES) !== envelope.payload.chunkCount) {
 			throw new ManagedSessionContractError("malformed", "v2 media descriptor failed chunk or pixel bounds");
 		}
 	}
@@ -133,6 +133,7 @@ export const deriveActivityTransactionId = (c: string, activityId: string, revis
 export const derivePollId = (g: string, key: string) => derive("poll", [g, key], "poll");
 export const deriveControlId = (c: string, eventId: string) => derive("control", [c, eventId], "control");
 export const deriveBlobId = (c: string, sha256: string) => derive("blob", [c, sha256], "blob");
+export const deriveInboundBlobId = (c: string, sha256: string) => derive("inbound-blob", [c, sha256], "blob");
 export const deriveUploadId = (c: string, key: string) => derive("upload", [c, key], "upload");
 export const deriveTransitionId = deriveGenerationTransitionId;
 

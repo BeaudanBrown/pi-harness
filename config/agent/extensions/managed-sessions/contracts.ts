@@ -43,9 +43,9 @@ const ArtifactMimeSchema = Type.String({ minLength: 3, maxLength: 127, pattern: 
 const ArtifactMediaTypeSchema = Type.Union([Type.Literal("image"), Type.Literal("audio"), Type.Literal("file")]);
 const mediaDescriptor = {
 	blobId: BlobIdSchema, sha256: MediaDigestSchema, mimeType: MediaMimeSchema,
-	byteLength: Type.Integer({ minimum: 1, maximum: 25 * 1024 * 1024 }),
-	width: Type.Integer({ minimum: 1, maximum: 16_384 }), height: Type.Integer({ minimum: 1, maximum: 16_384 }),
-	chunkCount: Type.Integer({ minimum: 1, maximum: 800 }),
+	byteLength: Type.Integer({ minimum: 1 }),
+	width: Type.Integer({ minimum: 1 }), height: Type.Integer({ minimum: 1 }),
+	chunkCount: Type.Integer({ minimum: 1 }),
 };
 
 export const WorkspaceIdentitySchema = strictObject({
@@ -305,7 +305,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		senderUserId: Type.Optional(MatrixUserIdSchema),
 	}),
 	relayEnvelope("media.chunk", {
-		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema, index: Type.Integer({ minimum: 0, maximum: 799 }),
+		deliveryId: DeliveryIdSchema, blobId: BlobIdSchema, index: Type.Integer({ minimum: 0 }),
 		sha256: MediaDigestSchema, data: Type.String({ minLength: 4, maxLength: 43_692, pattern: "^[A-Za-z0-9+/]+={0,2}$" }),
 	}),
 	relayEnvelope("media.result", {
@@ -761,7 +761,7 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 	if (envelope.type === "media.begin" || envelope.type === "artifact.begin") {
 		const payload = envelope.payload as { byteLength: number; chunkCount: number; mediaType?: string; width?: number; height?: number; filename?: string };
 		if (Math.ceil(payload.byteLength / (32 * 1024)) !== payload.chunkCount ||
-			(envelope.type === "media.begin" && (!payload.width || !payload.height || payload.width * payload.height > 40_000_000)) ||
+			(envelope.type === "media.begin" && (!payload.width || !payload.height)) ||
 			(envelope.type === "artifact.begin" && ((payload.mediaType === "image") !== (payload.width !== undefined && payload.height !== undefined) ||
 				(payload.width !== undefined && payload.height !== undefined && payload.width * payload.height > 40_000_000) ||
 				!payload.filename || /[\\/\u0000-\u001f\u007f]/.test(payload.filename)))) {
@@ -959,7 +959,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			matrixEvents.add(input.matrixEventId);
 			assertInputBody(input.kind, input.body);
 			if (input.media) {
-				if (input.kind !== "prompt" || Math.ceil(input.media.byteLength / (32 * 1024)) !== input.media.chunkCount || input.media.width * input.media.height > 40_000_000) {
+				if (input.kind !== "prompt" || Math.ceil(input.media.byteLength / (32 * 1024)) !== input.media.chunkCount) {
 					throw new ManagedSessionContractError("invalid_state", `invalid pending media in ${conversation.conversationId}`);
 				}
 				if (input.status !== "completed" && input.status !== "cancelled" && liveMediaBlobs.has(input.media.blobId)) {

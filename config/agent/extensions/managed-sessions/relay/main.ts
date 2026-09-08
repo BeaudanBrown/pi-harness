@@ -71,7 +71,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await registry.load();
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
 		const spool = new BlobSpool(resolve(runtimeDirectory, "media-spool"));
-		const media = new ManagedImageTransport(spool, matrix, environment.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER?.trim());
+		const media = new ManagedImageTransport(spool, matrix);
 		await media.initialize(registry.liveMediaBlobIds());
 		const authenticatedUserId = await matrix.whoami();
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");

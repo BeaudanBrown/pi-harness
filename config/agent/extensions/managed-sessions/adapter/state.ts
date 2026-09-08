@@ -104,9 +104,9 @@ function isDeliveryMedia(value: unknown): value is DeliveryMediaMarker {
 	const media = value as Record<string, unknown>;
 	return Object.keys(media).sort().join(",") === "blobId,byteLength,chunkCount,height,mimeType,sha256,width" &&
 		typeof media.blobId === "string" && /^blob_[a-f0-9]{32}$/.test(media.blobId) && typeof media.sha256 === "string" && /^[a-f0-9]{64}$/.test(media.sha256) &&
-		["image/jpeg", "image/png", "image/webp"].includes(String(media.mimeType)) && Number.isSafeInteger(media.byteLength) && Number(media.byteLength) >= 1 && Number(media.byteLength) <= 25 * 1024 * 1024 &&
-		Number.isSafeInteger(media.width) && Number(media.width) >= 1 && Number(media.width) <= 16_384 && Number.isSafeInteger(media.height) && Number(media.height) >= 1 && Number(media.height) <= 16_384 &&
-		Number(media.width) * Number(media.height) <= 40_000_000 && Number.isSafeInteger(media.chunkCount) && Number(media.chunkCount) === Math.ceil(Number(media.byteLength) / (32 * 1024));
+		["image/jpeg", "image/png", "image/webp"].includes(String(media.mimeType)) && Number.isSafeInteger(media.byteLength) && Number(media.byteLength) >= 1 &&
+		Number.isSafeInteger(media.width) && Number(media.width) >= 1 && Number.isSafeInteger(media.height) && Number(media.height) >= 1 &&
+		Number.isSafeInteger(media.chunkCount) && Number(media.chunkCount) === Math.ceil(Number(media.byteLength) / (32 * 1024));
 }
 
 function isDelivery(value: Record<string, unknown>): boolean {

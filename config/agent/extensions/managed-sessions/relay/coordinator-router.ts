@@ -125,8 +125,7 @@ export function authorizedRoomEvents(response: unknown, roomId: string, authoriz
 				typeof content.body !== "string" || content.body.length < 1 || content.body.length > MAX_INPUT_TEXT_LENGTH ||
 				typeof info !== "object" || info === null || Array.isArray(info) || Object.keys(info as object).some((key) => !allowedInfo.has(key))) continue;
 			const imageInfo = info as Record<string, unknown>;
-			if (!["image/jpeg", "image/png", "image/webp"].includes(String(imageInfo.mimetype)) || !Number.isSafeInteger(imageInfo.size) ||
-				!Number.isSafeInteger(imageInfo.w) || !Number.isSafeInteger(imageInfo.h)) continue;
+			if (!["image/jpeg", "image/png", "image/webp"].includes(String(imageInfo.mimetype))) continue;
 			const filename = content.filename;
 			if (filename !== undefined && (typeof filename !== "string" || filename.length < 1 || filename.length > 1_024)) continue;
 			seen.add(event.event_id); result.push({ kind: "image", eventId: event.event_id, senderUserId: event.sender, mxcUrl: content.url,
