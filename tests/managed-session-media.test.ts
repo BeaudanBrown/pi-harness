@@ -33,14 +33,34 @@ async function temp(t: TestContext): Promise<string> {
 	return root;
 }
 
-test("authorized managed-room image parsing accepts Element captions and fails closed for foreign, encrypted, and malformed media", () => {
+test("authorized image parsing preserves captions and rejects foreign, encrypted and related events", () => {
 	const events = [imageEvent("$caption", { body: "inspect this", filename: "photo.png" }), imageEvent("$plain"),
 		imageEvent("$no-size", { info: { mimetype: "image/png" } }), imageEvent("$bad-size", { info: { mimetype: "image/png", size: "stale" } }),
 		{ ...imageEvent("$foreign"), sender: "@other:example.com" }, imageEvent("$encrypted", { url: undefined, file: { url: "mxc://example.com/encrypted" } }),
 		imageEvent("$gif", { info: { mimetype: "image/gif", size: 20, w: 1, h: 1 } }), imageEvent("$relation", { "m.relates_to": { rel_type: "m.thread", event_id: "$x" } })];
 	assert.deepEqual(authorizedRoomEvents(sync(events), "!room:example.com", new Set([config.operatorUserId]), true).map((event) => event.kind === "image" ? [event.eventId, event.caption] : event.kind), [
-		["$caption", "inspect this"], ["$plain", undefined], ["$no-size", undefined], ["$bad-size", undefined],
+		["$caption", "inspect this"], ["$plain", undefined], ["$no-size", undefined], ["$bad-size", undefined], ["$gif", undefined],
 	]);
+});
+
+test("desktop image metadata is extensible, optional and never coerced", () => {
+	const desktop = imageEvent("$desktop", { "m.mentions": {}, info: { mimetype: "image/png", size: 77787, w: 2400, h: 1500,
+		"org.matrix.msc4230.is_animated": false, thumbnail_url: "mxc://example.com/thumbnail", thumbnail_info: { w: 800, h: 500 }, "xyz.amorgan.blurhash": "placeholder" } });
+	const events = [desktop, imageEvent("$future", { "future.metadata": { value: true }, info: { "future.info": true } }),
+		imageEvent("$no-info", { info: undefined }), imageEvent("$coercion-trap", { info: { mimetype: "image/png", size: { valueOf: null, toString: null }, w: {}, h: [] } }),
+		imageEvent("$filename", { filename: "photo.png" }), imageEvent("$caption", { filename: "photo.png", body: "Look at this" }), imageEvent("$empty", { body: "" }), imageEvent("$no-body", { body: undefined })];
+	const accepted = authorizedRoomEvents(sync(events), "!room:example.com", new Set([config.operatorUserId]), true);
+	assert.deepEqual(accepted.map((event) => event.eventId), events.map((event) => event.event_id));
+	assert.deepEqual(accepted.map((event) => event.kind === "image" ? event.caption : "wrong kind"), [undefined, undefined, undefined, undefined, undefined, "Look at this", undefined, undefined]);
+});
+
+test("metadata tolerance does not admit encrypted images, relations, edits or malformed routing", () => {
+	const events = [imageEvent("$file", { file: { url: "mxc://example.com/encrypted" } }),
+		imageEvent("$thread", { "m.relates_to": { rel_type: "m.thread", event_id: "$root" } }),
+		imageEvent("$edit", { "m.new_content": { body: "replacement" } }), imageEvent("$relation-null", { "m.relates_to": null }),
+		imageEvent("$bad-url", { url: "https://example.com/image" }), imageEvent("$bad-body", { body: {} }),
+		{ ...imageEvent("$encrypted-type"), type: "m.room.encrypted" }, { ...imageEvent("$foreign"), sender: "@foreign:example.com" }];
+	assert.deepEqual(authorizedRoomEvents(sync(events), "!room:example.com", new Set([config.operatorUserId]), true), []);
 });
 
 test("authenticated media download preserves bytes without leaking credentials", async () => {
@@ -163,6 +183,8 @@ test("inbound format comes from bytes and unsupported content cannot masquerade 
 	const transport = new ManagedImageTransport(new BlobSpool(join(root, "spool")), matrix); await transport.initialize(new Set());
 	const event = { kind: "image" as const, eventId: "$format", senderUserId: config.operatorUserId, mxcUrl: "mxc://example.com/format", declaredMimeType: "image/jpeg" as const };
 	const accepted = await transport.accept(conversationId, event);
+	const noHints = await transport.accept(conversationId, { kind: "image", eventId: "$no-hints", senderUserId: config.operatorUserId, mxcUrl: event.mxcUrl });
+	assert.deepEqual(noHints.image, accepted.image); assert.equal(noHints.prompt, CAPTIONLESS_IMAGE_PROMPT);
 	assert.equal(accepted.image.mimeType, "image/png", "actual supported format wins over stale metadata");
 	assert.deepEqual(await transport.spool.read(accepted.image), png);
 	for (bytes of [Buffer.from("GIF89a"), Buffer.from("<html>not an image</html>"), Buffer.from("arbitrary")]) {

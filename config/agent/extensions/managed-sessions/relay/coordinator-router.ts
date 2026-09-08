@@ -118,19 +118,16 @@ export function authorizedRoomEvents(response: unknown, roomId: string, authoriz
 				relation.event_id.length < 1 || relation.event_id.length > 255) continue;
 			seen.add(event.event_id); result.push({ kind: "poll_response", eventId: event.event_id, senderUserId: event.sender, pollEventId: relation.event_id, answerId: selections[0] });
 		} else if (event.type === "m.room.message" && content.msgtype === "m.image") {
-			const info = content.info;
-			const allowedContent = new Set(["msgtype", "body", "filename", "url", "info"]);
-			const allowedInfo = new Set(["mimetype", "size", "w", "h", "thumbnail_url", "thumbnail_info", "xyz.amorgan.blurhash", "org.matrix.msc2448.blurhash"]);
-			if (Object.keys(content).some((key) => !allowedContent.has(key)) || typeof content.url !== "string" || !content.url.startsWith("mxc://") ||
-				typeof content.body !== "string" || content.body.length < 1 || content.body.length > MAX_INPUT_TEXT_LENGTH ||
-				typeof info !== "object" || info === null || Array.isArray(info) || Object.keys(info as object).some((key) => !allowedInfo.has(key))) continue;
-			const imageInfo = info as Record<string, unknown>;
-			if (!["image/jpeg", "image/png", "image/webp"].includes(String(imageInfo.mimetype))) continue;
-			const filename = content.filename;
-			if (filename !== undefined && (typeof filename !== "string" || filename.length < 1 || filename.length > 1_024)) continue;
+			// Matrix content is extensible; hints/mentions/animation metadata are not
+			// routing authority. Reject known unsupported semantics explicitly instead
+			// of silently rejecting new client metadata. Do not coerce ignored info.
+			if (["file", "m.relates_to", "m.new_content"].some((key) => Object.hasOwn(content, key)) ||
+				typeof content.url !== "string" || !content.url.startsWith("mxc://") ||
+				(content.body !== undefined && (typeof content.body !== "string" || content.body.length > MAX_INPUT_TEXT_LENGTH))) continue;
+			const body = typeof content.body === "string" ? content.body : "";
+			const caption = typeof content.filename === "string" && content.filename.length > 0 && body !== content.filename ? body : undefined;
 			seen.add(event.event_id); result.push({ kind: "image", eventId: event.event_id, senderUserId: event.sender, mxcUrl: content.url,
-				declaredMimeType: imageInfo.mimetype as MatrixImageEvent["declaredMimeType"], declaredSize: Number(imageInfo.size),
-				declaredWidth: Number(imageInfo.w), declaredHeight: Number(imageInfo.h), ...(filename ? { caption: content.body } : {}) });
+				...(caption ? { caption } : {}) });
 		} else if (event.type === "m.room.message" && content.msgtype === "m.text" && typeof content.body === "string" && content.body.length > 0 && content.body.length <= MAX_INPUT_TEXT_LENGTH) {
 			const relation = content["m.relates_to"];
 			let replyToEventId: string | undefined;

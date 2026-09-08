@@ -14,7 +14,7 @@ export interface MatrixImageEvent {
 	eventId: string;
 	senderUserId: string;
 	mxcUrl: string;
-	declaredMimeType: ImageMimeType;
+	declaredMimeType?: ImageMimeType;
 	declaredSize?: number;
 	declaredWidth?: number;
 	declaredHeight?: number;
@@ -40,7 +40,6 @@ export class ManagedImageTransport {
 	async initialize(liveBlobIds: ReadonlySet<string>): Promise<void> { await this.spool.initialize(liveBlobIds); }
 
 	async accept(conversationId: string, event: MatrixImageEvent, signal?: AbortSignal): Promise<{ image: PendingImage; prompt: string }> {
-		if (!MIME_TYPES.includes(event.declaredMimeType)) throw new Error("Image MIME type is unsupported");
 		const { bytes } = await this.matrix.downloadMedia(event.mxcUrl, signal);
 		if (!bytes.length) throw new Error("Matrix returned an empty image");
 		const mimeType = imageMime(bytes);
