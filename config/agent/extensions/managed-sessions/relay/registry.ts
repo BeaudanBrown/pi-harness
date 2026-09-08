@@ -25,7 +25,7 @@ type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
 
 export class RelayRegistryError extends Error {
 	constructor(
-		readonly code: "permission_denied" | "invalid_nonce" | "attachment_conflict" | "not_found" | "invalid_state" | "capacity_reached" | "launch_failed" | "matrix_unavailable",
+		readonly code: "permission_denied" | "invalid_nonce" | "attachment_conflict" | "not_found" | "invalid_state" | "capacity_reached" | "launch_failed" | "matrix_unavailable" | "activity_interrupted",
 		message: string,
 	) {
 		super(message);

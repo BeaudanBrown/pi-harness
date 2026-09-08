@@ -67,6 +67,7 @@ function custom(id: string, customType: string, data: unknown) {
 
 class FakeRelay {
 	readonly frames: ManagedSessionEnvelope[] = [];
+	readonly interruptedActivities = new Set<string>();
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
@@ -146,6 +147,10 @@ class FakeRelay {
 		} else if (envelope.type === "control.result") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "control.result", status: "ok" } }));
 		} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
+			if (this.interruptedActivities.has(String(envelope.payload.activityId))) {
+				socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "activity_interrupted", message: "Activity was interrupted", retryable: false } }));
+				return;
+			}
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
 		} else if (envelope.type === "checkpoint.offer") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
@@ -660,6 +665,35 @@ test("activity lifecycle is one redacted busy span across parallel tools, retrie
 	assert.equal(secondFinal.payload.outcome, "failed");
 	assert.deepEqual(secondFinal.payload.context, { usedTokens: 55, remainingTokens: 45, limitTokens: 100, deltaTokens: 15 });
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+for (const interrupted of [false, true]) test(`busy adapter replays feedback on reconnect and recovers interrupted cards: ${interrupted}`, async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
+	const handlers = new Map<string, (...args: any[]) => any>(); let prompts = 0;
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined,
+		sendUserMessage: () => { prompts += 1; }, sendMessage: () => { prompts += 1; } } as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => false, abort: () => undefined, shutdown: () => undefined, getContextUsage: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
+	const waitFor = async (predicate: () => boolean) => { for (let i = 0; i < 200 && !predicate(); i++) await new Promise((resolve) => setTimeout(resolve, 10)); assert.ok(predicate()); };
+	await handlers.get("session_start")!({}, ctx); t.after(() => handlers.get("session_shutdown")!({}, ctx));
+	await handlers.get("agent_start")!({}, ctx);
+	handlers.get("turn_end")!({ message: { role: "assistant", usage: { input: 7, output: 3 }, stopReason: "toolUse" } });
+	await waitFor(() => relay.frames.some((frame) => frame.type === "activity.update"));
+	const original = String(relay.frames.find((frame) => frame.type === "activity.update")!.payload.activityId);
+	if (interrupted) relay.interruptedActivities.add(original);
+	relay.disconnect();
+	await waitFor(() => relay.frames.filter((frame) => frame.type === "activity.update").length >= (interrupted ? 3 : 2));
+	const resumed = String(relay.frames.filter((frame) => frame.type === "activity.update").at(-1)!.payload.activityId);
+	assert.equal(resumed === original, !interrupted, "short reconnect retains card; long reconnect creates a continuation without a tool event");
+	if (interrupted) relay.interruptedActivities.add(resumed); // Settlement must recover even if no update succeeded since grace expiry.
+	await handlers.get("agent_settled")!({}, ctx);
+	const final = relay.frames.filter((frame) => frame.type === "activity.finalize").at(-1)!;
+	assert.deepEqual(final.payload.run, { inputTokens: 7, outputTokens: 3, modelTurns: 1 });
+	if (interrupted) assert.notEqual(final.payload.activityId, resumed);
+	assert.equal(prompts, 0, "feedback recovery does not inject model turns");
 });
 
 test("durable aloop lifecycle scope protects persisted finals across restart", () => {

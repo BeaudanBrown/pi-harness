@@ -287,15 +287,30 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const activityTools = (span: BusyActivity) => [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({
 			name, count, state: [...span.activeTools.values()].includes(name) ? "running" as const : span.failedTools.has(name) ? "error" as const : "completed" as const,
 		}));
+		const publishActivity = async (span: BusyActivity, payload: Record<string, unknown>, finalize = false): Promise<void> => {
+			const target = client;
+			if (!target?.connected || !binding) return;
+			const send = () => target.updateActivity({ ...payload, activityId: span.activityId, revision: ++span.revision }, finalize);
+			try { await send(); }
+			catch (error) {
+				if (!(error instanceof ManagedAdapterError) || error.code !== "activity_interrupted" || activity !== span || !target.connected) throw error;
+				// The old card is immutable. A deterministic continuation preserves run
+				// counters and retry identity without creating another model turn.
+				span.activityId = deriveActivityId(deriveGenerationId(binding.conversationId, target.generation ?? 1), `continuation:${span.activityId}`);
+				span.revision = finalize ? 0 : -1;
+				await send();
+			}
+		};
 		const sendActivityUpdate = (span: BusyActivity, immediate = false, stateOverride?: "compaction"): void => {
 			if (activity !== span || role !== "ordinary_adapter") return;
 			const send = () => {
 				span.timer = undefined;
 				if (activity !== span || !client?.connected) return;
-				const revision = ++span.revision;
-				const tools = activityTools(span);
-				const payload = { activityId: span.activityId, revision, state: stateOverride ?? (tools.length ? "tool" as const : "busy" as const), ...(!stateOverride && tools.length ? { tools } : {}) };
-				span.work = span.work.then(() => client?.updateActivity(payload)).catch(() => undefined);
+				span.work = span.work.then(async () => {
+					if (activity !== span || !client?.connected) return;
+					const tools = activityTools(span);
+					await publishActivity(span, { state: stateOverride ?? (tools.length ? "tool" : "busy"), ...(!stateOverride && tools.length ? { tools } : {}) });
+				}).catch(() => undefined);
 			};
 			if (immediate) { if (span.timer) clearTimeout(span.timer); send(); return; }
 			if (!span.timer) { span.timer = setTimeout(send, 750); span.timer.unref(); }
@@ -312,9 +327,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const contextSnapshot = typeof used === "number" && typeof span.startContext === "number" && typeof limit === "number" &&
 				Number.isFinite(limit) && limit > 0 && used >= 0 && used <= limit
 				? { usedTokens: used, remainingTokens: limit - used, limitTokens: limit, deltaTokens: used - span.startContext } : undefined;
-			span.revision += 1;
-			await client.updateActivity({
-				activityId: span.activityId, revision: span.revision, outcome: outcome ?? span.requestedOutcome ?? "completed", durationMs: Math.max(0, Date.now() - span.startedAt),
+			await publishActivity(span, {
+				outcome: outcome ?? span.requestedOutcome ?? "completed", durationMs: Math.max(0, Date.now() - span.startedAt),
 				...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}), ...(ctx.thinkingLevel ? { thinking: ctx.thinkingLevel } : {}), generation: client?.generation ?? 1,
 				...(contextSnapshot ? { context: contextSnapshot } : {}), run: { inputTokens: span.inputTokens, outputTokens: span.outputTokens, modelTurns: span.modelTurns },
 				tools: { total: span.toolTotal, errors: span.toolErrors, counts: [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({ name, count })) }, compactions: span.compactions,
@@ -946,6 +960,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				// The authenticated manifest is authoritative even when an external
 				// tmux launcher only forwards the canonical workspace path.
 				if (next.placement) config.placement = next.placement;
+				if (activity) sendActivityUpdate(activity, true);
 				setCheckpointActive(true);
 				reconnectAttempt = 0;
 				replayAcknowledgements();

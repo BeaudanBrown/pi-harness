@@ -206,6 +206,22 @@ let
         export PI_HARNESS_MATT_SKILLS_ROOT="${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills"
         ${engineeringRuntimeEnvironment}
         export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
+        # systemd does not inherit a login PATH. Restore only conventional tool
+        # locations, after direnv/project and packaged tools; never source a shell
+        # profile or import the user manager's credential-bearing environment.
+        host_tool_paths=(/run/wrappers/bin)
+        if [[ -n "''${HOME:-}" ]]; then
+          host_tool_paths+=("$HOME/.nix-profile/bin" "''${XDG_STATE_HOME:-$HOME/.local/state}/nix/profile/bin")
+        fi
+        host_tool_paths+=(/nix/profile/bin ${lib.escapeShellArg "/etc/profiles/per-user/${nonNullString cfg.managedSessions.user}/bin"} /nix/var/nix/profiles/default/bin /run/current-system/sw/bin)
+        for host_tool_path in "''${host_tool_paths[@]}"; do
+          case ":$PATH:" in
+            *":$host_tool_path:"*) ;;
+            *) PATH="$PATH:$host_tool_path" ;;
+          esac
+        done
+        export PATH
+        unset host_tool_paths host_tool_path
         ${lspEnabledEnvironment}
         ${lspFallbackEnvironment}
         ${lspDisabledCleanup}

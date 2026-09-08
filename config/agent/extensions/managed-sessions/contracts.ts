@@ -416,6 +416,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			Type.Literal("capacity_reached"),
 			Type.Literal("launch_failed"),
 			Type.Literal("matrix_unavailable"),
+			Type.Literal("activity_interrupted"),
 		]),
 		message: boundedString(500),
 		retryable: Type.Boolean(),

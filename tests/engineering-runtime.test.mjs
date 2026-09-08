@@ -17,6 +17,12 @@ async function probe(t, launcher, role, projectPath) {
   const extension = join(cwd, "probe.mjs");
   await mkdir(join(cwd, "home"));
   await mkdir(join(cwd, "bin"));
+  await mkdir(join(cwd, "home/.nix-profile/bin"), { recursive: true });
+  for (const [directory, label] of [["bin", "project"], ["home/.nix-profile/bin", "host"]]) {
+    const path = join(cwd, directory, "pi-host-profile-probe");
+    await writeFile(path, `#!/bin/sh\nprintf ${label}`); await chmod(path, 0o700);
+  }
+  await writeFile(join(cwd, "home/.profile"), "exit 91\n"); // Must never source shell startup files.
   await writeFile(join(cwd, "bin/git"), "#!/bin/sh\nprintf project-git\\n\n");
   await chmod(join(cwd, "bin/git"), 0o700);
   await writeFile(extension, `
@@ -39,7 +45,7 @@ export default function(pi) {
     const diagnosis = await diagnoseCommandResult(new Proxy({}, { get() { throw new Error("model context must not be read"); } }), { name: "check", command: ["must-not-run"], task: "diagnose" }, { code: null, cancelled: true, timedOut: false, stdout: "", stderr: "", durationMs: 0, logPath: "not-run" }, "", AbortSignal.abort());
     const managedEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
       name.startsWith("PI_MANAGED_SESSION_") || name.startsWith("PI_MANAGED_PROJECT_") || name.startsWith("PI_MANAGED_COORDINATOR_") || name === "PI_HARNESS_AGENT_PROFILE" || name === "PI_MANAGED_LOCAL_MODEL_TOOLS"));
-    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
+    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ pathEntries: (process.env.PATH ?? "").split(":"), hostProbe: spawnSync("pi-host-profile-probe", [], { encoding: "utf8" }).stdout ?? null, decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
   });
 }
 `);
@@ -78,7 +84,11 @@ for (const [name, launcher, role] of [["normal", normal, undefined], ["managed p
   test(`${name} packaged launcher supplies the engineering baseline from empty PATH`, async (t) => {
     const { result } = await probe(t, launcher, role, false);
     assert.equal(result.injected, true);
-    if (role === "project") assert.equal(result.decoder, process.env.PI_HARNESS_EXPECTED_IMAGE_DECODER, "post-direnv dispatch resets an inherited decoder override");
+    if (role === "project") {
+      assert.equal(result.decoder, process.env.PI_HARNESS_EXPECTED_IMAGE_DECODER, "post-direnv dispatch resets an inherited decoder override");
+      assert.equal(result.hostProbe, "host", "restricted service PATH gains host profile executables");
+      for (const path of ["/run/wrappers/bin", "/nix/profile/bin", "/nix/var/nix/profiles/default/bin", "/run/current-system/sw/bin"]) assert.ok(result.pathEntries.includes(path));
+    } else assert.equal(result.hostProbe, null, "ordinary launchers do not gain managed host fallbacks");
     assert.equal(result.diagnosisAborted, true, "already-aborted diagnosis must not select or start a model");
     if (role === "fallback") assert.deepEqual(result.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
     for (const [name, tool] of Object.entries(result.tools)) { assert.equal(tool.code, 0, name); assert.ok(tool.path, name); if ("versionExit" in tool) assert.equal(tool.versionExit, 0, name); }
@@ -86,6 +96,7 @@ for (const [name, launcher, role] of [["normal", normal, undefined], ["managed p
   test(`${name} preserves project executable precedence`, async (t) => {
     const { result, cwd } = await probe(t, launcher, role, true);
     assert.equal(result.tools.git.path, join(cwd, "bin/git"));
+    assert.equal(result.hostProbe, "project", "project executable shadows the host profile");
   });
 }
 test("managed launcher rejects an unsupported non-empty role", async () => {
@@ -104,5 +115,6 @@ for (const [name, launcher, role] of [["local", local, undefined], ["coordinator
   test(`${name} launcher does not explicitly inject the engineering baseline`, async (t) => {
     const { result } = await probe(t, launcher, role, false);
     assert.equal(result.injected, false);
+    assert.equal(result.hostProbe, null, "lean launchers do not gain managed host fallbacks");
   });
 }
