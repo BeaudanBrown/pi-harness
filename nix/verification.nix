@@ -359,7 +359,59 @@ let
     touch "$out"
   '';
 
+  bridgePreflightModule = lib.evalModules {
+    specialArgs = { inherit pkgs; };
+    modules = [
+      {
+        options.assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
+        options.systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
+      }
+      ./bridge-chat-preflight.nix
+      {
+        services.pi-harness.bridgeChat.preflight = {
+          enable = true;
+          ownerUserId = "@owner:example.com";
+          bridges.signal = {
+            endpoint = "http://127.0.0.1:29328";
+            credentialFile = "/var/lib/mautrix-signal/config.yaml";
+            serviceUnit = "mautrix-signal.service";
+          };
+        };
+      }
+    ];
+  };
+  bridgePreflightReport = pkgs.writeText "bridge-preflight-module.json" (builtins.toJSON {
+    assertions = map (item: item.assertion) bridgePreflightModule.config.assertions;
+    service = bridgePreflightModule.config.systemd.services.pi-bridge-chat-preflight;
+    rejectsStoreCredential = !(lib.all (item: item.assertion) (bridgePreflightModule.extendModules {
+      modules = [ { services.pi-harness.bridgeChat.preflight.bridges.signal.credentialFile = lib.mkForce "/nix/store/unsafe-secret"; } ];
+    }).config.assertions);
+  });
+  bridgePreflightTests = pkgs.runCommand "pi-bridge-chat-preflight-tests" {
+    nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ];
+  } ''
+    ${prepareSource}
+    python3 -m unittest discover -s tests -p test_bridge_chat_preflight.py -v
+    jq -e '(.assertions | all) and .rejectsStoreCredential
+      and .service.after == ["mautrix-signal.service"]
+      and .service.serviceConfig.LoadCredential == ["signal:/var/lib/mautrix-signal/config.yaml"]
+      and .service.serviceConfig.DynamicUser and .service.serviceConfig.ProtectHome
+      and .service.serviceConfig.NoNewPrivileges
+      and .service.serviceConfig.ProtectSystem == "strict"
+      and .service.serviceConfig.IPAddressDeny == "any"
+      and .service.serviceConfig.IPAddressAllow == "localhost"
+      and .service.serviceConfig.TimeoutStartSec == 45
+      and (.service.serviceConfig | has("EnvironmentFile") | not)' ${bridgePreflightReport}
+    runner=$(jq -r .service.serviceConfig.ExecStart ${bridgePreflightReport})
+    test -x "$runner"
+    mkdir credentials
+    printf '%s\n' '{"provisioning":{"shared_secret":"disable"}}' > credentials/signal
+    CREDENTIALS_DIRECTORY="$PWD/credentials" "$runner" | jq -e '.bridges["bridge-1"].status == "provisioning_disabled" and .bridges["bridge-1"].liveMessagePath == "unverified"'
+    touch "$out"
+  '';
+
   deterministicChecks = {
+    bridge-chat-preflight = bridgePreflightTests;
     source-contracts = sourceContracts;
     schema-contracts = schemaContracts;
     typescript-build = testBuild;

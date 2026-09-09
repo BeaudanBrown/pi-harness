@@ -15,6 +15,7 @@ working directory and do not use credentials, network services, or live models.
 
 | Check | Contract |
 | --- | --- |
+| `bridge-chat-preflight` | Read-only credential-isolated diagnostic, bounded loopback HTTP, redaction and packaged service configuration pass; no live bridge acceptance is implied. |
 | `source-contracts` | Settings and profiles agree, referenced resources exist, retired resources stay absent, and adapter/RPC authority tripwires hold. |
 | `schema-contracts` | Evaluation schemas are valid and their positive and negative fixtures have the expected lexical behavior. |
 | `typescript-build` | Extension, evaluation, and test TypeScript compiles once into the shared test build. |
@@ -42,6 +43,7 @@ inputs have not changed.
 Test classification is name-based so a new test cannot compile without being
 executed by a deterministic suite:
 
+- `tests/test_bridge_chat_preflight.py` belongs to the bridge preflight check;
 - `tests/eval-*.test.ts` belongs to the sanitized evaluation self-test;
 - `tests/lsp-live.test.ts` belongs to the explicit live LSP gate;
 - `tests/managed-session-*.test.ts` belongs to the managed-session suite;

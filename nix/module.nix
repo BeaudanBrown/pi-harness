@@ -430,6 +430,8 @@ let
 
 in
 {
+  imports = [ ./bridge-chat-preflight.nix ];
+
   options.services.pi-harness = {
     enable = lib.mkEnableOption "shared Pi coding-agent configuration";
 

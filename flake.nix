@@ -297,6 +297,7 @@
           modules = [
             {
               options = {
+                systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
                 assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
                 environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 users.users = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
@@ -330,6 +331,7 @@
           modules = [
             {
               options = {
+                systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
                 assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
                 environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
                 users.users = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
