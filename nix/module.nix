@@ -376,8 +376,11 @@ let
     runtime="''${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/pi-managed-sessions"
     ${pkgs.systemd}/bin/systemctl --user is-active --quiet pi-managed-session-relay.service
     test -S "$runtime/relay.sock"
-    registry="$runtime/registry.json"
+    state_dir=${lib.escapeShellArg cfg.managedSessions.stateDirectory}
+    state_dir="''${state_dir//%h/$HOME}"
+    registry="$state_dir/registry.json"
     test -f "$registry"
+    test -f "$runtime/sync-health.json"
     manifest_dir=${lib.escapeShellArg cfg.managedSessions.manifestDirectory}
     manifest_dir="''${manifest_dir//%h/$HOME}"
     test -d "$manifest_dir"
@@ -385,7 +388,10 @@ let
     if ${pkgs.bash}/bin/bash -c 'compgen -G "$1/conv_*.json" >/dev/null' _ "$manifest_dir"; then
       pending_reconciliation=$(${pkgs.jq}/bin/jq -s '[.[] | select(.kind == "project" and (.projectKey == null))] | length' "$manifest_dir"/conv_*.json)
     fi
-    ${pkgs.jq}/bin/jq --argjson pending "$pending_reconciliation" '{service:"active",socket:"ready",conversations:(.conversations|length),states:(.conversations|group_by(.state)|map({key:.[0].state,value:length})|from_entries),cursorConfigured:any(.conversations[]?;.matrixCursor.status == "established"),pendingProjectReconciliation:$pending}' "$registry"
+    report=$(${pkgs.jq}/bin/jq --slurpfile health "$runtime/sync-health.json" --argjson pending "$pending_reconciliation" \
+      -f ${../scripts/managed-session-status.jq} "$registry")
+    printf '%s\n' "$report"
+    ${pkgs.jq}/bin/jq -e '.sync.ready' <<< "$report" >/dev/null
   '';
 
   managedRelayLaunch = pkgs.writeShellScript "pi-managed-session-relay-launch" ''
@@ -417,6 +423,7 @@ let
     export PI_MATRIX_ACCESS_TOKEN="$matrix_token"
     expand_home() { printf '%s' "''${1//%h/$HOME}"; }
     export PI_MANAGED_SESSIONS_RUNTIME_DIR="''${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/pi-managed-sessions"
+    export PI_MANAGED_SESSIONS_STATE_DIR="$(expand_home ${lib.escapeShellArg cfg.managedSessions.stateDirectory})"
     export PI_MANAGED_SESSIONS_SOCKET="$PI_MANAGED_SESSIONS_RUNTIME_DIR/relay.sock"
     # The relay and interactive launcher must address the same per-user tmux server.
     unset TMUX TMUX_PANE
@@ -516,6 +523,12 @@ in
         type = lib.types.nonEmptyStr;
         default = "%h/.local/state/pi-managed-sessions/project-sessions";
         description = "Private host-local directory containing coordinator-created persisted project Pi sessions.";
+      };
+
+      stateDirectory = lib.mkOption {
+        type = lib.types.nonEmptyStr;
+        default = "%h/.local/state/pi-managed-sessions/relay";
+        description = "Private persistent host-local registry, activity and media state; never place under XDG_RUNTIME_DIR or synchronize across hosts. Existing legacy runtime state is copied atomically on first start under the host relay lock.";
       };
 
       manifestDirectory = lib.mkOption {

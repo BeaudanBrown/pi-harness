@@ -81,7 +81,7 @@ systemctl --user status pi-managed-session-relay.service
 journalctl --user -u pi-managed-session-relay.service --since today
 ```
 
-The host status command fails unless the service is active, its private socket exists, and durable registry and manifest JSON are readable. Its JSON output contains only aggregate lifecycle states, cursor presence, and `pendingProjectReconciliation` count—not tokens, room IDs, event IDs, message text, paths, or launch errors. In a conversation, `!status` combines a typed live adapter snapshot with relay-authoritative manifest/runtime state: concept/kind, project and checkout labels, lifecycle and idle/busy state, adapter connection, generation ordinal/count, actual and saved/requested model and thinking, model mismatch, bounded context usage, pending queue counts, checkpoint state, redacted launch failure, and reconciliation count. The typed contract has no path, credential, prompt, tool-argument, output, or reasoning fields.
+The host status command fails unless the service is active, its private socket exists, and persistent registry and manifest state are readable. It also exits nonzero when sync is starting, blocked, or its last successful cursor commit is at least 120 seconds old (or in the future). When available it prints the aggregate report even for unhealthy sync. Its JSON output contains only aggregate lifecycle states, cursor presence, `sync` status/last-success timestamp/readiness, and `pendingProjectReconciliation` count—not tokens, room IDs, event IDs, message text, paths, or launch errors. A running service or established cursor alone is not proof of working Matrix intake. In a conversation, `!status` combines a typed live adapter snapshot with relay-authoritative manifest/runtime state: concept/kind, project and checkout labels, lifecycle and idle/busy state, adapter connection, generation ordinal/count, actual and saved/requested model and thinking, model mismatch, bounded context usage, pending queue counts, checkpoint state, redacted launch failure, and reconciliation count. The typed contract has no path, credential, prompt, tool-argument, output, or reasoning fields.
 
 ### One-time tmux socket cutover
 
@@ -98,7 +98,54 @@ Cleanup derives the legacy socket from the current UID, verifies that it is a us
 
 The relay uses bounded exponential backoff with jitter, honors Matrix `retry_after_ms`, and cancels waits on shutdown. Media is fetched through Matrix's authenticated client media endpoint; access tokens never enter media URLs, spool metadata, IPC, or Pi history. Stable Matrix transaction IDs make uncertain transcript, activity-card edit, checkpoint poll/notice, poll closure, notice, command-acknowledgement, and artifact-event retries idempotent. Typing is intentionally ephemeral and reconstructed only from live durable controls, command deliveries, or activity spans; it is never persisted as authoritative state. Artifact bytes cross IPC only as digest-verified bounded chunks, enter the private bounded spool, and use a durably recorded, expiry-bounded MXC reservation before retry-safe upload and room send; restart resumes the last durable phase and removes consumed local blobs. A crash in the create-response window can leave only an empty server-expiring reservation—never uploaded bytes—and durable export count plus spool quotas bound local recovery state. Checkpoint poll publication intent, exact answer mapping, event identity, and active/retired state are persisted before cursor advancement, so restart recovery preserves the hard boundary and cannot accept changed, duplicate, foreign, malformed, late, or post-close votes. Registry writes are private atomic write/fsync/rename operations. After relay restart, adapters may reattach during the reconciliation grace period; unmatched conversations become dormant. Accepted input, expanded input, persisted unfinished turns, checkpoints, and final projections resume from durable identity. Explicit stop/abort cancellation is terminal and is never recovered.
 
-Cursor state is explicit: a fresh relay performs one bootstrap sync, persists its returned cursor, and does not execute retained timeline commands from that bootstrap response. Established state requires a bounded cursor; malformed state and limited/oversized timeline gaps do not advance it. Authentication failures are concise HTTP diagnostics in the user service journal. Do not delete or hand-edit `registry.json`; restore the last known complete synchronized manifests and host-local registry together, or resolve the conflict explicitly. Legacy `.remote-session` files and rooms are never scanned or migrated.
+Cursor state is explicit: a fresh relay performs one bootstrap sync, persists its validated returned cursor, and does not inspect or execute retained timeline commands from that bootstrap response. A limited initial timeline is normal and does not block bootstrap. Established state requires a bounded cursor. Limited/oversized incremental timelines trigger forward `/messages` pagination from that saved sync token to the fixed new sync boundary. The relay recovers every affected room before dispatch, verifies the recovered history covers the sync tail, and preserves normal sender authorization and event identity deduplication. Recovery admits at most 512 events per room, ten pages of at most 100 events, and the existing 4 MiB response bound. Pagination must echo the requested `start` and terminate at the exact requested `end` boundary. An omitted `end` can also mean inaccessible history, so exhaustion alone is conservatively refused even if the visible sync tail is present. Pagination stalls, malformed/foreign/repeated events, unavailable or unprovable history and exceeded bounds leave the cursor unchanged with a concise journal diagnostic. Interrupted recovery starts again from the saved cursor; already accepted deliveries retain their stable identities. The relay never automatically skips an established gap. Authentication failures are concise HTTP diagnostics in the user service journal. Do not delete or hand-edit `registry.json`; restore the last known complete synchronized manifests and host-local registry together, or resolve the conflict explicitly. Legacy `.remote-session` files and rooms are never scanned or migrated.
+
+### Persistent-state cutover and reboot recovery
+
+`services.pi-harness.managedSessions.stateDirectory` defaults to
+`%h/.local/state/pi-managed-sessions/relay` and is exported as
+`PI_MANAGED_SESSIONS_STATE_DIR`. It contains `registry.json`, `activities.json`,
+and `media-spool/`; custom raw-relay deployments also default project sessions
+under this state directory. The NixOS module keeps project sessions, manifests
+and the coordinator at their existing persistent locations. Do not synchronize
+host-local relay state across hosts. `PI_MANAGED_SESSIONS_RUNTIME_DIR` remains
+`$XDG_RUNTIME_DIR/pi-managed-sessions` for the socket and ephemeral
+`sync-health.json` only. These must be separate non-nested directories.
+
+On the first patched start, while holding the host lock, the relay copies any
+existing legacy registry, activities, media spool and fallback project sessions
+from the runtime directory into a private staging directory. It validates the
+registry/manifest pair and atomically publishes the complete destination.
+Credentials, sockets and transient observations are not copied. The source is
+retained, not deleted; once the destination exists it is authoritative and the
+legacy copy must not be used as current state. Failed staging is not adopted.
+An incomplete destination, unsafe legacy files or a mismatched primary registry
+fails closed for explicit recovery. A hard crash may leave a `.relocating-*`
+staging directory; it is never used as a recovery source.
+
+For a host already stuck at `bootstrap` after reboot:
+
+1. Keep private backups of the legacy runtime directory and
+   `~/.local/state/pi-managed-sessions/` before deployment. Coordinate a quiet
+   relay when taking a consistent backup; never share the contents in chat.
+2. Deploy the patched harness package/module together, then restart the relay.
+   Editing a checkout alone does not update installed Nix store code. No token
+   rotation, room replacement, registry edit or context reset is needed.
+3. Check `pi-managed-session-status`: `sync.ready` should become true and the
+   journal should stop repeating the bootstrap gap error. Send `!status` in the
+   existing Matrix room, then one ordinary message to wake the saved session.
+4. Review messages sent before bootstrap completed and explicitly resend any
+   unfinished requests. That initial history is deliberately not executed.
+
+If the old volatile registry was already lost on reboot, manifests preserve room
+and Pi-session identity but cannot reconstruct all accepted-input, poll or
+projection metadata. Do not claim those records were recovered. The persistent
+cutover prevents that storage loss on future reboots, but cannot undo past loss.
+For an **established** gap exceeding recovery bounds, preserve the cursor and
+backups and arrange explicit history reconciliation; no reset-to-now CLI exists.
+Repeated restarts, `!new`, or manually changing the cursor are not a safe fix.
+Downgrading to the old runtime-directory launcher would reopen stale state and
+is unsupported; rollback must restore a matched package and complete state set.
 
 ## Token rotation and device revocation
 
@@ -126,6 +173,7 @@ Managed project windows inherit a service environment, not an interactive login 
 - **Service inactive:** inspect the user journal and credential owner/mode. Confirm linger is enabled and network-online is available.
 - **HTTP 401/403:** replace or rotate the token and confirm the configured bot MXID did not change.
 - **Repeated rate limits/outage:** leave the service running; bounded retry preserves cursor and stable transactions without duplicate turns.
+- **Timeline gap:** limited bootstrap now establishes the cursor without replay. Established gaps recover within the documented bounds; an unrecoverable gap reports blocked sync and retains the cursor. Do not delete state or keep resending commands while it is blocked.
 - **Dormant room:** ordinary text queues and wakes the exact persisted session. Dormant steer/abort intentionally do not wake it.
 - **Launch failure:** verify the configured workspace root, immediate-child workspace, direnv policy, and `tmux_project` managed operations. Error output is intentionally concise and redacted.
 - **Image rejected:** confirm the active model advertises image input and resend after selecting a capable model. For an actual Matrix download or model rejection, inspect that error or try another supported JPEG, PNG, or WebP. Stale or missing Matrix size metadata no longer causes rejection; the relay never sends only the caption.

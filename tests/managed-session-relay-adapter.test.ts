@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -42,6 +42,7 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	});
 	running = await startManagedSessionRelay({
 		PI_MANAGED_SESSIONS_RUNTIME_DIR: join(root, "runtime"),
+		PI_MANAGED_SESSIONS_STATE_DIR: join(root, "state"),
 		PI_MANAGED_SESSIONS_MANIFEST_DIR: join(root, "manifests"),
 		PI_MANAGED_SESSIONS_HOST_ID: hostId,
 		PI_MANAGED_SESSIONS_RESTART_GRACE_MS: "5000",
@@ -178,4 +179,53 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	assert.equal(sentContent.body, transcript.body, "plain fallback preserves readable source text");
 	assert.match(sentContent.formatted_body ?? "", /<strong>answer<\/strong>/);
 	assert.doesNotMatch(sentContent.formatted_body ?? "", /<script>/);
+});
+
+test("production relay bootstraps limited history and retains its cursor when volatile runtime is removed", { timeout: 10_000 }, async (t) => {
+	const peer = process.env.PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER;
+	const lock = process.env.PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER;
+	if (!peer || !lock) return t.skip("packaged relay security helpers are unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-relay-reboot-"));
+	const runtime = join(root, "runtime"); const state = join(root, "state");
+	const originalFetch = globalThis.fetch;
+	let running: Awaited<ReturnType<typeof startManagedSessionRelay>> | undefined;
+	let roomsCreated = 0; let bootstrapCount = 0; let incrementalCount = 0;
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(String(input));
+		if (url.pathname.endsWith("/whoami")) return Response.json({ user_id: "@bot:example.com" });
+		if (url.pathname.endsWith("/createRoom")) { roomsCreated += 1; return Response.json({ room_id: roomsCreated === 1 ? "!space:example.com" : "!coordinator:example.com" }); }
+		if (url.pathname.endsWith("/sync")) {
+			if (!url.searchParams.has("since")) {
+				bootstrapCount += 1;
+				return Response.json({ next_batch: "preserved-cursor", rooms: { join: { "!coordinator:example.com": { timeline: { limited: true,
+					events: [{ event_id: "$old", type: "m.room.message", sender: "@operator:example.com", origin_server_ts: Date.now(), content: { msgtype: "m.text", body: "never execute" } }] } } } } });
+			}
+			assert.equal(url.searchParams.get("since"), "preserved-cursor"); incrementalCount += 1;
+			await new Promise<void>((resolve) => init?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+			throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+		}
+		return Response.json({ creator: "@bot:example.com" });
+	};
+	t.after(async () => { await running?.stop(); globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); });
+	const env = { PI_MANAGED_SESSIONS_RUNTIME_DIR: runtime, PI_MANAGED_SESSIONS_STATE_DIR: state,
+		PI_MANAGED_SESSIONS_MANIFEST_DIR: join(root, "manifests"), PI_MANAGED_SESSIONS_HOST_ID: `reboot-${randomUUID()}`,
+		PI_MANAGED_SESSIONS_RESTART_GRACE_MS: "300000", PI_MANAGED_SESSIONS_PEER_UID_HELPER: peer, PI_MANAGED_SESSIONS_RELAY_LOCK_HELPER: lock,
+		PI_MANAGED_COORDINATOR_WORKSPACE_DIR: join(root, "workspace"), PI_MANAGED_COORDINATOR_SESSION_FILE: join(root, "coordinator.jsonl"),
+		PI_MANAGED_COORDINATOR_LAUNCHER: join(root, "must-not-launch"), PI_MATRIX_HOMESERVER: "https://matrix.example.com",
+		PI_MATRIX_ACCESS_TOKEN: "synthetic-token", PI_MATRIX_BOT_USER_ID: "@bot:example.com", PI_MATRIX_OPERATOR_USER_ID: "@operator:example.com" };
+	running = await startManagedSessionRelay(env);
+	for (let i = 0; i < 100 && incrementalCount < 1; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(incrementalCount, 1); assert.equal(bootstrapCount, 1);
+	assert.equal(JSON.parse(await readFile(join(runtime, "sync-health.json"), "utf8")).status, "healthy");
+	await assert.rejects(() => stat(join(runtime, "registry.json")), { code: "ENOENT" });
+	const before = running.registry.snapshot(); const manifests = running.registry.listManifests();
+	assert.equal(before.conversations[0]?.pendingInputs.length, 0);
+	await running.stop(); running = undefined;
+	await rm(runtime, { recursive: true });
+	running = await startManagedSessionRelay(env);
+	for (let i = 0; i < 100 && incrementalCount < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(incrementalCount, 2); assert.equal(bootstrapCount, 1, "reboot must never silently create a fresh cursor");
+	assert.equal(roomsCreated, 2, "neither room nor Space is recreated");
+	assert.deepEqual(running.registry.snapshot(), before);
+	assert.deepEqual(running.registry.listManifests(), manifests);
 });

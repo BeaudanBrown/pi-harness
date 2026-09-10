@@ -192,12 +192,18 @@ a bounded private content-addressed image spool, and the relay-only Matrix HTTPS
 fields of that process and are never accepted by or emitted over IPC.
 
 The executable requires `PI_MANAGED_SESSIONS_RUNTIME_DIR`,
-`PI_MANAGED_SESSIONS_MANIFEST_DIR`, `PI_MANAGED_SESSIONS_HOST_ID`, and the
+`PI_MANAGED_SESSIONS_STATE_DIR`, `PI_MANAGED_SESSIONS_MANIFEST_DIR`,
+`PI_MANAGED_SESSIONS_HOST_ID`, and the
 existing `PI_MATRIX_*` identity/credential variables. Packaging the executable does not enable it. The NixOS module's atomic
 `managedSessions.enable` switch installs only the ordinary adapter into the
 interactive Pi wrapper, starts one lingered systemd user relay for the selected
 Unix user, and strictly parses the SOPS Matrix token file for the relay without
-sourcing arbitrary environment assignments. The coordinator uses a separate raw-Pi profile and never inherits
+sourcing arbitrary environment assignments. `managedSessions.stateDirectory`
+defaults to `%h/.local/state/pi-managed-sessions/relay`: registry, activity and
+media state survive reboot there; only the socket and sync-health observation
+live under `XDG_RUNTIME_DIR`. First startup atomically copies existing legacy
+runtime state under the host lock without merging or deleting the old store.
+The coordinator uses a separate raw-Pi profile and never inherits
 `PI_MATRIX_*` credentials.
 
 The resource package also exposes separate ordinary and coordinator adapter

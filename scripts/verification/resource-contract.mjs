@@ -40,4 +40,13 @@ for (const directory of settings.skills ?? []) await access(path.join(root, "con
 for (const directory of settings.prompts ?? []) await access(path.join(root, "config/agent", directory));
 for (const directory of settings.themes ?? []) await access(path.join(root, "config/agent", directory));
 
+// These startup paths cannot be exercised in this check without activating a
+// user service. Keep the persistent/volatile split explicit at the Nix boundary.
+const moduleSource = await readFile(path.join(root, "nix/module.nix"), "utf8");
+assert.match(moduleSource, /default = "%h\/\.local\/state\/pi-managed-sessions\/relay";/);
+assert.match(moduleSource, /export PI_MANAGED_SESSIONS_STATE_DIR="\$\(expand_home \$\{lib\.escapeShellArg cfg\.managedSessions\.stateDirectory\}\)"/);
+assert.match(moduleSource, /registry="\$state_dir\/registry\.json"/);
+assert.doesNotMatch(moduleSource, /registry="\$runtime\/registry\.json"/);
+await access(path.join(root, "scripts/managed-session-status.jq"));
+
 console.log(`resource contract: ${configured.size} default extensions and ${Object.keys(profiles.profiles).length} profiles`);

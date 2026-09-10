@@ -160,6 +160,7 @@ test("unprefixed authorized coordinator text is durable before wake and delivere
 		operatorUserId: matrixConfig.operatorUserId,
 		ignoredSenderUserIds: new Set([matrixConfig.botUserId]),
 		joinedMemberIds: async () => new Set([matrixConfig.operatorUserId]),
+		recoverSyncTimelines: async (response: unknown) => response,
 		sync: async (_since?: string, signal?: AbortSignal) => {
 			syncCount += 1;
 			if (syncCount === 1) return { nextBatch: "cursor-1", response: { rooms: { join: { [manifest.roomId]: { timeline: { events: [
@@ -216,6 +217,7 @@ test("failed coordinator wake returns dormant, retains input, and emits one stab
 		operatorUserId: matrixConfig.operatorUserId,
 		ignoredSenderUserIds: new Set([matrixConfig.botUserId]),
 		joinedMemberIds: async () => new Set([matrixConfig.operatorUserId]),
+		recoverSyncTimelines: async (response: unknown) => response,
 		sync: async (_since?: string, signal?: AbortSignal) => {
 			if (!synced) {
 				synced = true;
@@ -315,6 +317,7 @@ if (url.pathname.includes("/state/m.room.member/")) return Response.json({ membe
 	running = await startManagedSessionRelay({
 		...process.env,
 		PI_MANAGED_SESSIONS_RUNTIME_DIR: join(root, "runtime"),
+		PI_MANAGED_SESSIONS_STATE_DIR: join(root, "state"),
 		PI_MANAGED_SESSIONS_SOCKET: join(root, "runtime", "relay.sock"),
 		PI_MANAGED_SESSIONS_MANIFEST_DIR: join(root, "manifests"),
 		PI_MANAGED_SESSIONS_HOST_ID: `tracer-${Date.now()}`,

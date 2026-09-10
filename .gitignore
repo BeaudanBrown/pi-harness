@@ -4,6 +4,9 @@
 *.db
 .beads-credential-key
 
+# Private operator recovery backups must never enter Git or review snapshots.
+/backup/
+
 # Local developer/runtime artifacts
 .direnv/
 .loom/

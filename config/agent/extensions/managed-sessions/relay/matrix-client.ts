@@ -142,6 +142,66 @@ export class ManagedMatrixClient {
 		const response = await this.request("GET", `/_matrix/client/v3/sync?${query}`, undefined, signal);
 		return { nextBatch: requiredString(response, "next_batch"), response };
 	}
+	/** Recover a complete bounded interval, never merely trust the tail of a limited sync. */
+	async recoverSyncTimelines(response: unknown, since: string, nextBatch: string, roomIds: readonly string[], signal?: AbortSignal): Promise<unknown> {
+		const result = structuredClone(response);
+		const joined = (result as { rooms?: { join?: Record<string, { timeline?: { limited?: boolean; events?: unknown[] } }> } } | null)?.rooms?.join;
+		if (!joined || typeof joined !== "object" || Array.isArray(joined)) return result;
+		for (const roomId of roomIds) {
+			const timeline = joined[roomId]?.timeline;
+			if (!timeline || (timeline.limited !== true && !(Array.isArray(timeline.events) && timeline.events.length > 512))) continue;
+			const events = await this.recoverRoomInterval(roomId, since, nextBatch, signal);
+			// Keep the tail as a completeness check: a successful history response must
+			// contain every sync event, including ignored bot/state events.
+			const ids = new Set(events.map((event) => (event as JsonObject).event_id));
+			if (!Array.isArray(timeline.events) || timeline.events.some((event) => !event || typeof event !== "object" || !ids.has((event as JsonObject).event_id))) {
+				throw new ManagedMatrixError("invalid_response", "Matrix gap recovery did not cover the sync timeline; cursor preserved");
+			}
+			joined[roomId]!.timeline = { limited: false, events };
+			if (Buffer.byteLength(JSON.stringify(result), "utf8") > MAX_MATRIX_RESPONSE_BYTES) {
+				throw new ManagedMatrixError("invalid_response", "Matrix recovered sync exceeds the response byte bound; cursor preserved");
+			}
+		}
+		return result;
+	}
+
+	private async recoverRoomInterval(roomId: string, since: string, to: string, signal?: AbortSignal): Promise<unknown[]> {
+		this.assertManagedRoom(roomId);
+		const events: unknown[] = []; const ids = new Set<string>(); const tokens = new Set([since]);
+		let bytes = 0;
+		let from = since;
+		// Matrix explicitly permits /sync next_batch for both from and to:
+		// https://spec.matrix.org/v1.16/client-server-api/#get_matrixclientv3roomsroomidmessages
+		// Forward pagination to a fixed boundary avoids chasing a moving head.
+		for (let page = 0; page < 10; page += 1) {
+			const query = new URLSearchParams({ from, to, dir: "f", limit: "100" });
+			const value = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/messages?${query}`, undefined, signal);
+			if (!value || typeof value !== "object" || Array.isArray(value)) throw new ManagedMatrixError("invalid_response", "Matrix gap recovery response is malformed; cursor preserved");
+			const chunk = (value as JsonObject).chunk; const end = (value as JsonObject).end;
+			// Omitted end can also mean history is no longer visible to the bot.
+			// Exhaustion alone is not proof that this interval is complete.
+			if (end === undefined) throw new ManagedMatrixError("invalid_response", "Matrix gap recovery has no terminal boundary; operator recovery required, cursor preserved");
+			if ((value as JsonObject).start !== from || !Array.isArray(chunk) || chunk.length > 100 ||
+				typeof end !== "string" || !end || end.length > 4_096) {
+				throw new ManagedMatrixError("invalid_response", "Matrix gap recovery page is malformed or oversized; cursor preserved");
+			}
+			for (const event of chunk) {
+				if (!event || typeof event !== "object" || Array.isArray(event) || typeof event.event_id !== "string" || !event.event_id || event.event_id.length > 255 ||
+					(event.room_id !== undefined && event.room_id !== roomId) || ids.has(event.event_id)) {
+					throw new ManagedMatrixError("invalid_response", "Matrix gap recovery event is malformed, foreign, or repeated; cursor preserved");
+				}
+				bytes += Buffer.byteLength(JSON.stringify(event), "utf8");
+				if (bytes > MAX_MATRIX_RESPONSE_BYTES) throw new ManagedMatrixError("invalid_response", "Matrix gap recovery exceeds the response byte bound; cursor preserved");
+				ids.add(event.event_id); events.push(event);
+			}
+			if (events.length > 512) throw new ManagedMatrixError("invalid_response", "Matrix gap recovery exceeds 512 events; operator recovery required, cursor preserved");
+			if (end === to) return events;
+			if (tokens.has(end)) throw new ManagedMatrixError("invalid_response", "Matrix gap recovery pagination stalled; cursor preserved");
+			tokens.add(end); from = end;
+		}
+		throw new ManagedMatrixError("invalid_response", "Matrix gap recovery exceeds 10 pages; operator recovery required, cursor preserved");
+	}
+
 	async memberJoined(roomId: string, userId: string, signal?: AbortSignal): Promise<boolean> {
 		this.assertManagedRoom(roomId);
 		try {

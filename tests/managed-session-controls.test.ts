@@ -262,16 +262,40 @@ test("limited offline timeline does not advance the durable cursor", async () =>
 	assert.equal(registry.pendingInputs(manifest.conversationId).length, 0);
 });
 
-test("bootstrap limited timeline also does not establish a cursor", async () => {
-	const { registry, manifest } = await fixture(false); let diagnosed = false;
-	const matrix = new ManagedMatrixClient(config, async () => Response.json({ next_batch: "unsafe-bootstrap", rooms: { join: {
-		[manifest.roomId]: { timeline: { limited: true, prev_batch: "gap", events: [event("$old", "do not run")] } },
-	} } }), [manifest.roomId], { maxAttempts: 1 });
-	const router = new CoordinatorRouter(manifest, registry, matrix, { sendToConversation: () => false } as unknown as ManagedSessionIpcServer,
-		async () => undefined, async () => undefined, async () => undefined, () => { diagnosed = true; });
-	router.start(); for (let attempt = 0; attempt < 100 && !diagnosed; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
-	await router.stop(); assert.equal(diagnosed, true);
-	assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor, { status: "bootstrap" });
+test("bootstrap accepts a limited initial timeline without replay, then routes new input", async () => {
+	const { registry, manifest } = await fixture(false);
+	const diagnostics: string[] = []; const delivered: ManagedSessionEnvelope[] = [];
+	let syncCount = 0;
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const url = new URL(String(input));
+		if (url.pathname.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
+		assert.ok(url.pathname.endsWith("/sync"));
+		syncCount += 1;
+		if (syncCount === 1) {
+			assert.equal(url.searchParams.has("since"), false);
+			return Response.json({ next_batch: "safe-bootstrap", rooms: { join: {
+				[manifest.roomId]: { timeline: { limited: true, prev_batch: "gap", events: [event("$old", "do not run")] } },
+			} } });
+		}
+		if (syncCount === 2) {
+			assert.equal(url.searchParams.get("since"), "safe-bootstrap");
+			return Response.json({ ...sync([event("$new", "new task")]), next_batch: "after-new" });
+		}
+		await new Promise<void>((resolve) => init?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+		throw Object.assign(new Error("cancelled"), { name: "AbortError" });
+	}, [manifest.roomId], { maxAttempts: 1 });
+	const router = new CoordinatorRouter(manifest, registry, matrix, {
+		sendToConversation: (envelope: ManagedSessionEnvelope) => { delivered.push(envelope); return true; },
+	} as unknown as ManagedSessionIpcServer, async () => undefined, async () => undefined, async () => undefined,
+		(message) => diagnostics.push(message));
+	router.start();
+	try {
+		for (let attempt = 0; attempt < 100 && syncCount < 3 && diagnostics.length === 0; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	} finally { await router.stop(); }
+	assert.deepEqual(diagnostics, []);
+	assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor, { status: "established", since: "after-new" });
+	assert.deepEqual(delivered.map((item) => item.payload.body), ["new task"]);
+	assert.deepEqual(registry.pendingInputs(manifest.conversationId).map((item) => item.matrixEventId), ["$new"]);
 });
 
 test("authorized sender set, event age, and payload shape fail closed before routing", () => {

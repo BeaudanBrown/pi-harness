@@ -104,6 +104,7 @@ export class RelayRegistry {
 			})),
 		};
 		const bundle = parsePersistenceBundle(manifests, runtime);
+		if (bundle.runtime.hostId !== this.hostId) throw new RelayRegistryError("invalid_state", "Relay registry belongs to a different host");
 		this.manifests = new Map(bundle.manifests.map((manifest) => [manifest.conversationId, manifest]));
 		this.state = bundle.runtime;
 		await this.runtimeFile.write(this.state);

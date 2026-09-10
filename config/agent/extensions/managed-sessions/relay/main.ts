@@ -32,6 +32,8 @@ import { BlobSpool } from "./blob-spool.js";
 import { ManagedImageTransport } from "./image-media.js";
 import { ManagedArtifactExporter } from "./artifact-export.js";
 import { renderManagedConversationStatus } from "./status.js";
+import { prepareRelayStateDirectory } from "./state-directory.js";
+import { AtomicJsonFile } from "./atomic-json.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -47,6 +49,7 @@ export interface RunningRelay {
 
 export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = process.env): Promise<RunningRelay> {
 	const runtimeDirectory = resolve(required(environment, "PI_MANAGED_SESSIONS_RUNTIME_DIR"));
+	const stateDirectory = resolve(required(environment, "PI_MANAGED_SESSIONS_STATE_DIR"));
 	const manifestDirectory = resolve(required(environment, "PI_MANAGED_SESSIONS_MANIFEST_DIR"));
 	const hostId = required(environment, "PI_MANAGED_SESSIONS_HOST_ID");
 	const graceMilliseconds = Number(environment.PI_MANAGED_SESSIONS_RESTART_GRACE_MS ?? "10000");
@@ -61,16 +64,27 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	}
 	const relayLock = relayLockHelper ? new HostRelayLock(relayLockHelper, await hostRelayLockPath(hostId, expectedUid)) : undefined;
 	await relayLock?.acquire();
-	const registry = new RelayRegistry(hostId, runtimeDirectory, new ConversationManifestStore(manifestDirectory));
+	const manifestStore = new ConversationManifestStore(manifestDirectory);
+	const registry = new RelayRegistry(hostId, stateDirectory, manifestStore);
 	let server: ManagedSessionIpcServer | undefined;
 	let coordinatorRouter: CoordinatorRouter | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
 	try {
+		await prepareRelayStateDirectory(hostId, stateDirectory, runtimeDirectory, manifestStore);
 		await registry.load();
+		// Ephemeral observation, never a recovery source. No tokens or error text.
+		let lastSuccessfulSyncAt: string | null = null;
+		const healthFile = new AtomicJsonFile<{ status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null }>(
+			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null });
+		await healthFile.write({ status: "starting", lastSuccessfulSyncAt });
+		const syncHealth = async (healthy: boolean): Promise<void> => {
+			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
+			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt });
+		};
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
-		const spool = new BlobSpool(resolve(runtimeDirectory, "media-spool"));
+		const spool = new BlobSpool(resolve(stateDirectory, "media-spool"));
 		const media = new ManagedImageTransport(spool, matrix);
 		await media.initialize(registry.liveMediaBlobIds());
 		const authenticatedUserId = await matrix.whoami();
@@ -99,7 +113,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			}, registry, matrix);
 		}
 		const transcriptProjector = new TranscriptProjector(registry, matrix);
-		activityProjector = new ActivityProjector(runtimeDirectory, registry, matrix);
+		activityProjector = new ActivityProjector(stateDirectory, registry, matrix);
 		await activityProjector.load();
 		const eventProjector = new RelayEventProjector(registry, matrix);
 		registry.beginRestartReconciliation();
@@ -325,7 +339,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			},
 		});
 		if (coordinator) {
-			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(runtimeDirectory, "project-sessions");
+			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(stateDirectory, "project-sessions");
 			hostLifecycle = new HostLifecycle({
 				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
 				socketPath: server.socketPath, registry, matrix, server, environment,
@@ -360,7 +374,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
 			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile(), media,
 			(conversationId, operationId) => activityProjector!.beginOperationFeedback(conversationId, operationId),
-			(conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId));
+			(conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId), syncHealth);
 			coordinatorRouter.start();
 			await hostLifecycle!.reconcileGenerationTransitions();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
@@ -402,9 +416,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 async function main(): Promise<void> {
 	if (process.argv[2] === "--migrate-v1-to-v2") {
 		if (process.argv.length !== 3) throw new Error("--migrate-v1-to-v2 accepts no additional arguments");
-		const runtimeDirectory = resolve(required(process.env, "PI_MANAGED_SESSIONS_RUNTIME_DIR"));
+		const stateDirectory = resolve(required(process.env, "PI_MANAGED_SESSIONS_STATE_DIR"));
 		const manifestDirectory = resolve(required(process.env, "PI_MANAGED_SESSIONS_MANIFEST_DIR"));
-		await migrateManagedSessionStoresV1ToV2(resolve(runtimeDirectory, "registry.json"), manifestDirectory);
+		await migrateManagedSessionStoresV1ToV2(resolve(stateDirectory, "registry.json"), manifestDirectory);
 		return;
 	}
 	if (process.argv.length !== 2) throw new Error("Managed-session relay accepts only --migrate-v1-to-v2");

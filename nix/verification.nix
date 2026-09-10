@@ -126,7 +126,7 @@ let
     ${typeSetup}
     mkdir -p "$out/build" "$out/source"
     tsc --project tsconfig.test.json --outDir "$out/build"
-    cp -R config eval tests bin .aloop.json .pi-types "$out/source/"
+    cp -R config eval tests bin scripts .aloop.json .pi-types "$out/source/"
   '';
 
   runCompiledTests = {

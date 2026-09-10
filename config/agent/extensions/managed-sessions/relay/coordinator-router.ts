@@ -162,6 +162,7 @@ export class CoordinatorRouter {
 		private readonly media?: ManagedImageTransport,
 		private readonly beginOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
 		private readonly endOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
+		private readonly syncHealth: (healthy: boolean) => Promise<void> = async () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -211,15 +212,27 @@ export class CoordinatorRouter {
 				const cursor = runtime.matrixCursor;
 				const established = cursor.status === "established";
 				const sync = await this.matrix.sync(cursor.status === "established" ? cursor.since : undefined, signal);
+				// Initial sync is a deliberate no-replay boundary, not an incremental gap.
+				// A limited retained timeline is normal here and must not prevent startup.
+				if (!established) {
+					await this.registry.setMatrixCursor(this.manifest.conversationId, sync.nextBatch);
+					await this.syncHealth(true);
+					failures = 0;
+					continue;
+				}
+				// Resolve every gap before any dispatch in this batch. Never partially
+				// execute a truncated interval or advance past an unrecoverable room.
+				const response = await this.matrix.recoverSyncTimelines(sync.response, cursor.since, sync.nextBatch,
+					this.registry.listManifests().map((item) => item.roomId), signal);
 				// A vote may already be in this response from the uncertain PUT window. Bind the
 				// idempotently recovered poll event before inspecting or advancing the response.
 				await this.reconcileControlPollPublications();
 				await this.reconcileCheckpointPollPublications();
 				for (const manifest of this.registry.listManifests()) {
-					const candidateSenders = roomEventSenderIds(sync.response, manifest.roomId, this.matrix.ignoredSenderUserIds, established);
+					const candidateSenders = roomEventSenderIds(response, manifest.roomId, this.matrix.ignoredSenderUserIds, established);
 					const joinedMembers = established && candidateSenders.size > 0 ? await this.matrix.joinedMemberIds(manifest.roomId, signal) : new Set<string>();
 					const authorizedSenders = new Set([...candidateSenders].filter((sender) => joinedMembers.has(sender)));
-					const events = authorizedRoomEvents(sync.response, manifest.roomId, authorizedSenders, established);
+					const events = authorizedRoomEvents(response, manifest.roomId, authorizedSenders, established);
 					if (established) for (const event of events) {
 						if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
 						else if (event.kind === "image") await this.acceptImage(manifest, event, signal);
@@ -228,10 +241,12 @@ export class CoordinatorRouter {
 					await this.ensureWake(manifest);
 				}
 				await this.registry.setMatrixCursor(this.manifest.conversationId, sync.nextBatch);
+				await this.syncHealth(true);
 				failures = 0;
 			} catch (error) {
 				if (signal.aborted) return;
 				failures += 1;
+				await this.syncHealth(false).catch(() => undefined);
 				this.diagnostic(error instanceof Error ? error.message : "Matrix synchronization failed");
 				await new Promise<void>((resolve) => {
 					const ceiling = Math.min(30_000, 500 * (2 ** Math.min(failures - 1, 6)));
