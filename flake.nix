@@ -297,6 +297,7 @@
           modules = [
             {
               options = {
+                users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
                 systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
                 assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
                 environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
@@ -331,6 +332,7 @@
           modules = [
             {
               options = {
+                users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
                 systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
                 assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
                 environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
@@ -518,6 +520,7 @@
         packages.pi-harness = piHarnessPackage;
         packages.pi-harness-resources = piHarnessResources;
         packages.managed-session-relay = managedSessionRelay;
+        packages.bridge-chat = import ./nix/bridge-chat-package.nix { inherit pkgs piPackage; };
         packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
         packages.playwright-agent-cli = playwrightAgentCli;

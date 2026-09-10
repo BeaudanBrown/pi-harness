@@ -17,7 +17,8 @@ layout remains external and uses regular tmux through fixed host-owned actions.
 - a Nix resource package named `pi-harness-resources`
 - a NixOS module named `nixosModules.pi-harness`
 - a packaged `pi-managed-session-relay` host-runtime executable
-- an opt-in [read-only bridge preflight](docs/bridge-chat-preflight.md) NixOS service (not yet a `!pi` chat assistant)
+- an opt-in [read-only bridge preflight](docs/bridge-chat-preflight.md) NixOS service
+- a separately isolated [stateless `!pi` chat assistant](docs/bridge-chat-assistant.md), disabled by default and awaiting per-bridge live acceptance
 - shared Pi resources under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`

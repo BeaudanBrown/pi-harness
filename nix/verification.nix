@@ -410,7 +410,56 @@ let
     touch "$out"
   '';
 
+  bridgeChatModule = lib.evalModules {
+    specialArgs = { inherit pkgs; };
+    modules = [
+      {
+        options.assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
+        options.systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
+        options.users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
+        options.services.pi-harness.package = lib.mkOption { type = lib.types.anything; default = { pi = piPackage; }; };
+      }
+      ./bridge-chat.nix
+      {
+        services.pi-harness.bridgeChat.assistant = {
+          enable = true;
+          homeserver = "https://matrix.example.com";
+          ownerUserId = "@owner:example.com";
+          roomIds = [ "!test:example.com" ];
+          matrixTokenFile = "/run/secrets/chat-matrix";
+          codexAuthFile = "/run/secrets/chat-codex";
+        };
+      }
+    ];
+  };
+  bridgeChatReport = pkgs.writeText "bridge-chat-module.json" (builtins.toJSON {
+    assertions = map (a: a.assertion) bridgeChatModule.config.assertions;
+    services = bridgeChatModule.config.systemd.services;
+    rejectsEmptyScope = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
+      modules = [ { services.pi-harness.bridgeChat.assistant.roomIds = lib.mkForce [ ]; } ];
+    }).config.assertions);
+    rejectsStoreSecret = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
+      modules = [ { services.pi-harness.bridgeChat.assistant.codexAuthFile = lib.mkForce "/nix/store/unsafe"; } ];
+    }).config.assertions);
+  });
+  bridgeChatTests = pkgs.runCommand "pi-bridge-chat-tests" {
+    nativeBuildInputs = [ pkgs.python3 pkgs.nodejs pkgs.jq ];
+  } ''
+    ${prepareSource}
+    python3 -m unittest discover -s tests -p test_bridge_chat_transport.py -v
+    BRIDGE_CHAT_PACKAGE=${import ./bridge-chat-package.nix { inherit pkgs piPackage; }} node --test tests/bridge-chat-model.test.mjs
+    jq -e '(.assertions | all) and .rejectsEmptyScope and .rejectsStoreSecret
+      and .services["pi-chat-model"].serviceConfig.LoadCredential == ["codex:/run/secrets/chat-codex"]
+      and .services["pi-chat-transport"].serviceConfig.LoadCredential == ["matrix:/run/secrets/chat-matrix"]
+      and (.services | all(.serviceConfig.DynamicUser and .serviceConfig.ProtectHome
+        and .serviceConfig.ProtectSystem == "strict" and .serviceConfig.StateDirectoryMode == "0700"
+        and (.serviceConfig.InaccessiblePaths | index("-/run/postgresql")) != null
+        and (.serviceConfig | has("EnvironmentFile") | not)))' ${bridgeChatReport}
+    touch "$out"
+  '';
+
   deterministicChecks = {
+    bridge-chat = bridgeChatTests;
     bridge-chat-preflight = bridgePreflightTests;
     source-contracts = sourceContracts;
     schema-contracts = schemaContracts;
