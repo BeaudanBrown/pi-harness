@@ -1,4 +1,6 @@
 import { MAX_BLOB_BYTES } from "../v2-contracts.js";
+import { MatrixError as ManagedMatrixError, MatrixHttp, MAX_MATRIX_RESPONSE_BYTES, type MatrixRetryOptions } from "../../matrix-shared/http.js";
+export { ManagedMatrixError };
 
 export interface ManagedMatrixConfig {
 	homeserver: string;
@@ -8,31 +10,10 @@ export interface ManagedMatrixConfig {
 	ignoredSenderUserIds?: readonly string[];
 }
 
-export interface ManagedMatrixRetryOptions {
-	maxAttempts?: number;
-	baseDelayMs?: number;
-	maxDelayMs?: number;
-	random?: () => number;
-	sleep?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
-}
-
-export class ManagedMatrixError extends Error {
-	constructor(
-		readonly code: "cancelled" | "http" | "invalid_response" | "network",
-		message: string,
-		readonly status?: number,
-		readonly retryable = false,
-		readonly retryAfterMs?: number,
-	) {
-		super(message);
-		this.name = "ManagedMatrixError";
-	}
-}
+export type ManagedMatrixRetryOptions = MatrixRetryOptions;
 
 type FetchLike = typeof fetch;
 type JsonObject = Record<string, unknown>;
-const MAX_MATRIX_RESPONSE_BYTES = 4 * 1024 * 1024;
-const MAX_RETRY_AFTER_MS = 120_000;
 const MAX_TYPING_TIMEOUT_MS = 30_000;
 const MAX_MESSAGE_BODY_LENGTH = 32_768;
 const MAX_POLL_ANSWERS = 20;
@@ -82,16 +63,6 @@ function requiredString(value: unknown, field: string): string {
 	return candidate;
 }
 
-function defaultSleep(milliseconds: number, signal?: AbortSignal): Promise<void> {
-	if (signal?.aborted) return Promise.reject(new ManagedMatrixError("cancelled", "Matrix request was cancelled"));
-	return new Promise((resolve, reject) => {
-		const finish = () => { signal?.removeEventListener("abort", abort); resolve(); };
-		const timer = setTimeout(finish, milliseconds);
-		const abort = () => { clearTimeout(timer); signal?.removeEventListener("abort", abort); reject(new ManagedMatrixError("cancelled", "Matrix request was cancelled")); };
-		signal?.addEventListener("abort", abort, { once: true });
-	});
-}
-
 export function managedMatrixConfigFromEnvironment(environment: NodeJS.ProcessEnv = process.env): ManagedMatrixConfig {
 	const value = (name: string): string => {
 		const result = environment[name]?.trim();
@@ -119,7 +90,8 @@ export class ManagedMatrixClient {
 	readonly ignoredSenderUserIds: ReadonlySet<string>;
 	readonly #accessToken: string;
 	readonly #managedRoomIds: Set<string>;
-	readonly #retry: Required<Omit<ManagedMatrixRetryOptions, "sleep">> & { sleep: NonNullable<ManagedMatrixRetryOptions["sleep"]> };
+	readonly #http: MatrixHttp;
+	readonly #retry: Required<MatrixRetryOptions>;
 
 	constructor(config: ManagedMatrixConfig, private readonly fetchImplementation: FetchLike = fetch, managedRoomIds: Iterable<string> = [], retry: ManagedMatrixRetryOptions = {}) {
 		const parsed = new URL(config.homeserver);
@@ -130,17 +102,14 @@ export class ManagedMatrixClient {
 		this.homeserver = parsed.toString().replace(/\/$/, ""); this.botUserId = config.botUserId; this.operatorUserId = config.operatorUserId;
 		this.ignoredSenderUserIds = new Set([config.botUserId, ...(config.ignoredSenderUserIds ?? [])]);
 		this.#accessToken = config.accessToken; this.#managedRoomIds = new Set(managedRoomIds);
-		this.#retry = { maxAttempts: retry.maxAttempts ?? 5, baseDelayMs: retry.baseDelayMs ?? 250, maxDelayMs: retry.maxDelayMs ?? 30_000,
-			random: retry.random ?? Math.random, sleep: retry.sleep ?? defaultSleep };
-		if (!Number.isSafeInteger(this.#retry.maxAttempts) || this.#retry.maxAttempts < 1 || this.#retry.maxAttempts > 10 ||
-			this.#retry.baseDelayMs < 1 || this.#retry.maxDelayMs < this.#retry.baseDelayMs || this.#retry.maxDelayMs > MAX_RETRY_AFTER_MS) throw new Error("Invalid Matrix retry policy");
+		this.#http = new MatrixHttp(config, fetchImplementation, retry);
+		this.#retry = this.#http.retry;
 	}
 
 	async whoami(signal?: AbortSignal): Promise<string> { return requiredString(await this.request("GET", "/_matrix/client/v3/account/whoami", undefined, signal), "user_id"); }
 	async sync(since?: string, signal?: AbortSignal): Promise<{ nextBatch: string; response: unknown }> {
 		const query = new URLSearchParams({ timeout: "30000" }); if (since) query.set("since", since);
-		const response = await this.request("GET", `/_matrix/client/v3/sync?${query}`, undefined, signal);
-		return { nextBatch: requiredString(response, "next_batch"), response };
+		return this.#http.sync(query, signal);
 	}
 	/** Recover a complete bounded interval, never merely trust the tail of a limited sync. */
 	async recoverSyncTimelines(response: unknown, since: string, nextBatch: string, roomIds: readonly string[], signal?: AbortSignal): Promise<unknown> {
@@ -523,34 +492,7 @@ export class ManagedMatrixClient {
 		return { serverName: parsed.host, mediaId };
 	}
 
-	private async request(method: string, path: string, body?: JsonObject, signal?: AbortSignal): Promise<unknown> {
-		const safePath = path.split("?")[0]; let last: ManagedMatrixError | undefined;
-		for (let attempt = 0; attempt < this.#retry.maxAttempts; attempt += 1) {
-			if (signal?.aborted) throw new ManagedMatrixError("cancelled", "Matrix request was cancelled");
-			try {
-				const response = await this.fetchImplementation(new URL(path, this.homeserver), { method, headers: { Authorization: `Bearer ${this.#accessToken}`, ...(body ? { "Content-Type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined, signal });
-				const length = Number(response.headers.get("content-length"));
-				if (Number.isFinite(length) && length > MAX_MATRIX_RESPONSE_BYTES) throw new ManagedMatrixError("invalid_response", "Matrix response exceeded the size limit");
-				const text = response.status === 204 ? "" : await response.text();
-				if (Buffer.byteLength(text, "utf8") > MAX_MATRIX_RESPONSE_BYTES) throw new ManagedMatrixError("invalid_response", "Matrix response exceeded the size limit");
-				let parsed: unknown = {};
-				try { parsed = text === "" ? {} : JSON.parse(text) as unknown; }
-				catch { if (response.ok) throw new ManagedMatrixError("invalid_response", `Matrix ${method} ${safePath} returned invalid JSON`); }
-				if (response.ok) return parsed;
-				const retryAfter = response.status === 429 && typeof parsed === "object" && parsed !== null && Number.isSafeInteger((parsed as JsonObject).retry_after_ms)
-					? Math.min(MAX_RETRY_AFTER_MS, Math.max(0, Number((parsed as JsonObject).retry_after_ms))) : undefined;
-				last = new ManagedMatrixError("http", `Matrix ${method} ${safePath} returned HTTP ${response.status}`, response.status, response.status === 429 || response.status >= 500, retryAfter);
-			} catch (error) {
-				if (error instanceof ManagedMatrixError) last = error;
-				else if (signal?.aborted || (error instanceof Error && error.name === "AbortError")) throw new ManagedMatrixError("cancelled", "Matrix request was cancelled");
-				else last = new ManagedMatrixError("network", `Matrix ${method} ${safePath} failed`, undefined, true);
-			}
-			const retrySafe = method === "GET" || method === "PUT";
-			if (!last.retryable || !retrySafe || attempt + 1 >= this.#retry.maxAttempts) throw last;
-			const exponential = Math.min(this.#retry.maxDelayMs, this.#retry.baseDelayMs * (2 ** attempt));
-			const jittered = Math.floor(exponential * (0.5 + Math.max(0, Math.min(1, this.#retry.random())) * 0.5));
-			await this.#retry.sleep(Math.max(last.retryAfterMs ?? 0, jittered), signal);
-		}
-		throw last ?? new ManagedMatrixError("network", "Matrix request failed", undefined, true);
+	private request(method: string, path: string, body?: JsonObject, signal?: AbortSignal): Promise<unknown> {
+		return this.#http.request(method, path, body, signal);
 	}
 }

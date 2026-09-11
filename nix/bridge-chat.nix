@@ -41,7 +41,8 @@ in {
     homeserver = lib.mkOption { type = lib.types.str; default = ""; description = "HTTPS origin, without a path, of the owner's Matrix homeserver."; };
     ownerUserId = lib.mkOption { type = lib.types.strMatching "@[^[:space:]:]+:[^[:space:]]+"; description = "Exact Matrix owner account used for intake and replies. The token inherits this account's privileges."; };
     matrixTokenFile = lib.mkOption { type = lib.types.str; description = "Runtime file containing only a dedicated owner-login access token. This credential has account-wide authority, including admin rights if the owner has them; never provide an appservice token."; };
-    codexAuthFile = lib.mkOption { type = lib.types.str; description = "Runtime JSON containing only openai-codex OAuth auth from a dedicated login, not a shared rotating Pi credential."; };
+    modelUser = lib.mkOption { type = lib.types.strMatching "[a-z_][a-z0-9_-]*"; description = "Existing Unix user whose installed Pi login the worker reuses."; };
+    piAgentDirectory = lib.mkOption { type = lib.types.str; description = "Original existing Pi agent directory, containing auth.json and its shared sibling lock. Bound at the same path for Pi-coordinated credential refresh; no resources/settings/models are discovered from it."; };
     model = lib.mkOption { type = lib.types.strMatching "[a-zA-Z0-9._-]{1,100}"; default = "gpt-5.4"; description = "Explicit Codex model; verify account entitlement during activation. No fallback to another model."; };
     roomIds = lib.mkOption { type = lib.types.listOf (lib.types.strMatching "![^[:space:]]+"); default = [ ]; description = "Initial test-room allowlist; use new IDs after recreating encrypted mirrors."; };
     allJoinedRooms = lib.mkOption { type = lib.types.bool; default = false; description = "Explicitly accept commands in all eligible rooms this owner account joins, not just roomIds. Does not grant server-wide access."; };
@@ -49,19 +50,29 @@ in {
   };
   config = lib.mkIf cfg.enable {
     assertions = [
-      { assertion = privatePath cfg.matrixTokenFile && privatePath cfg.codexAuthFile; message = "Chat credentials must be runtime paths, never Nix store files."; }
+      { assertion = privatePath cfg.matrixTokenFile && privatePath cfg.piAgentDirectory && cfg.piAgentDirectory != "/"; message = "Chat credentials and existing Pi auth directory must be absolute runtime paths, never Nix store paths."; }
       { assertion = lib.hasPrefix "https://" cfg.homeserver; message = "Chat transport requires an HTTPS homeserver origin."; }
       { assertion = cfg.allJoinedRooms || cfg.roomIds != [ ]; message = "Chat assistant requires an explicit test-room allowlist or allJoinedRooms approval."; }
       { assertion = builtins.length cfg.roomIds <= 256 && builtins.length cfg.remoteOwnerUserIds <= 8; message = "Chat allowlists exceed their bounds."; }
     ];
     users.groups.pi-chat = { };
     systemd.services.pi-chat-model = {
-      description = "Isolated stateless Codex/web-search worker (no Matrix credentials)";
+      description = "Restricted stateless Pi SDK worker using existing Pi authentication";
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
+      environment = {
+        HOME = "/var/lib/pi-chat-model";
+        PI_CODING_AGENT_DIR = "/var/lib/pi-chat-model/isolated";
+      };
       serviceConfig = common // {
-        ExecStart = "${package}/bin/pi-chat-model ${socket} /var/lib/pi-chat-model/auth.json %d/codex ${cfg.model}";
-        LoadCredential = [ "codex:${cfg.codexAuthFile}" ];
+        DynamicUser = false;
+        User = cfg.modelUser;
+        # Keep the real path and its shared lock visible; a copied credential or
+        # private bind of only auth.json would break Pi's refresh coordination.
+        ProtectHome = "tmpfs";
+        BindPaths = [ cfg.piAgentDirectory ];
+        ReadWritePaths = [ cfg.piAgentDirectory ];
+        ExecStart = "${package}/bin/pi-chat-model ${socket} ${lib.escapeShellArg "${cfg.piAgentDirectory}/auth.json"} ${cfg.model}";
         RuntimeDirectory = "pi-chat-model";
         RuntimeDirectoryMode = "0750";
         StateDirectory = "pi-chat-model";

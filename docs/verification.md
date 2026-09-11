@@ -15,7 +15,7 @@ working directory and do not use credentials, network services, or live models.
 
 | Check | Contract |
 | --- | --- |
-| `bridge-chat` | Owner-only stateless intake, exact hosted-web-search capability, SQLite crash recovery, packaged worker and separated credential/unit contracts; live bridge acceptance remains separate. |
+| `bridge-chat` | Owner-only intake, real Pi SDK web-search-only sessions, shared existing-login locking, SQLite recovery, packaged worker and separated credential/unit contracts; live acceptance remains separate. |
 | `bridge-chat-preflight` | Read-only credential-isolated diagnostic, bounded loopback HTTP, redaction and packaged service configuration pass; no live bridge acceptance is implied. |
 | `source-contracts` | Settings and profiles agree, referenced resources exist, retired resources stay absent, and adapter/RPC authority tripwires hold. |
 | `schema-contracts` | Evaluation schemas are valid and their positive and negative fixtures have the expected lexical behavior. |
@@ -45,7 +45,7 @@ Test classification is name-based so a new test cannot compile without being
 executed by a deterministic suite:
 
 - `tests/test_bridge_chat_preflight.py` belongs to the bridge preflight check;
-- `tests/test_bridge_chat_transport.py` and `tests/bridge-chat-model.test.mjs` belong to the bridge assistant check;
+- `tests/bridge-chat-*.test.{ts,mts}` belong only to the bridge assistant check; `tests/matrix-shared.test.ts` belongs to unit-tests;
 - `tests/eval-*.test.ts` belongs to the sanitized evaluation self-test;
 - `tests/lsp-live.test.ts` belongs to the explicit live LSP gate;
 - `tests/managed-session-*.test.ts` belongs to the managed-session suite;

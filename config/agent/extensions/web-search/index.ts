@@ -1,10 +1,11 @@
 import { Buffer } from "node:buffer";
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
-const DEFAULT_MODEL = "gpt-5.4-mini";
+const DEFAULT_MODEL = "gpt-5.6-luna";
 const SEARCH_TIMEOUT_MS = 60_000;
+export const MAX_SEARCH_CONTEXT_BYTES = 48_000;
 
 const WebSearchParams = Type.Object({
 	query: Type.String({
@@ -104,6 +105,15 @@ function searchInstructions(params: WebSearchParamsValue, depth: Depth): string 
 		.join(" ");
 }
 
+function contextText(text: string): string {
+	const bytes = Buffer.from(text);
+	if (bytes.length <= MAX_SEARCH_CONTEXT_BYTES) return text;
+	const marker = "\n\n[Search result truncated to fit the context limit.]";
+	let end = MAX_SEARCH_CONTEXT_BYTES - Buffer.byteLength(marker);
+	while ((bytes[end] & 0xc0) === 0x80) end--;
+	return bytes.subarray(0, end).toString("utf8") + marker;
+}
+
 function extractTextFromSse(text: string): string {
 	let output = "";
 	for (const event of text.split("\n\n")) {
@@ -137,8 +147,8 @@ function formatResult(answer: string, sources: Source[]): string {
 	return lines.join("\n");
 }
 
-export default function (pi: ExtensionAPI) {
-	pi.registerTool({
+export function createWebSearchTool(modelOverride?: string, resolveToken?: (ctx: ExtensionContext, signal?: AbortSignal) => Promise<string | undefined>): ToolDefinition<typeof WebSearchParams> {
+	return {
 		name: "web_search",
 		label: "Web Search",
 		description:
@@ -148,8 +158,10 @@ export default function (pi: ExtensionAPI) {
 		async execute(_toolCallId, params, signal, onUpdate, ctx) {
 			const input = params as WebSearchParamsValue;
 			const depth = input.depth ?? "quick";
-			const model = process.env.PI_CODEX_WEB_SEARCH_MODEL?.trim() || DEFAULT_MODEL;
-			const accessToken = await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
+			const model = modelOverride ?? (process.env.PI_CODEX_WEB_SEARCH_MODEL?.trim() || DEFAULT_MODEL);
+			signal?.throwIfAborted();
+			const accessToken = resolveToken ? await resolveToken(ctx, signal) : await ctx.modelRegistry.getApiKeyForProvider("openai-codex");
+			signal?.throwIfAborted();
 			if (!accessToken) {
 				throw new Error("Web search requires Pi's ChatGPT/Codex login. Run /login and select ChatGPT Plus/Pro (Codex).");
 			}
@@ -189,18 +201,18 @@ export default function (pi: ExtensionAPI) {
 					}),
 				});
 
+				const body = await response.text();
 				if (!response.ok) {
-					const body = await response.text();
 					if (response.status === 401) {
 						throw new Error("Pi's ChatGPT/Codex login was rejected. Run /login and sign in again.");
 					}
 					throw new Error(`Codex web search request failed (${response.status}): ${body.slice(0, 1000)}`);
 				}
 
-				const answer = extractTextFromSse(await response.text());
+				const answer = extractTextFromSse(body);
 				const sources = extractSources(answer);
 				return {
-					content: [{ type: "text", text: formatResult(answer, sources) }],
+					content: [{ type: "text", text: contextText(formatResult(answer, sources)) }],
 					details: { query: input.query, model, depth, sources } satisfies WebSearchDetails,
 				};
 			} finally {
@@ -208,5 +220,9 @@ export default function (pi: ExtensionAPI) {
 				timeout.removeEventListener("abort", abort);
 			}
 		},
-	});
+	};
+}
+
+export default function (pi: ExtensionAPI) {
+	pi.registerTool(createWebSearchTool());
 }

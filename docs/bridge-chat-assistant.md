@@ -1,176 +1,194 @@
 # Stateless !pi assistant (#90)
 
-## Contract and implementation boundary
+## Shared implementation, separate policies and accounts
 
-A separate NAS service observes a dedicated Matrix login session for
-its configured owner. It never logs in, joins rooms, provisions chats or changes
-bridge configuration. An explicit room allowlist is the deployment default;
-`allJoinedRooms` is an intentional expansion to rooms that account already joins.
-Encrypted rooms and Spaces are unsupported. The first sync is a discard-only
-watermark. Newly observed rooms and limited timelines are also discard-only,
-with durable per-room timestamp floors covering every event in the skipped
-batch. Replays at or before those floors remain ineligible after restart.
+The managed engineering relay and chat assistant share `matrix-shared/http.ts`:
+HTTPS authentication, bounded JSON streaming, cancellation, deadlines, safe
+retry mechanics and sync requests. They keep separate account credentials,
+sync cursors, room authorization, message selection and delivery state.
+The managed relay retains its room guards, media handling and bounded history
+recovery; chat never imports that history recovery or engineering lifecycle.
 
-Only new, bounded `m.text` messages beginning exactly `!pi ` (or a newline/tab
-after `!pi`) from the owner or explicitly configured remote-owner puppet MXIDs
-qualify. Puppet MXIDs must be verified from bridge-owned identity evidence before
-configuration; never use display names or discover them from message content.
-Edits, replies/threads, attachments, encrypted messages and generated answers
-are not commands. The transport sees sync events to filter them; only the question
-is sent over a private Unix socket to the model worker. No timeline, room ID,
-sender, Matrix credential or operational database is sent to the model.
+Chat's TypeScript `OwnerMatrix` uses one attempt for every request, including
+PUT sends. The managed relay retains its existing retry policy. An uncertain
+bridge send must not accidentally inherit the engineering relay's retry behavior.
+The old standalone Python client and direct-Codex model worker are removed.
 
-The model worker uses the pinned Pi Codex OAuth refresh implementation and the
-same fixed ChatGPT Codex backend as the existing web-search extension. It does
-not start Pi, load an agent session, discover resources or implement local tools.
-Each backend request contains a fixed instruction, one question and exactly the
-hosted `web_search` tool with automatic selection. No previous response ID or
-conversation is reused. A completed response is required; unsupported tool calls
-and incomplete responses fail closed. A dedicated OAuth login is required: do
-not concurrently reuse a rotating refresh credential from an interactive Pi.
-This uses ChatGPT entitlement, not an implicitly provisioned paid API key.
+A dedicated Matrix login session for the configured owner observes rooms the
+account already joins and sends through its existing linked bridge accounts.
+It does not join rooms, provision chats or change participants/bridge settings.
+The default deployment requires a room allowlist; `allJoinedRooms` is an explicit
+expansion, not server-wide access. Encrypted rooms and Spaces are unsupported.
 
-The Matrix transport sends plain `Pi: …` text with no mentions or reply routing.
-With an owner login the bridge should use that owner's existing remote login,
-not bot relay mode. This remains a live acceptance requirement on each bridge;
-Facebook relay being disabled alone does not prove or disprove this path.
+The owner token carries account-wide authority even while processing only an
+allowlist. If the owner is a homeserver administrator, its session also inherits
+those privileges. Application filtering is not a server-side token scope. The
+operator must approve that authority; do not use an appservice token. A stolen
+owner token or compromised homeserver/bridge is outside sender authentication.
 
-## Security and operational boundaries
+## Input contract
 
-The two processes run as different systemd DynamicUsers. Only the transport gets
-the Matrix token; only the worker gets the Codex credential. Their shared group
-permits a bounded question/answer Unix socket, not access to private state or
-credentials. Home and host database sockets are hidden. No secrets, ordinary
-messages, model questions/answers or remote error bodies are logged.
+Only new bounded `m.text` messages beginning exactly `!pi ` (or newline/tab after
+`!pi`) from the owner or independently verified owner puppet MXIDs qualify.
+Do not discover authority from display names or message metadata. Puppet IDs
+are empty by default. Edits, replies/threads, attachments, encrypted messages,
+ordinary chatter and generated `Pi:` replies do not become model requests.
 
-The owner Matrix token has account-wide authority even during allowlisted tests.
-Application filters are not a server-side token scope. If the owner account is a
-homeserver administrator, its login token also inherits that authority: a new
-session does not downgrade privileges. Prefer a non-admin owner account where
-possible; do not supply an application-service token. Provisioning/activation
-requires explicit operator acceptance of this authority. A server administrator,
-compromised bridge/application service or stolen owner token is outside the
-sender-authentication boundary. Unknown puppet attribution must fail closed.
+Initial sync, newly observed rooms and limited timelines are discard-only.
+Durable per-room timestamp floors cover every observed event in skipped batches;
+replays at or before a floor remain ineligible after restart. No history fetch
+fills a limited timeline. A first command in a new room can therefore be ignored;
+only demonstrably subsequent events qualify. Origin timestamps are trusted only
+as homeserver/bridge event metadata, not as caller-supplied command arguments.
 
-One request executes at a time. Questions, replies, HTTP bodies, sync timelines,
-queue size and request age are bounded. Accepted questions/replies are stored
-privately only until their operational phase finishes; no conversational memory
-or ordinary-message history is stored. Completed tombstones expire after seven
-days; the short timestamp admission window prevents old tombstones becoming
-fresh requests. Saturation drops new commands with a content-free diagnostic.
+The transport must see incoming events to filter them. Only the question suffix
+crosses the private question/answer Unix socket: no room ID, sender, Matrix token,
+attachments or surrounding timeline. Ordinary messages are never retained.
 
-Before sending, a durable `sending` state is committed. After an uncertain HTTP
-outcome or restart in `sending`, the request becomes terminal `uncertain`; the
-service does not resend it, even with the same Matrix transaction. This favors
-no duplicate remote replies over guaranteed delivery. Matrix acceptance is not
-proof of downstream bridge delivery. Interrupted model work becomes a fixed
-failure reply, not a fresh model retry. No background history recovery is used.
+## Pi SDK execution and existing authentication
+
+The worker uses the same pinned Pi SDK as the installed Pi package. Packaging
+includes the SDK's runtime dependency tree, not merely its declarations. The
+worker runs as the existing Unix Pi user and uses the original `auth.json` through
+Pi's `ModelRuntime`; no new login, copied OAuth seed or Codex SOPS secret is needed.
+The original agent directory is bound at the same path so interactive Pi and
+the worker use the same sibling auth lock. Pi owns refresh and credential writes;
+this integration does not implement a second refresh loop or token-copy scheme.
+
+Every question creates a fresh `SessionManager.inMemory()` session and in-memory
+settings. A custom empty resource loader prevents discovery of context files,
+extensions, skills, templates and themes. Custom model files/catalog refreshes
+are disabled. Only the explicit built-in Codex model is selected; no silent
+fallback to another model or paid API-key setup. The existing Pi login must
+include ChatGPT/Codex for the web-search tool. Entitlement is a live gate.
+
+`noTools: builtin` plus an exact `web_search` allowlist prevents local tools.
+The entire registered/active tool set is checked. Search is the same tool
+factory used by the normal harness extension, defaulting to `gpt-5.6-luna`
+(independent of the answering model), with cancellable Pi-managed authentication
+and redacted errors. All callers receive the same 48,000-byte UTF-8 search text
+limit, with an explicit truncation notice. There are no additional chat-specific
+search call, concurrency, argument or HTTP-body limits. Pi chooses whether
+to call it. No request reuses another request's session or previous-response ID.
+Plain question text is passed with prompt/template/skill expansion disabled.
+Answers must finish normally; aborted/partial responses are never delivered.
+Execution is limited to four turns, ninety seconds and bounded text output.
+
+Future tools or directory access are explicit reviewed capability upgrades to
+this module, not ambient inheritance from interactive Pi. In particular, adding
+file tools requires revisiting the exposed auth-directory seam: it must not make
+Pi's credentials model-readable. There is no generic arbitrary-tools option now.
+
+## Process and persistence isolation
+
+The transport remains a systemd DynamicUser with only its Matrix LoadCredential.
+The Pi worker runs as the configured existing user, without Matrix credentials.
+A shared group permits only the bounded Unix socket. Both have private state,
+resource limits, strict filesystem protection, no privilege escalation and no
+access to host PostgreSQL sockets. The worker's home is hidden by a tmpfs, except
+for its original Pi agent directory, explicitly mounted read/write for auth
+locking. That directory is available to trusted SDK auth code, **not** a model
+file tool; no settings/resources/models are loaded from it. This is process
+isolation, not an assertion that the worker runs under a new Unix identity.
+
+Logs contain bounded operational codes, never questions, answers, credentials or
+raw backend error bodies. Node's SQLite experimental warning is benign runtime
+metadata. The worker's neutral HOME/working directory is not an engineering
+project. It does not launch the ordinary engineering CLI wrapper.
+
+The transport uses SQLite with an exclusive process lock. There is one execution
+at a time, at most eight pending requests, five-minute input admission, 8KB
+questions, 12KB answers, 5,000 operational records and a 16MiB SQLite page bound.
+Question/answer text is erased when its phase finishes; secure_delete is enabled.
+Completed tombstones expire after seven days. Saturation drops new commands with
+a content-free diagnostic, rather than storing unsolicited history.
+
+A durable `sending` phase precedes the sole Matrix PUT. Any uncertain HTTP outcome
+or restart in that phase becomes terminal `uncertain`; no automatic resend.
+Matrix acceptance is not proof of downstream bridge delivery. Interrupted model
+work becomes a fixed failure reply, not a new model run. Membership/encryption is
+checked before execution and again before sending. Configuration/token changes
+establish a new discard-only watermark and discard pending work. The TypeScript
+upgrade does so once too, retaining compatible SQLite state/tombstones without
+replaying the old Python client's events.
 
 ## Acceptance-to-evidence matrix
 
-| Requirement | Deterministic proof | Live deployment gate |
+| Requirement | Deterministic proof | Live gate |
 |---|---|---|
-| owner-only question selection | unauthorized, malformed, metadata, echo, age and relation fixtures | owner outgoing echo identity on each bridge |
-| no ambient tools/context | exact native request body, forbidden output and fresh-request tests | supported Codex model/auth and search round trip |
-| room scope/encryption | allowlist, initial/new/limited sync, state failures | new Note to Self room and native Matrix |
-| minimal durable recovery | SQLite phase/restart and uncertain-send fault injection | outage/restart with approved chats |
-| isolation | packaged worker/transport tests and generated unit assertions | NAS credential provisioning and activation |
-| linked-account replies | fixed destination and plain prefix tests | Signal/Facebook group and ordinary DM tests |
+| shared Matrix mechanics, distinct policies | shared-client account/filter/retry tests and managed regressions | engineering relay remains healthy |
+| owner-only question selection | forged sender, relation/media, age, Unicode and echo tests | Signal self echo identity |
+| no ambient capabilities/history | real SDK fake-provider tests, poisoned context/models/extension fixtures, exact registered tools | actual Pi login/model/search |
+| shared auth, no credential copying | two-process Pi auth-store locking test preserving unrelated providers; packaged worker startup | original NAS Pi login still works |
+| room scope and replay defense | first/new/limited/rejoin watermark tests across restart | repaired Note to Self only initially |
+| bounded durable recovery | SQLite phase/uncertain-send/expiry/capacity tests | approved outage/restart test |
+| linked-account replies | fixed destination/prefix, no PUT retries | Signal/Facebook ordinary DM/group tests later |
 
-The operator has repaired Signal's encrypted mirrors and management room and
-confirmed Note to Self works manually. Its old room ID is obsolete. Prior
-preflight verified one connected login and owner admin permission per bridge.
-Those facts do NOT establish automated !pi intake or full bridge acceptance.
-No personal test chats beyond the operator-approved targets may be used.
+The operator approved owner-token authority, supplied the replacement Note to
+Self room, and reports the Matrix secret pushed to the private secrets input.
+Read-only NAS metadata confirms installed Pi and a mode0600 auth file owned by
+its existing user. No credential contents were inspected. This does not prove
+model entitlement or an automated assistant round trip. Broader rooms and
+Facebook remain outside initial activation scope.
 
 ## Crash-boundary matrix
 
 | Boundary | Recovery |
 |---|---|
-| sync received before acceptance transaction | replay from previous cursor; deterministic event identity |
-| accept/advance cursor | one SQLite transaction, no ordinary messages stored |
-| queued before model | continue only while fresh; expire to a fixed reply; discard pending work on credential or authorization-policy changes |
-| running before result commit | fixed interrupted failure, never repeat the model |
-| ready before send | recheck room state and membership, then send once |
-| sending before/after HTTP acknowledgement | mark uncertain and erase text; never blind retry |
-| done before next sync | tombstone suppresses replay; fixed prefix suppresses echoes |
-| OAuth refresh before durable rotation write | reauthentication may be needed; no credential guessing |
+| sync before acceptance | replay previous cursor; deterministic identity |
+| acceptance/cursor/discard floors | one SQLite transaction |
+| queued before model | fresh only; expire to fixed reply; discard after policy change |
+| running before result commit | fixed failure, never repeat model |
+| ready before send | recheck scope, membership and encryption |
+| sending before/after acknowledgment | terminal uncertain, no blind retry |
+| completed before next sync | tombstone suppresses duplicate; prefix suppresses echo |
+| shared auth refresh | Pi's original sibling lock; no copied credential; ordinary Pi recovery if interrupted |
 
-Memory, history, workspace tools, chat provisioning, encrypted Matrix, and
-unconditional support for arbitrary bridges remain deferred. #90 stays open
-until approved live group/DM and native Matrix acceptance.
+## Operator activation
 
-## Operator activation (not performed by the agent)
+Only one new SOPS secret is needed: `pi-chat/matrix-token`, containing just the
+access token from the approved dedicated owner Matrix login. Do not paste it into
+Matrix. **Remove any old `codexAuthFile` option/declaration; it is no longer used.**
+Do not create a second Codex login or copy an interactive `auth.json`.
 
-1. Approve use of a dedicated login session for the existing Matrix owner account.
-   The token can read/send as that account, not merely in the test allowlist; if
-   that account is a homeserver admin, it also carries those privileges. This
-   is not a new bridge/bot identity and does not add remote participants.
-2. Provision `pi-chat/matrix-token`: a file containing only that dedicated
-   session's Matrix access token and an optional final newline. Do not use a
-   bridge appservice token, a password, a whole environment file, or the token
-   belonging to an actively used Element device. Never paste it into Matrix.
-3. Create a separate ChatGPT/Codex OAuth login using raw Pi with a dedicated
-   `PI_CODING_AGENT_DIR` and `/login`. Do not copy a credential whose refresh
-   token will continue to be used/refreshed by interactive Pi elsewhere.
-   Provision `pi-chat/codex-auth`: JSON with exactly one `openai-codex` property,
-   containing that login's `type: oauth`, `access`, `refresh`, `expires`, and
-   provider metadata. No other provider credentials belong in this file.
-   Use the normal private SOPS workflow; no secret values enter Nix source.
-4. Obtain the NEW Matrix room ID for repaired Note to Self. Start with only
-   this approved room and your real owner MXID. Send a synthetic `!pi` from
-   Matrix first. Then test the same command from Signal. If it appears from a
-   bridge puppet rather than the real owner MXID, verify that exact puppet's
-   remote self identity before adding it to `remoteOwnerUserIds`. Do not loosen
-   the sender check or configure every bridge sender to make a test pass.
-5. Configure the following in the NAS instance, register the two SOPS secret
-   names using existing dotfiles conventions, then activate through the normal
-   operator-controlled NAS deployment. The snippet is a template, not an
-   already applied NAS change:
+Example NAS declaration (use the supplied replacement room ID in private dotfiles):
 
 ```nix
 services.pi-harness.bridgeChat.assistant = {
-  enable = true; # only after approving credential authority and test scope
+  enable = true;
   homeserver = "https://matrix.bepis.lol";
   ownerUserId = "@beau:matrix.bepis.lol";
   matrixTokenFile = config.sops.secrets."pi-chat/matrix-token".path;
-  codexAuthFile = config.sops.secrets."pi-chat/codex-auth".path;
+  modelUser = config.hostSpec.username;
+  piAgentDirectory = "${config.hostSpec.home}/.pi/agent";
   roomIds = [ "!REPLACEMENT_NOTE_TO_SELF_ROOM:matrix.bepis.lol" ];
-  remoteOwnerUserIds = [ ]; # exact independently verified self puppets only
+  remoteOwnerUserIds = [ ];
   allJoinedRooms = false;
-  model = "gpt-5.4"; # verify this account's entitlement; no silent fallback
+  model = "gpt-5.4";
 };
 ```
 
-6. Check `pi-chat-model.service` and `pi-chat-transport.service`. Their journals
-   contain only bounded operational codes, not prompts, answers or credentials.
-   `model_socket_ready` means local readiness, not backend authentication proof;
-   wait for `watermark_initialized` before sending test commands. `matrix_reply_accepted`
-   means only Matrix accepted the event, not that Signal/Facebook delivered it.
-7. Test direct answers, a current-facts question requiring web search, failures,
-   forbidden-tool instructions, and owner/other-participant trigger isolation.
-   Extend the allowlist only to approved Signal/Facebook groups and ordinary
-   DMs and a native unencrypted Matrix room. Only after acceptance consider
-   `allJoinedRooms = true`. Neither service invites itself into inaccessible rooms.
+Ensure the consuming private secrets input includes the new Matrix secret, then
+activate through the normal operator-controlled NAS workflow. The agent must not
+inspect the private secrets repository or evaluate/build/restart host configs.
 
-Recreating a portal changes its ID: update the allowlist. Changes to credentials
-or transport configuration establish a new discard-only watermark and discard
-pending work. A first command in a newly observed room is intentionally ignored;
-subsequent fresh events are eligible. Limited sync timelines are not backfilled.
-Changing to a new Codex seed replaces the worker's saved credential on restart;
-otherwise durable refreshed credentials survive restarts. An interrupted OAuth
-rotation can require a new dedicated login.
+Check `pi-chat-model.service` and `pi-chat-transport.service`. Wait for
+`watermark_initialized` before testing. `model_socket_ready` means only local SDK
+readiness, not provider verification. `matrix_reply_accepted` does not prove
+remote delivery. Start with a Matrix-origin !pi in Note to Self, then one from
+Signal, then direct/search/forbidden-tool/cancellation/restart cases. If the
+Signal command has a self-puppet sender, verify its exact owner mapping before
+configuring it; do not accept all bridge senders to make a test pass.
 
-To stop the assistant, disable the option and deploy normally. Do not reset
-Signal/Facebook logins or delete portals as assistant recovery. The private
-`pi-chat-model` state contains refreshed OAuth credentials; `pi-chat-transport`
-state contains only bounded operational requests/tombstones. Never share either
-state directory or raw credential files in a diagnostic report.
+Do not widen room scope until acceptance. Do not reset bridge logins or delete
+portals as assistant recovery. Keep #90 open until approved live acceptance;
+memory, history, workspace tools, encrypted Matrix and general group provisioning
+remain deferred.
 
-## Deterministic verification
+## Verification
 
-`nix build .#checks.x86_64-linux.bridge-chat --no-link` runs transport admission,
-SQLite crash/replay tests, worker HTTP/capability/credential tests, an actual
-packaged worker startup and generated Nix service-isolation assertions. It is
-also included in `nix run .#verify`. `nix build .#bridge-chat --no-link` builds the
-production pair without enabling them or touching a host configuration.
+`nix build .#checks.x86_64-linux.bridge-chat --no-link` exercises the actual SDK,
+chat store, private socket, shared login locking and packaged worker using only
+fake credentials/model output. Shared Matrix tests belong to unit-tests; managed
+regressions cover existing consumers. All are included in `nix run .#verify`.
+`nix build .#bridge-chat --no-link` builds the production pair without activation.

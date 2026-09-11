@@ -162,7 +162,8 @@ let
       find ${testBuild}/build/tests -maxdepth 1 -type f -name '*.test.js' \
         ! -name 'eval-*.test.js' \
         ! -name 'lsp-live.test.js' \
-        ! -name 'managed-session-*.test.js' | sort
+        ! -name 'managed-session-*.test.js' \
+        ! -name 'bridge-chat-*.test.js' | sort
     '';
     environment = ''
       export PI_HARNESS_JQ=${lib.getExe pkgs.jq}
@@ -427,7 +428,8 @@ let
           ownerUserId = "@owner:example.com";
           roomIds = [ "!test:example.com" ];
           matrixTokenFile = "/run/secrets/chat-matrix";
-          codexAuthFile = "/run/secrets/chat-codex";
+          modelUser = "operator";
+          piAgentDirectory = "/home/operator/.pi/agent";
         };
       }
     ];
@@ -439,20 +441,32 @@ let
       modules = [ { services.pi-harness.bridgeChat.assistant.roomIds = lib.mkForce [ ]; } ];
     }).config.assertions);
     rejectsStoreSecret = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
-      modules = [ { services.pi-harness.bridgeChat.assistant.codexAuthFile = lib.mkForce "/nix/store/unsafe"; } ];
+      modules = [ { services.pi-harness.bridgeChat.assistant.piAgentDirectory = lib.mkForce "/nix/store/unsafe"; } ];
     }).config.assertions);
   });
   bridgeChatTests = pkgs.runCommand "pi-bridge-chat-tests" {
-    nativeBuildInputs = [ pkgs.python3 pkgs.nodejs pkgs.jq ];
+    nativeBuildInputs = [ pkgs.nodejs pkgs.jq ];
   } ''
-    ${prepareSource}
-    python3 -m unittest discover -s tests -p test_bridge_chat_transport.py -v
-    BRIDGE_CHAT_PACKAGE=${import ./bridge-chat-package.nix { inherit pkgs piPackage; }} node --test tests/bridge-chat-model.test.mjs
+    export HOME="$TMPDIR/home"
+    mkdir -p "$HOME"
+    export NODE_PATH=${piPackage}/lib/node_modules:${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules
+    export BRIDGE_CHAT_PACKAGE=${import ./bridge-chat-package.nix { inherit pkgs piPackage; }}
+    cp -R ${testBuild}/build "$TMPDIR/chat-tests"
+    chmod -R u+w "$TMPDIR/chat-tests"
+    mkdir -p "$TMPDIR/chat-tests/node_modules/@earendil-works"
+    ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-coding-agent"
+    ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-ai"
+    node --test "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
     jq -e '(.assertions | all) and .rejectsEmptyScope and .rejectsStoreSecret
-      and .services["pi-chat-model"].serviceConfig.LoadCredential == ["codex:/run/secrets/chat-codex"]
+      and (.services["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
+      and .services["pi-chat-model"].serviceConfig.User == "operator"
+      and .services["pi-chat-model"].serviceConfig.DynamicUser == false
+      and .services["pi-chat-model"].serviceConfig.ProtectHome == "tmpfs"
+      and .services["pi-chat-model"].serviceConfig.BindPaths == ["/home/operator/.pi/agent"]
+      and .services["pi-chat-model"].serviceConfig.ReadWritePaths == ["/home/operator/.pi/agent"]
+      and .services["pi-chat-transport"].serviceConfig.DynamicUser
       and .services["pi-chat-transport"].serviceConfig.LoadCredential == ["matrix:/run/secrets/chat-matrix"]
-      and (.services | all(.serviceConfig.DynamicUser and .serviceConfig.ProtectHome
-        and .serviceConfig.ProtectSystem == "strict" and .serviceConfig.StateDirectoryMode == "0700"
+      and (.services | all(.serviceConfig.ProtectSystem == "strict" and .serviceConfig.StateDirectoryMode == "0700"
         and (.serviceConfig.InaccessiblePaths | index("-/run/postgresql")) != null
         and (.serviceConfig | has("EnvironmentFile") | not)))' ${bridgeChatReport}
     touch "$out"

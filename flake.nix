@@ -54,13 +54,12 @@
           patches = (old.patches or [ ]) ++ [ ./nix/patches/pi-prompt-expanded-hook.patch ];
           postInstall = (old.postInstall or "") + ''
             sdk_root="$out/lib/node_modules/@earendil-works/pi-coding-agent"
-            mkdir -p "$sdk_root/node_modules/@earendil-works" "$sdk_root/node_modules/@types"
+            mkdir -p "$sdk_root"
             cp -R dist package.json "$sdk_root/"
-            cp -R node_modules/typebox "$sdk_root/node_modules/typebox"
-            cp -R node_modules/@types/node "$sdk_root/node_modules/@types/node"
-            for dependency in pi-agent-core pi-ai pi-tui; do
-              cp -R "node_modules/@earendil-works/$dependency" "$sdk_root/node_modules/@earendil-works/$dependency"
-            done
+            # The chat worker imports the real SDK, not only declaration files.
+            # Keep its pinned dependency tree so ESM imports resolve without
+            # ambient NODE_PATH, an engineering launcher, or another installation.
+            cp -R node_modules "$sdk_root/"
           '';
         });
         agentgraphPackage = agentgraph.packages.${system}.ag-unchecked;

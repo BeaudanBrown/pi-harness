@@ -18,7 +18,7 @@ layout remains external and uses regular tmux through fixed host-owned actions.
 - a NixOS module named `nixosModules.pi-harness`
 - a packaged `pi-managed-session-relay` host-runtime executable
 - an opt-in [read-only bridge preflight](docs/bridge-chat-preflight.md) NixOS service
-- a separately isolated [stateless `!pi` chat assistant](docs/bridge-chat-assistant.md), disabled by default and awaiting per-bridge live acceptance
+- a separately isolated [stateless `!pi` chat assistant](docs/bridge-chat-assistant.md), sharing Matrix infrastructure and the existing Pi login, with web-search-only SDK sessions; disabled by default and awaiting per-bridge live acceptance
 - shared Pi resources under `config/agent/`
 - a small web search extension under `config/agent/extensions/web-search`
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
@@ -555,7 +555,10 @@ The included `web_search` extension registers a Pi tool for current web
 research. It uses Pi's ChatGPT Plus/Pro (Codex) OAuth login and Codex's native
 web-search backend, rather than an OpenAI API key. Log in through `/login` and
 select ChatGPT Plus/Pro (Codex). The delegated search model defaults to
-`gpt-5.4-mini`; set `PI_CODEX_WEB_SEARCH_MODEL` to override it.
+`gpt-5.6-luna`; set `PI_CODEX_WEB_SEARCH_MODEL` to override it. Search result
+text is capped at 48,000 UTF-8 bytes, including a truncation notice, before it
+enters the calling model's context. This policy is shared by all callers; it does
+not cap query/domain inputs or HTTP response bytes.
 
 The Codex backend is not a public OpenAI API. Pi keeps the OAuth credential
 refreshed, but an upstream backend or model-entitlement change can require a

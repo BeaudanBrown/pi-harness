@@ -23,6 +23,7 @@ stdenv.mkDerivation {
     cp config/agent/extensions/managed-sessions/checkpoint.ts source/managed-sessions/checkpoint.ts
     cp config/agent/extensions/managed-sessions/aloop-lifecycle.ts source/managed-sessions/aloop-lifecycle.ts
     cp -R config/agent/extensions/managed-sessions/relay source/managed-sessions/relay
+    cp -R config/agent/extensions/matrix-shared source/matrix-shared
     cat > tsconfig.json <<EOF
     {
       "compilerOptions": {
@@ -56,6 +57,7 @@ stdenv.mkDerivation {
     runHook preInstall
     mkdir -p "$out/lib/node_modules" "$out/libexec" "$out/bin"
     cp -R lib/managed-sessions "$out/lib/managed-sessions"
+    cp -R lib/matrix-shared "$out/lib/matrix-shared"
     cp -R ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$out/lib/node_modules/typebox"
     cp pi-managed-session-peer-uid "$out/libexec/pi-managed-session-peer-uid"
     cp pi-managed-session-relay-lock "$out/libexec/pi-managed-session-relay-lock"
