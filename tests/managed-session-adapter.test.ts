@@ -16,6 +16,9 @@ import {
 	type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { ActivityProjector } from "../config/agent/extensions/managed-sessions/relay/activity-projector.js";
+import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
+import type { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { createManagedSessionAdapterExtension } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
@@ -68,6 +71,8 @@ function custom(id: string, customType: string, data: unknown) {
 class FakeRelay {
 	readonly frames: ManagedSessionEnvelope[] = [];
 	readonly interruptedActivities = new Set<string>();
+	projectActivity?: (envelope: ManagedSessionEnvelope) => Promise<"updated" | "finalized">;
+	beforeActivityAck?: (socket: Socket, envelope: ManagedSessionEnvelope) => Promise<void>;
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
@@ -147,6 +152,18 @@ class FakeRelay {
 		} else if (envelope.type === "control.result") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "control.result", status: "ok" } }));
 		} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
+			if (this.projectActivity) {
+				void (async () => {
+					try {
+						const status = await this.projectActivity!(envelope);
+						await this.beforeActivityAck?.(socket, envelope);
+						if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status } }));
+					} catch (error) {
+						if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: (error as { code?: string }).code ?? "invalid_state", message: String((error as Error).message), retryable: false } }));
+					}
+				})();
+				return;
+			}
 			if (this.interruptedActivities.has(String(envelope.payload.activityId))) {
 				socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "activity_interrupted", message: "Activity was interrupted", retryable: false } }));
 				return;
@@ -606,6 +623,119 @@ test("durable control execution closes compaction and stop crash windows without
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.equal(aborts, 1); assert.equal(shutdowns, 1, "same-process acknowledgement replay does not repeat the stop effect");
 	await stopRecovery.handlers.get("session_shutdown")!({ reason: "quit" }, stopRecovery.ctx);
+});
+
+async function activityIntegration(t: { after(fn: () => Promise<void>): void }) {
+	const relay = await FakeRelay.start(); const errors: string[] = []; const notices: string[] = [];
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "fixture", botUserId: "@bot:example.com", operatorUserId: "@owner:example.com" }, async () => Response.json({ event_id: "$card" }), ["!card:example.com"]);
+	const projector = new ActivityProjector(join(relay.root, "activity-state"), { manifestByConversationId: () => ({ roomId: "!card:example.com" }) } as unknown as RelayRegistry, matrix);
+	relay.projectActivity = async envelope => { try { return await projector.project(envelope); } catch (error) { errors.push((error as Error).message); throw error; } };
+	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
+	let leaf = "binding", sequence = 0;
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined, registerTool: () => undefined, getCommands: () => [],
+		appendEntry: (type: string, data: unknown) => { const id = `custom-${++sequence}`; branch.push({ ...custom(id, type, data), parentId: leaf }); leaf = id; }, sendUserMessage: () => undefined, sendMessage: () => undefined } as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: true, ui: { setStatus() {}, notify(message: string) { notices.push(message); } }, isIdle: () => true, hasPendingMessages: () => false, abort() {}, shutdown() {}, getContextUsage: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf, getSessionFile: () => "/tmp/fixture.jsonl", getSessionDir: () => "/tmp" } };
+	t.after(async () => { await handlers.get("session_shutdown")!({ reason: "quit" }, ctx); await projector.close(); await relay.close(); });
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const start = async () => {
+		const id = `user-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content: "fixture" } }); leaf = id;
+		await handlers.get("agent_start")!({}, ctx);
+	};
+	const answer = () => { const id = `answer-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "assistant", content: "fixture answer", stopReason: "stop" } }); leaf = id; };
+	return { relay, errors, notices, start, answer, handlers, ctx, settle: () => handlers.get("agent_settled")!({}, ctx), frames: () => relay.frames.filter(e => e.type.startsWith("activity.")) };
+}
+async function activityWait(predicate: () => boolean, timeoutMs = 3000) {
+	for (let i = 0; i < timeoutMs / 10 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.ok(predicate(), "activity condition timed out");
+}
+
+test("real adapter/projector single-flight overlapping settlement", async t => {
+	const f = await activityIntegration(t); await f.start(); f.answer();
+	await Promise.all([f.settle(), f.settle()]);
+	assert.deepEqual(f.errors, []); assert.deepEqual(f.notices, []);
+	assert.equal(f.frames().filter(e => e.type === "activity.finalize").length, 1);
+});
+
+test("real adapter/projector replays an identical final after acceptance-before-ack disconnect", async t => {
+	const f = await activityIntegration(t); let dropped = false;
+	f.relay.beforeActivityAck = async (socket, e) => { if (e.type === "activity.finalize" && !dropped) { dropped = true; socket.destroy(); } };
+	await f.start(); f.answer(); await f.settle();
+	await activityWait(() => f.frames().filter(e => e.type === "activity.finalize").length >= 2 || f.errors.length > 0);
+	await f.settle();
+	assert.deepEqual(f.errors, []);
+	const finals = f.frames().filter(e => e.type === "activity.finalize"); assert.ok(finals.length >= 2);
+	for (const frame of finals.slice(1)) assert.deepEqual(frame.payload, finals[0].payload, "retry must retain revision and all final statistics");
+	const firstFinal = f.frames().findIndex(e => e.type === "activity.finalize");
+	assert.ok(f.frames().slice(firstFinal).every(e => e.type === "activity.finalize"), "closing spans never become busy on reconnect");
+	await f.start(); f.answer(); await f.settle();
+	assert.deepEqual(f.errors, []); assert.notEqual(f.frames().at(-1)!.payload.activityId, finals[0].payload.activityId);
+});
+
+test("old final acknowledgment cannot absorb or clear a newly started activity", async t => {
+	const f = await activityIntegration(t); let release!: () => void; let blocked = false;
+	const gate = new Promise<void>(resolve => { release = resolve; });
+	f.relay.beforeActivityAck = async (_socket, e) => { if (e.type === "activity.finalize" && !blocked) { blocked = true; await gate; } };
+	await f.start(); f.answer(); const oldSettlement = f.settle();
+	try {
+		await activityWait(() => blocked);
+		await f.start();
+		const updates = f.frames().filter(e => e.type === "activity.update");
+		assert.equal(updates.length, 2); assert.notEqual(updates[0].payload.activityId, updates[1].payload.activityId);
+	} finally { release(); await oldSettlement; }
+	f.answer(); await f.settle();
+	const finals = f.frames().filter(e => e.type === "activity.finalize");
+	assert.equal(finals.length, 2); assert.notEqual(finals[0].payload.activityId, finals[1].payload.activityId);
+	assert.deepEqual(f.errors, []); assert.deepEqual(f.notices, []);
+});
+
+test("closing feedback retries on a healthy connection and keeps refresh busy until acknowledged", async t => {
+	const f = await activityIntegration(t); const attempts: number[] = [];
+	f.relay.beforeActivityAck = async (_socket, e) => {
+		if (e.type === "activity.finalize") {
+			attempts.push(performance.now());
+			if (attempts.length <= 3) throw Error("fixture acknowledgment failure");
+		}
+	};
+	await f.start(); f.answer(); await f.settle();
+	f.relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "closing-refresh", conversationId, role: "relay", type: "refresh.request", payload: { refreshId: "closing-refresh" } });
+	await activityWait(() => f.relay.frames.some(e => e.type === "refresh.result"));
+	assert.equal(f.relay.frames.find(e => e.type === "refresh.result")!.payload.status, "busy");
+	await activityWait(() => attempts.length >= 4, 10000);
+	for (let i = 1; i < 4; i++) assert.ok(attempts[i] - attempts[i - 1] >= 900 * 2 ** (i - 1), "backoff must not reset before finalization succeeds");
+	await activityWait(() => f.relay.frames.some(e => e.type === "transcript.offer" && e.payload.kind === "assistant_final"));
+	const finals = f.frames().filter(e => e.type === "activity.finalize");
+	for (const retry of finals.slice(1)) assert.deepEqual(retry.payload, finals[0].payload);
+	assert.deepEqual(f.errors, []);
+});
+
+test("new answer remains behind its own closing activity while an older final is pending", async t => {
+	const f = await activityIntegration(t); let release!: () => void; let blocked = false;
+	const gate = new Promise<void>(resolve => { release = resolve; });
+	f.relay.beforeActivityAck = async (_socket, e) => { if (e.type === "activity.finalize" && !blocked) { blocked = true; await gate; } };
+	await f.start(); f.answer(); const first = f.settle(); let second: Promise<void> | undefined;
+	try {
+		await activityWait(() => blocked); await f.start(); f.answer(); second = f.settle();
+		assert.equal(f.relay.frames.filter(e => e.type === "transcript.offer" && e.payload.kind === "assistant_final").length, 0);
+	} finally { release(); await first; await second; }
+	const lastFinal = f.relay.frames.lastIndexOf(f.frames().filter(e => e.type === "activity.finalize").at(-1)!);
+	assert.equal(f.frames().filter(e => e.type === "activity.finalize").length, 2);
+	assert.ok(f.relay.frames.findIndex(e => e.type === "transcript.offer" && e.payload.kind === "assistant_final") > lastFinal);
+	assert.deepEqual(f.errors, []);
+});
+
+test("closing backlog bounds feedback only and drains without losing frozen finals", async t => {
+	const f = await activityIntegration(t), project = f.relay.projectActivity!; let fail = true;
+	f.relay.projectActivity = e => fail && e.type === "activity.finalize" ? Promise.reject(Error("fixture outage")) : project(e);
+	for (let i = 0; i < 35; i++) { await f.start(); f.answer(); await f.settle(); }
+	assert.equal(f.frames().filter(e => e.type === "activity.update").length, 32);
+	fail = false; await f.settle();
+	assert.equal(new Set(f.frames().filter(e => e.type === "activity.finalize").map(e => e.payload.activityId)).size, 32);
+	await f.start(); f.answer(); await f.settle();
+	assert.equal(f.frames().filter(e => e.type === "activity.update").length, 33);
+	assert.deepEqual(f.errors, []);
 });
 
 test("activity lifecycle is one redacted busy span across parallel tools, retries, compaction, and follow-ups", async (t) => {

@@ -154,6 +154,16 @@ interface BusyActivity {
 	toolCounts: Map<string, number>; activeTools: Map<string, string>; failedTools: Set<string>; timer?: NodeJS.Timeout; work: Promise<void>;
 }
 
+interface ClosingActivity {
+	span: BusyActivity;
+	conversationId: string;
+	generation: number;
+	snapshot: Record<string, unknown>;
+	final?: Record<string, unknown>;
+	run?: Promise<void>;
+}
+const MAX_CLOSING_ACTIVITIES = 32;
+
 interface AdapterEnvironment {
 	socketPath: string;
 	attachmentNonce?: string;
@@ -242,6 +252,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const persistedRecoveryPending = new Set<string>();
 		const expandedRecoveryPending = new Set<string>();
 		let activity: BusyActivity | undefined;
+		const closingActivities = new Set<ClosingActivity>();
 		let selectedModel: string | undefined;
 		let selectedThinking: string | undefined;
 		const controlResults = new Map<string, ControlResult>();
@@ -287,17 +298,17 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const activityTools = (span: BusyActivity) => [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({
 			name, count, state: [...span.activeTools.values()].includes(name) ? "running" as const : span.failedTools.has(name) ? "error" as const : "completed" as const,
 		}));
-		const publishActivity = async (span: BusyActivity, payload: Record<string, unknown>, finalize = false): Promise<void> => {
+		const publishActivity = async (span: BusyActivity, payload: Record<string, unknown>): Promise<void> => {
 			const target = client;
 			if (!target?.connected || !binding) return;
-			const send = () => target.updateActivity({ ...payload, activityId: span.activityId, revision: ++span.revision }, finalize);
+			const send = () => target.updateActivity({ ...payload, activityId: span.activityId, revision: ++span.revision });
 			try { await send(); }
 			catch (error) {
 				if (!(error instanceof ManagedAdapterError) || error.code !== "activity_interrupted" || activity !== span || !target.connected) throw error;
 				// The old card is immutable. A deterministic continuation preserves run
 				// counters and retry identity without creating another model turn.
 				span.activityId = deriveActivityId(deriveGenerationId(binding.conversationId, target.generation ?? 1), `continuation:${span.activityId}`);
-				span.revision = finalize ? 0 : -1;
+				span.revision = -1;
 				await send();
 			}
 		};
@@ -315,25 +326,57 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (immediate) { if (span.timer) clearTimeout(span.timer); send(); return; }
 			if (!span.timer) { span.timer = setTimeout(send, 750); span.timer.unref(); }
 		};
-		const finalizeActivity = async (ctx: ExtensionContext, outcome?: ActivityOutcome): Promise<void> => {
+		// Claim the span synchronously, before settlement awaits transcript work.
+		// A new agent run can now own a different active span while this one closes.
+		const captureFinalizations = (ctx: ExtensionContext, outcome?: ActivityOutcome): ClosingActivity[] => {
 			const span = activity;
-			if (!span || role !== "ordinary_adapter") return;
+			if (!span || role !== "ordinary_adapter" || !binding) return [...closingActivities];
+			activity = undefined;
 			if (span.timer) { clearTimeout(span.timer); span.timer = undefined; }
-			await span.work;
-			if (!client?.connected || activity !== span) { activity = undefined; return; }
 			const context = ctx.getContextUsage();
 			const used = context?.tokens;
 			const limit = ctx.model?.contextWindow;
 			const contextSnapshot = typeof used === "number" && typeof span.startContext === "number" && typeof limit === "number" &&
 				Number.isFinite(limit) && limit > 0 && used >= 0 && used <= limit
 				? { usedTokens: used, remainingTokens: limit - used, limitTokens: limit, deltaTokens: used - span.startContext } : undefined;
-			await publishActivity(span, {
+			const snapshot = {
 				outcome: outcome ?? span.requestedOutcome ?? "completed", durationMs: Math.max(0, Date.now() - span.startedAt),
 				...(ctx.model ? { model: `${ctx.model.provider}/${ctx.model.id}` } : {}), ...(ctx.thinkingLevel ? { thinking: ctx.thinkingLevel } : {}), generation: client?.generation ?? 1,
 				...(contextSnapshot ? { context: contextSnapshot } : {}), run: { inputTokens: span.inputTokens, outputTokens: span.outputTokens, modelTurns: span.modelTurns },
 				tools: { total: span.toolTotal, errors: span.toolErrors, counts: [...span.toolCounts].sort(([left], [right]) => left.localeCompare(right)).slice(0, 64).map(([name, count]) => ({ name, count })) }, compactions: span.compactions,
-			}, true);
-			activity = undefined;
+			};
+			closingActivities.add({ span, conversationId: binding.conversationId, generation: client?.generation ?? 1, snapshot });
+			return [...closingActivities];
+		};
+		const sendFinalization = (closing: ClosingActivity): Promise<void> => {
+			if (closing.run) return closing.run;
+			if (!closingActivities.has(closing)) return Promise.resolve();
+			const run = (async () => {
+				await closing.span.work;
+				const target = client;
+				if (!target?.connected) return; // Reconnect will drain the same closing records.
+				if (!binding || binding.conversationId !== closing.conversationId || (target.generation ?? 1) !== closing.generation) {
+					throw new ManagedAdapterError("Activity finalization binding changed", "invalid_state");
+				}
+				const freeze = () => closing.final ??= Object.freeze({ ...closing.snapshot, activityId: closing.span.activityId, revision: ++closing.span.revision });
+				try { await target.updateActivity(freeze(), true); }
+				catch (error) {
+					if (!(error instanceof ManagedAdapterError) || error.code !== "activity_interrupted" || !target.connected) throw error;
+					// Only an authoritative interruption permits a new identity. An
+					// uncertain completed final always replays its exact frozen payload.
+					closing.span.activityId = deriveActivityId(deriveGenerationId(closing.conversationId, closing.generation), `continuation:${closing.span.activityId}`);
+					closing.span.revision = 0;
+					closing.final = undefined;
+					await target.updateActivity(freeze(), true);
+				}
+				closingActivities.delete(closing); // Never clear another run's active span.
+			})();
+			closing.run = run;
+			void run.finally(() => { if (closing.run === run) closing.run = undefined; }).catch(() => undefined);
+			return run;
+		};
+		const finishFinalizations = async (closings: ClosingActivity[]): Promise<void> => {
+			for (const closing of closings) await sendFinalization(closing);
 		};
 
 		const worktreeCreationKey = (rootKey: string, workspace: string, baseRef: string, branch: string): string =>
@@ -592,6 +635,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 			for (const entry of plan.entries) {
 				if (localUsersOnly && entry.kind !== "local_user") continue;
+				if (entry.kind === "assistant_final" && closingActivities.size) continue;
 				if (entry.kind === "assistant_final" && (isAloopLifecycleActive(projectionBinding.sessionId) || privateAloopEntries.has(entry.piEntryKey))) {
 					recordProjectionMarker(ctx, { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
 						kind: entry.kind, status: "blocked", reason: "aloop_private" });
@@ -626,6 +670,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}
 				recordProjectionMarker(ctx, { ...marker, status: "projected" });
 			}
+			if (localUsersOnly || closingActivities.size) return;
 			projectionRetryAttempt = 0;
 			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);
 			projectionRetryTimer = undefined;
@@ -654,8 +699,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				while (projectionRequestedContext) {
 					const requestedContext = projectionRequestedContext;
 					projectionRequestedContext = undefined;
-					try { await projectAloopLifecycle(requestedContext); await projectEligibleEntries(requestedContext); }
-					catch (error) { notify(requestedContext, error instanceof Error ? error.message : "Managed transcript projection failed", "error"); }
+					try {
+						await projectAloopLifecycle(requestedContext);
+						await projectEligibleEntries(requestedContext, true);
+						await finishFinalizations([...closingActivities]);
+						await projectEligibleEntries(requestedContext);
+					}
+					catch (error) { notify(requestedContext, error instanceof Error ? error.message : "Managed transcript projection failed", "error"); scheduleProjectionRetry(requestedContext); }
 				}
 			})().finally(() => { projectionRun = undefined; });
 		}
@@ -887,7 +937,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
 			if (envelope.type === "refresh.request") {
-				const idle = () => ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !inFlightDeliveries.size && !pendingUserPersistence.length;
+				const idle = () => ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !closingActivities.size && !inFlightDeliveries.size && !pendingUserPersistence.length;
 				if (role !== "ordinary_adapter" || !client) throw new ManagedAdapterError("Refresh requires a managed project");
 				const ready = idle();
 				await client.refreshResult(String(envelope.payload.refreshId), ready ? "ready" : "busy");
@@ -961,6 +1011,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				// tmux launcher only forwards the canonical workspace path.
 				if (next.placement) config.placement = next.placement;
 				if (activity) sendActivityUpdate(activity, true);
+				await finishFinalizations([...closingActivities]);
 				setCheckpointActive(true);
 				reconnectAttempt = 0;
 				replayAcknowledgements();
@@ -1006,6 +1057,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		pi.on("session_start", async (event, ctx) => {
+			closingActivities.clear(); // Session-local feedback never crosses a binding/session switch.
 			stopped = false;
 			setCheckpointActive(false);
 			currentContext = ctx;
@@ -1080,6 +1132,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		pi.on("agent_start", async (_event, ctx) => {
 			if (role !== "ordinary_adapter" || !binding || activity) return;
+			// Bound feedback retention during prolonged outages, not model execution.
+			if (closingActivities.size >= MAX_CLOSING_ACTIVITIES) return;
 			const source = ctx.sessionManager.getLeafId();
 			if (!source) return;
 			const span: BusyActivity = {
@@ -1112,6 +1166,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("session_compact_failed", (event) => { if (activity) { if (!event.aborted) activity.requestedOutcome = "failed"; sendActivityUpdate(activity, true); } });
 
 		pi.on("agent_settled", async (_event, ctx) => {
+			const finalizations = captureFinalizations(ctx);
 			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
 				const marker = pendingUserPersistence[index]!;
 				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
@@ -1129,11 +1184,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			activeDeliveries.clear();
 			if (projectionRun) await projectionRun;
 			await projectEligibleEntries(ctx, true);
-			try { await finalizeActivity(ctx); }
-			catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed activity finalization failed", "error"); return; }
+			try { await finishFinalizations(finalizations); }
+			catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed activity finalization failed", "error"); scheduleProjectionRetry(ctx); return; }
 			await projectEligibleEntries(ctx);
 			await aloopProjectionWork;
-			clearAloopLifecycle(ctx.sessionManager.getSessionId());
+			if (!activity && !closingActivities.size) clearAloopLifecycle(ctx.sessionManager.getSessionId());
 		});
 
 		pi.on("session_shutdown", async (event, ctx) => {
@@ -1141,7 +1196,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			unsubscribeAloopLifecycle();
 			unregisterAloopCheckpointDelegate();
 			clearAloopLifecycle(ctx.sessionManager.getSessionId());
-			if (activity) await finalizeActivity(ctx, activity.requestedOutcome ?? "interrupted").catch(() => undefined);
+			await finishFinalizations(captureFinalizations(ctx, activity?.requestedOutcome ?? "interrupted")).catch(() => undefined);
 			if (reconnectTimer) clearTimeout(reconnectTimer);
 			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);
 			reconnectTimer = undefined;
