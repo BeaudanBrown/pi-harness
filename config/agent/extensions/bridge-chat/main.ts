@@ -4,6 +4,13 @@ import { createHash } from "node:crypto";
 import { matrixDelay } from "../matrix-shared/http.js";
 import { OwnerMatrix, Store, object, validateConfig } from "./transport.js";
 import { modelAnswer } from "./socket.js";
+import { transportFailure, type TransportStage } from "./diagnostics.js";
+
+let stage: TransportStage = "configuration";
+function enterStage(next: TransportStage): void {
+	stage = next;
+	console.log(JSON.stringify({ event: "transport_stage", stage }));
+}
 
 export function readToken(filename: string): string {
 	const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
@@ -15,19 +22,27 @@ export function readToken(filename: string): string {
 }
 async function main(): Promise<void> {
 	process.umask(0o077);
+	enterStage("configuration");
 	const config = validateConfig(JSON.parse(fs.readFileSync(process.argv[2], "utf8")));
+	enterStage("credential_read");
 	const token = readToken(path.join(process.env.CREDENTIALS_DIRECTORY!, "matrix"));
+	enterStage("matrix_client");
 	const matrix = new OwnerMatrix({ homeserver: config.homeserver, accessToken: token });
 	const stop = new AbortController();
 	process.on("SIGTERM", () => stop.abort());
+	enterStage("identity_request");
 	const identity = object(await matrix.http.request("GET", "/_matrix/client/v3/account/whoami", undefined, stop.signal));
+	enterStage("identity_validation");
 	if (identity.user_id !== config.ownerUserId || identity.is_guest === true || typeof identity.device_id !== "string" || !identity.device_id) throw Error("Dedicated owner login required");
+	enterStage("database_open");
 	const store = new Store(path.join(process.env.STATE_DIRECTORY!, "requests.sqlite"));
-	// Versioned policy also discards pre-TypeScript pending work without replaying history.
-	const fingerprint = createHash("sha256").update("typescript-v1:" + JSON.stringify(config) + token).digest("hex");
-	let fresh = store.get("identity") !== fingerprint || !store.get("cursor");
-	if (fresh) store.resetPolicy();
 	try {
+		enterStage("policy_initialization");
+		// Versioned policy also discards pre-TypeScript pending work without replaying history.
+		const fingerprint = createHash("sha256").update("typescript-v1:" + JSON.stringify(config) + token).digest("hex");
+		let fresh = store.get("identity") !== fingerprint || !store.get("cursor");
+		if (fresh) store.resetPolicy();
+		enterStage("running");
 		while (!stop.signal.aborted) {
 			try {
 				const batch = await matrix.sync(fresh ? "" : store.get("cursor"), [config.ownerUserId, ...config.remoteOwnerUserIds], store.pending(), stop.signal);
@@ -45,4 +60,4 @@ async function main(): Promise<void> {
 		}
 	} finally { store.close(); }
 }
-void main().catch(() => { console.error("pi-chat-transport: stopped (details redacted)"); process.exitCode = 1; });
+void main().catch(error => { console.error(transportFailure(stage, error)); process.exitCode = 1; });

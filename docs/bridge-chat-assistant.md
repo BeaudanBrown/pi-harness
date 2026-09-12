@@ -172,8 +172,21 @@ Ensure the consuming private secrets input includes the new Matrix secret, then
 activate through the normal operator-controlled NAS workflow. The agent must not
 inspect the private secrets repository or evaluate/build/restart host configs.
 
-Check `pi-chat-model.service` and `pi-chat-transport.service`. Wait for
-`watermark_initialized` before testing. `model_socket_ready` means only local SDK
+Check `pi-chat-model.service` and `pi-chat-transport.service`. Transport startup
+emits `transport_stage` events before `configuration`, `credential_read`,
+`matrix_client`, `identity_request`, `identity_validation`, `database_open`,
+`policy_initialization`, and `running`. A fatal `transport_failed` event identifies
+the last stage, an allowlisted error code (or `unknown`), and a bounded HTTP status
+when available. Stages indicate entry, not successful completion; `running` does
+not prove sync or model readiness. These diagnostics never include error messages,
+stacks, causes, credentials, paths, response bodies, or conversation contents.
+They do not alter retry, authorization, or state handling. Inspect them with:
+
+```bash
+sudo journalctl -u pi-chat-transport.service --since "15 minutes ago" --no-pager -o cat
+```
+
+Wait for `watermark_initialized` before testing. `model_socket_ready` means only local SDK
 readiness, not provider verification. `matrix_reply_accepted` does not prove
 remote delivery. Start with a Matrix-origin !pi in Note to Self, then one from
 Signal, then direct/search/forbidden-tool/cancellation/restart cases. If the
