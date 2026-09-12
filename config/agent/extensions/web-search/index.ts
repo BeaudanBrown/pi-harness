@@ -4,7 +4,7 @@ import { Type } from "typebox";
 
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const DEFAULT_MODEL = "gpt-5.6-luna";
-const SEARCH_TIMEOUT_MS = 60_000;
+const SEARCH_TIMEOUT_MS = 3 * 60_000;
 export const MAX_SEARCH_CONTEXT_BYTES = 48_000;
 
 const WebSearchParams = Type.Object({
