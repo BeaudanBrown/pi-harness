@@ -172,6 +172,13 @@ Ensure the consuming private secrets input includes the new Matrix secret, then
 activate through the normal operator-controlled NAS workflow. The agent must not
 inspect the private secrets repository or evaluate/build/restart host configs.
 
+The transport accepts owner-only credential permissions and systemd's `0440`
+credentials when the file group matches the process's effective group (the unit
+uses `Group=pi-chat`). Group write/execute, all other-user permissions, and
+foreign-group read access remain forbidden. Symlinks, non-regular files and files
+over 4097 bytes remain rejected. Do not change the source secret permissions to
+work around the permissions on systemd's runtime credential copy.
+
 Check `pi-chat-model.service` and `pi-chat-transport.service`. Transport startup
 emits `transport_stage` events before `configuration`, `credential_read`,
 `matrix_client`, `identity_request`, `identity_validation`, `database_open`,

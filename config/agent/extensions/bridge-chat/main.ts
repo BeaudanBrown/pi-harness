@@ -16,7 +16,11 @@ export function readToken(filename: string): string {
 	const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
 	try {
 		const st = fs.fstatSync(fd);
-		if (!st.isFile() || (st.mode & 0o077) || st.size > 4097) throw Error("Credential file");
+		// systemd LoadCredential uses 0440 when the unit declares Group=.
+		// Permit read access only for the process's effective group, never
+		// group write/execute or any access for other users.
+		const foreignGroupRead = (st.mode & 0o040) !== 0 && st.gid !== process.getegid?.();
+		if (!st.isFile() || (st.mode & 0o037) || foreignGroupRead || st.size > 4097) throw Error("Credential file");
 		return fs.readFileSync(fd, "utf8").trim();
 	} finally { fs.closeSync(fd); }
 }
