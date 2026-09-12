@@ -11,6 +11,15 @@ const cases = [
 	{ name: "systemd group read", mode: 0o440, accepted: true },
 	{ name: "owner write and group read", mode: 0o640, accepted: true },
 	{ name: "foreign group read", mode: 0o440, accepted: false, foreignGroup: true },
+	{ name: "systemd root-owned root-group read-only", mode: 0o440, accepted: true, metadata: { uid: 0, gid: 0 } },
+	{ name: "root-group but non-root owner", mode: 0o440, accepted: false, metadata: { uid: 64806, gid: 0 } },
+	{ name: "root owner but foreign non-root group", mode: 0o440, accepted: false, metadata: { uid: 0, gid: 958 } },
+	{ name: "root-owned root-group owner-writable", mode: 0o640, accepted: false, metadata: { uid: 0, gid: 0 } },
+	{ name: "root-owned root-group group-writable", mode: 0o460, accepted: false, metadata: { uid: 0, gid: 0 } },
+	{ name: "root-owned root-group world-readable", mode: 0o444, accepted: false, metadata: { uid: 0, gid: 0 } },
+	{ name: "root-owned root-group setuid", mode: 0o440, accepted: false, metadata: { uid: 0, gid: 0, mode: 0o104440 } },
+	{ name: "root-owned root-group setgid", mode: 0o440, accepted: false, metadata: { uid: 0, gid: 0, mode: 0o102440 } },
+	{ name: "root-owned root-group sticky", mode: 0o440, accepted: false, metadata: { uid: 0, gid: 0, mode: 0o101440 } },
 	{ name: "group write", mode: 0o460, accepted: false },
 	{ name: "group execute", mode: 0o450, accepted: false },
 	{ name: "world read", mode: 0o444, accepted: false },
@@ -36,7 +45,14 @@ for (const scenario of cases) test(`credential entrypoint: ${scenario.name}`, t 
 	}
 	// Stop at the first network boundary: these tests must never contact Matrix.
 	fs.writeFileSync(preload, `global.fetch = async () => { process.exit(0); };
-		${scenario.foreignGroup ? `process.getegid = () => require('node:fs').statSync(${JSON.stringify(tokenPath)}).gid + 1;` : ""}`);
+		${scenario.foreignGroup ? `process.getegid = () => require('node:fs').statSync(${JSON.stringify(tokenPath)}).gid + 1;` : ""}
+		${scenario.metadata ? `
+			// Model the metadata observed inside systemd without requiring root/chown.
+			const fs = require('node:fs'), original = fs.fstatSync;
+			fs.fstatSync = (...args) => Object.assign(original(...args), ${JSON.stringify(scenario.metadata)});
+			process.getegid = () => 957;
+			process.geteuid = () => 64806;
+		` : ""}`);
 	const result = spawnSync(process.execPath, ["--require", preload, require.resolve("../config/agent/extensions/bridge-chat/main.js"), config], {
 		encoding: "utf8", timeout: 5000,
 		env: { ...process.env, NODE_OPTIONS: "", CREDENTIALS_DIRECTORY: dir, STATE_DIRECTORY: dir },

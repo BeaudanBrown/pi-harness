@@ -172,10 +172,13 @@ Ensure the consuming private secrets input includes the new Matrix secret, then
 activate through the normal operator-controlled NAS workflow. The agent must not
 inspect the private secrets repository or evaluate/build/restart host configs.
 
-The transport accepts owner-only credential permissions and systemd's `0440`
-credentials when the file group matches the process's effective group (the unit
-uses `Group=pi-chat`). Group write/execute, all other-user permissions, and
-foreign-group read access remain forbidden. Symlinks, non-regular files and files
+The transport accepts owner-only credential permissions, effective-group read
+access, and the exact root-owned `root:root` mode `0440` credential metadata
+observed with systemd `LoadCredential`. The latter can be readable inside the
+service even when neither file ID matches the DynamicUser process; effective GID
+matching alone is not sufficient. This exception requires UID 0, GID 0, and mode
+`0440` without special permission bits. Group write/execute, all other-user
+permissions, and all other foreign-group read access remain forbidden. Symlinks, non-regular files and files
 over 4097 bytes remain rejected. Do not change the source secret permissions to
 work around the permissions on systemd's runtime credential copy.
 

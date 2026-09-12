@@ -16,10 +16,12 @@ export function readToken(filename: string): string {
 	const fd = fs.openSync(filename, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
 	try {
 		const st = fs.fstatSync(fd);
-		// systemd LoadCredential uses 0440 when the unit declares Group=.
-		// Permit read access only for the process's effective group, never
-		// group write/execute or any access for other users.
-		const foreignGroupRead = (st.mode & 0o040) !== 0 && st.gid !== process.getegid?.();
+		// systemd may expose a readable root:root 0440 credential even when
+		// neither ID matches this DynamicUser process. Accept that exact
+		// read-only case as well as effective-group read access; never relax
+		// the checks for group write/execute or any other-user permissions.
+		const rootReadOnly = st.uid === 0 && st.gid === 0 && (st.mode & 0o7777) === 0o440;
+		const foreignGroupRead = (st.mode & 0o040) !== 0 && st.gid !== process.getegid?.() && !rootReadOnly;
 		if (!st.isFile() || (st.mode & 0o037) || foreignGroupRead || st.size > 4097) throw Error("Credential file");
 		return fs.readFileSync(fd, "utf8").trim();
 	} finally { fs.closeSync(fd); }
