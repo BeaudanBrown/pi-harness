@@ -61,6 +61,89 @@ test("interrupted cards return a typed continuation signal without rewriting fin
 	assert.equal(typing, false);
 });
 
+test("attachment loss interrupts every unfinished activity before later final answers", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "managed-multiple-interrupt-")); t.after(() => rm(root, { recursive: true, force: true }));
+	let card = 0;
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
+		async (input) => Response.json(String(input).includes("/send/") ? { event_id: `$card-${++card}` } : {}), [roomId]);
+	const registry = { manifestByConversationId: () => ({ roomId }) } as unknown as RelayRegistry;
+	const projector = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 1 }); t.after(() => projector.close());
+	const olderId = deriveActivityId(deriveGenerationId(conversationId, 1), "older-run");
+	const newerId = deriveActivityId(deriveGenerationId(conversationId, 1), "newer-run");
+	await projector.project(envelope("activity.update", { activityId: olderId, revision: 0, state: "busy" }));
+	await projector.project(envelope("activity.update", { activityId: newerId, revision: 0, state: "busy" }));
+	projector.attachmentDisconnected(conversationId);
+	for (let attempt = 0; attempt < 100 && projector.hasUnfinalized(conversationId); attempt += 1) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(projector.hasUnfinalized(conversationId), false, "no orphaned activity may block a later assistant final");
+});
+
+test("reconnect replay preserves its activity while stale unfinished cards are interrupted", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "managed-stale-reconnect-")); t.after(() => rm(root, { recursive: true, force: true }));
+	let card = 0;
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
+		async (input) => Response.json(String(input).includes("/send/") ? { event_id: `$card-${++card}` } : {}), [roomId]);
+	const registry = { manifestByConversationId: () => ({ roomId }) } as unknown as RelayRegistry;
+	const projector = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 20 }); t.after(() => projector.close());
+	const staleId = deriveActivityId(deriveGenerationId(conversationId, 1), "stale-run");
+	const replayedId = deriveActivityId(deriveGenerationId(conversationId, 1), "replayed-run");
+	await projector.project(envelope("activity.update", { activityId: staleId, revision: 0, state: "busy" }));
+	await projector.project(envelope("activity.update", { activityId: replayedId, revision: 0, state: "busy" }));
+	projector.attachmentDisconnected(conversationId); await projector.attachmentConnected(conversationId);
+	await projector.project(envelope("activity.update", { activityId: replayedId, revision: 1, state: "busy" }));
+	let activities: Array<{ activityId: string; finalized: boolean; payload: { outcome?: string } }> = [];
+	for (let attempt = 0; attempt < 100; attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 5));
+		activities = JSON.parse(await readFile(join(root, "activities.json"), "utf8")).activities;
+		if (activities.find((item) => item.activityId === staleId)?.finalized) break;
+	}
+	assert.equal(activities.find((item) => item.activityId === staleId)?.payload.outcome, "interrupted");
+	assert.equal(activities.find((item) => item.activityId === replayedId)?.finalized, false);
+	await projector.project(envelope("activity.finalize", { activityId: replayedId, revision: 2, outcome: "completed" }));
+	activities = JSON.parse(await readFile(join(root, "activities.json"), "utf8")).activities;
+	assert.equal(activities.every((item: { finalized: boolean }) => item.finalized), true, "a later assistant final is no longer blocked by the stale card");
+});
+
+test("reconnect preserves the original loss deadline and a later loss starts fresh grace", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "managed-interrupt-deadline-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
+		async () => Response.json({ event_id: "$card" }), [roomId]);
+	const registry = { manifestByConversationId: () => ({ roomId }) } as unknown as RelayRegistry;
+	const projector = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 60_000 }); t.after(() => projector.close());
+	await projector.project(envelope("activity.update", { activityId, revision: 0, state: "busy" }));
+	const deadlines = (projector as unknown as { interruptionDeadlines: Map<string, number> }).interruptionDeadlines;
+	projector.attachmentDisconnected(conversationId); const originalDeadline = deadlines.get(conversationId)!;
+	await projector.attachmentConnected(conversationId);
+	assert.equal(deadlines.get(conversationId), originalDeadline, "reconnect must not grant stale cards another full grace interval");
+	await new Promise((resolve) => setTimeout(resolve, 2)); projector.attachmentDisconnected(conversationId);
+	assert.ok(deadlines.get(conversationId)! > originalDeadline, "a later attachment loss starts a fresh grace interval");
+});
+
+test("reconnect fences successful and failed interruption I/O already in flight", async () => {
+	for (const fail of [false, true]) {
+		const root = await mkdtemp(join(tmpdir(), "managed-inflight-interrupt-"));
+		let release!: () => void; let started!: () => void; let blocking = true;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		const interruptionStarted = new Promise<void>((resolve) => { started = resolve; });
+		const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
+			async (_input, init) => {
+				const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : {};
+				const replacement = body["m.new_content"] as { body?: string } | undefined;
+				if (blocking && replacement?.body?.includes("Interrupted")) { started(); await gate; if (fail) throw new Error("injected Matrix failure"); }
+				return Response.json({ event_id: "$card" });
+			}, [roomId], { maxAttempts: 1 });
+		const registry = { manifestByConversationId: () => ({ roomId }) } as unknown as RelayRegistry;
+		const projector = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 1 });
+		try {
+			await projector.project(envelope("activity.update", { activityId, revision: 0, state: "busy" }));
+			projector.attachmentDisconnected(conversationId); await interruptionStarted;
+			await projector.attachmentConnected(conversationId);
+			const replay = projector.project(envelope("activity.update", { activityId, revision: 1, state: "busy" }));
+			blocking = false; release(); await replay;
+			assert.equal(projector.hasUnfinalized(conversationId), true, `stale ${fail ? "failed" : "successful"} interruption must not finalize replayed activity`);
+		} finally { release(); await projector.close(); await rm(root, { recursive: true, force: true }); }
+	}
+});
+
 test("reconnect cancels an expired interruption still queued behind projection", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "managed-typing-queued-interrupt-"));
 	let unblock!: () => void; let blocked!: () => void;
@@ -76,8 +159,9 @@ test("reconnect cancels an expired interruption still queued behind projection",
 	const slow = projector.project({ ...envelope("activity.update", { activityId, revision: 0, state: "busy" }), conversationId: "other" });
 	await started; projector.attachmentDisconnected(conversationId);
 	await new Promise((resolve) => setTimeout(resolve, 20));
-	await projector.attachmentConnected(conversationId); unblock(); await slow;
-	await projector.project(envelope("activity.update", { activityId, revision: 1, state: "busy" }));
+	await projector.attachmentConnected(conversationId);
+	const replay = projector.project(envelope("activity.update", { activityId, revision: 1, state: "busy" }));
+	unblock(); await Promise.all([slow, replay]);
 	assert.equal(projector.hasUnfinalized(conversationId), true);
 });
 

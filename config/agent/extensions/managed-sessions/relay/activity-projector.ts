@@ -66,6 +66,9 @@ export class ActivityProjector {
 	private closed = false;
 	private readonly operationLeases = new Map<string, Set<string>>();
 	private readonly interruptions = new Map<string, NodeJS.Timeout>();
+	private readonly interruptionDeadlines = new Map<string, number>();
+	private readonly interruptionVersions = new Map<string, number>();
+	private readonly reconnectedActivities = new Map<string, Set<string>>();
 	private readonly typingRefreshMs: number;
 	private readonly interruptionGraceMs: number;
 	private readonly typingRequestMs: number;
@@ -80,9 +83,9 @@ export class ActivityProjector {
 	async project(envelope: ManagedSessionEnvelope): Promise<"updated" | "finalized"> {
 		return this.serialize(() => this.projectOnce(envelope));
 	}
-	private async projectOnce(envelope: ManagedSessionEnvelope): Promise<"updated" | "finalized"> {
+	private async projectOnce(envelope: ManagedSessionEnvelope, preserveInterruption = false, stillCurrent: () => boolean = () => true): Promise<"updated" | "finalized"> {
 		if (!envelope.conversationId || envelope.role !== "ordinary_adapter" || !["activity.update", "activity.finalize"].includes(envelope.type)) throw new RelayRegistryError("permission_denied", "Activity requires an attached ordinary adapter");
-		const interruption = this.interruptions.get(envelope.conversationId); if (interruption) clearTimeout(interruption); this.interruptions.delete(envelope.conversationId);
+		if (!stillCurrent()) return "updated";
 		const manifest = this.registry.manifestByConversationId(envelope.conversationId);
 		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 		const payload = envelope.payload as ActivityUpdate | ActivityFinal;
@@ -105,8 +108,10 @@ export class ActivityProjector {
 		} else if (payload.revision > item.revision || envelope.type === "activity.finalize") {
 			await this.matrix.replaceMessage(manifest.roomId, deriveActivityTransactionId(envelope.conversationId, payload.activityId, payload.revision), item.eventId, body);
 		}
+		if (!stillCurrent()) return "updated";
 		item.revision = payload.revision; item.payload = payload; item.finalized = envelope.type === "activity.finalize";
 		await this.file.write(this.state);
+		if (!preserveInterruption) this.recordReconnectedActivity(envelope.conversationId, payload.activityId);
 		if (item.finalized && !this.hasOperationLease(envelope.conversationId) && !this.hasUnfinalized(envelope.conversationId)) void this.stopTyping(envelope.conversationId, manifest.roomId).catch(() => undefined);
 		else void this.startTyping(envelope.conversationId, manifest.roomId).catch(() => undefined);
 		return item.finalized ? "finalized" : "updated";
@@ -130,33 +135,71 @@ export class ActivityProjector {
 		});
 	}
 	async attachmentConnected(conversationId: string): Promise<void> {
-		const interruption = this.interruptions.get(conversationId);
-		if (interruption) clearTimeout(interruption);
-		this.interruptions.delete(conversationId);
-		if (!this.hasUnfinalized(conversationId) && !this.hasOperationLease(conversationId)) return;
+		if (!this.hasUnfinalized(conversationId)) {
+			this.clearInterruption(conversationId);
+			if (!this.hasOperationLease(conversationId)) return;
+		} else if (this.interruptions.has(conversationId)) {
+			const interruption = this.interruptions.get(conversationId)!; clearTimeout(interruption); this.interruptions.delete(conversationId);
+			const deadline = this.interruptionDeadlines.get(conversationId) ?? Date.now();
+			this.reconnectedActivities.set(conversationId, new Set()); this.scheduleInterruption(conversationId, deadline);
+		}
 		const manifest = this.registry.manifestByConversationId(conversationId);
 		if (manifest) void this.startTyping(conversationId, manifest.roomId).catch(() => undefined);
 	}
 	attachmentDisconnected(conversationId: string): void {
-		if (this.interruptions.has(conversationId)) return;
-		const timer = setTimeout(() => {
-			void this.interrupt(conversationId, () => this.interruptions.get(conversationId) === timer).catch(() => undefined);
-		}, this.interruptionGraceMs);
-		timer.unref(); this.interruptions.set(conversationId, timer);
+		this.reconnectedActivities.delete(conversationId);
+		const interruption = this.interruptions.get(conversationId); if (interruption) clearTimeout(interruption);
+		this.interruptions.delete(conversationId); this.scheduleInterruption(conversationId);
 	}
 	async interrupt(conversationId: string, stillDisconnected: () => boolean = () => true): Promise<void> {
 		await this.serialize(async () => {
 			if (this.closed || !stillDisconnected()) return;
-			const item = [...this.state.activities].reverse().find((candidate) => candidate.conversationId === conversationId && !candidate.finalized);
-			if (!item) { this.interruptions.delete(conversationId); return; }
-			await this.projectOnce({ protocolVersion: "1.0.0", messageId: "relay-interrupt", conversationId, role: "ordinary_adapter", type: "activity.finalize", payload: { activityId: item.activityId, revision: item.revision + 1, outcome: "interrupted" } });
+			const reconnected = this.reconnectedActivities.get(conversationId) ?? new Set<string>();
+			const items = this.state.activities.filter((candidate) => candidate.conversationId === conversationId && !candidate.finalized && !reconnected.has(candidate.activityId)).reverse();
+			if (!items.length) {
+				if (stillDisconnected()) this.clearInterruption(conversationId);
+				return;
+			}
+			try {
+				for (const item of items) {
+					if (!stillDisconnected()) return;
+					await this.projectOnce({ protocolVersion: "1.0.0", messageId: "relay-interrupt", conversationId, role: "ordinary_adapter", type: "activity.finalize", payload: { activityId: item.activityId, revision: item.revision + 1, outcome: "interrupted" } }, true, stillDisconnected);
+					if (!stillDisconnected()) return;
+				}
+				this.clearInterruption(conversationId);
+			} catch (error) {
+				if (!stillDisconnected()) return;
+				this.clearInterruption(conversationId);
+				this.attachmentDisconnected(conversationId);
+				throw error;
+			}
 		});
 	}
 	async close(): Promise<void> {
 		this.closed = true;
 		for (const state of this.typing.values()) { clearInterval(state.timer); state.controller?.abort(); }
 		for (const timer of this.interruptions.values()) clearTimeout(timer);
-		this.typing.clear(); this.operationLeases.clear(); this.interruptions.clear();
+		this.typing.clear(); this.operationLeases.clear(); this.interruptions.clear(); this.interruptionDeadlines.clear(); this.interruptionVersions.clear(); this.reconnectedActivities.clear();
+	}
+	private scheduleInterruption(conversationId: string, deadline = Date.now() + this.interruptionGraceMs): void {
+		const version = (this.interruptionVersions.get(conversationId) ?? 0) + 1;
+		this.interruptionVersions.set(conversationId, version); this.interruptionDeadlines.set(conversationId, deadline);
+		const timer = setTimeout(() => {
+			void this.interrupt(conversationId, () => this.interruptions.get(conversationId) === timer && this.interruptionVersions.get(conversationId) === version).catch(() => undefined);
+		}, Math.max(0, deadline - Date.now()));
+		timer.unref(); this.interruptions.set(conversationId, timer);
+	}
+	private clearInterruption(conversationId: string): void {
+		const interruption = this.interruptions.get(conversationId); if (interruption) clearTimeout(interruption);
+		this.interruptions.delete(conversationId); this.interruptionDeadlines.delete(conversationId); this.interruptionVersions.delete(conversationId); this.reconnectedActivities.delete(conversationId);
+	}
+	private recordReconnectedActivity(conversationId: string, activityId: string): void {
+		const reconnected = this.reconnectedActivities.get(conversationId);
+		if (!reconnected) return;
+		reconnected.add(activityId);
+		const unresolved = this.state.activities.some((item) => item.conversationId === conversationId && !item.finalized && !reconnected.has(item.activityId));
+		if (unresolved) return;
+		this.clearInterruption(conversationId);
 	}
 	private hasOperationLease(conversationId: string): boolean { return (this.operationLeases.get(conversationId)?.size ?? 0) > 0; }
 	private async startTyping(conversationId: string, roomId: string): Promise<void> { this.desireTyping(conversationId, roomId, true); }
