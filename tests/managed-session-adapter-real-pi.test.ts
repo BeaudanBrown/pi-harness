@@ -7,6 +7,7 @@ import { join } from "node:path";
 import test from "node:test";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
+	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
 	deriveDeliveryId,
 	deriveTranscriptEntryId,
@@ -115,6 +116,8 @@ test("real Pi binds, expands once, persists provenance, leaves /new and /fork un
 							payload: { deliveryId: normalDeliveryId, matrixEventId: "$normal-event", kind: "prompt", body: "ordinary persisted prompt" },
 						})), 100);
 					}
+				} else if (envelope.type === "self.promote") {
+					socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.promote", status: "ok" } }));
 				} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {
 					socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
 				} else if (envelope.type === "transcript.offer") {
@@ -175,14 +178,25 @@ export default function (pi) {
 	const sessionDirectory = join(root, "sessions");
 	const sessionPath = join(sessionDirectory, "probe.jsonl");
 	await mkdir(sessionDirectory);
+	const persistedSessionId = "11111111-1111-4111-8111-111111111111";
+	const persistedBoundaryId = "promotion-boundary";
+	const persistedBoundaryEntryId = deriveTranscriptEntryId(persistedSessionId, persistedBoundaryId);
 	await writeFile(sessionPath, [
 		{
-			type: "session", version: 3, id: "11111111-1111-4111-8111-111111111111",
+			type: "session", version: 3, id: persistedSessionId,
 			timestamp: "2026-08-31T00:00:00.000Z", cwd: root,
 		},
 		{
-			type: "message", id: "abcd1234", parentId: null, timestamp: "2026-08-31T00:00:01.000Z",
-			message: { role: "user", content: "seed for fork probe", timestamp: 1788134401000 },
+			type: "message", id: "abcd1234", parentId: null, timestamp: "2026-08-31T00:00:00.250Z",
+			message: { role: "user", content: "seed for fork probe", timestamp: 1788134400250 },
+		},
+		{
+			type: "custom", id: persistedBoundaryId, parentId: "abcd1234", timestamp: "2026-08-31T00:00:00.500Z",
+			customType: "managed-session.binding-boundary", data: { version: MANAGED_SESSION_STATE_VERSION, creationKey: "manual-probe", concept: "real probe", sessionId: persistedSessionId },
+		},
+		{
+			type: "custom", id: "promotion-binding", parentId: persistedBoundaryId, timestamp: "2026-08-31T00:00:00.750Z",
+			customType: "managed-session.binding", data: { version: MANAGED_SESSION_STATE_VERSION, conversationId, concept: "real probe", sessionId: persistedSessionId, bindingBoundaryEntryId: persistedBoundaryEntryId, role: "ordinary_adapter" },
 		},
 	].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
 	const child = spawn(pi, [
@@ -205,7 +219,6 @@ export default function (pi) {
 	});
 	const events = await rpc(child, [
 		{ id: "commands", type: "get_commands" },
-		{ id: "bind", type: "prompt", message: "/remote on real probe" },
 		{ id: "wait", type: "prompt", message: "/adapter-wait" },
 		{ id: "new", type: "new_session" },
 		{ id: "wait-new", type: "prompt", message: "/adapter-wait" },
@@ -219,7 +232,7 @@ export default function (pi) {
 	assert.ok(commands.includes("remote"));
 	assert.equal(commands.some((name) => name.startsWith("remote_session_")), false);
 	assert.equal((await readFile(expandedPath, "utf8")).trim(), "hello");
-	assert.equal(frames.filter((frame) => frame.type === "self.bind").length, 1);
+	assert.equal(frames.filter((frame) => frame.type === "self.bind").length, 0);
 	assert.equal(frames.filter((frame) => frame.type === "attachment.attach").length, 3, "one reconnect and one exact-session resume must attach; new and fork must remain unbound");
 	assert.equal(redeliveredAfterReconnect, true);
 	assert.ok(frames.some((frame) => frame.type === "attachment.detach" && frame.payload.reason === "session_change"));

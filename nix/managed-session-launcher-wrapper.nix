@@ -12,6 +12,40 @@ pkgs.writeShellApplication {
     operation="''${2-}"
     request=$(cat)
     ${builtins.readFile ./managed-worktree-lifecycle.sh}
+
+    if [[ "$operation" == workspace-identify ]]; then
+      requested_cwd=$(jq -er '.cwd | select(type == "string" and length >= 1 and length <= 4096 and startswith("/") and (test("[\u0000-\u001f\u007f]") | not))' <<<"$request")
+      [[ ! -L "$requested_cwd" ]]
+      canonical_cwd=$(realpath -e "$requested_cwd")
+      [[ "$canonical_cwd" == "$requested_cwd" && -d "$canonical_cwd" ]]
+      identify_match_count=0
+      matched_root_key=""
+      matched_workspace=""
+      matched_relative=""
+      while IFS= read -r encoded; do
+        row=$(printf '%s' "$encoded" | base64 --decode)
+        root_key=$(jq -er '.key | select(type == "string" and test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"))' <<<"$row")
+        configured_root_raw=$(jq -er '.value | select(type == "string" and length >= 1 and length <= 4096 and startswith("/") and (test("[\u0000-\u001f\u007f]") | not))' <<<"$row")
+        [[ ! -L "$configured_root_raw" ]]
+        configured_root=$(realpath -e "$configured_root_raw")
+        [[ -d "$configured_root" ]] || continue
+        case "$canonical_cwd/" in "$configured_root/"*) ;; *) continue ;; esac
+        suffix="''${canonical_cwd#"$configured_root"/}"
+        workspace="''${suffix%%/*}"
+        [[ "$workspace" =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$ ]]
+        workspace_path=$(realpath -e "$configured_root/$workspace")
+        [[ -d "$workspace_path" && ! -L "$workspace_path" && $(dirname "$workspace_path") == "$configured_root" && $(basename "$workspace_path") == "$workspace" && $(stat -c %u "$workspace_path") == $(id -u) ]]
+        relative_cwd="''${canonical_cwd#"$workspace_path"}"
+        relative_cwd="''${relative_cwd#/}"
+        identify_match_count=$((identify_match_count + 1))
+        matched_root_key=$root_key matched_workspace=$workspace matched_relative=$relative_cwd
+      done < <(jq -r 'to_entries[] | @base64' <<<"''${PI_MANAGED_SESSIONS_WORKSPACE_ROOTS:?}")
+      [[ $identify_match_count -eq 1 ]]
+      jq -nce --arg rootKey "$matched_root_key" --arg workspace "$matched_workspace" --arg relativeCwd "$matched_relative" --arg cwd "$canonical_cwd" \
+        '{rootKey:$rootKey,workspace:$workspace,relativeCwd:$relativeCwd,cwd:$cwd}'
+      exit 0
+    fi
+
     result=$(printf '%s\n' "$request" | ${launcherPackage}/${launcherExecutable} "$@")
     if [[ "$operation" != workspace-resolve && "$operation" != project-create ]]; then
       printf '%s\n' "$result"

@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { requestSelfBind, BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveMatrixTransactionId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
@@ -12,7 +12,7 @@ import type { SessionBinding } from "../config/agent/extensions/managed-sessions
 
 const nonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
 
-test("production relay self-binds, attaches, reports status, and deletes only bridge state", { timeout: 10_000 }, async (t) => {
+test("production relay attaches, reports status, and deletes only bridge state", { timeout: 10_000 }, async (t) => {
 	const peerUidHelper = process.env.PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER;
 	const relayLockHelper = process.env.PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER;
 	if (!peerUidHelper || !relayLockHelper) return t.skip("packaged relay security helpers are unavailable");
@@ -40,10 +40,18 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		await running?.stop();
 		await rm(root, { recursive: true, force: true });
 	});
+	const manifestDirectory = join(root, "manifests");
+	await mkdir(manifestDirectory, { recursive: true });
+	await writeFile(join(manifestDirectory, `${conversationId}.json`), `${JSON.stringify({
+		schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", conversationId, ownerHostId: hostId, creationKey,
+		concept: "production work", piSessionId: sessionId, roomId: "!production:example.com",
+		placement: { rootKey: "projects", workspace: "work", relativeCwd: "" }, bindingBoundaryEntryId: boundaryEntryId,
+		createdAt: "2026-08-31T00:00:00.000Z",
+	})}\n`, { mode: 0o600 });
 	running = await startManagedSessionRelay({
 		PI_MANAGED_SESSIONS_RUNTIME_DIR: join(root, "runtime"),
 		PI_MANAGED_SESSIONS_STATE_DIR: join(root, "state"),
-		PI_MANAGED_SESSIONS_MANIFEST_DIR: join(root, "manifests"),
+		PI_MANAGED_SESSIONS_MANIFEST_DIR: manifestDirectory,
 		PI_MANAGED_SESSIONS_HOST_ID: hostId,
 		PI_MANAGED_SESSIONS_RESTART_GRACE_MS: "5000",
 		PI_MANAGED_SESSIONS_PEER_UID_HELPER: peerUidHelper,
@@ -53,16 +61,7 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 		PI_MATRIX_BOT_USER_ID: "@bot:example.com",
 		PI_MATRIX_OPERATOR_USER_ID: "@operator:example.com",
 	});
-	assert.equal(await requestSelfBind({
-		socketPath: running.server.socketPath,
-		role: "ordinary_adapter",
-		creationKey,
-		concept: "production work",
-		sessionId,
-		attachmentNonce: nonce,
-		bindingBoundaryEntryId: boundaryEntryId,
-		placement: { rootKey: "projects", workspace: "work", relativeCwd: "" },
-	}), conversationId);
+	await running.registry.setAttachmentNonce(conversationId, nonce);
 	const binding: SessionBinding = {
 		version: MANAGED_SESSION_STATE_VERSION,
 		conversationId,
@@ -161,7 +160,6 @@ test("production relay self-binds, attaches, reports status, and deletes only br
 	assert.deepEqual(running.registry.snapshot().conversations, []);
 	assert.deepEqual(requests.map((request) => request.path), [
 		"/_matrix/client/v3/account/whoami",
-		"/_matrix/client/v3/createRoom",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, transcript.entryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`,

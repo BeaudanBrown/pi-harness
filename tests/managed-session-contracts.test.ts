@@ -158,14 +158,14 @@ test("role and operation combinations enforce capabilities", () => {
 		payload: {
 			creationKey: "manual-bind-1", concept: "work", sessionId: "pi-session-1",
 			attachmentNonce: "abcdefghijklmnopqrstuvwxyzABCDEF", bindingBoundaryEntryId: entryId,
-			placement: { rootKey: "projects", workspace: "pi-harness", relativeCwd: "" },
+			sourceCwd: "/workspaces/pi-harness", sourceSessionFile: "/sessions/pi-session.jsonl",
 		},
 	};
 	assert.equal(parseManagedSessionEnvelope(selfBind).conversationId, undefined);
 	assert.throws(() => parseManagedSessionEnvelope({
 		...selfBind,
-		payload: { ...selfBind.payload, placement: { ...selfBind.payload.placement, relativeCwd: "../escape" } },
-	}), /unsafe path/);
+		payload: { ...selfBind.payload, sourceSessionFile: "../escape" },
+	}), /absolute source paths/);
 
 	const lifecycle = {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,

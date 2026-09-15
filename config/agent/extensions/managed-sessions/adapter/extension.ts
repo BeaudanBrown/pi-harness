@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import {
@@ -936,6 +936,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		async function handleEnvelope(envelope: ManagedSessionEnvelope): Promise<void> {
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
+			if (envelope.type === "promotion.shutdown") {
+				if (role !== "ordinary_adapter") throw new ManagedAdapterError("Terminal-session promotion requires an ordinary adapter");
+				ctx.shutdown();
+				return;
+			}
 			if (envelope.type === "refresh.request") {
 				const idle = () => ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !closingActivities.size && !inFlightDeliveries.size && !pendingUserPersistence.length;
 				if (role !== "ordinary_adapter" || !client) throw new ManagedAdapterError("Refresh requires a managed project");
@@ -1237,29 +1242,41 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}
 				if (input.startsWith("delete")) return notify(ctx, "Use /remote delete --confirm to delete only bridge metadata", "warning");
 				if (input.startsWith("on ")) {
-					if (binding) return notify(ctx, "This Pi session is already bound", "warning");
-					if (!ctx.sessionManager.getSessionFile()) return notify(ctx, "Persist this Pi session before binding it", "error");
-					if (!config.attachmentNonce) return notify(ctx, "Managed-session attachment nonce is unavailable", "error");
-					if (!config.placement) return notify(ctx, "Managed-session workspace placement is unavailable", "error");
+					const sourceSessionFile = ctx.sessionManager.getSessionFile();
+					if (!sourceSessionFile) return notify(ctx, "Persist this Pi session before binding it", "error");
+					if (!ctx.isIdle() || ctx.hasPendingMessages()) return notify(ctx, "Wait for Pi to become idle before promoting it", "error");
 					const concept = normalizeConcept(input.slice(3));
 					if (!concept) return notify(ctx, "Usage: /remote on <concept> (1-128 printable characters)", "error");
+					if (binding && config.placement) return notify(ctx, "This Pi session is already bound", "warning");
+					if (binding && binding.concept !== concept) return notify(ctx, "Promotion retry must use the existing conversation concept", "error");
 					const sessionId = ctx.sessionManager.getSessionId();
 					const existingAttempt = restoreBindingAttempt(ctx.sessionManager.getBranch(), sessionId, concept);
+					if (binding && !existingAttempt) return notify(ctx, "The managed promotion boundary is unavailable", "error");
 					const creationKey = existingAttempt?.creationKey ?? `manual-${randomUUID()}`;
 					const boundaryKey = existingAttempt?.entryKey ?? appendMarker(pi, ctx, BINDING_BOUNDARY_ENTRY_TYPE, {
 						version: MANAGED_SESSION_STATE_VERSION, creationKey, concept, sessionId,
 					});
 					const bindingBoundaryEntryId = persistedEntryId(sessionId, boundaryKey);
 					try {
+						config.attachmentNonce ??= randomBytes(32).toString("base64url");
+						environment.PI_MANAGED_SESSION_ATTACHMENT_NONCE = config.attachmentNonce;
 						const conversationId = await requestSelfBind({
 							socketPath: config.socketPath, role: "ordinary_adapter", creationKey, concept, sessionId,
-							attachmentNonce: config.attachmentNonce, bindingBoundaryEntryId, placement: config.placement,
+							attachmentNonce: config.attachmentNonce, bindingBoundaryEntryId, sourceCwd: ctx.cwd, sourceSessionFile,
 						});
-						binding = { version: MANAGED_SESSION_STATE_VERSION, conversationId, concept, sessionId, bindingBoundaryEntryId, role };
-						appendMarker(pi, ctx, BINDING_ENTRY_TYPE, binding);
+						if (binding && (binding.conversationId !== conversationId || binding.bindingBoundaryEntryId !== bindingBoundaryEntryId)) {
+							throw new ManagedAdapterError("Promotion retry changed its managed conversation identity");
+						}
+						if (!binding) {
+							binding = { version: MANAGED_SESSION_STATE_VERSION, conversationId, concept, sessionId, bindingBoundaryEntryId, role };
+							appendMarker(pi, ctx, BINDING_ENTRY_TYPE, binding);
+						}
 						deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
 						await connectBinding(ctx);
-						notify(ctx, `Bound managed conversation ${concept}`);
+						if (!client?.connected) throw new ManagedAdapterError("Managed conversation could not attach before promotion");
+						await client.promoteTerminalSession();
+						notify(ctx, `Promoted ${concept}; relaunching this session as managed`);
+						ctx.shutdown();
 					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed binding failed", "error"); }
 					return;
 				}

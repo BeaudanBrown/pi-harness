@@ -589,7 +589,7 @@ export class RelayRegistry {
 		});
 	}
 
-	async createProjectConversation(manifest: ConversationManifest, nonce: string): Promise<ConversationManifest> {
+	async createProjectConversation(manifest: ConversationManifest, nonce: string, promotionSourceSessionFile?: string): Promise<ConversationManifest> {
 		if (manifest.kind !== "project" || manifest.ownerHostId !== this.hostId || !manifest.placement) {
 			throw new RelayRegistryError("permission_denied", "Self binding requires a host-owned project manifest");
 		}
@@ -607,7 +607,13 @@ export class RelayRegistry {
 						JSON.stringify(existing.placement) === JSON.stringify(manifest.placement)) {
 						const runtime = this.runtimeConversation(existing.conversationId);
 						if (!runtime.attachmentNonceHash || !equalHash(runtime.attachmentNonceHash, nonceHash(nonce))) {
-							throw new RelayRegistryError("invalid_nonce", "Attachment nonce does not match the existing binding");
+							if (runtime.promotion?.phase !== "prepared" || runtime.state !== "dormant" || runtime.attachment) {
+								throw new RelayRegistryError("invalid_nonce", "Attachment nonce does not match the existing binding");
+							}
+							runtime.attachmentNonceHash = nonceHash(nonce);
+						}
+						if (promotionSourceSessionFile !== undefined && runtime.promotion?.sourceSessionFile !== promotionSourceSessionFile) {
+							throw new RelayRegistryError("invalid_state", "Promotion retry changed its source Pi session");
 						}
 						return existing;
 					}
@@ -633,6 +639,7 @@ export class RelayRegistry {
 					artifactExports: [],
 					projection: [],
 					managedWindow: null,
+					...(promotionSourceSessionFile ? { promotion: { sourceSessionFile: promotionSourceSessionFile, phase: "prepared" as const, requestedAt: new Date().toISOString() } } : {}),
 				});
 				return manifest;
 			});
@@ -877,6 +884,45 @@ export class RelayRegistry {
 				}
 			}
 			if (!receiptAfterSocketDelivery) input.status = status;
+		});
+	}
+
+	promotion(conversationId: string): RuntimeConversation["promotion"] {
+		const value = this.runtimeConversation(conversationId).promotion;
+		return value ? { ...value } : value;
+	}
+
+	pendingPromotionConversationIds(): string[] {
+		return this.state.conversations.filter((conversation) => conversation.promotion && conversation.promotion.phase !== "prepared")
+			.map((conversation) => conversation.conversationId);
+	}
+
+	async requestPromotion(conversationId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (!conversation.promotion) throw new RelayRegistryError("invalid_state", "This conversation was not prepared for terminal-session promotion");
+			if (conversation.managedWindow) throw new RelayRegistryError("invalid_state", "A managed conversation cannot be promoted again");
+			if (conversation.state !== "active" || !conversation.attachment) throw new RelayRegistryError("invalid_state", "Promotion requires the attached terminal Pi session");
+			if (conversation.promotion.phase === "adopted") throw new RelayRegistryError("invalid_state", "The promoted session has already been adopted");
+			conversation.promotion.phase = "shutdown_requested";
+		});
+	}
+
+	async markPromotionAdopted(conversationId: string): Promise<void> {
+		await this.mutate(async () => {
+			const promotion = this.runtimeConversation(conversationId).promotion;
+			if (!promotion || promotion.phase !== "shutdown_requested") throw new RelayRegistryError("invalid_state", "Promotion is not ready for session adoption");
+			promotion.phase = "adopted";
+		});
+	}
+
+	async finishPromotion(conversationId: string): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (conversation.promotion?.phase !== "adopted") {
+				throw new RelayRegistryError("invalid_state", "Promotion did not reach the adopted phase");
+			}
+			conversation.promotion = null;
 		});
 	}
 

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isAbsolute } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
 
@@ -159,6 +160,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	clientEnvelope(adapterRole, "attachment.attach", attachmentFields),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "refresh.result", { refreshId: identifier, status: Type.Union([Type.Literal("ready"), Type.Literal("busy")]) }),
 	relayEnvelope("refresh.request", { refreshId: identifier }),
+	relayEnvelope("promotion.shutdown", {}),
 	clientEnvelope(adapterRole, "attachment.detach", {
 		attachmentId: identifier,
 		reason: Type.Union([
@@ -257,8 +259,10 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		sessionId: identifier,
 		attachmentNonce: Type.String({ pattern: "^[A-Za-z0-9_-]{32,128}$" }),
 		bindingBoundaryEntryId: TranscriptEntryIdSchema,
-		placement: WorkspaceIdentitySchema,
+		sourceCwd: boundedString(4_096),
+		sourceSessionFile: boundedString(4_096),
 	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "self.promote", {}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "aloop.notice", {
 		scopeSessionId: identifier, lifecycleId: stableId("aloop"),
 		kind: Type.Union([Type.Literal("startup"), Type.Literal("startup-failure"), Type.Literal("attempt-settled"), Type.Literal("checkpoint"), Type.Literal("bounded-stop"), Type.Literal("cancelled"), Type.Literal("epic-ready"), Type.Literal("recovery")]),
@@ -338,6 +342,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			conversationState: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 		}),
 		strictObject({ operation: Type.Literal("self.delete"), status: Type.Literal("ok") }),
+		strictObject({ operation: Type.Literal("self.promote"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("control.result"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("refresh.result"), status: Type.Literal("ok") }),
 	])),
@@ -598,6 +603,11 @@ const runtimeConversation = strictObject({
 			paneId: boundedString(64),
 		}),
 	),
+	promotion: Type.Optional(nullable(strictObject({
+		sourceSessionFile: boundedString(4_096),
+		phase: Type.Union([Type.Literal("prepared"), Type.Literal("shutdown_requested"), Type.Literal("adopted")]),
+		requestedAt: timestamp,
+	}))),
 	lastLaunchError: Type.Optional(strictObject({ code: identifier, message: boundedString(500), at: timestamp })),
 	generationTransition: Type.Optional(nullable(strictObject({
 		transitionId: TransitionIdSchema, sourceControlId: stableId("control"), phase: Type.Union([
@@ -686,6 +696,7 @@ export interface HostRuntimeState {
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string };
+		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "adopted"; requestedAt: string };
 		lastLaunchError?: { code: string; message: string; at: string };
 		generationTransition?: null | {
 			transitionId: string; sourceControlId: string; phase: "requested" | "session_persisted" | "activated" | "attached" | "failed";
@@ -817,7 +828,10 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 		}
 	}
 	if (envelope.type === "self.bind") {
-		assertWorkspaceIdentity((envelope.payload as { placement: WorkspaceIdentity }).placement);
+		const payload = envelope.payload as { sourceCwd: string; sourceSessionFile: string };
+		if (!isAbsolute(payload.sourceCwd) || !isAbsolute(payload.sourceSessionFile) || /[\u0000-\u001f\u007f]/.test(payload.sourceCwd) || /[\u0000-\u001f\u007f]/.test(payload.sourceSessionFile)) {
+			throw new ManagedSessionContractError("malformed", "self binding requires absolute source paths");
+		}
 	}
 	if (envelope.type === "lifecycle.request") {
 		const payload = envelope.payload as { request: { operation: string; placement?: WorkspaceIdentity; workspace?: string } };

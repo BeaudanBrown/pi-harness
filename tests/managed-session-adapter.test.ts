@@ -177,6 +177,8 @@ class FakeRelay {
 			setTimeout(() => {
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
 			}, this.transcriptDelayMs);
+		} else if (envelope.type === "self.promote") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.promote", status: "ok" } }));
 		} else if (envelope.type === "self.status") {
 			if (this.selfStatusDelayMs >= 0) setTimeout(() => {
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }));
@@ -394,11 +396,38 @@ test("manual self binding is a strict one-shot relay operation", async (t) => {
 		sessionId,
 		attachmentNonce: nonce,
 		bindingBoundaryEntryId: boundaryEntryId,
-		placement: { rootKey: "projects", workspace: "work", relativeCwd: "" },
+		sourceCwd: "/tmp/work",
+		sourceSessionFile: "/tmp/session.jsonl",
 	}), conversationId);
 	assert.equal(relay.frames[0]?.type, "self.bind");
 	assert.equal(relay.frames[0]?.conversationId, undefined);
 	assert.equal(relay.frames[0]?.payload.attachmentNonce, nonce);
+});
+
+test("/remote on promotes an idle persisted ordinary session and shuts down only after relay confirmation", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const handlers = new Map<string, (...args: any[]) => any>(); const commands = new Map<string, (...args: any[]) => any>();
+	const branch: any[] = []; const notices: string[] = []; let leaf: string | null = null; let sequence = 0; let shutdowns = 0;
+	const api = {
+		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
+		registerCommand: (name: string, options: { handler: (...args: any[]) => any }) => commands.set(name, options.handler),
+		registerTool: () => undefined, getCommands: () => [],
+		appendEntry: (customType: string, data: unknown) => { const id = `promotion-${++sequence}`; branch.push({ type: "custom", id, parentId: leaf, customType, data }); leaf = id; },
+	} as unknown as ExtensionAPI;
+	const environment = { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath } as NodeJS.ProcessEnv;
+	createManagedSessionAdapterExtension("ordinary_adapter", environment)(api);
+	const ctx: any = { cwd: "/workspaces/project", hasUI: true, ui: { notify(message: string) { notices.push(message); }, setStatus() {} }, isIdle: () => true, hasPendingMessages: () => false,
+		shutdown: () => { shutdowns += 1; }, getContextUsage: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => "/sessions/ordinary.jsonl", getBranch: () => branch, getLeafId: () => leaf } };
+	await commands.get("remote")!("on promoted work", ctx);
+	assert.equal(shutdowns, 1, notices.join(" | "));
+	assert.match(environment.PI_MANAGED_SESSION_ATTACHMENT_NONCE ?? "", /^[A-Za-z0-9_-]{32,128}$/);
+	assert.deepEqual(relay.frames.filter((frame) => ["self.bind", "attachment.attach", "self.promote"].includes(frame.type)).map((frame) => frame.type),
+		["self.bind", "attachment.attach", "self.promote"]);
+	const selfBind = relay.frames.find((frame) => frame.type === "self.bind")!;
+	assert.equal(selfBind.payload.sourceCwd, ctx.cwd); assert.equal(selfBind.payload.sourceSessionFile, "/sessions/ordinary.jsonl");
+	assert.deepEqual(branch.map((entry) => entry.customType), [BINDING_BOUNDARY_ENTRY_TYPE, BINDING_ENTRY_TYPE]);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
 test("only the coordinator profile exposes the bounded managed lifecycle tools", () => {

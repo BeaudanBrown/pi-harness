@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import {
-	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, type ConversationManifest, type ManagedSessionEnvelope,
+	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, deriveTranscriptEntryId, type ConversationManifest, type ManagedSessionEnvelope,
 	encodeNdjsonEnvelope, parseNdjsonEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { HostLifecycle, parseProjectWindow } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
@@ -53,8 +53,16 @@ test("packaged project-create launcher confines creation, initializes only local
 	const otherRoot = join(root, "other-roots"); const sameDisplay = join(otherRoot, "group-main"); await mkdir(sameDisplay, { recursive: true });
 	execFileSync("git", ["-C", sameDisplay, "init", "-b", "main"]);
 	assert.notEqual(resolveWorkspace(otherRoot, "group-main").projectKey, rootIdentity.projectKey, "display-name equality cannot merge foreign repositories");
-	const plain = join(workspaceRoot, "plain"); await mkdir(plain);
+	const plain = join(workspaceRoot, "plain"); const nestedPlain = join(plain, "nested"); await mkdir(nestedPlain, { recursive: true });
 	assert.deepEqual(resolveWorkspace(workspaceRoot, "plain"), resolveWorkspace(workspaceRoot, "plain"), "non-Git fallback identity is stable");
+	const identified = JSON.parse(execFileSync(launcher, ["managed", "workspace-identify"], {
+		input: `${JSON.stringify({ cwd: nestedPlain })}\n`, encoding: "utf8", env,
+	})) as Record<string, unknown>;
+	assert.deepEqual(identified, { rootKey: "projects", workspace: "plain", relativeCwd: "nested", cwd: nestedPlain },
+		"host-owned promotion placement is derived from the canonical terminal cwd");
+	assert.throws(() => execFileSync(launcher, ["managed", "workspace-identify"], {
+		input: `${JSON.stringify({ cwd: root })}\n`, encoding: "utf8", env,
+	}), "promotion rejects a cwd outside configured workspace roots");
 	const malformed = join(workspaceRoot, "malformed"); await mkdir(join(malformed, ".git"), { recursive: true });
 	assert.throws(() => resolveWorkspace(workspaceRoot, "malformed"), "malformed direct Git metadata fails closed");
 	const markerLink = join(workspaceRoot, "marker-link"); await mkdir(markerLink); await symlink(join(mainCheckout, ".git"), join(markerLink, ".git"));
@@ -243,6 +251,59 @@ test("idempotent Matrix provisioning recovers an uncertain create response witho
 	}, [], { maxAttempts: 2, baseDelayMs: 1, maxDelayMs: 1, sleep: async () => undefined });
 	assert.equal(await matrix.createPrivateSpaceIdempotent("Stable Space", alias), "!stable:example.com");
 	assert.equal(postCalls, 1, "the alias resolves the room from the uncertain response without issuing a duplicate create");
+});
+
+test("terminal promotion adopts the existing session only after detach and relaunches it as managed", { timeout: 20_000 }, async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "pi-promotion-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const runtime = join(root, "runtime"); const manifests = join(root, "manifests"); const sessions = join(root, "managed-sessions");
+	const workspaceRoot = join(root, "workspaces"); const workspace = join(workspaceRoot, "alpha"); const source = join(root, "ordinary-session.jsonl");
+	const record = join(root, "launch.json"); await mkdir(workspace, { recursive: true });
+	const registry = new RelayRegistry(hostId, runtime, new ConversationManifestStore(manifests)); await registry.load();
+	let room = 0;
+	const matrix = new ManagedMatrixClient(matrixConfig, async (input) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("/createRoom")) return Response.json({ room_id: `!promotion${++room}:example.com` });
+		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
+			...(decodeURIComponent(path).includes("!promotion1:example.com") ? { type: "m.space" } : {}) });
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		return Response.json({ event_id: "$ok" });
+	}, [], { maxAttempts: 1 });
+	const launcher = join(root, "launcher");
+	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworkspace-identify) test "$(field cwd)" = '${workspace}'; printf '${JSON.stringify({ rootKey: "projects", workspace: "alpha", relativeCwd: "", cwd: workspace })}\\n';;\nworkspace-resolve) printf '${JSON.stringify({ rootKey: "projects", workspace: "alpha", relativeCwd: "", workspacePath: workspace, cwd: workspace, projectKey: `project_${"a".repeat(32)}`, projectDisplayName: "alpha", checkoutDisplayName: "alpha" })}\\n';;\nroot-ensure) printf '{"sessionName":"alpha","workspacePath":"${workspace}"}\\n';;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) conversation=$(field conversationId); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > '${record}'; printf '{"conversationId":"%s","sessionName":"alpha","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"alpha","relativeCwd":"","role":"conversation"}\\n' "$conversation";;\nwindow-terminate) printf '{"terminated":true}\\n';;\n*) exit 2;;\nesac\n`, { mode: 0o700 });
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") }); await server.start(); t.after(() => server.close());
+	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath,
+		registry, matrix, server, environment: { ...process.env, TEST_LAUNCH_RECORD: record } });
+	const creationKey = "promote-terminal"; const concept = "terminal work"; const sessionId = "ordinary-session";
+	const boundaryKey = "ordinary-boundary"; const boundaryEntryId = deriveTranscriptEntryId(sessionId, boundaryKey); const nonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
+	await writeFile(source, [
+		{ type: "session", version: 3, id: sessionId, timestamp: "2026-09-15T00:00:00.000Z", cwd: workspace },
+		{ type: "message", id: "seed", parentId: null, timestamp: "2026-09-15T00:00:01.000Z", message: { role: "user", content: "existing history" } },
+		{ type: "custom", id: boundaryKey, parentId: "seed", timestamp: "2026-09-15T00:00:02.000Z", customType: "managed-session.binding-boundary",
+			data: { version: MANAGED_SESSION_STATE_VERSION, creationKey, concept, sessionId } },
+	].map((entry) => JSON.stringify(entry)).join("\n") + "\n", { mode: 0o600 });
+	const manifest = await lifecycle.prepareTerminalPromotion({ creationKey, concept, sessionId, attachmentNonce: nonce,
+		bindingBoundaryEntryId: boundaryEntryId, sourceCwd: workspace, sourceSessionFile: source });
+	await writeFile(source, `${JSON.stringify({ type: "custom", id: "binding", parentId: boundaryKey, timestamp: "2026-09-15T00:00:03.000Z",
+		customType: "managed-session.binding", data: { version: MANAGED_SESSION_STATE_VERSION, conversationId: manifest.conversationId, concept, sessionId,
+			bindingBoundaryEntryId: boundaryEntryId, role: "ordinary_adapter" } })}\n`, { flag: "a" });
+	const original = connect(server.socketPath); await new Promise<void>((resolve, reject) => { original.once("connect", resolve); original.once("error", reject); });
+	original.write(encodeNdjsonEnvelope({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "original-attach", conversationId: manifest.conversationId,
+		role: "ordinary_adapter", type: "attachment.attach", payload: { sessionId, attachmentNonce: nonce, bindingBoundaryEntryId: boundaryEntryId } }));
+	assert.equal((await readEnvelope(original)).type, "attachment.accepted");
+	await registry.requestPromotion(manifest.conversationId);
+	original.end();
+	for (let attempt = 0; attempt < 100 && registry.conversationState(manifest.conversationId) !== "dormant"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(registry.conversationState(manifest.conversationId), "dormant", "replacement waits until the ordinary writer disconnects");
+	const replacement = attachFromRecord(record, server, registry);
+	await lifecycle.completeTerminalPromotion(manifest.conversationId);
+	const replacementSocket = await replacement; t.after(() => replacementSocket.destroy());
+	const destination = join(sessions, manifest.conversationId, "session.jsonl");
+	await assert.rejects(() => readFile(source, "utf8"), /ENOENT/);
+	assert.match(await readFile(destination, "utf8"), /existing history/);
+	assert.equal(registry.conversationState(manifest.conversationId), "active");
+	assert.equal(registry.promotion(manifest.conversationId), null);
+	assert.deepEqual(registry.managedWindow(manifest.conversationId), { sessionName: "alpha", windowId: "@7", paneId: "%8" });
 });
 
 test("project launcher contract preserves an empty relative cwd", () => {

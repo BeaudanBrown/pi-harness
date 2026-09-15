@@ -3,13 +3,8 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
-	MANAGED_SESSION_STATE_VERSION,
-	deriveConversationId,
-	deriveGenerationId,
-	type ConversationManifest,
 	type ManagedAdapterLiveStatus,
 	type ManagedSessionEnvelope,
-	type WorkspaceIdentity,
 } from "../contracts.js";
 import { bootstrapCoordinator, type CoordinatorIdentity } from "./coordinator-bootstrap.js";
 import { launchCoordinator } from "./coordinator-launcher.js";
@@ -133,6 +128,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
 			onAttachment: async (attachment) => {
 				await activityProjector?.attachmentConnected(attachment.conversationId);
+				if (registry.promotion(attachment.conversationId)?.phase === "shutdown_requested") {
+					server!.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-promotion-${randomUUID()}`,
+						conversationId: attachment.conversationId, role: "relay", type: "promotion.shutdown", payload: {} });
+				}
 				if (coordinatorRouter) await coordinatorRouter.attachmentReady(attachment.conversationId);
 				else for (const control of registry.pendingControls(attachment.conversationId).filter((item) =>
 					!registry.hasGenerationBoundary(attachment.conversationId) || item.name === "new" && item.argument === "--confirm")) {
@@ -145,45 +144,20 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			},
 			onAttachmentDisconnect: (attachment) => {
 				activityProjector?.attachmentDisconnected(attachment.conversationId);
+				if (registry.promotion(attachment.conversationId)?.phase === "shutdown_requested") {
+					void hostLifecycle?.completeTerminalPromotion(attachment.conversationId).catch((error) => {
+						process.stderr.write(`pi-managed-session-relay: terminal promotion failed: ${redactManagedValue(error instanceof Error ? error.message : "unknown failure", environment)}\n`);
+					});
+				}
 			},
 			onUnboundEnvelope: async (envelope) => {
 				if (envelope.type !== "self.bind" || envelope.role !== "ordinary_adapter") return undefined;
 				const payload = envelope.payload as {
 					creationKey: string; concept: string; sessionId: string; attachmentNonce: string;
-					bindingBoundaryEntryId: string; placement: WorkspaceIdentity;
+					bindingBoundaryEntryId: string; sourceCwd: string; sourceSessionFile: string;
 				};
-				const conversationId = deriveConversationId(hostId, payload.creationKey);
-				const existing = registry.manifestByCreationKey(payload.creationKey);
-				let manifest: ConversationManifest;
-				if (existing) {
-					if (existing.conversationId !== conversationId || existing.concept !== payload.concept ||
-						existing.piSessionId !== payload.sessionId || existing.bindingBoundaryEntryId !== payload.bindingBoundaryEntryId ||
-						JSON.stringify(existing.placement) !== JSON.stringify(payload.placement)) {
-						throw new RelayRegistryError("invalid_state", "Self-binding retry conflicts with the existing conversation");
-					}
-					manifest = await registry.createProjectConversation(existing, payload.attachmentNonce);
-				} else {
-					const resolved = await hostLifecycle?.resolveWorkspaceIdentity(payload.placement);
-					const grouped = resolved ? await hostLifecycle!.provisionConversationMatrix(conversationId, payload.concept, resolved) : undefined;
-					const roomId = grouped?.roomId ?? await matrix.createPrivateRoom(`pi · ${payload.concept}`);
-					const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
-					manifest = {
-						schemaVersion: MANAGED_SESSION_STATE_VERSION,
-						kind: "project",
-						conversationId,
-						ownerHostId: hostId,
-						creationKey: payload.creationKey,
-						concept: payload.concept,
-						piSessionId: payload.sessionId,
-						roomId,
-						placement: payload.placement, ...(resolved && grouped ? { projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName,
-							checkoutDisplayName: resolved.checkoutDisplayName, projectSpace: grouped.projectSpace } : {}),
-						bindingBoundaryEntryId: payload.bindingBoundaryEntryId,
-						createdAt, activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: payload.sessionId,
-							bindingBoundaryEntryId: payload.bindingBoundaryEntryId, createdAt }],
-					};
-					manifest = await registry.createProjectConversation(manifest, payload.attachmentNonce);
-				}
+				if (!hostLifecycle) throw new RelayRegistryError("invalid_state", "Terminal-session promotion is unavailable");
+				const manifest = await hostLifecycle.prepareTerminalPromotion(payload);
 				return response(manifest.conversationId, envelope.messageId, "self.result", {
 					operation: "self.bind", status: "ok", boundConversationId: manifest.conversationId,
 				});
@@ -318,6 +292,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					if (!hostLifecycle || attachment.role !== "coordinator_adapter") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle is unavailable");
 					return response(attachment.conversationId, envelope.messageId, "lifecycle.result", await hostLifecycle.request(envelope));
 				}
+				if (envelope.type === "self.promote") {
+					await registry.requestPromotion(attachment.conversationId);
+					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "self.promote", status: "ok" });
+				}
 				if (envelope.type === "self.status") {
 					return response(attachment.conversationId, envelope.messageId, "self.result", {
 						operation: "self.status", status: "ok", conversationState: registry.conversationState(attachment.conversationId),
@@ -388,7 +366,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		throw error;
 	}
 	const reconciliationTimer = setTimeout(() => {
-		void registry.finishRestartReconciliation().then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
+		void registry.finishRestartReconciliation()
+			.then(() => hostLifecycle?.recoverTerminalPromotions())
+			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
 			await relayLock?.release().catch(() => undefined);

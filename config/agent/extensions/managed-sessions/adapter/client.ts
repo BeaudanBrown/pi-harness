@@ -54,6 +54,7 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 		case "aloop.notice": return { type: "aloop.acknowledge", fields: [["lifecycleId", String(payload.lifecycleId)], ["status", "projected"]] };
 		case "self.status": return { type: "self.result", fields: [["operation", "self.status"], ["status", "ok"]] };
 		case "self.delete": return { type: "self.result", fields: [["operation", "self.delete"], ["status", "ok"]] };
+		case "self.promote": return { type: "self.result", fields: [["operation", "self.promote"], ["status", "ok"]] };
 		case "lifecycle.request": return { type: "lifecycle.result", fields: [["operation", String((payload.request as Record<string, unknown>).operation)]] };
 		default: throw new ManagedAdapterError(`Unsupported correlated adapter request ${request.type}`, "invalid_message");
 	}
@@ -180,6 +181,15 @@ export class BoundAdapterClient {
 	async refreshResult(refreshId: string, status: "ready" | "busy"): Promise<void> {
 		await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("refresh-result"),
 			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "refresh.result", payload: { refreshId, status } });
+	}
+
+	async promoteTerminalSession(): Promise<void> {
+		if (this.options.role !== "ordinary_adapter") throw new ManagedAdapterError("Terminal-session promotion requires an ordinary adapter", "permission_denied");
+		const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("promote"),
+			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "self.promote", payload: {} }, RELAY_SIDE_EFFECT_TIMEOUT_MS);
+		if (result.type !== "self.result" || result.payload.operation !== "self.promote" || result.payload.status !== "ok") {
+			throw new ManagedAdapterError("Relay did not confirm terminal-session promotion", "invalid_response");
+		}
 	}
 
 	async exportArtifact(artifact: WorkspaceArtifact): Promise<void> {
@@ -426,7 +436,8 @@ export async function requestSelfBind(options: {
 	sessionId: string;
 	attachmentNonce: string;
 	bindingBoundaryEntryId: string;
-	placement: WorkspaceIdentity;
+	sourceCwd: string;
+	sourceSessionFile: string;
 }): Promise<string> {
 	const socket = await openSocket(options.socketPath);
 	try {
@@ -436,7 +447,7 @@ export async function requestSelfBind(options: {
 			payload: {
 				creationKey: options.creationKey, concept: options.concept, sessionId: options.sessionId,
 				attachmentNonce: options.attachmentNonce, bindingBoundaryEntryId: options.bindingBoundaryEntryId,
-				placement: options.placement,
+				sourceCwd: options.sourceCwd, sourceSessionFile: options.sourceSessionFile,
 			},
 		};
 		socket.write(encodeNdjsonEnvelope(request));

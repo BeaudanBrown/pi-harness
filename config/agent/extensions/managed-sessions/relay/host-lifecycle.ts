@@ -1,6 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
-import { chmod, lstat, open, readFile, readdir, rename, rm } from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
+import { chmod, copyFile, lstat, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import {
 	MANAGED_SESSION_STATE_VERSION,
@@ -205,8 +206,7 @@ async function readPrivateIntent<T>(file: AtomicJsonFile<T>): Promise<T | undefi
 	return value;
 }
 
-async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1): Promise<{ sessionId: string; boundaryEntryId: string }> {
-	const directory = await ensurePrivateDirectory(dirname(path));
+async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1, mustExist = false): Promise<{ sessionId: string; boundaryEntryId: string }> {
 	try {
 		const info = await lstat(path);
 		if (!info.isFile() || info.isSymbolicLink() || (process.getuid?.() !== undefined && info.uid !== process.getuid!())) {
@@ -227,7 +227,9 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 		return { sessionId: header.id, boundaryEntryId: deriveTranscriptEntryId(header.id, boundary.id) };
 	} catch (error) {
 		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+		if (mustExist) throw new RelayRegistryError("invalid_state", "The persisted Pi session file is unavailable");
 	}
+	const directory = await ensurePrivateDirectory(dirname(path));
 	const sessionId = ordinal === 1 ? `managed-${conversationId.slice(5)}` : `managed-${conversationId.slice(5)}-g${ordinal}`;
 	const boundaryKey = ordinal === 1 ? `managed-boundary-${conversationId.slice(5)}` : `managed-boundary-${conversationId.slice(5)}-g${ordinal}`;
 	const now = new Date().toISOString();
@@ -380,9 +382,114 @@ export class HostLifecycle {
 		return { roomId, projectSpace };
 	}
 
+	async prepareTerminalPromotion(input: {
+		creationKey: string; concept: string; sessionId: string; attachmentNonce: string;
+		bindingBoundaryEntryId: string; sourceCwd: string; sourceSessionFile: string;
+	}): Promise<ConversationManifest> {
+		const identified = await this.invoke("workspace-identify", { cwd: input.sourceCwd });
+		const placement = { rootKey: identified.rootKey, workspace: identified.workspace, relativeCwd: identified.relativeCwd };
+		if (![placement.rootKey, placement.workspace, placement.relativeCwd].every((value) => typeof value === "string") ||
+			Object.keys(identified).some((field) => !["rootKey", "workspace", "relativeCwd", "cwd"].includes(field)) ||
+			identified.cwd !== input.sourceCwd) throw new RelayRegistryError("launch_failed", "Workspace launcher could not identify the terminal Pi placement");
+		const resolved = await this.resolveWorkspaceIdentity(placement as WorkspaceIdentity);
+		if (resolved.cwd !== input.sourceCwd) throw new RelayRegistryError("invalid_state", "Terminal Pi cwd differs from its host-resolved placement");
+		const conversationId = deriveConversationId(this.options.hostId, input.creationKey);
+		const session = await durableProjectSession(input.sourceSessionFile, resolved.cwd, conversationId, input.creationKey, input.concept, 1, true);
+		if (session.sessionId !== input.sessionId || session.boundaryEntryId !== input.bindingBoundaryEntryId) {
+			throw new RelayRegistryError("invalid_state", "Terminal Pi session differs from its durable promotion boundary");
+		}
+		const existing = this.options.registry.manifestByCreationKey(input.creationKey);
+		if (existing) {
+			if (existing.kind !== "project" || existing.conversationId !== conversationId || existing.concept !== input.concept ||
+				existing.piSessionId !== input.sessionId || existing.bindingBoundaryEntryId !== input.bindingBoundaryEntryId ||
+				JSON.stringify(existing.placement) !== JSON.stringify(placement)) throw new RelayRegistryError("invalid_state", "Promotion retry conflicts with the existing conversation");
+			return this.options.registry.createProjectConversation(existing, input.attachmentNonce, input.sourceSessionFile);
+		}
+		const grouped = await this.provisionConversationMatrix(conversationId, input.concept, resolved);
+		const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
+		const manifest: ConversationManifest = {
+			schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", conversationId, ownerHostId: this.options.hostId,
+			creationKey: input.creationKey, concept: input.concept, piSessionId: input.sessionId, roomId: grouped.roomId,
+			placement: placement as WorkspaceIdentity, projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName,
+			checkoutDisplayName: resolved.checkoutDisplayName, projectSpace: grouped.projectSpace,
+			bindingBoundaryEntryId: input.bindingBoundaryEntryId, createdAt, activeGenerationId: generationId,
+			generations: [{ generationId, ordinal: 1, piSessionId: input.sessionId, bindingBoundaryEntryId: input.bindingBoundaryEntryId, createdAt }],
+		};
+		return this.options.registry.createProjectConversation(manifest, input.attachmentNonce, input.sourceSessionFile);
+	}
+
+	async completeTerminalPromotion(conversationId: string): Promise<void> {
+		const promotion = this.options.registry.promotion(conversationId);
+		if (!promotion || promotion.phase === "prepared" || this.options.registry.conversationState(conversationId) !== "dormant") return;
+		const manifest = this.projectManifest(conversationId);
+		const destination = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
+		const resolved = await this.resolveWorkspaceIdentity(manifest.placement!);
+		if (promotion.phase === "shutdown_requested") {
+			await this.adoptPromotedSession(promotion.sourceSessionFile, destination);
+			const session = await durableProjectSession(destination, resolved.cwd, conversationId, manifest.creationKey, manifest.concept, 1, true);
+			if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {
+				throw new RelayRegistryError("invalid_state", "Adopted Pi session conflicts with its managed conversation");
+			}
+			await this.options.registry.markPromotionAdopted(conversationId);
+		}
+		await this.launchProject(manifest, undefined, destination);
+		await this.options.registry.finishPromotion(conversationId);
+	}
+
+	async recoverTerminalPromotions(): Promise<void> {
+		for (const conversationId of this.options.registry.pendingPromotionConversationIds()) {
+			await this.completeTerminalPromotion(conversationId);
+		}
+	}
+
+	private async adoptPromotedSession(source: string, destination: string): Promise<void> {
+		await ensurePrivateDirectory(dirname(destination));
+		try {
+			const target = await lstat(destination);
+			if (!target.isFile() || target.isSymbolicLink() || (process.getuid?.() !== undefined && target.uid !== process.getuid!())) {
+				throw new RelayRegistryError("invalid_state", "Managed promotion destination is unsafe");
+			}
+			try { await lstat(source); } catch (error) {
+				if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+				throw error;
+			}
+			const [sourceBytes, destinationBytes] = await Promise.all([readFile(source), readFile(destination)]);
+			if (!sourceBytes.equals(destinationBytes)) throw new RelayRegistryError("invalid_state", "Source and managed promotion session files conflict");
+			await unlink(source);
+			return;
+		} catch (error) {
+			if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+		}
+		const sourceInfo = await lstat(source);
+		if (!sourceInfo.isFile() || sourceInfo.isSymbolicLink() || (process.getuid?.() !== undefined && sourceInfo.uid !== process.getuid!())) {
+			throw new RelayRegistryError("invalid_state", "Terminal Pi session source is unsafe");
+		}
+		try {
+			await rename(source, destination);
+		} catch (error) {
+			if (!(error instanceof Error && "code" in error && error.code === "EXDEV")) throw error;
+			const temporary = `${destination}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
+			try {
+				await copyFile(source, temporary, fsConstants.COPYFILE_EXCL);
+				const file = await open(temporary, "r"); try { await file.sync(); } finally { await file.close(); }
+				await rename(temporary, destination);
+				await unlink(source);
+			} catch (copyError) {
+				await rm(temporary, { force: true });
+				throw copyError;
+			}
+		}
+	}
+
 	async wake(manifest: ConversationManifest): Promise<void> {
 		if (manifest.kind === "coordinator" || !manifest.placement) throw new RelayRegistryError("permission_denied", "Coordinator wake uses its dedicated launcher");
-		await this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement), async () => { await this.launchProject(manifest); return {}; });
+		await this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement), async () => {
+			const promotion = this.options.registry.promotion(manifest.conversationId);
+			if (promotion?.phase === "prepared") throw new RelayRegistryError("invalid_state", "Terminal promotion must be retried from its source Pi session");
+			if (promotion) await this.completeTerminalPromotion(manifest.conversationId);
+			else await this.launchProject(manifest);
+			return {};
+		});
 	}
 
 	async requestNewGeneration(manifest: ConversationManifest, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<void> {
@@ -736,7 +843,12 @@ export class HostLifecycle {
 	private async resumeOnce(conversationId: string): Promise<Record<string, unknown>> {
 		const manifest = this.projectManifest(conversationId);
 		await this.invoke("root-ensure", manifest.placement!);
-		if (this.options.registry.conversationState(conversationId) !== "active") await this.launchProject(manifest);
+		if (this.options.registry.conversationState(conversationId) !== "active") {
+			const promotion = this.options.registry.promotion(conversationId);
+			if (promotion?.phase === "prepared") throw new RelayRegistryError("invalid_state", "Terminal promotion must be retried from its source Pi session");
+			if (promotion) await this.completeTerminalPromotion(conversationId);
+			else await this.launchProject(manifest);
+		}
 		return { operation: "conversation.resume", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };
 	}
 
