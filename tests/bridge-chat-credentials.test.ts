@@ -55,7 +55,7 @@ for (const scenario of cases) test(`credential entrypoint: ${scenario.name}`, t 
 		` : ""}`);
 	const result = spawnSync(process.execPath, ["--require", preload, require.resolve("../config/agent/extensions/bridge-chat/main.js"), config], {
 		encoding: "utf8", timeout: 5000,
-		env: { ...process.env, NODE_OPTIONS: "", CREDENTIALS_DIRECTORY: dir, STATE_DIRECTORY: dir },
+		env: { ...process.env, NODE_OPTIONS: "", NODE_NO_WARNINGS: "1", CREDENTIALS_DIRECTORY: dir, STATE_DIRECTORY: dir },
 	});
 	assert.equal(result.error, undefined);
 	assert.equal(result.status, scenario.accepted ? 0 : 1, result.stderr);
