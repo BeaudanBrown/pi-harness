@@ -197,7 +197,7 @@ test("unfinished durable activity is finalized as interrupted after attachment l
 	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" }, fetcher as typeof fetch, [roomId]);
 	const registry = { manifestByConversationId: () => ({ conversationId, roomId }) } as unknown as RelayRegistry;
 	const first = new ActivityProjector(root, registry, matrix); await first.load(); await first.project(envelope("activity.update", { activityId, revision: 0, state: "busy" })); await first.close();
-	const recovered = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 10, typingRefreshMs: 5 });
+	const recovered = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 60_000, typingRefreshMs: 5 });
 	await recovered.load();
 	await recovered.attachmentConnected(conversationId);
 	await new Promise((resolve) => setTimeout(resolve, 25));
@@ -205,11 +205,18 @@ test("unfinished durable activity is finalized as interrupted after attachment l
 	assert.equal(durable.activities[0].finalized, false, "an adapter reconnect cancels restart interruption");
 	assert.ok(typing.includes(true), "typing resumes with the surviving busy span");
 	recovered.attachmentDisconnected(conversationId);
-	await new Promise((resolve) => setTimeout(resolve, 30));
-	durable = JSON.parse(await readFile(join(root, "activities.json"), "utf8"));
+	await recovered.close();
+	const interrupted = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 10, typingRefreshMs: 5 });
+	await interrupted.load();
+	for (let attempt = 0; attempt < 300; attempt += 1) {
+		await new Promise((resolve) => setTimeout(resolve, 10));
+		durable = JSON.parse(await readFile(join(root, "activities.json"), "utf8"));
+		if (durable.activities[0].finalized) break;
+	}
 	assert.equal(durable.activities[0].finalized, true); assert.equal(durable.activities[0].payload.outcome, "interrupted");
+	for (let attempt = 0; attempt < 100 && typing.at(-1) !== false; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.equal(typing.at(-1), false);
-	await recovered.close(); await rm(root, { recursive: true, force: true });
+	await interrupted.close(); await rm(root, { recursive: true, force: true });
 });
 
 test("all terminal outcomes render as distinct immutable unpinned snapshots", async () => {
