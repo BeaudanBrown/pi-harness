@@ -372,11 +372,18 @@ async function waitForExit(pid: number): Promise<void> {
 test("cancelled full workers preserve dirty partial work and finalized artifacts", async () => {
 	const cwd = await createRepository();
 	const controller = new AbortController();
-	setTimeout(() => controller.abort(), 100).unref?.();
 	try {
-		const outcome = await runAloopWorker({
+		const running = runAloopWorker({
 			...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 5_000, signal: controller.signal,
 		});
+		let started = false;
+		for (let attempt = 0; attempt < 400; attempt += 1) {
+			try { await readFile(path.join(cwd, "timeout-partial.txt")); started = true; break; }
+			catch { await new Promise((resolve) => setTimeout(resolve, 10)); }
+		}
+		assert.equal(started, true, "fake worker must start before cancellation");
+		controller.abort();
+		const outcome = await running;
 		assert.equal(outcome.status, "cancelled");
 		assert.deepEqual(JSON.parse(await readFile(path.join(cwd, outcome.artifacts.untracked!), "utf8")), ["timeout-partial.txt"]);
 		assert.equal(JSON.parse(await readFile(path.join(cwd, outcome.artifacts.result), "utf8")).status, "cancelled");
