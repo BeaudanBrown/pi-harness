@@ -16,7 +16,7 @@ export type PeerUidResolver = (socket: Socket) => number | undefined | Promise<n
 export type EnvelopeHandler = (envelope: ManagedSessionEnvelope, attachment: AcceptedAttachment) => Promise<ManagedSessionEnvelope | undefined>;
 export type UnboundEnvelopeHandler = (envelope: ManagedSessionEnvelope) => Promise<ManagedSessionEnvelope | undefined>;
 export type AttachmentHandler = (attachment: AcceptedAttachment) => Promise<void> | void;
-export type AttachmentDisconnectHandler = (attachment: AcceptedAttachment) => Promise<void> | void;
+export type AttachmentDisconnectHandler = (attachment: AcceptedAttachment, reason?: "shutdown" | "session_change" | "stop" | "bridge_delete") => Promise<void> | void;
 
 interface ConnectionState {
 	id: string;
@@ -24,6 +24,7 @@ interface ConnectionState {
 	attachment?: AcceptedAttachment;
 	messageIds: Set<string>;
 	closed: boolean;
+	detachReason?: "shutdown" | "session_change" | "stop" | "bridge_delete";
 	work: Promise<void>;
 }
 
@@ -156,7 +157,7 @@ export class ManagedSessionIpcServer {
 				this.attachedSockets.delete(state.attachment.conversationId);
 			}
 			if (state.attachment && !this.preserveAttachmentsOnClose) {
-				void this.registry.detach(state.id, state.attachment).then(() => this.onAttachmentDisconnect?.(state.attachment!)).catch(() => undefined);
+				void this.registry.detach(state.id, state.attachment).then(() => this.onAttachmentDisconnect?.(state.attachment!, state.detachReason)).catch(() => undefined);
 			}
 		});
 		socket.resume();
@@ -216,7 +217,9 @@ export class ManagedSessionIpcServer {
 				}
 				this.registry.assertAuthorized(envelope, state.id, state.attachment);
 				if (envelope.type === "attachment.detach") {
-					await this.registry.detach(state.id, state.attachment, (envelope.payload as { attachmentId: string }).attachmentId);
+					const payload = envelope.payload as { attachmentId: string; reason: "shutdown" | "session_change" | "stop" | "bridge_delete" };
+					state.detachReason = payload.reason;
+					await this.registry.detach(state.id, state.attachment, payload.attachmentId, payload.reason);
 					socket.end();
 					return;
 				}

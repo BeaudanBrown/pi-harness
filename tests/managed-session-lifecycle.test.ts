@@ -294,9 +294,19 @@ test("terminal promotion adopts the existing session only after detach and relau
 	await registry.requestPromotion(manifest.conversationId);
 	original.end();
 	for (let attempt = 0; attempt < 100 && registry.conversationState(manifest.conversationId) !== "dormant"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
-	assert.equal(registry.conversationState(manifest.conversationId), "dormant", "replacement waits until the ordinary writer disconnects");
-	const replacement = attachFromRecord(record, server, registry);
 	await lifecycle.completeTerminalPromotion(manifest.conversationId);
+	assert.equal(await readFile(source, "utf8").then(() => true), true, "an unqualified socket loss cannot authorize adoption");
+	assert.equal(registry.promotion(manifest.conversationId)?.phase, "shutdown_requested");
+	const resumed = connect(server.socketPath); await new Promise<void>((resolve, reject) => { resumed.once("connect", resolve); resumed.once("error", reject); });
+	resumed.write(encodeNdjsonEnvelope({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "resumed-attach", conversationId: manifest.conversationId,
+		role: "ordinary_adapter", type: "attachment.attach", payload: { sessionId, attachmentNonce: nonce, bindingBoundaryEntryId: boundaryEntryId } }));
+	const resumedAccepted = await readEnvelope(resumed);
+	resumed.write(encodeNdjsonEnvelope({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "resumed-detach", conversationId: manifest.conversationId,
+		role: "ordinary_adapter", type: "attachment.detach", payload: { attachmentId: String(resumedAccepted.payload.attachmentId), reason: "shutdown" } }));
+	for (let attempt = 0; attempt < 100 && registry.promotion(manifest.conversationId)?.phase !== "shutdown_confirmed"; attempt += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(registry.conversationState(manifest.conversationId), "dormant", "replacement waits for the ordinary writer's graceful detach");
+	const replacement = attachFromRecord(record, server, registry);
+	await Promise.all([lifecycle.completeTerminalPromotion(manifest.conversationId), lifecycle.completeTerminalPromotion(manifest.conversationId)]);
 	const replacementSocket = await replacement; t.after(() => replacementSocket.destroy());
 	const destination = join(sessions, manifest.conversationId, "session.jsonl");
 	await assert.rejects(() => readFile(source, "utf8"), /ENOENT/);

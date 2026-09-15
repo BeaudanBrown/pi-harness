@@ -261,6 +261,7 @@ export class HostLifecycle {
 	private readonly creations = new Map<string, Promise<Record<string, unknown>>>();
 	private readonly worktreeOperations = new Map<string, Promise<unknown>>();
 	private readonly provisions = new Map<string, Promise<{ roomId: string; projectSpace: string }>>();
+	private readonly promotions = new Map<string, Promise<void>>();
 	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
 	private readonly refreshWaiters = new Map<string, { refreshId: string; resolve: (ready: boolean) => void }>();
 	private readonly reconciler: ProjectReconciler;
@@ -419,12 +420,20 @@ export class HostLifecycle {
 	}
 
 	async completeTerminalPromotion(conversationId: string): Promise<void> {
+		const existing = this.promotions.get(conversationId);
+		if (existing) return existing;
+		const operation = this.completeTerminalPromotionOnce(conversationId).finally(() => this.promotions.delete(conversationId));
+		this.promotions.set(conversationId, operation);
+		return operation;
+	}
+
+	private async completeTerminalPromotionOnce(conversationId: string): Promise<void> {
 		const promotion = this.options.registry.promotion(conversationId);
-		if (!promotion || promotion.phase === "prepared" || this.options.registry.conversationState(conversationId) !== "dormant") return;
+		if (!promotion || promotion.phase === "prepared" || promotion.phase === "shutdown_requested" || this.options.registry.conversationState(conversationId) !== "dormant") return;
 		const manifest = this.projectManifest(conversationId);
 		const destination = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
 		const resolved = await this.resolveWorkspaceIdentity(manifest.placement!);
-		if (promotion.phase === "shutdown_requested") {
+		if (promotion.phase === "shutdown_confirmed") {
 			await this.adoptPromotedSession(promotion.sourceSessionFile, destination);
 			const session = await durableProjectSession(destination, resolved.cwd, conversationId, manifest.creationKey, manifest.concept, 1, true);
 			if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {

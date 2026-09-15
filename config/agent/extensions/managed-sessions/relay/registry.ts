@@ -893,7 +893,7 @@ export class RelayRegistry {
 	}
 
 	pendingPromotionConversationIds(): string[] {
-		return this.state.conversations.filter((conversation) => conversation.promotion && conversation.promotion.phase !== "prepared")
+		return this.state.conversations.filter((conversation) => conversation.promotion && ["shutdown_confirmed", "adopted"].includes(conversation.promotion.phase))
 			.map((conversation) => conversation.conversationId);
 	}
 
@@ -911,7 +911,7 @@ export class RelayRegistry {
 	async markPromotionAdopted(conversationId: string): Promise<void> {
 		await this.mutate(async () => {
 			const promotion = this.runtimeConversation(conversationId).promotion;
-			if (!promotion || promotion.phase !== "shutdown_requested") throw new RelayRegistryError("invalid_state", "Promotion is not ready for session adoption");
+			if (!promotion || promotion.phase !== "shutdown_confirmed") throw new RelayRegistryError("invalid_state", "Promotion is not ready for session adoption");
 			promotion.phase = "adopted";
 		});
 	}
@@ -975,7 +975,7 @@ export class RelayRegistry {
 		}
 	}
 
-	async detach(connectionId: string, attachment: AcceptedAttachment, requestedAttachmentId?: string): Promise<void> {
+	async detach(connectionId: string, attachment: AcceptedAttachment, requestedAttachmentId?: string, reason?: "shutdown" | "session_change" | "stop" | "bridge_delete"): Promise<void> {
 		await this.mutate(async () => {
 			if (this.liveConnections.get(attachment.conversationId) !== connectionId) return;
 			const conversation = this.runtimeConversation(attachment.conversationId);
@@ -985,6 +985,9 @@ export class RelayRegistry {
 			this.liveConnections.delete(attachment.conversationId);
 			conversation.state = "dormant";
 			conversation.attachment = null;
+			if (reason === "shutdown" && conversation.promotion?.phase === "shutdown_requested") {
+				conversation.promotion.phase = "shutdown_confirmed";
+			}
 		});
 	}
 

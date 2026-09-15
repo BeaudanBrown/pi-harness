@@ -142,9 +142,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						} });
 				}
 			},
-			onAttachmentDisconnect: (attachment) => {
+			onAttachmentDisconnect: (attachment, reason) => {
 				activityProjector?.attachmentDisconnected(attachment.conversationId);
-				if (registry.promotion(attachment.conversationId)?.phase === "shutdown_requested") {
+				if (reason === "shutdown" && registry.promotion(attachment.conversationId)?.phase === "shutdown_confirmed") {
 					void hostLifecycle?.completeTerminalPromotion(attachment.conversationId).catch((error) => {
 						process.stderr.write(`pi-managed-session-relay: terminal promotion failed: ${redactManagedValue(error instanceof Error ? error.message : "unknown failure", environment)}\n`);
 					});

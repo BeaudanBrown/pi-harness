@@ -177,7 +177,7 @@ interface AdapterEnvironment {
 function environmentConfig(environment: NodeJS.ProcessEnv): AdapterEnvironment {
 	const socketPath = environment.PI_MANAGED_SESSIONS_SOCKET?.trim();
 	if (!socketPath) throw new ManagedAdapterError("PI_MANAGED_SESSIONS_SOCKET is required");
-	const attachmentNonce = environment.PI_MANAGED_SESSION_ATTACHMENT_NONCE?.trim();
+	const attachmentNonce = environment.PI_MANAGED_SESSION_ATTACHMENT_NONCE?.trim() || undefined;
 	if (attachmentNonce && !/^[A-Za-z0-9_-]{32,128}$/.test(attachmentNonce)) throw new ManagedAdapterError("Managed-session attachment nonce is invalid");
 	const rootKey = environment.PI_MANAGED_SESSION_ROOT_KEY?.trim();
 	const workspace = environment.PI_MANAGED_SESSION_WORKSPACE?.trim();

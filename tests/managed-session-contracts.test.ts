@@ -417,6 +417,8 @@ test("runtime parser rejects malformed lifecycle state and duplicate durable ide
 		() => parseHostRuntimeState(runtime({ attachment: { attachmentId: "attachment-1", sessionId: "pi-session-1", connectedAt: "2026-08-31T10:00:00Z" } })),
 		/has an attachment/,
 	);
+	assert.throws(() => parseHostRuntimeState(runtime({ promotion: { sourceSessionFile: "relative.jsonl", phase: "prepared", requestedAt: "2026-08-31T10:00:00Z" } })), /promotion source path/);
+	assert.throws(() => parseHostRuntimeState(runtime({ state: "starting", promotion: { sourceSessionFile: "/safe/session.jsonl", phase: "shutdown_confirmed", requestedAt: "2026-08-31T10:00:00Z" } })), /confirmed promotion/);
 	assert.throws(
 		() => parseHostRuntimeState({ ...runtime(), conversations: [...runtime().conversations, ...runtime().conversations] }),
 		/duplicate runtime conversation/,

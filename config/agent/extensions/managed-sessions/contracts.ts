@@ -605,7 +605,7 @@ const runtimeConversation = strictObject({
 	),
 	promotion: Type.Optional(nullable(strictObject({
 		sourceSessionFile: boundedString(4_096),
-		phase: Type.Union([Type.Literal("prepared"), Type.Literal("shutdown_requested"), Type.Literal("adopted")]),
+		phase: Type.Union([Type.Literal("prepared"), Type.Literal("shutdown_requested"), Type.Literal("shutdown_confirmed"), Type.Literal("adopted")]),
 		requestedAt: timestamp,
 	}))),
 	lastLaunchError: Type.Optional(strictObject({ code: identifier, message: boundedString(500), at: timestamp })),
@@ -696,7 +696,7 @@ export interface HostRuntimeState {
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string };
-		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "adopted"; requestedAt: string };
+		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "shutdown_confirmed" | "adopted"; requestedAt: string };
 		lastLaunchError?: { code: string; message: string; at: string };
 		generationTransition?: null | {
 			transitionId: string; sourceControlId: string; phase: "requested" | "session_persisted" | "activated" | "attached" | "failed";
@@ -961,6 +961,12 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		}
 		if (conversation.state === "dormant" && conversation.attachment !== null) {
 			throw new ManagedSessionContractError("invalid_state", `dormant conversation ${conversation.conversationId} has an attachment`);
+		}
+		if (conversation.promotion && (!isAbsolute(conversation.promotion.sourceSessionFile) || /[\u0000-\u001f\u007f]/.test(conversation.promotion.sourceSessionFile))) {
+			throw new ManagedSessionContractError("invalid_state", `invalid promotion source path in ${conversation.conversationId}`);
+		}
+		if (conversation.promotion?.phase === "shutdown_confirmed" && conversation.state !== "dormant") {
+			throw new ManagedSessionContractError("invalid_state", `confirmed promotion ${conversation.conversationId} is not dormant`);
 		}
 		const deliveries = new Set<string>();
 		const matrixEvents = new Set<string>();

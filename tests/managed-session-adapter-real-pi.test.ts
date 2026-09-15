@@ -269,3 +269,51 @@ export default function (pi) {
 	assert.equal((normalPersisted?.data as { piEntryId?: string }).piEntryId,
 		deriveTranscriptEntryId("11111111-1111-4111-8111-111111111111", String(normalUser!.id)));
 });
+
+test("real Pi promotes an ordinary persisted session only after relay confirmation", { timeout: 25_000 }, async (t) => {
+	if (!pi || !adapterExtension) return t.skip("packaged Pi adapter probe paths are unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-managed-real-promotion-"));
+	const home = join(root, "home"); const socketPath = join(root, "relay.sock"); const sessionPath = join(root, "ordinary.jsonl");
+	await mkdir(home);
+	const sessionId = "22222222-2222-4222-8222-222222222222";
+	await writeFile(sessionPath, [
+		{ type: "session", version: 3, id: sessionId, timestamp: "2026-09-15T00:00:00.000Z", cwd: root },
+		{ type: "message", id: "history-before-promotion", parentId: null, timestamp: "2026-09-15T00:00:01.000Z",
+			message: { role: "user", content: "history before promotion", timestamp: 1789430401000 } },
+	].map((entry) => JSON.stringify(entry)).join("\n") + "\n");
+	const frames: ManagedSessionEnvelope[] = []; const sockets = new Set<Socket>();
+	const promotedConversationId = deriveConversationId("probe-host", "ignored-by-fake-relay");
+	const server = createServer((socket) => {
+		sockets.add(socket); socket.on("close", () => sockets.delete(socket)); let buffer = Buffer.alloc(0);
+		socket.on("data", (chunk) => {
+			buffer = Buffer.concat([buffer, chunk]);
+			while (buffer.includes(0x0a)) {
+				const newline = buffer.indexOf(0x0a); const envelope = parseNdjsonEnvelope(buffer.subarray(0, newline + 1)); buffer = buffer.subarray(newline + 1);
+				frames.push(envelope);
+				const base = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-promotion-${frames.length}`,
+					conversationId: envelope.conversationId ?? promotedConversationId, role: "relay" as const, inReplyTo: envelope.messageId };
+				if (envelope.type === "self.bind") socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: promotedConversationId } }));
+				else if (envelope.type === "attachment.attach") socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "promotion-attachment", state: "active" } }));
+				else if (envelope.type === "self.promote") socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.promote", status: "ok" } }));
+			}
+		});
+	});
+	await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+	t.after(async () => { for (const socket of sockets) socket.destroy(); await new Promise<void>((resolve) => server.close(() => resolve())); await rm(root, { recursive: true, force: true }); });
+	const child = spawn(pi, ["--mode", "rpc", "--session", sessionPath, "--no-extensions", "--extension", adapterExtension], {
+		cwd: root, env: { ...process.env, HOME: home, PI_CODING_AGENT_DIR: join(home, ".pi", "agent"), PI_MANAGED_SESSIONS_SOCKET: socketPath,
+			PI_MANAGED_SESSION_ATTACHMENT_NONCE: undefined, PI_MANAGED_SESSION_ROOT_KEY: undefined, PI_MANAGED_SESSION_WORKSPACE: undefined, PI_MANAGED_SESSION_RELATIVE_CWD: undefined },
+		stdio: ["pipe", "pipe", "pipe"],
+	});
+	const events = await rpc(child, [{ id: "promote", type: "prompt", message: "/remote on promoted from terminal" }]);
+	assert.deepEqual(frames.filter((frame) => ["self.bind", "attachment.attach", "self.promote"].includes(frame.type)).map((frame) => frame.type),
+		["self.bind", "attachment.attach", "self.promote"], JSON.stringify(events));
+	const bind = frames.find((frame) => frame.type === "self.bind");
+	assert.equal(bind?.payload.sourceCwd, root); assert.equal(bind?.payload.sourceSessionFile, sessionPath);
+	assert.ok(frames.some((frame) => frame.type === "attachment.detach" && frame.payload.reason === "shutdown"));
+	const entries = (await readFile(sessionPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
+	assert.equal((entries[0] as { id?: string }).id, sessionId);
+	assert.ok(entries.some((entry) => entry.type === "custom" && entry.customType === "managed-session.binding-boundary"));
+	assert.ok(entries.some((entry) => entry.type === "custom" && entry.customType === "managed-session.binding"));
+	assert.equal(frames.some((frame) => frame.type === "transcript.offer"), false, "pre-promotion history is not projected");
+});
