@@ -59,7 +59,7 @@ A bootstrap `/sync` establishes its validated cursor without interpreting retain
 
 ### Protocol contract
 
-`config/agent/extensions/managed-sessions/contracts.ts` is the shared normative TypeScript contract. V1 uses one UTF-8 JSON object per LF-terminated frame with a 64 KiB maximum. Every object and payload rejects additional properties. Every envelope carries literal protocol version `1.0.0`, a message ID, role, type, and typed payload. Bound operations also carry the conversation ID; the sole exception is initial `self.bind`, because an unbound persisted Pi session has no conversation identity yet. Initial binding carries the process's bounded attachment nonce and host-owned portable workspace placement so the relay can persist the logical project manifest plus only the nonce's one-way verifier before accepting the subsequent attachment. Relay responses may correlate with `inReplyTo`.
+`config/agent/extensions/managed-sessions/contracts.ts` is the shared normative TypeScript contract. V1 uses one UTF-8 JSON object per LF-terminated frame with a 64 KiB maximum. Every object and payload rejects additional properties. Every envelope carries literal protocol version `1.0.0`, a message ID, role, type, and typed payload. Bound operations also carry the conversation ID; the sole exception is initial `self.bind`, because an unbound persisted Pi session has no conversation identity yet. Initial binding carries the process's bounded attachment nonce plus its absolute cwd and persisted session-file path. The relay resolves cwd to portable workspace placement through the host-owned launcher, validates the session ID and durable binding-boundary entry, provisions Matrix resources, and persists the logical manifest, promotion intent, and only the nonce's one-way verifier before accepting the subsequent attachment. A correlated `self.promote` makes shutdown intent durable; only after that ordinary adapter disconnects may the relay atomically adopt the same session file and launch it under the managed profile. Relay responses may correlate with `inReplyTo`.
 
 The checkpoint tool's model-facing schema is one flat bounded object because llama.cpp constrained decoding emits empty arguments for a root union; strict kind-specific exact-field validation still runs before persistence or relay contact. The protocol schema permits only:
 
@@ -67,7 +67,7 @@ The checkpoint tool's model-facing schema is one flat bounded object because lla
 - input delivery and staged acknowledgement;
 - transcript offer and acknowledgement;
 - structured checkpoint offer and acknowledgement;
-- ordinary self bind/status/confirmed bridge deletion;
+- ordinary self bind/promotion/status/confirmed bridge deletion;
 - coordinator workspace/worktree inventory, bounded local-project and linked-worktree creation, preview-key-confirmed worktree/bridge cleanup, separately confirmed merged local-branch deletion, and conversation list/status/start/resume/stop/confirmed delete;
 - relay attachment acceptance, typed operation results, termination requests, and typed errors.
 
@@ -79,20 +79,20 @@ Unknown versions, message types, fields, enum values, invalid role/type combinat
 
 There is no protocol operation or payload field for:
 
-- arbitrary commands, argv, executable paths, shell text, file reads/writes, environment values, PIDs, caller-selected worktree paths, or caller-selected tmux targets;
+- arbitrary commands, argv, executable paths, shell text, file contents, environment values, PIDs, caller-selected lifecycle/worktree paths, or caller-selected tmux targets; the sole path-bearing request is ordinary promotion's current cwd and persisted Pi session file, both re-resolved and structurally validated by the host;
 - Matrix access tokens, arbitrary Matrix endpoints, arbitrary room sends, media, attachments, edits, reactions, threads, or voice;
 - thinking, tools, tool results, partial assistant output, compaction, or internal entries;
 - cross-host discovery, migration, room sharing, claims, or process control;
 - task objectives or hidden prompt injection;
 - importing or interpreting legacy direct-bridge bindings.
 
-The typed workspace identity and relay-selected lifecycle operation are the only placement inputs. Host launcher code maps them to canonical paths and fixed argv.
+Typed workspace identity is the normal placement input. Initial ordinary promotion supplies its current absolute cwd only so host launcher code can map it back to that identity; all lifecycle operations thereafter map the stored identity to canonical paths and fixed argv.
 
 ### Persistence split
 
 Synchronized **conversation manifests** contain only portable logical identity: schema version, conversation kind, owning host key, stable conversation/creation identity, immutable concept, Pi session, Matrix room, binding boundary, creation time, and (for project conversations) workspace identity plus optional stable project identity and project Space for pre-reconciliation compatibility. They contain no credentials, process observations, pending message bodies, or legacy bridge state.
 
-Host-local **runtime state** contains the lifecycle state, current attachment observation, an optional one-way attachment-nonce verifier, Matrix cursor, bounded accepted-input records, bounded projection records and transaction IDs, managed tmux observation, and a concise redacted launch error. Raw attachment nonces are never persisted. Runtime state is written by atomic replacement in a private **persistent** host directory, never under reboot-volatile `XDG_RUNTIME_DIR`. The name “runtime state” describes host-local ownership, not ephemeral storage. Registry, activity projection and referenced media survive host reboot together. Only sockets and reconstructible health observations belong in the volatile runtime directory. First relocation holds the host relay lock, copies private legacy state into a sibling staging directory, validates the registry/manifest pair, fsyncs, and publishes the whole destination by rename; it retains the legacy source and never merges it into an existing destination. Storage implementations must fsync/write/rename safely and must never recover from malformed primary state by silently accepting a partial temporary file.
+Host-local **runtime state** contains the lifecycle state, current attachment observation, an optional one-way attachment-nonce verifier, terminal-promotion source and phase, Matrix cursor, bounded accepted-input records, bounded projection records and transaction IDs, managed tmux observation, and a concise redacted launch error. Raw attachment nonces are never persisted. Runtime state is written by atomic replacement in a private **persistent** host directory, never under reboot-volatile `XDG_RUNTIME_DIR`. The name “runtime state” describes host-local ownership, not ephemeral storage. Registry, activity projection and referenced media survive host reboot together. Only sockets and reconstructible health observations belong in the volatile runtime directory. First relocation holds the host relay lock, copies private legacy state into a sibling staging directory, validates the registry/manifest pair, fsyncs, and publishes the whole destination by rename; it retains the legacy source and never merges it into an existing destination. Storage implementations must fsync/write/rename safely and must never recover from malformed primary state by silently accepting a partial temporary file.
 
 Parsers reject unsupported versions, extra fields, malformed timestamps and workspace identities, impossible active/dormant attachment combinations, duplicate conversation/delivery/event/projection/transaction identities, host ownership mismatches, and any mismatch between the synchronized manifest set and host-local registry. There is no best-effort merge. Operators must resolve conflicting synchronized state explicitly.
 
@@ -108,7 +108,7 @@ Derivations use SHA-256 with a distinct `pi-managed-sessions:<domain>:v1` prefix
 | Transcript chunk ID | entry ID, zero-based chunk index | `chunk_` + 32 hex |
 | Matrix transaction ID | conversation ID, source ID, zero-based chunk index | `pi_` + 48 hex |
 
-Creation keys are durable retry keys, not display names. Coordinator-created conversation keys are supplied by the trusted coordinator adapter. Manual ordinary `/remote on` creates its key once, persists it with the binding-boundary attempt before contacting the relay, and reuses that key on retry. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
+Creation keys are durable retry keys, not display names. Coordinator-created conversation keys are supplied by the trusted coordinator adapter. Manual ordinary `/remote on` creates its key once, persists it with the binding-boundary attempt before contacting the relay, and reuses that key on retry. Promotion has persisted `prepared`, `shutdown_requested`, and `adopted` phases: failure before shutdown leaves the source process and file untouched; adoption waits for disconnect, handles cross-filesystem moves, and restart recovery resumes only durable shutdown requests. The binding boundary also defines the projection start, so the adopted session retains earlier model history without backfilling it to Matrix. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
 
 ### V2 rich-interaction and generation amendment
 

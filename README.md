@@ -215,10 +215,14 @@ expansion. They are deliberately absent from default settings and the default
 Pi wrapper; an enabled managed-session host must select exactly one profile.
 The ordinary profile provides `/remote on <concept>`, `/remote status`, and
 `/remote delete --confirm`; there is no `/remote off` operation and no ordinary
-host-wide lifecycle tool surface. Initial binding requires the host-owned
-`PI_MANAGED_SESSION_ROOT_KEY`, `PI_MANAGED_SESSION_WORKSPACE`, and optional
-`PI_MANAGED_SESSION_RELATIVE_CWD` placement environment in addition to the
-private socket and attachment nonce.
+host-wide lifecycle tool surface. `/remote on` promotes a persisted, idle
+ordinary Pi session: the relay resolves its canonical cwd through the host
+launcher, provisions the private Matrix hierarchy and durable binding, then the
+adapter shuts down gracefully and the relay adopts the same session file into a
+managed tmux window. Provisioning failure leaves the ordinary process running;
+pre-binding transcript history remains available to Pi but is not projected to
+Matrix. Managed relaunches receive their private socket and one-time attachment
+nonce from the host-owned launcher.
 
 After binding, adapters classify persisted Pi branch entries and offer only
 terminal-origin text turns and final assistant answers. Matrix-origin users are
