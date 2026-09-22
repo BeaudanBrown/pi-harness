@@ -72,26 +72,17 @@ let
   localProfile = profileDocument.profiles."pi-local" or { tools = [ ]; };
   managedLocalModelTools = builtins.toJSON localProfile.tools;
   managedVariant = profileDocument.variants."managed-project" or { excludeExtensions = [ ]; excludeSkills = [ ]; excludePrompts = [ ]; };
-  managedProfileExtensions = builtins.filter
-    (name: !(builtins.elem name (managedVariant.excludeExtensions or [ ])) && name != "pi-r" && name != "agentgraph")
-    engineeringProfile.extensions;
-  managedProfileExtensionArgs = lib.concatMapStringsSep "\n" (name:
-    if name == "lsp" then ""
-    else ''--extension "${cfg.package.harnessResources}/share/pi-harness/agent/extensions/${name}/index.ts"''
-  ) managedProfileExtensions;
-  managedProfileSkillArgs = lib.concatMapStringsSep "\n" (name:
-    if builtins.elem name (managedVariant.excludeSkills or [ ]) then ""
-    else if name == "harness" then ''--skill "${cfg.package.harnessResources}/share/pi-harness/agent/skills"''
-    else if name == "matt-pocock" then ''--skill "${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills"''
-    else ""
-  ) engineeringProfile.skills;
-  managedProfilePromptArgs = lib.concatMapStringsSep "\n" (name:
-    if builtins.elem name (managedVariant.excludePrompts or [ ]) then ""
-    else if name == "harness" then ''--prompt-template "${cfg.package.harnessResources}/share/pi-harness/agent/prompts"'' else ""
-  ) engineeringProfile.prompts;
-  managedProfileThemeArgs = lib.concatMapStringsSep "\n" (name:
-    if name == "harness" then ''--theme "${cfg.package.harnessResources}/share/pi-harness/agent/themes"'' else ""
-  ) engineeringProfile.themes;
+  fragments = import ./launcher-fragments.nix { inherit lib; };
+  without = values: excluded: builtins.filter (name: !(builtins.elem name excluded)) values;
+  managedResourceArgs = fragments.resourceArgs {
+    extensions = without engineeringProfile.extensions (managedVariant.excludeExtensions or [ ]);
+    skills = without engineeringProfile.skills (managedVariant.excludeSkills or [ ]);
+    prompts = without engineeringProfile.prompts (managedVariant.excludePrompts or [ ]);
+    themes = without engineeringProfile.themes (managedVariant.excludeThemes or [ ]);
+  } {
+    harnessRoot = "${cfg.package.harnessResources}/share/pi-harness/agent";
+    mattSkillsRoot = "${cfg.package.mattpocockSkills}/share/pi-harness/mattpocock-skills";
+  };
   coordinatorProfile = profileDocument.profiles."managed-coordinator" or { tools = [ ]; };
   coordinatorTools = lib.concatStringsSep "," coordinatorProfile.tools;
   managedRawPi = cfg.package.pi or cfg.package;
@@ -124,23 +115,7 @@ let
   lspFallbackEnvironment = lib.optionalString cfg.lsp.enable ''
     export PI_HARNESS_LSP_FALLBACK_PATH="${lib.makeBinPath cfg.lsp.packages}"
   '';
-  lspEnvironmentCleanup = ''
-    if [[ -n "''${PI_HARNESS_LSP_FALLBACK_PATH:-}" ]]; then
-      IFS=: read -r -a pi_path_parts <<< "''${PATH:-}"
-      IFS=: read -r -a pi_lsp_parts <<< "''${PI_HARNESS_LSP_FALLBACK_PATH}"
-      pi_clean_path=()
-      for pi_path_part in "''${pi_path_parts[@]}"; do
-        pi_keep_path=1
-        for pi_lsp_part in "''${pi_lsp_parts[@]}"; do
-          if [[ "$pi_path_part" == "$pi_lsp_part" ]]; then pi_keep_path=0; break; fi
-        done
-        if [[ "$pi_keep_path" == 1 ]]; then pi_clean_path+=("$pi_path_part"); fi
-      done
-      PATH="$(IFS=:; printf '%s' "''${pi_clean_path[*]}")"
-      export PATH
-    fi
-    unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH
-  '';
+  lspEnvironmentCleanup = fragments.lspCleanup;
   lspDisabledCleanup = lib.optionalString (!cfg.lsp.enable) lspEnvironmentCleanup;
   managedOrdinaryExtension = lib.optionalString managedSessionsEnabled ''
     extension_args+=(--extension "${managedExtensions.ordinary}")
@@ -227,10 +202,7 @@ let
         ${lspDisabledCleanup}
         ${lib.optionalString cfg.lsp.enable ''export PI_HARNESS_LSP_EXTENSION="${cfg.lsp.extension}/share/pi-lsp-extension/src/index.ts"''}
         profile_args=(
-          ${managedProfileExtensionArgs}
-          ${managedProfileSkillArgs}
-          ${managedProfilePromptArgs}
-          ${managedProfileThemeArgs}
+          ${managedResourceArgs}
           --extension "${managedExtensions.ordinary}"
         )
         ${lspExtensionArray}

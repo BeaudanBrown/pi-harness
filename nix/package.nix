@@ -31,22 +31,13 @@ let
   engineeringRuntimePath = lib.makeBinPath (callPackage ./engineering-runtime.nix { });
   profileDocument = piHarnessResources.agentProfiles;
   engineeringProfile = profileDocument.profiles."engineering-full";
-  engineeringExtensionArgs = lib.concatMapStringsSep "\n" (name:
-    if name == "pi-r" || name == "agentgraph" then ""
-    else if name == "lsp" then ""
-    else ''--extension "${piHarnessResources}/share/pi-harness/agent/extensions/${name}/index.ts"''
-  ) engineeringProfile.extensions;
-  engineeringSkillArgs = lib.concatMapStringsSep "\n" (name:
-    if name == "harness" then ''--skill "${piHarnessResources}/share/pi-harness/agent/skills"''
-    else if name == "matt-pocock" then ''--skill "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills"''
-    else ""
-  ) engineeringProfile.skills;
-  engineeringPromptArgs = lib.concatMapStringsSep "\n" (name:
-    if name == "harness" then ''--prompt-template "${piHarnessResources}/share/pi-harness/agent/prompts"'' else ""
-  ) engineeringProfile.prompts;
-  engineeringThemeArgs = lib.concatMapStringsSep "\n" (name:
-    if name == "harness" then ''--theme "${piHarnessResources}/share/pi-harness/agent/themes"'' else ""
-  ) engineeringProfile.themes;
+  fragments = import ./launcher-fragments.nix { inherit lib; };
+  engineeringResourceArgs = fragments.resourceArgs engineeringProfile {
+    harnessRoot = "${piHarnessResources}/share/pi-harness/agent";
+    mattSkillsRoot = "${mattPocockSkillsResources}/share/pi-harness/mattpocock-skills";
+  };
+  # package launchers are written through an expanding shell heredoc.
+  lspCleanup = lib.replaceStrings [ "$" ] [ "\\$" ] fragments.lspCleanup;
   localProfile = profileDocument.profiles."pi-local";
   localInitialTools = lib.concatStringsSep "," localProfile.tools;
   evalLauncherIdentity = builtins.toJSON {
@@ -101,45 +92,11 @@ ${lib.optionalString (piLspExtension != null) ''
 if [[ "\''${PI_HARNESS_LSP_ENABLED:-0}" == 1 ]]; then
   export PI_HARNESS_LSP_EXTENSION="${piLspExtension}/share/pi-lsp-extension/src/index.ts"
 else
-  if [[ -n "\''${PI_HARNESS_LSP_FALLBACK_PATH:-}" ]]; then
-    IFS=: read -r -a pi_path_parts <<< "\''${PATH:-}"
-    IFS=: read -r -a pi_lsp_parts <<< "\''${PI_HARNESS_LSP_FALLBACK_PATH}"
-    pi_clean_path=()
-    for pi_path_part in "\''${pi_path_parts[@]}"; do
-      pi_keep_path=1
-      for pi_lsp_part in "\''${pi_lsp_parts[@]}"; do
-        if [[ "\$pi_path_part" == "\$pi_lsp_part" ]]; then pi_keep_path=0; break; fi
-      done
-      if [[ "\$pi_keep_path" == 1 ]]; then pi_clean_path+=("\$pi_path_part"); fi
-    done
-    PATH="\$(IFS=:; printf '%s' "\''${pi_clean_path[*]}")"
-    export PATH
-  fi
-  unset PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH
+  ${lspCleanup}
 fi
 ''}
-export PI_R_RESOURCE_ROOT="${piRPackage.resourcePaths.root}"
-export PI_R_TREE_SITTER="${piRPackage.resourcePaths.parser}"
-export PI_R_TREE_SITTER_R="${piRPackage.resourcePaths.parserGrammar}"
-export PI_R_TREE_SITTER_QUERY="${piRPackage.resourcePaths.parserQuery}"
-export PI_R_RSCRIPT="${piRPackage.resourcePaths.rscript}"
-export PI_R_BASE_RSCRIPT="${piRPackage.resourcePaths.rscript}"
-export PI_R_FORMATTER_SCRIPT="${piRPackage.resourcePaths.formatter}"
-export PI_R_CONTRACT_READER="${piRPackage.resourcePaths.contractReader}"
-export PI_R_BWRAP="${piRPackage.resourcePaths.sandbox}"
-export PI_R_WORKER_RSCRIPT="${piRPackage.resourcePaths.rscript}"
-export PI_R_WORKER_SCRIPT="${piRPackage.resourcePaths.worker}"
-export PI_R_VALUE_SUMMARY_SCRIPT="${piRPackage.resourcePaths.valueSummary}"
-export PI_R_TARGET_RUNNER_SCRIPT="${piRPackage.resourcePaths.targetRunner}"
-export PI_R_ARTIFACT_INSPECTOR_SCRIPT="${piRPackage.resourcePaths.artifactInspector}"
-export PI_R_DATA_INSPECTOR_SCRIPT="${piRPackage.resourcePaths.dataInspector}"
-export PI_R_SANDBOX_PATH="${piRPackage.resourcePaths.sandboxRuntimePath}"
-export PI_R_NIXPKGS_PATH="${piRPackage.resourcePaths.nixpkgs}"
-export PI_R_NIXPKGS_PIN_PATH="${piRPackage.resourcePaths.nixpkgsPin}"
-export PI_R_SCOUT_PI="${lib.getExe piPackage}"
-export PI_R_SCOUT_EXTENSION="${piRPackage.resourcePaths.scoutExtension}"
+${fragments.piREnvironment piRPackage piPackage}
 export PI_HARNESS_AGENT_PROFILE="\''${PI_HARNESS_AGENT_PROFILE:-engineering-full}"
-unset PI_R_TEST_TREE_SITTER PI_R_TEST_TREE_SITTER_R PI_R_TEST_TREE_SITTER_QUERY PI_R_TEST_BASE_RSCRIPT PI_R_TEST_RESOURCE_ROOT
 ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
 ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
 ${lib.optionalString (fzf != null) ''export PI_HARNESS_FZF="\''${PI_HARNESS_FZF:-${fzf}/bin/fzf}"''}
@@ -159,10 +116,7 @@ esac
 
 resource_args=(
   --extension "${piRPackage.resourcePaths.extension}"
-  ${engineeringExtensionArgs}
-  ${engineeringSkillArgs}
-  ${engineeringPromptArgs}
-  ${engineeringThemeArgs}
+  ${engineeringResourceArgs}
 )
 ${lib.optionalString (agentgraphPiResources != null) ''agentgraph_root="\''${PI_HARNESS_AGENTGRAPH_ROOT:-\''${AGENTGRAPH_PI_RESOURCES:-${agentgraphPiResources}/share/agentgraph-pi}}"
 agentgraph_extensions_dir="\''${PI_HARNESS_AGENTGRAPH_EXTENSIONS_DIR:-\$agentgraph_root/extensions}"
@@ -204,43 +158,9 @@ EOF
 #!/usr/bin/env bash
 set -euo pipefail
 export NODE_PATH="${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules:\''${NODE_PATH:-}"
-export PI_R_RESOURCE_ROOT="${piRPackage.resourcePaths.root}"
-export PI_R_TREE_SITTER="${piRPackage.resourcePaths.parser}"
-export PI_R_TREE_SITTER_R="${piRPackage.resourcePaths.parserGrammar}"
-export PI_R_TREE_SITTER_QUERY="${piRPackage.resourcePaths.parserQuery}"
-export PI_R_RSCRIPT="${piRPackage.resourcePaths.rscript}"
-export PI_R_BASE_RSCRIPT="${piRPackage.resourcePaths.rscript}"
-export PI_R_FORMATTER_SCRIPT="${piRPackage.resourcePaths.formatter}"
-export PI_R_CONTRACT_READER="${piRPackage.resourcePaths.contractReader}"
-export PI_R_BWRAP="${piRPackage.resourcePaths.sandbox}"
-export PI_R_WORKER_RSCRIPT="${piRPackage.resourcePaths.rscript}"
-export PI_R_WORKER_SCRIPT="${piRPackage.resourcePaths.worker}"
-export PI_R_VALUE_SUMMARY_SCRIPT="${piRPackage.resourcePaths.valueSummary}"
-export PI_R_TARGET_RUNNER_SCRIPT="${piRPackage.resourcePaths.targetRunner}"
-export PI_R_ARTIFACT_INSPECTOR_SCRIPT="${piRPackage.resourcePaths.artifactInspector}"
-export PI_R_DATA_INSPECTOR_SCRIPT="${piRPackage.resourcePaths.dataInspector}"
-export PI_R_SANDBOX_PATH="${piRPackage.resourcePaths.sandboxRuntimePath}"
-export PI_R_NIXPKGS_PATH="${piRPackage.resourcePaths.nixpkgs}"
-export PI_R_NIXPKGS_PIN_PATH="${piRPackage.resourcePaths.nixpkgsPin}"
-export PI_R_SCOUT_PI="${lib.getExe piPackage}"
-export PI_R_SCOUT_EXTENSION="${piRPackage.resourcePaths.scoutExtension}"
+${fragments.piREnvironment piRPackage piPackage}
 export PI_HARNESS_AGENT_PROFILE="pi-local"
-if [[ -n "\''${PI_HARNESS_LSP_FALLBACK_PATH:-}" ]]; then
-  IFS=: read -r -a pi_path_parts <<< "\''${PATH:-}"
-  IFS=: read -r -a pi_lsp_parts <<< "\''${PI_HARNESS_LSP_FALLBACK_PATH}"
-  pi_clean_path=()
-  for pi_path_part in "\''${pi_path_parts[@]}"; do
-    pi_keep_path=1
-    for pi_lsp_part in "\''${pi_lsp_parts[@]}"; do
-      if [[ "\$pi_path_part" == "\$pi_lsp_part" ]]; then pi_keep_path=0; break; fi
-    done
-    if [[ "\$pi_keep_path" == 1 ]]; then pi_clean_path+=("\$pi_path_part"); fi
-  done
-  PATH="\$(IFS=:; printf '%s' "\''${pi_clean_path[*]}")"
-  export PATH
-fi
-unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH
-unset PI_R_TEST_TREE_SITTER PI_R_TEST_TREE_SITTER_R PI_R_TEST_TREE_SITTER_QUERY PI_R_TEST_BASE_RSCRIPT PI_R_TEST_RESOURCE_ROOT
+${lspCleanup}
 if [[ -n "\''${PI_EVAL_ATTESTATION_PATH:-}" ]]; then
   umask 077
   printf '{"launcherId":"pi-r-local","resourceRoot":"%s","extensionPath":"%s","skillPath":"%s"}\n' \

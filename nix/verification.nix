@@ -35,18 +35,6 @@ let
   } ''
     ${prepareSource}
     node scripts/verification/resource-contract.mjs .
-    for required in \
-      docs/architecture/decisions/0001-synthetic-evaluation-contracts.md \
-      docs/architecture/decisions/0002-managed-session-contracts.md \
-      docs/verification.md \
-      config/agent/extensions/managed-sessions/contracts.ts \
-      config/agent/extensions/managed-sessions/adapter/ordinary.ts \
-      config/agent/extensions/managed-sessions/adapter/coordinator.ts \
-      config/agent/extensions/managed-sessions/relay/main.ts \
-      eval/contracts/path-policy.ts eval/rpc/engine.ts eval/workspace/materialize.ts \
-      eval/trace/capture.ts eval/grading/grade.ts; do
-      test -f "$required" || { echo "missing required contract: $required" >&2; exit 1; }
-    done
     if grep -R -n -E 'from "node:(child_process|http|https)"|PI_MATRIX|MATRIX_ACCESS_TOKEN|send-keys' \
       config/agent/extensions/managed-sessions/adapter; then
       echo "managed-session adapter crossed the relay authority seam" >&2
@@ -357,29 +345,6 @@ let
     touch "$out"
   '';
 
-  promptExpansionContract = pkgs.runCommand "pi-harness-prompt-expansion-contract" {
-    nativeBuildInputs = [ pkgs.coreutils pkgs.nodejs ];
-  } ''
-    probe=$(mktemp -d)
-    trap 'rm -rf "$probe"' EXIT
-    cat > "$probe/extension.ts" <<'EOF'
-    import { writeFileSync } from "node:fs";
-    import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-    export default function (pi: ExtensionAPI): void {
-      pi.registerCommand("matrix-command-probe", {
-        handler: async (args) => writeFileSync(process.env.PROBE_RESULT!, args),
-      });
-      pi.on("session_start", () => {
-        pi.sendUserMessage("/matrix-command-probe expanded", { expandPromptTemplates: true });
-      });
-    }
-    EOF
-    printf '%s\n' '{"type":"get_state"}' | env PROBE_RESULT="$probe/result" \
-      timeout 10 ${piPackage}/bin/pi --mode rpc --no-session --extension "$probe/extension.ts" >/dev/null
-    test "$(cat "$probe/result")" = expanded
-    touch "$out"
-  '';
-
   bridgePreflightModule = lib.evalModules {
     specialArgs = { inherit pkgs; };
     modules = [
@@ -504,7 +469,6 @@ let
     eval-self-test = evalTests;
     package-contracts = packageContracts;
     module-contracts = moduleContracts;
-    prompt-expansion-contract = promptExpansionContract;
   };
 
   verify = pkgs.runCommand "pi-harness-verify" { } ''

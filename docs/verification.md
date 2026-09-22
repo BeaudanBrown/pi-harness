@@ -26,7 +26,6 @@ working directory and do not use credentials, network services, or live models.
 | `eval-self-test` | The fake-RPC synthetic evaluation laboratory passes in its sanitized environment. |
 | `package-contracts` | Public packaged resources, executables, launcher identity, and important negative capability contracts hold. |
 | `module-contracts` | Evaluated NixOS module assertions and generated managed-session launcher capability contracts hold. |
-| `prompt-expansion-contract` | The patched Pi runtime expands extension-injected prompt commands. |
 | `verify` | Aggregate dependency over every deterministic check above. |
 
 Build one check while developing with a single Nix invocation (replace the
@@ -72,6 +71,10 @@ executed by a deterministic suite:
 - `tests/lsp-live.test.ts` belongs to the explicit live LSP gate;
 - `tests/managed-session-*.test.ts` belongs to the managed-session suite;
 - every other `tests/*.test.ts` belongs to the ordinary unit suite.
+
+Prompt expansion is exercised by the real-Pi managed adapter tests rather than a
+second standalone probe. Source-file existence is left to compilation and package
+checks, not duplicated as a list of filenames.
 
 Do not add a hand-maintained test list. Give a specialized test the established
 prefix, or let it run as an ordinary unit test. The TypeScript build includes all
