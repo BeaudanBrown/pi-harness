@@ -434,9 +434,9 @@ When enabled, it adds `service_tier=priority` to OpenAI and OpenAI Codex
 provider requests. It is inactive for other providers.
 
 Use `/codex-fast` inside Pi to toggle it, or start Pi with `pi --fast` to enable
-it for that session. The preference is saved in `~/.pi/agent/pi-codex-fast.json` (respecting
-`PI_CODING_AGENT_DIR`). Existing global `pi-codex-fast` settings remain a read-only
-fallback until the first save; project settings still override the preference.
+it for the initial session. The setting is recorded only in that Pi session's
+history, so resuming the session restores it while new and unrelated sessions
+start with fast mode disabled. Global and project settings do not enable it.
 
 ## Delegated Worker Runner
 

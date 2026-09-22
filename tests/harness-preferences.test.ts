@@ -9,21 +9,21 @@ import { extractAssistantText, workerResourceLoader } from "../config/agent/exte
 test("extension preferences migrate on save without ever rewriting Pi settings", async t => {
 	const dir = await mkdtemp(join(tmpdir(), "harness-prefs-"));
 	t.after(() => rm(dir, { recursive: true, force: true }));
-	const settings = JSON.stringify({ "pi-codex-fast": { enabled: false }, "pi-worker-runner": { mode: "luna" }, theme: "dark" });
+	const settings = JSON.stringify({ "second-owner": { enabled: false }, "pi-worker-runner": { mode: "luna" }, theme: "dark" });
 	await writeFile(join(dir, "settings.json"), settings);
 	assert.deepEqual(await loadPreference("pi-worker-runner", dir), { mode: "luna" });
 	await Promise.all([
 		savePreference("pi-worker-runner", { selection: { kind: "preset", preset: "spark" } }, dir),
-		savePreference("pi-codex-fast", { enabled: true }, dir),
+		savePreference("second-owner", { enabled: true }, dir),
 	]);
-	assert.deepEqual(await loadPreference("pi-codex-fast", dir), { enabled: true });
+	assert.deepEqual(await loadPreference("second-owner", dir), { enabled: true });
 	assert.deepEqual(await loadPreference("pi-worker-runner", dir), { selection: { kind: "preset", preset: "spark" } });
 	assert.equal(await readFile(join(dir, "settings.json"), "utf8"), settings);
 	await Promise.all(Array.from({ length: 12 }, (_, value) => savePreference("same-owner", { value }, dir)));
 	assert.equal(typeof (await loadPreference("same-owner", dir) as { value: number }).value, "number");
 	assert.ok(!(await readdir(dir)).some(file => file.endsWith(".tmp")));
-	await writeFile(join(dir, "pi-codex-fast.json"), "malformed");
-	await assert.rejects(loadPreference("pi-codex-fast", dir), SyntaxError);
+	await writeFile(join(dir, "second-owner.json"), "malformed");
+	await assert.rejects(loadPreference("second-owner", dir), SyntaxError);
 });
 
 test("shared worker loader remains resource-free and selects the intended prompt", () => {
