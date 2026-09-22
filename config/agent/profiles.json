@@ -51,7 +51,7 @@
       "tools": [
         "read", "bash", "edit", "write", "grep", "find", "ls",
         "web_search", "github_issue_inspect", "github_issue_graph",
-        "diagram_inventory", "diagram_render", "architecture_commands", "architecture_queries", "architecture_command", "architecture_query",
+        "diagram_inventory", "diagram_render", "architecture_discover", "architecture_command", "architecture_query",
         "run_worker", "review_agents",
         "lsp_diagnostics", "lsp_hover", "lsp_definition", "lsp_references", "lsp_symbols", "lsp_rename", "lsp_code_actions", "lsp_completions",
         "code_overview", "ast_search", "code_rewrite",

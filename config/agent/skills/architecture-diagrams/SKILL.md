@@ -24,9 +24,8 @@ When available, use these pi tools:
 - `diagram_inventory`: list diagram-as-code files in the repo.
 - `diagram_render`: validate/render Mermaid, D2, Graphviz DOT, PlantUML, or Structurizr diagram files with local CLIs.
 - `diagram_show`: open rendered SVG/PNG/JPEG/GIF/WebP/PDF artifacts in a detached local viewer.
-- `architecture_commands`: list project-defined deterministic architecture commands from `.pi/architecture.json`.
+- `architecture_discover`: list project metadata, commands, queries, and parameters from `.pi/architecture.json` in one call.
 - `architecture_command`: run a named deterministic architecture command from `.pi/architecture.json`.
-- `architecture_queries`: list project-defined focused architecture queries from `.pi/architecture.json`.
 - `architecture_query`: run a named focused architecture query with structured JSON args.
 
 If a CLI is missing, follow the project's Nix/runtime guidance. Prefer project wrappers first (`nix develop -c`, `bash ./bin/in-env`, `package.json` scripts, `make`, `just`), then ephemeral Nix commands when appropriate. Do not ask the user to install tools globally.
@@ -68,9 +67,9 @@ Do not open viewer windows for every small exploratory diagram. For quick inline
 Before editing durable architecture docs:
 
 1. Inspect existing docs with `diagram_inventory` and normal file reads.
-2. Check for project deterministic commands with `architecture_commands`.
+2. Discover project commands and queries with `architecture_discover`.
 3. Run relevant generators before making claims.
-4. For focused questions, inspect `architecture_queries` and run `architecture_query` instead of inventing ad hoc grep pipelines.
+4. For focused questions, run a discovered `architecture_query` instead of inventing ad hoc grep pipelines.
 5. Edit diagram source files, not generated SVG/PNG files, unless the generated file is the only artifact requested.
 6. Validate or render changed diagrams with `diagram_render` or the project command.
 7. Record provenance in the doc: source files inspected, generator command, query result, or generated facts file.
@@ -163,6 +162,9 @@ The project command should write a structured JSON object to stdout. Diagrams ar
 ```
 
 Artifact paths must stay inside `docs/`, `diagrams/`, `output/`, `build/`, or `.pi/tmp/`.
+Results are bounded JSON previews; complete query stdout and command logs are saved under `.pi/tmp/architecture-tools/`. Read the reported file when the preview is truncated.
+
+`diagram_render` defaults to a generated artifact path. Structurizr exports a directory of PlantUML, Mermaid, or DOT sources; render those separately for images. `diagram_inventory` excludes `.pi/tmp/` unless `includeGenerated: true` is requested.
 
 ## Adding Architecture Support To A Project
 
@@ -179,7 +181,7 @@ When asked to add architecture tooling to a new project:
 9. Write focused temporary query outputs under `.pi/tmp/architecture-query/` or a project-specific `.pi/tmp/architecture-*` subdirectory.
 10. Document how to regenerate, how to run freshness checks, and whether generated outputs are committed.
 11. Use versioned facts, provenance, and confidence where possible. Prefer intent-based query names (`request-flow`, `realtime-usage`, `generated-contracts`) over names tied to temporary implementation mechanisms.
-12. Validate by running `architecture_commands`, `architecture_queries`, at least one `architecture_command`, and at least one `architecture_query`.
+12. Validate with `architecture_discover`, at least one `architecture_command`, and at least one `architecture_query`.
 
 ## CLI Availability Guidance
 

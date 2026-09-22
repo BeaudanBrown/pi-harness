@@ -468,13 +468,18 @@ architecture documentation:
   and Structurizr diagram sources using local CLI tools.
 - `diagram_show` opens rendered SVG/PNG/JPEG/GIF/WebP/PDF artifacts in a
   detached local viewer when visual review is useful or explicitly requested.
-- `architecture_commands` lists project-defined deterministic architecture
-  commands from `.pi/architecture.json`.
+- `architecture_discover` lists project metadata, commands, queries, and
+  parameters from `.pi/architecture.json` in one call.
 - `architecture_command` runs a named project-defined architecture command.
-- `architecture_queries` lists project-defined parameterized architecture
-  queries from `.pi/architecture.json`.
 - `architecture_query` runs a named architecture query with structured JSON
   arguments, returning summary, artifact paths, and provenance.
+
+Diagram and architecture commands share the worker runner's timeout/cancellation
+cleanup. Results use bounded JSON previews with full logs/results under
+`.pi/tmp/architecture-tools/`; query JSON is parsed before display truncation.
+Rendering reports only existing artifacts. Structurizr exports a directory of
+PlantUML, Mermaid, or DOT sources, rather than an image. Inventory excludes
+`.pi/tmp/` unless `includeGenerated: true` is requested.
 
 The packaged wrapper exposes D2, Graphviz, and a default diagram viewer through
 `PI_HARNESS_D2`, `PI_HARNESS_DOT`, and `PI_HARNESS_IMAGE_VIEWER`. Other

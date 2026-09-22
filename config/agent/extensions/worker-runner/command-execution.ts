@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { createWriteStream } from "node:fs";
+import { closeSync, createWriteStream, openSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 
@@ -90,6 +90,10 @@ export async function runDurableCommand(options: {
 	timeoutMs: number;
 	signal?: AbortSignal;
 	shutdownGraceMs?: number;
+	env?: NodeJS.ProcessEnv;
+	input?: string;
+	// Raw stdout (including binary renderer output) bypasses preview truncation.
+	stdoutFile?: string;
 }): Promise<DurableCommandResult> {
 	if (process.platform !== "linux" && process.platform !== "darwin") throw new Error("Durable command execution requires process-group cleanup on Linux or macOS.");
 	if (options.command.length === 0 || options.command.some((part) => !part)) throw new Error("Command must be a non-empty argv array.");
@@ -108,6 +112,7 @@ export async function runDurableCommand(options: {
 	let stopping: Promise<void> | null = null;
 	log.write(`$ ${shellDisplay(options.command)}\ncwd: ${options.cwd}\nstarted: ${startedAt}\n\n`);
 
+	const stdoutFd = options.stdoutFile ? openSync(options.stdoutFile, "wx", 0o600) : undefined;
 	const result = await new Promise<DurableCommandResult>((resolve) => {
 		if (cancelled) {
 			const finishedAt = new Date().toISOString();
@@ -116,8 +121,8 @@ export async function runDurableCommand(options: {
 		}
 		const child = spawn(options.command[0]!, options.command.slice(1), {
 			cwd: options.cwd,
-			env: process.env,
-			stdio: ["ignore", "pipe", "pipe"],
+			env: options.env ?? process.env,
+			stdio: [options.input === undefined ? "ignore" : "pipe", stdoutFd ?? "pipe", "pipe"],
 			detached: true,
 		});
 		let settled = false;
@@ -130,8 +135,10 @@ export async function runDurableCommand(options: {
 		const timer = setTimeout(() => stop("timeout"), options.timeoutMs);
 		const abort = () => stop("cancelled");
 		options.signal?.addEventListener("abort", abort, { once: true });
-		child.stdout.on("data", (chunk: Buffer) => { stdout = appendBounded(stdout, chunk); log.write(chunk); });
-		child.stderr.on("data", (chunk: Buffer) => { stderr = appendBounded(stderr, chunk); log.write(chunk); });
+		child.stdin?.on("error", () => {}); // Early exit may close stdin before consuming input.
+		if (options.input !== undefined) child.stdin!.end(options.input);
+		child.stdout?.on("data", (chunk: Buffer) => { stdout = appendBounded(stdout, chunk); log.write(chunk); });
+		child.stderr!.on("data", (chunk: Buffer) => { stderr = appendBounded(stderr, chunk); log.write(chunk); });
 		const finish = async (code: number | null, signal: NodeJS.Signals | null, spawnError?: string) => {
 			if (settled) return;
 			settled = true;
@@ -150,7 +157,7 @@ export async function runDurableCommand(options: {
 		};
 		child.once("error", (error) => void finish(null, null, error.message));
 		child.once("close", (code, signal) => void finish(code, signal));
-	});
+	}).finally(() => { if (stdoutFd !== undefined) closeSync(stdoutFd); });
 	await atomicJson(options.resultPath, result);
 	return result;
 }
