@@ -12,6 +12,7 @@ import {
 import type { AdapterRole, SessionBinding } from "./state.js";
 import { artifactChunks, type WorkspaceArtifact } from "./artifact-export.js";
 
+export const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
 const REQUEST_TIMEOUT_MS = 5_000;
 // Relay operations that project to Matrix may legitimately span the client's bounded
 // rate-limit retries (up to four two-minute waits) before returning their durable result.
@@ -84,6 +85,8 @@ export interface BoundAdapterOptions {
 	onEnvelope: (envelope: ManagedSessionEnvelope) => Promise<void> | void;
 	onMedia?: (image: ReceivedImage) => Promise<void> | void;
 	onDisconnect?: () => void;
+	/** Test seam for exercising timeout boundaries without waiting on production durations. */
+	timeouts?: { requestMs?: number; relaySideEffectMs?: number };
 }
 
 export class BoundAdapterClient {
@@ -99,7 +102,13 @@ export class BoundAdapterClient {
 	#expiredRequests = new Map<string, ResponseExpectation>();
 	#media = new Map<string, { descriptor: Omit<ReceivedImage, "data"> & { chunkCount: number }; chunks: Buffer[] }>();
 
-	constructor(protected readonly options: BoundAdapterOptions) {}
+	constructor(protected readonly options: BoundAdapterOptions) {
+		for (const timeout of Object.values(options.timeouts ?? {})) {
+			if (!Number.isSafeInteger(timeout) || timeout <= 0 || timeout > MAX_NODE_TIMER_DELAY_MS) {
+				throw new ManagedAdapterError("Adapter timeouts must be positive bounded integers");
+			}
+		}
+	}
 
 	get generation(): number { return this.#generation; }
 
@@ -300,7 +309,10 @@ export class BoundAdapterClient {
 		await waitForClose(socket, 1_000);
 	}
 
-	protected request(envelope: ManagedSessionEnvelope, timeoutMs = REQUEST_TIMEOUT_MS): Promise<ManagedSessionEnvelope> {
+	protected request(envelope: ManagedSessionEnvelope, timeoutMs?: number): Promise<ManagedSessionEnvelope> {
+		const effectiveTimeoutMs = timeoutMs === RELAY_SIDE_EFFECT_TIMEOUT_MS
+			? this.options.timeouts?.relaySideEffectMs ?? timeoutMs
+			: timeoutMs ?? this.options.timeouts?.requestMs ?? REQUEST_TIMEOUT_MS;
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return Promise.reject(new ManagedAdapterError("Relay connection is unavailable"));
 		if (this.#pending.size >= MAX_PENDING_REQUESTS) return Promise.reject(new ManagedAdapterError("Relay request capacity was reached", "capacity_reached"));
@@ -310,7 +322,7 @@ export class BoundAdapterClient {
 				this.#pending.delete(envelope.messageId);
 				this.rememberExpiredRequest(envelope.messageId, expectation);
 				reject(new ManagedAdapterError("Relay request timed out", "timeout"));
-			}, timeoutMs);
+			}, effectiveTimeoutMs);
 			this.#pending.set(envelope.messageId, { resolve, reject, timer });
 			try {
 				socket.write(encodeNdjsonEnvelope(envelope));

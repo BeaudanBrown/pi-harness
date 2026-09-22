@@ -32,7 +32,7 @@ async function waitForProcessExit(pid: number): Promise<void> {
 }
 
 test("command deadline aborts the run and cleans its process tree", async () => {
-	const engine = engineFor("command-timeout", { commandTimeoutMs: 70, promptTimeoutMs: 1_000 });
+	const engine = engineFor("command-timeout", { commandTimeoutMs: 1_000, promptTimeoutMs: 2_000 });
 	await engine.start();
 	let grandchildPid = 0;
 	await assert.rejects(
@@ -52,7 +52,7 @@ test("command deadline aborts the run and cleans its process tree", async () => 
 });
 
 test("prompt timeout terminates the complete RPC process tree", async () => {
-	const engine = engineFor("timeout", { promptTimeoutMs: 80, runTimeoutMs: 2_000 });
+	const engine = engineFor("timeout", { promptTimeoutMs: 500, runTimeoutMs: 2_000 });
 	await engine.start();
 	let grandchildPid = 0;
 	await assert.rejects(
@@ -78,10 +78,10 @@ test("a declared per-prompt timeout overrides the launcher default", async () =>
 	await engine.start();
 	let grandchildPid = 0;
 	await assert.rejects(
-		engine.promptAndWait("Use the scenario prompt deadline.", undefined, 60),
+		engine.promptAndWait("Use the scenario prompt deadline.", undefined, 500),
 		(error: unknown) => {
 			assert.ok(error instanceof RpcEngineError);
-			assert.match(error.message, /Prompt did not settle within 60ms/);
+			assert.match(error.message, /Prompt did not settle within 500ms/);
 			grandchildPid = Number(error.diagnostics.stderr.match(/grandchild:(\d+)/)?.[1]);
 			return true;
 		},
@@ -103,7 +103,7 @@ test("abort signal cancels and terminates a running prompt", async () => {
 });
 
 test("whole-run deadline bounds an unsettled RPC process", async () => {
-	const engine = engineFor("timeout", { promptTimeoutMs: 2_000, runTimeoutMs: 70 });
+	const engine = engineFor("timeout", { promptTimeoutMs: 2_000, runTimeoutMs: 500 });
 	await engine.start();
 	try {
 		await assert.rejects(engine.promptAndWait("Exceed the synthetic whole-run deadline."), /Whole RPC run timed out/);
@@ -330,7 +330,7 @@ test("settlement before correlated prompt acceptance is ignored", async () => {
 });
 
 test("stop waits for close and retains stderr bytes emitted during shutdown", async () => {
-	const engine = engineFor("shutdown-stderr");
+	const engine = engineFor("shutdown-stderr", { shutdownGraceMs: 1_000 });
 	await engine.start();
 	await engine.promptAndWait("Complete a fabricated run before shutdown.");
 	await engine.stop();

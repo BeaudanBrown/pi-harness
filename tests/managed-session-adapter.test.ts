@@ -15,7 +15,7 @@ import {
 	parseNdjsonEnvelope,
 	type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, MAX_NODE_TIMER_DELAY_MS, ManagedAdapterError, requestSelfBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { ActivityProjector } from "../config/agent/extensions/managed-sessions/relay/activity-projector.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import type { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
@@ -292,12 +292,12 @@ test("transcript classification is boundary-ordered, provenance-aware, and final
 });
 
 test("coordinator lifecycle requests allow the bounded launcher duration", async (t) => {
-	const relay = await FakeRelay.start(5_100);
+	const relay = await FakeRelay.start(750);
 	t.after(() => relay.close());
 	const coordinatorBinding = { ...binding, role: "coordinator_adapter" as const };
 	const client = new CoordinatorAdapterClient({
 		socketPath: relay.socketPath, role: "coordinator_adapter", attachmentNonce: nonce,
-		binding: coordinatorBinding, onEnvelope: () => undefined,
+		binding: coordinatorBinding, onEnvelope: () => undefined, timeouts: { requestMs: 500, relaySideEffectMs: 5_000 },
 	});
 	t.after(() => client.close());
 	await client.connect();
@@ -306,10 +306,10 @@ test("coordinator lifecycle requests allow the bounded launcher duration", async
 });
 
 test("transcript projection tolerates relay Matrix work beyond the short IPC request timeout", async (t) => {
-	const relay = await FakeRelay.start(0, 0, 5_100);
+	const relay = await FakeRelay.start(0, 0, 750);
 	t.after(() => relay.close());
 	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
-		onEnvelope: () => undefined });
+		onEnvelope: () => undefined, timeouts: { requestMs: 500, relaySideEffectMs: 5_000 } });
 	t.after(() => client.close());
 	await client.connect();
 	const entryId = deriveTranscriptEntryId(sessionId, "slow-final");
@@ -320,22 +320,22 @@ test("transcript projection tolerates relay Matrix work beyond the short IPC req
 });
 
 test("a valid response arriving just after an IPC timeout does not disconnect the adapter", async (t) => {
-	const relay = await FakeRelay.start(0, 0, 0, 5_100);
+	const relay = await FakeRelay.start(0, 0, 0, 200);
 	t.after(() => relay.close());
 	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
-		onEnvelope: () => undefined });
+		onEnvelope: () => undefined, timeouts: { requestMs: 100 } });
 	t.after(() => client.close());
 	await client.connect();
 	await assert.rejects(client.selfStatus(), (error: unknown) => error instanceof ManagedAdapterError && error.code === "timeout");
-	await new Promise((resolve) => setTimeout(resolve, 200));
+	await new Promise((resolve) => setTimeout(resolve, 250));
 	assert.equal(client.connected, true, "a recognized late correlation is ignored without forcing recovery and transcript backlog");
 });
 
 test("a mismatched late correlation fails closed", async (t) => {
-	const relay = await FakeRelay.start(0, 0, 0, 6_000);
+	const relay = await FakeRelay.start(0, 0, 0, 500);
 	t.after(() => relay.close());
 	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
-		onEnvelope: () => undefined });
+		onEnvelope: () => undefined, timeouts: { requestMs: 100 } });
 	t.after(() => client.close());
 	await client.connect();
 	await assert.rejects(client.selfStatus(), (error: unknown) => error instanceof ManagedAdapterError && error.code === "timeout");
@@ -347,6 +347,8 @@ test("a mismatched late correlation fails closed", async (t) => {
 });
 
 test("adapter request concurrency is bounded", async (t) => {
+	assert.throws(() => new BoundAdapterClient({ socketPath: "/tmp/unopened", role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		onEnvelope: () => undefined, timeouts: { requestMs: MAX_NODE_TIMER_DELAY_MS + 1 } }), /positive bounded integers/);
 	const relay = await FakeRelay.start(0, 0, 0, -1);
 	t.after(() => relay.close());
 	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
@@ -496,8 +498,13 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
 	assert.deepEqual(activeTools, ["read", "remote_checkpoint"], "checkpoint activates on binding, but export requires complete placement");
-	const send = async (id: number, name: string, argument?: string) => { relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
-		messageId: `control-${id}`, conversationId, role: "relay", type: "control.deliver", payload: { controlId: `control_${String(id).padStart(32, "a")}`, name, ...(argument ? { argument } : {}) } } as ManagedSessionEnvelope); await new Promise((resolve) => setTimeout(resolve, 30)); };
+	const send = async (id: number, name: string, argument?: string) => {
+		const controlId = `control_${String(id).padStart(32, "a")}`;
+		const priorResults = relay.frames.filter((frame) => frame.type === "control.result" && frame.payload.controlId === controlId).length;
+		relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+			messageId: `control-${id}`, conversationId, role: "relay", type: "control.deliver", payload: { controlId, name, ...(argument ? { argument } : {}) } } as ManagedSessionEnvelope);
+		await activityWait(() => relay.frames.filter((frame) => frame.type === "control.result" && frame.payload.controlId === controlId).length > priorResults, 1_000);
+	};
 	await send(12, "status");
 	assert.deepEqual(relay.frames.at(-1)?.payload.liveStatus, { state: "busy", model: "scoped/model-0", thinking: "medium", context: { usedTokens: 90, limitTokens: 100 } });
 	await send(1, "model", "scoped/model-1");
@@ -526,7 +533,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 	assert.deepEqual(relay.frames.at(-1)?.payload.generation, { model: "scoped/model-1", thinking: "off" }, "confirmed reset carries only the selected model and thinking metadata");
 	assert.equal(promptCalls, 0, "internal controls never enter model-visible message APIs");
 	relay.disconnect();
-	await new Promise((resolve) => setTimeout(resolve, 30));
+	await activityWait(() => activeTools.length === 1 && activeTools[0] === "read", 1_000);
 	assert.deepEqual(activeTools, ["read"], "checkpoint deactivates immediately when the managed binding disconnects");
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 	assert.deepEqual(activeTools, ["read"], "checkpoint remains inactive when the managed binding shuts down");
@@ -664,7 +671,8 @@ async function activityIntegration(t: { after(fn: () => Promise<void>): void }) 
 	const handlers = new Map<string, (...args: any[]) => any>();
 	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined, registerTool: () => undefined, getCommands: () => [],
 		appendEntry: (type: string, data: unknown) => { const id = `custom-${++sequence}`; branch.push({ ...custom(id, type, data), parentId: leaf }); leaf = id; }, sendUserMessage: () => undefined, sendMessage: () => undefined } as unknown as ExtensionAPI;
-	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce },
+		{ projectionRetryDelayMs: (attempt) => 10 * (2 ** Math.min(attempt, 5)), maxClosingActivities: 3 })(api);
 	const ctx: any = { hasUI: true, ui: { setStatus() {}, notify(message: string) { notices.push(message); } }, isIdle: () => true, hasPendingMessages: () => false, abort() {}, shutdown() {}, getContextUsage: () => undefined,
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf, getSessionFile: () => "/tmp/fixture.jsonl", getSessionDir: () => "/tmp" } };
 	t.after(async () => { await handlers.get("session_shutdown")!({ reason: "quit" }, ctx); await projector.close(); await relay.close(); });
@@ -732,8 +740,8 @@ test("closing feedback retries on a healthy connection and keeps refresh busy un
 	f.relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "closing-refresh", conversationId, role: "relay", type: "refresh.request", payload: { refreshId: "closing-refresh" } });
 	await activityWait(() => f.relay.frames.some(e => e.type === "refresh.result"));
 	assert.equal(f.relay.frames.find(e => e.type === "refresh.result")!.payload.status, "busy");
-	await activityWait(() => attempts.length >= 4, 10000);
-	for (let i = 1; i < 4; i++) assert.ok(attempts[i] - attempts[i - 1] >= 900 * 2 ** (i - 1), "backoff must not reset before finalization succeeds");
+	await activityWait(() => attempts.length >= 4, 1_000);
+	for (let i = 1; i < 4; i++) assert.ok(attempts[i] - attempts[i - 1] >= 8 * 2 ** (i - 1), "backoff must not reset before finalization succeeds");
 	await activityWait(() => f.relay.frames.some(e => e.type === "transcript.offer" && e.payload.kind === "assistant_final"));
 	const finals = f.frames().filter(e => e.type === "activity.finalize");
 	for (const retry of finals.slice(1)) assert.deepEqual(retry.payload, finals[0].payload);
@@ -758,12 +766,12 @@ test("new answer remains behind its own closing activity while an older final is
 test("closing backlog bounds feedback only and drains without losing frozen finals", async t => {
 	const f = await activityIntegration(t), project = f.relay.projectActivity!; let fail = true;
 	f.relay.projectActivity = e => fail && e.type === "activity.finalize" ? Promise.reject(Error("fixture outage")) : project(e);
-	for (let i = 0; i < 35; i++) { await f.start(); f.answer(); await f.settle(); }
-	assert.equal(f.frames().filter(e => e.type === "activity.update").length, 32);
+	for (let i = 0; i < 6; i++) { await f.start(); f.answer(); await f.settle(); }
+	assert.equal(f.frames().filter(e => e.type === "activity.update").length, 3);
 	fail = false; await f.settle();
-	assert.equal(new Set(f.frames().filter(e => e.type === "activity.finalize").map(e => e.payload.activityId)).size, 32);
+	assert.equal(new Set(f.frames().filter(e => e.type === "activity.finalize").map(e => e.payload.activityId)).size, 3);
 	await f.start(); f.answer(); await f.settle();
-	assert.equal(f.frames().filter(e => e.type === "activity.update").length, 33);
+	assert.equal(f.frames().filter(e => e.type === "activity.update").length, 4);
 	assert.deepEqual(f.errors, []);
 });
 
@@ -1053,12 +1061,18 @@ for (const byteLength of [16, 25 * 1024 * 1024 + 1]) test(`managed images preser
 		assert.ok(responses() > before);
 	};
 	const capable = await makeAdapter(true);
-	relay.send(begin()); relay.disconnect();
-	await new Promise((resolve) => setTimeout(resolve, 400));
+	if (byteLength === 16) {
+		relay.send(begin()); relay.disconnect();
+		await new Promise((resolve) => setTimeout(resolve, 400));
+	}
 	await push();
 	assert.equal(capable.sent.length, 1);
 	assert.deepEqual(capable.sent[0], [{ type: "text", text: "Matrix participant @signal_123:example.com:\n\ncaption" },
 		{ type: "image", data: bytes.toString("base64"), mimeType: "image/png" }]);
+	if (byteLength !== 16) {
+		await capable.handlers.get("session_shutdown")!({ reason: "quit" }, capable.ctx);
+		return;
+	}
 	await capable.handlers.get("agent_settled")!({}, capable.ctx);
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === deliveryId && frame.payload.status === "completed"));

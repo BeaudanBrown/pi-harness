@@ -172,7 +172,11 @@ export default function (pi) {
     streamSimple: fakeStream,
   });
   pi.registerCommand("adapter-expanded", { handler: async (args) => appendFileSync(process.env.ADAPTER_EXPANDED_PATH, args.trim() + "\\n") });
-  pi.registerCommand("adapter-wait", { handler: async () => new Promise((resolve) => setTimeout(resolve, 1600)) });
+  pi.registerCommand("adapter-wait", { handler: async (args) => {
+    const delayMs = Number(args);
+    if (!Number.isSafeInteger(delayMs) || delayMs < 1 || delayMs > 2000) throw new Error("invalid adapter probe delay");
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+  } });
 }
 `);
 	const sessionDirectory = join(root, "sessions");
@@ -219,13 +223,13 @@ export default function (pi) {
 	});
 	const events = await rpc(child, [
 		{ id: "commands", type: "get_commands" },
-		{ id: "wait", type: "prompt", message: "/adapter-wait" },
+		{ id: "wait", type: "prompt", message: "/adapter-wait 500" },
 		{ id: "new", type: "new_session" },
-		{ id: "wait-new", type: "prompt", message: "/adapter-wait" },
+		{ id: "wait-new", type: "prompt", message: "/adapter-wait 50" },
 		{ id: "resume", type: "switch_session", sessionPath },
-		{ id: "wait-resume", type: "prompt", message: "/adapter-wait" },
+		{ id: "wait-resume", type: "prompt", message: "/adapter-wait 1" },
 		{ id: "fork", type: "fork", entryId: "abcd1234" },
-		{ id: "wait-fork", type: "prompt", message: "/adapter-wait" },
+		{ id: "wait-fork", type: "prompt", message: "/adapter-wait 1100" },
 	]);
 	const commandResponse = events.find((event) => event.type === "response" && event.id === "commands") as { data?: { commands?: Array<{ name: string }> } } | undefined;
 	const commands = commandResponse?.data?.commands?.map((command) => command.name) ?? [];

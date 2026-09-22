@@ -506,7 +506,6 @@
             migrateTkApp
             playwrightAgentCli
             piLspExtension
-            evalSelfTestApp
             typeSetup
             lspPackages
             ;

@@ -19,7 +19,6 @@
   migrateTkApp,
   playwrightAgentCli,
   piLspExtension,
-  evalSelfTestApp,
   typeSetup,
   lspPackages,
 }:
@@ -158,6 +157,7 @@ let
 
   unitTests = runCompiledTests {
     name = "pi-harness-unit-tests";
+    nodeArgs = "--test-concurrency=2";
     selector = ''
       find ${testBuild}/build/tests -maxdepth 1 -type f -name '*.test.js' \
         ! -name 'eval-*.test.js' \
@@ -175,7 +175,7 @@ let
     name = "pi-harness-managed-session-tests";
     selector = ''find ${testBuild}/build/tests -maxdepth 1 -type f -name 'managed-session-*.test.js' | sort'';
     extraInputs = [ pkgs.direnv pkgs.tmux pkgs.imagemagick ];
-    nodeArgs = "--test-concurrency=1";
+    nodeArgs = "--test-concurrency=6";
     environment = ''
       export PI_HARNESS_JQ=${lib.getExe pkgs.jq}
       export PI_TEST_SHELL=${lib.getExe pkgs.bash}
@@ -205,8 +205,27 @@ let
     touch "$out"
   '';
 
-  evalTests = pkgs.runCommand "pi-harness-eval-self-test-check" { } ''
-    ${evalSelfTestApp}/bin/pi-eval-self-test
+  # Reuse the canonical TypeScript build. The standalone eval app keeps its
+  # own package, but verification must not compile the same sources twice.
+  evalTests = pkgs.runCommand "pi-harness-eval-self-test-check" {
+    nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.git pkgs.nodejs ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ];
+  } ''
+    export HOME="$TMPDIR/home"
+    mkdir -p "$HOME"
+    work="$TMPDIR/work"
+    cp -R --no-preserve=mode ${testBuild}/source "$work"
+    chmod -R u+w "$work"
+    cd "$work"
+    # Eval files exercise process-global sandbox and Git environment state;
+    # keep them serial while still reusing the shared TypeScript build.
+    env -i \
+      HOME="$HOME" \
+      TMPDIR="$TMPDIR" \
+      PATH="$PATH" \
+      PI_TEST_SHELL=${lib.getExe pkgs.bash} \
+      ${lib.optionalString pkgs.stdenv.isLinux "PI_EVAL_BWRAP=${lib.getExe pkgs.bubblewrap} \\"}
+      ${lib.getExe pkgs.nodejs} --test --test-concurrency=1 \
+        ${testBuild}/build/tests/eval-*.test.js
     touch "$out"
   '';
 
@@ -456,7 +475,7 @@ let
     mkdir -p "$TMPDIR/chat-tests/node_modules/@earendil-works"
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-coding-agent"
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-ai"
-    node --test "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
+    node --test --test-concurrency=1 "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
     jq -e '(.assertions | all) and .rejectsEmptyScope and .rejectsStoreSecret
       and (.services["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
       and .services["pi-chat-model"].serviceConfig.User == "operator"

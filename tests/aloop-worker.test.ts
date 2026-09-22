@@ -394,7 +394,7 @@ test("timed-out full workers preserve dirty partial work and reconstruction arti
 	const cwd = await createRepository();
 	try {
 		const outcome = await runAloopWorker({
-			...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 250,
+			...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 1_000,
 		});
 		assert.equal(outcome.status, "timeout");
 		assert.equal(outcome.preservation?.capture, "complete");
@@ -418,7 +418,7 @@ test("failed postflight HEAD inspection persists unknown rather than invented ze
 		await writeFile(path.join(bin, "git"), `#!/bin/sh\nif [ "$1" = rev-parse ] && [ -f timeout-partial.txt ]; then exit 1; fi\nexec "${realGit}" "$@"\n`);
 		await chmod(path.join(bin, "git"), 0o755);
 		process.env.PATH = `${bin}:${originalPath}`;
-		const outcome = await runAloopWorker({ ...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 250 });
+		const outcome = await runAloopWorker({ ...workerInput, cwd, launcher: [process.execPath, fakeWorker], env: { FAKE_ALOOP_MODE: "timeout" }, timeoutMs: 1_000 });
 		const record = JSON.parse(await readFile(path.join(cwd, outcome.artifacts.result), "utf8"));
 		assert.equal(record.afterHead, null);
 		assert.equal(record.commitCount, null);

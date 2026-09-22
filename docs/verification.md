@@ -19,7 +19,7 @@ working directory and do not use credentials, network services, or live models.
 | `bridge-chat-preflight` | Read-only credential-isolated diagnostic, bounded loopback HTTP, redaction and packaged service configuration pass; no live bridge acceptance is implied. |
 | `source-contracts` | Settings and profiles agree, referenced resources exist, retired resources stay absent, and adapter/RPC authority tripwires hold. |
 | `schema-contracts` | Evaluation schemas are valid and their positive and negative fixtures have the expected lexical behavior. |
-| `typescript-build` | Extension, evaluation, and test TypeScript compiles once into the shared test build. |
+| `typescript-build` | Extension, evaluation, and test TypeScript compiles once into the shared test build used by every compiled TypeScript Node suite. |
 | `unit-tests` | Ordinary deterministic Node tests pass. |
 | `managed-session-tests` | Relay, adapter, lifecycle, Matrix projection, and real-Pi managed-session integration tests pass. |
 | `pi-r-integration` | The packaged normal and local launchers preserve their Pi-R contracts. |
@@ -29,15 +29,37 @@ working directory and do not use credentials, network services, or live models.
 | `prompt-expansion-contract` | The patched Pi runtime expands extension-injected prompt commands. |
 | `verify` | Aggregate dependency over every deterministic check above. |
 
-Build one check while developing with:
+Build one check while developing with a single Nix invocation (replace the
+system component on other platforms):
 
 ```bash
-nix build .#checks.$(nix eval --raw --impure --expr builtins.currentSystem).unit-tests
+nix build .#checks.x86_64-linux.unit-tests
 ```
 
-`nix run .#verify` realizes the aggregate and prints the checks that passed.
-Nix builds independent checks in parallel and reuses their outputs when their
-inputs have not changed.
+`nix run .#verify` is the only canonical invocation. It realizes one aggregate
+build graph and prints the checks that passed; do not wrap it in a loop that
+builds each named check separately. Nix builds independent checks in parallel,
+reuses their outputs when inputs have not changed, and shares one TypeScript
+compilation between the ordinary TypeScript, managed-session, bridge-chat, and
+evaluation suites. JavaScript package-contract probes run directly from source.
+Managed-session and ordinary TypeScript test files use bounded parallelism
+while each file retains Node's normal in-file ordering. Bridge-chat and
+evaluation files remain serial because they exercise process-global SDK,
+sandbox, or Git environment state. These suite-level bounds prevent the
+parallel Nix checks from oversubscribing the host with nested Node workers.
+
+For an end-to-end timing measurement, time that same invocation rather than
+running a separate build first:
+
+```bash
+time nix run .#verify
+```
+
+The local performance target is under one minute after the pinned toolchain
+closure has been realized. A new machine or garbage-collected store may first
+need to fetch the pinned Pi, Pi-R, AgentGraph, browser, image, Python, and NixOS
+module dependencies; provision those through the configured binary caches
+rather than weakening or duplicating the verification graph.
 
 ## Test classification
 

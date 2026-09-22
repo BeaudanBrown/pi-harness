@@ -22,7 +22,7 @@ import {
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
-import { BoundAdapterClient, CoordinatorAdapterClient, ManagedAdapterError, requestSelfBind, type ReceivedImage } from "./client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, MAX_NODE_TIMER_DELAY_MS, ManagedAdapterError, requestSelfBind, type ReceivedImage } from "./client.js";
 import { resolveWorkspaceArtifact } from "./artifact-export.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
@@ -223,7 +223,12 @@ function bootstrapBinding(pi: ExtensionAPI, ctx: ExtensionContext, role: Adapter
 	return binding;
 }
 
-export function createManagedSessionAdapterExtension(role: AdapterRole, environment: NodeJS.ProcessEnv = process.env) {
+export function createManagedSessionAdapterExtension(role: AdapterRole, environment: NodeJS.ProcessEnv = process.env,
+	options: { projectionRetryDelayMs?: (attempt: number) => number; maxClosingActivities?: number } = {}) {
+	const maxClosingActivities = options.maxClosingActivities ?? MAX_CLOSING_ACTIVITIES;
+	if (!Number.isSafeInteger(maxClosingActivities) || maxClosingActivities < 1 || maxClosingActivities > MAX_CLOSING_ACTIVITIES) {
+		throw new ManagedAdapterError("Closing activity limit must be a positive bounded integer");
+	}
 	return function managedSessionAdapter(pi: ExtensionAPI): void {
 		let config: AdapterEnvironment;
 		try { config = environmentConfig(environment); } catch (error) {
@@ -683,7 +688,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		function scheduleProjectionRetry(ctx: ExtensionContext): void {
 			if (projectionRetryTimer || stopped || !binding) return;
-			const delay = Math.min(30_000, 1_000 * (2 ** Math.min(projectionRetryAttempt, 5)));
+			const delay = options.projectionRetryDelayMs?.(projectionRetryAttempt)
+				?? Math.min(30_000, 1_000 * (2 ** Math.min(projectionRetryAttempt, 5)));
+			if (!Number.isSafeInteger(delay) || delay < 1 || delay > MAX_NODE_TIMER_DELAY_MS) {
+				throw new ManagedAdapterError("Projection retry delay must be a positive bounded integer");
+			}
 			projectionRetryAttempt += 1;
 			projectionRetryTimer = setTimeout(() => {
 				projectionRetryTimer = undefined;
@@ -1138,7 +1147,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("agent_start", async (_event, ctx) => {
 			if (role !== "ordinary_adapter" || !binding || activity) return;
 			// Bound feedback retention during prolonged outages, not model execution.
-			if (closingActivities.size >= MAX_CLOSING_ACTIVITIES) return;
+			if (closingActivities.size >= maxClosingActivities) return;
 			const source = ctx.sessionManager.getLeafId();
 			if (!source) return;
 			const span: BusyActivity = {
