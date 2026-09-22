@@ -86,7 +86,7 @@ only through the registry's `aloop-opt-in` policy; `.aloop.json` supplies that
 explicit opt-in when the worker launcher consumes the policy.
 
 Capabilities tied to live state are not ambient. `remote_checkpoint` is active
-only while an ordinary adapter has a live managed Matrix binding, and aloop's
+only while a connected ordinary adapter has unfinished Matrix input, and aloop's
 supervisor tools are active only from `/aloop` startup until that supervisor
 turn settles. The managed coordinator exposes only its typed lifecycle tools.
 

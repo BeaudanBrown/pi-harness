@@ -267,7 +267,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (role !== "ordinary_adapter" || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
 			const managed = ["remote_checkpoint", "remote_artifact_export"];
 			const names = pi.getActiveTools().filter((name) => !managed.includes(name));
-			pi.setActiveTools(active ? [...names, "remote_checkpoint", ...(config.placement && config.workspacePath ? ["remote_artifact_export"] : [])] : names);
+			pi.setActiveTools(active ? [...names,
+				...(activeDeliveries.size || pendingUserPersistence.length ? ["remote_checkpoint"] : []),
+				...(config.placement && config.workspacePath ? ["remote_artifact_export"] : [])] : names);
 		};
 		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
 		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
@@ -507,6 +509,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (!previous?.piEntryId) throw new ManagedAdapterError("Checkpoint origin was not durably persisted");
 				const completed = { ...previous, status: "completed" as const };
 				recordDelivery(ctx, completed); activeDeliveries.delete(originDeliveryId); acknowledge(completed);
+				setCheckpointActive(true);
 				if (activity) activity.requestedOutcome = "checkpoint";
 				return { content: [{ type: "text" as const, text: "Remote checkpoint projected. The run is stopped pending new Matrix input." }],
 					details: { checkpointId, kind: checkpoint.kind, waiting: true } };
@@ -753,6 +756,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				provenanceRecorded = true;
 				const expanded: DeliveryMarker = { ...accepted, status: previous ? "reinjecting" : "expanded", expandedText, media };
 				recordDelivery(ctx, expanded); pendingUserPersistence.push(expanded);
+				setCheckpointActive(Boolean(client?.connected));
 			};
 			try {
 				pi.sendUserMessage([{ type: "text", text: attributedCaption }, { type: "image", data: image.data.toString("base64"), mimeType: image.mimeType }], {
@@ -819,7 +823,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (extensionCommand) {
 					const completed: DeliveryMarker = { ...expanded, status: "completed", completionKind: "extension_command" };
 					recordDelivery(ctx, completed); inFlightDeliveries.delete(expanded.deliveryId); acknowledge(completed);
-				} else pendingUserPersistence.push(expanded);
+				} else {
+					pendingUserPersistence.push(expanded);
+					setCheckpointActive(Boolean(client?.connected));
+				}
 			};
 			const invocation = payload.body.match(/^\/([^\s]+)(?:\s|$)/)?.[1];
 			const extensionCommand = Boolean(invocation && pi.getCommands().some((command) => command.name === invocation && command.source === "extension"));
@@ -1144,14 +1151,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (binding) await connectBinding(ctx);
 		});
 
+		pi.on("before_agent_start", () => setCheckpointActive(Boolean(binding && client?.connected)));
 		pi.on("agent_start", async (_event, ctx) => {
 			if (role !== "ordinary_adapter" || !binding || activity) return;
 			// Bound feedback retention during prolonged outages, not model execution.
 			if (closingActivities.size >= maxClosingActivities) return;
-			const source = ctx.sessionManager.getLeafId();
-			if (!source) return;
+			// A branch leaf can be revisited. Allocate once per busy span, not per
+			// update; the relay persists it and reconnects replay the same span.
+			const activityId = deriveActivityId(deriveGenerationId(binding.conversationId, client?.generation ?? 1), randomUUID());
 			const span: BusyActivity = {
-				activityId: deriveActivityId(deriveGenerationId(binding.conversationId, client?.generation ?? 1), source), revision: -1, startedAt: Date.now(),
+				activityId, revision: -1, startedAt: Date.now(),
 				startContext: ctx.getContextUsage()?.tokens ?? undefined, inputTokens: 0, outputTokens: 0, modelTurns: 0, toolTotal: 0, toolErrors: 0, compactions: 0,
 				toolCounts: new Map(), activeTools: new Map(), failedTools: new Set(), work: Promise.resolve(),
 			};
@@ -1196,6 +1205,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				acknowledge(completed);
 			}
 			activeDeliveries.clear();
+			setCheckpointActive(Boolean(binding && client?.connected));
 			if (projectionRun) await projectionRun;
 			await projectEligibleEntries(ctx, true);
 			try { await finishFinalizations(finalizations); }

@@ -497,7 +497,7 @@ test("typed runtime controls reject busy mutation and use authenticated scoped n
 		getContextUsage: () => ({ tokens: contextTokens }), compact: ({ customInstructions, onComplete }: any) => { compactFocus = customInstructions; contextTokens = 40; onComplete({ estimatedTokensAfter: 40 }); },
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding", getSessionFile: () => "/tmp/session.jsonl" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
-	assert.deepEqual(activeTools, ["read", "remote_checkpoint"], "checkpoint activates on binding, but export requires complete placement");
+	assert.deepEqual(activeTools, ["read"], "checkpoint requires Matrix input; export requires complete placement");
 	const send = async (id: number, name: string, argument?: string) => {
 		const controlId = `control_${String(id).padStart(32, "a")}`;
 		const priorResults = relay.frames.filter((frame) => frame.type === "control.result" && frame.payload.controlId === controlId).length;
@@ -677,9 +677,11 @@ async function activityIntegration(t: { after(fn: () => Promise<void>): void }) 
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf, getSessionFile: () => "/tmp/fixture.jsonl", getSessionDir: () => "/tmp" } };
 	t.after(async () => { await handlers.get("session_shutdown")!({ reason: "quit" }, ctx); await projector.close(); await relay.close(); });
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
-	const start = async () => {
-		const id = `user-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content: "fixture" } }); leaf = id;
+	const start = async (from = leaf) => {
+		leaf = from;
+		// Real Pi emits agent_start before persisting the new user message.
 		await handlers.get("agent_start")!({}, ctx);
+		const id = `user-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content: "fixture" } }); leaf = id;
 	};
 	const answer = () => { const id = `answer-${++sequence}`; branch.push({ type: "message", id, parentId: leaf, message: { role: "assistant", content: "fixture answer", stopReason: "stop" } }); leaf = id; };
 	return { relay, errors, notices, start, answer, handlers, ctx, settle: () => handlers.get("agent_settled")!({}, ctx), frames: () => relay.frames.filter(e => e.type.startsWith("activity.")) };
@@ -688,6 +690,15 @@ async function activityWait(predicate: () => boolean, timeoutMs = 3000) {
 	for (let i = 0; i < timeoutMs / 10 && !predicate(); i++) await new Promise(resolve => setTimeout(resolve, 10));
 	assert.ok(predicate(), "activity condition timed out");
 }
+
+test("rewinding a settled branch creates a distinct activity without editing its finalized card", async t => {
+	const f = await activityIntegration(t);
+	for (let i = 0; i < 2; i++) { await f.start("binding"); f.answer(); await f.settle(); }
+	const finals = f.frames().filter(e => e.type === "activity.finalize");
+	assert.equal(finals.length, 2);
+	assert.notEqual(finals[0].payload.activityId, finals[1].payload.activityId);
+	assert.deepEqual(f.errors, []); assert.deepEqual(f.notices, []);
+});
 
 test("real adapter/projector single-flight overlapping settlement", async t => {
 	const f = await activityIntegration(t); await f.start(); f.answer();
@@ -930,12 +941,14 @@ test("managed adapter steers busy Matrix prompts and replay while preserving idl
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
 	let leaf = "binding"; let sequence = 0; let idle = true; let aborts = 0;
+	let activeTools = ["read", "remote_checkpoint"];
 	const handlers = new Map<string, (...args: any[]) => any>(); const tools = new Map<string, any>();
 	const deliveriesSeen: Array<{ text: string; deliverAs?: string }> = [];
 	const api = {
 		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
 		registerCommand: () => undefined,
 		registerTool: (tool: any) => tools.set(tool.name, tool),
+		getActiveTools: () => activeTools, setActiveTools: (names: string[]) => { activeTools = names; },
 		getCommands: () => [],
 		appendEntry: (customType: string, data: unknown) => { const id = `custom-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id; },
 		sendUserMessage: (text: string, options: any) => { deliveriesSeen.push({ text, ...(options.deliverAs ? { deliverAs: options.deliverAs } : {}) }); options.onPromptExpanded(text);
@@ -953,7 +966,10 @@ test("managed adapter steers busy Matrix prompts and replay while preserving idl
 			payload: { deliveryId: deriveDeliveryId(conversationId, eventId), matrixEventId: eventId, ...(senderUserId ? { senderUserId } : {}), kind, body } });
 		await new Promise((resolve) => setTimeout(resolve, 30));
 	};
+	await handlers.get("before_agent_start")!({}, ctx);
+	assert.deepEqual(activeTools, ["read"], "terminal input must not advertise a Matrix checkpoint");
 	await send("$idle", "prompt", "idle task", "@alice:example.com");
+	assert.ok(activeTools.includes("remote_checkpoint"), "expanded Matrix input enables checkpoint before model execution");
 	await handlers.get("agent_start")!({}, ctx);
 	assert.ok(tools.has("remote_checkpoint"));
 	await assert.rejects(() => tools.get("remote_checkpoint").execute("malformed-checkpoint", {}, undefined, undefined, ctx), /kind must be/);
@@ -961,6 +977,7 @@ test("managed adapter steers busy Matrix prompts and replay while preserving idl
 		"malformed local-model arguments fail before durable relay or Matrix side effects");
 	const delegated = await delegateManagedAloopCheckpoint(sessionId, "tool-call-stable", { kind: "question", decision: "Approve?" });
 	assert.equal(delegated, true); assert.equal(aborts, 1);
+	assert.deepEqual(activeTools, ["read"], "completed checkpoint no longer advertises the tool");
 	assert.equal(relay.frames.filter((frame) => frame.type === "checkpoint.offer").length, 1);
 	handlers.get("turn_end")!({ message: { role: "assistant", usage: { input: 1, output: 1 }, stopReason: "error" } });
 	await handlers.get("agent_settled")!({}, ctx);
