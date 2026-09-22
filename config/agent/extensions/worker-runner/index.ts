@@ -1,5 +1,5 @@
 import { randomBytes } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
 	createAgentSession,
@@ -9,10 +9,11 @@ import {
 	SettingsManager,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveAgentProfile } from "../agent-profiles/core.js";
+import { loadPreference, savePreference } from "../shared/preferences.js";
+import { extractAssistantText, workerResourceLoader } from "../shared/worker-session.js";
 import { recordNestedModelUsage } from "../agent-profiles/usage.js";
 import {
 	nextWorkerPresetSelection,
@@ -76,46 +77,8 @@ function repoRelative(fromCwd: string, absolutePath: string): string {
 const STATUS_KEY = "worker-model";
 const SETTINGS_KEY = "pi-worker-runner";
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && "code" in error;
-}
-
-async function readJsonObject(filePath: string): Promise<Record<string, unknown>> {
-	try {
-		const text = await readFile(filePath, "utf8");
-		const parsed: unknown = JSON.parse(text);
-		return isRecord(parsed) ? parsed : {};
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return {};
-		throw error;
-	}
-}
-
-function workerSettingsPath(): string {
-	return path.join(getAgentDir(), "settings.json");
-}
-
 async function loadWorkerSelection(): Promise<WorkerSelection> {
-	const settings = await readJsonObject(workerSettingsPath());
-	return workerSelectionFromSettings(settings[SETTINGS_KEY]);
-}
-
-async function persistWorkerSelection(selection: WorkerSelection): Promise<void> {
-	const settingsPath = workerSettingsPath();
-	const settings = await readJsonObject(settingsPath);
-	const existing = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
-	const next: Record<string, unknown> = { ...existing, ...workerSelectionToSettings(selection) };
-	delete next.mode;
-	settings[SETTINGS_KEY] = next;
-
-	await mkdir(path.dirname(settingsPath), { recursive: true });
-	const tempPath = `${settingsPath}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tempPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-	await rename(tempPath, settingsPath);
+	return workerSelectionFromSettings(await loadPreference(SETTINGS_KEY, getAgentDir()));
 }
 
 type ResolvedWorkerModel =
@@ -142,39 +105,6 @@ function selectedWorkerModel(ctx: ExtensionContext, selection: WorkerSelection):
 	return { error: `${label} is not registered or has no configured authentication.` };
 }
 
-function createWorkerResourceLoader(): ResourceLoader {
-	const profile = resolveAgentProfile("diagnostic-worker");
-	return {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => profile.systemPrompt,
-		getSystemPromptSource: () => undefined,
-		getAppendSystemPrompt: () => [],
-		getAppendSystemPromptSources: () => [],
-		extendResources: () => {},
-		reload: async () => {},
-	};
-}
-
-function extractAssistantText(session: { messages: unknown[] }): string {
-	for (let i = session.messages.length - 1; i >= 0; i--) {
-		const message = session.messages[i] as any;
-		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-		const parts = message.content
-			.map((part: any) => {
-				if (typeof part === "string") return part;
-				if (part?.type === "text" && typeof part.text === "string") return part.text;
-				return undefined;
-			})
-			.filter(Boolean);
-		if (parts.length > 0) return parts.join("\n").trim();
-	}
-	return "";
-}
-
 async function askWorker(
 	ctx: ExtensionContext,
 	selection: WorkerSelection,
@@ -195,7 +125,7 @@ async function askWorker(
 		tools: resolveAgentProfile("diagnostic-worker").tools,
 		sessionManager: SessionManager.inMemory(ctx.cwd),
 		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-		resourceLoader: createWorkerResourceLoader(),
+		resourceLoader: workerResourceLoader("diagnostic-worker", createExtensionRuntime),
 	});
 
 	let streamed = "";
@@ -268,7 +198,7 @@ export default function workerRunnerExtension(pi: ExtensionAPI): void {
 	}
 
 	function persistSelection(selection: WorkerSelection, ctx: ExtensionContext): void {
-		settingsWriteQueue = settingsWriteQueue.catch(() => undefined).then(() => persistWorkerSelection(selection));
+		settingsWriteQueue = settingsWriteQueue.catch(() => undefined).then(() => savePreference(SETTINGS_KEY, workerSelectionToSettings(selection), getAgentDir()));
 		void settingsWriteQueue.catch((error: unknown) => {
 			if (!ctx.hasUI) return;
 			const message = error instanceof Error ? error.message : String(error);

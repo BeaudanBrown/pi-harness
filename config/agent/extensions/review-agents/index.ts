@@ -9,10 +9,10 @@ import {
 	SettingsManager,
 	type ExtensionAPI,
 	type ExtensionContext,
-	type ResourceLoader,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { resolveAgentProfile } from "../agent-profiles/core.js";
+import { extractAssistantText, workerResourceLoader } from "../shared/worker-session.js";
 import { recordNestedModelUsage } from "../agent-profiles/usage.js";
 import {
 	buildReviewPrompt,
@@ -61,39 +61,6 @@ type ReviewResult = {
 	axis: ReviewTask["axis"];
 	text: string;
 };
-
-function createReviewResourceLoader(): ResourceLoader {
-	const profile = resolveAgentProfile("review-worker");
-	return {
-		getExtensions: () => ({ extensions: [], errors: [], runtime: createExtensionRuntime() }),
-		getSkills: () => ({ skills: [], diagnostics: [] }),
-		getPrompts: () => ({ prompts: [], diagnostics: [] }),
-		getThemes: () => ({ themes: [], diagnostics: [] }),
-		getAgentsFiles: () => ({ agentsFiles: [] }),
-		getSystemPrompt: () => profile.systemPrompt,
-		getSystemPromptSource: () => undefined,
-		getAppendSystemPrompt: () => [],
-		getAppendSystemPromptSources: () => [],
-		extendResources: () => {},
-		reload: async () => {},
-	};
-}
-
-function extractAssistantText(session: { messages: unknown[] }): string {
-	for (let i = session.messages.length - 1; i >= 0; i--) {
-		const message = session.messages[i] as any;
-		if (message?.role !== "assistant" || !Array.isArray(message.content)) continue;
-		const parts = message.content
-			.map((part: any) => {
-				if (typeof part === "string") return part;
-				if (part?.type === "text" && typeof part.text === "string") return part.text;
-				return undefined;
-			})
-			.filter((part: string | undefined): part is string => Boolean(part));
-		if (parts.length > 0) return parts.join("\n").trim();
-	}
-	return "";
-}
 
 function truncateResult(value: string): string {
 	const bytes = Buffer.byteLength(value, "utf8");
@@ -231,7 +198,7 @@ async function askReviewer(
 		tools: resolveAgentProfile("review-worker").tools,
 		sessionManager: SessionManager.inMemory(ctx.cwd),
 		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
-		resourceLoader: createReviewResourceLoader(),
+		resourceLoader: workerResourceLoader("review-worker", createExtensionRuntime),
 	});
 
 	const abortReviewer = () => void session.abort();

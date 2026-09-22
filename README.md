@@ -434,8 +434,9 @@ When enabled, it adds `service_tier=priority` to OpenAI and OpenAI Codex
 provider requests. It is inactive for other providers.
 
 Use `/codex-fast` inside Pi to toggle it, or start Pi with `pi --fast` to enable
-it for that session. The persisted setting is stored under `pi-codex-fast` in
-Pi's normal settings files.
+it for that session. The preference is saved in `~/.pi/agent/pi-codex-fast.json` (respecting
+`PI_CODING_AGENT_DIR`). Existing global `pi-codex-fast` settings remain a read-only
+fallback until the first save; project settings still override the preference.
 
 ## Delegated Worker Runner
 
@@ -443,7 +444,7 @@ The included `worker-runner` extension registers `run_worker`, a tool for noisy 
 
 Use it for tests, typechecks, builds, and integration checks where dumping raw output into the main context would be wasteful. The parent agent supplies an argv command and a plain-language task describing what the worker should extract or diagnose. The command runs in a dedicated process group so timeout or cancellation terminates descendants. Its full log and machine-readable `result.json` are durable before diagnostic summarization starts; balanced head/tail excerpts retain startup and failure context, and a deterministic fallback preserves authoritative status if the diagnostic model fails. The worker defaults to `openai-codex/gpt-5.3-codex-spark` and falls back to the current session model only when Spark is unavailable.
 
-Use `/worker-model` to keep the fast Spark/Luna toggle, or use `/worker-model spark`, `/worker-model luna`, and `/worker-model status`. `/worker-model select` opens a fuzzy selector over registered, authenticated Pi models; `/worker-model provider/model` provides the same capability for RPC, Matrix, or other non-interactive sessions. The selection persists in Pi's global settings under `pi-worker-runner`, so it applies to future Pi sessions. Legacy mode-only settings migrate automatically. Luna and explicitly selected custom models are never silently replaced with Spark or the parent model. `PI_HARNESS_WORKER_MODEL=provider/model` remains the highest-priority environment override and is shown as active by `/worker-model status`.
+Use `/worker-model` to keep the fast Spark/Luna toggle, or use `/worker-model spark`, `/worker-model luna`, and `/worker-model status`. `/worker-model select` opens a fuzzy selector over registered, authenticated Pi models; `/worker-model provider/model` provides the same capability for RPC, Matrix, or other non-interactive sessions. The selection persists in `pi-worker-runner.json` in Pi's agent directory, so it applies to future sessions without rewriting Pi's shared settings. Existing global `pi-worker-runner` settings are read until the first save; legacy mode-only selections still load. Luna and explicitly selected custom models are never silently replaced with Spark or the parent model. `PI_HARNESS_WORKER_MODEL=provider/model` remains the highest-priority environment override and is shown as active by `/worker-model status`.
 
 Do not use `run_worker` for subjective code review. The dedicated `review_agents` tool uses a review-specific model, prompt, and shared pinned diff.
 

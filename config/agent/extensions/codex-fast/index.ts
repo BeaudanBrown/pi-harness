@@ -1,6 +1,6 @@
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
 import { getAgentDir, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { loadPreference, readJsonObject, savePreference } from "../shared/preferences.js";
 
 const STATUS_KEY = "codex-fast";
 const SETTINGS_KEY = "pi-codex-fast";
@@ -22,47 +22,10 @@ function supportsPriorityServiceTier(ctx: ExtensionContext): boolean {
 	return ctx.model?.provider === "openai" || ctx.model?.provider === "openai-codex";
 }
 
-async function readJsonObject(path: string): Promise<Record<string, unknown>> {
-	try {
-		const text = await readFile(path, "utf8");
-		const parsed: unknown = JSON.parse(text);
-		return isRecord(parsed) ? parsed : {};
-	} catch (error) {
-		if (isNodeError(error) && error.code === "ENOENT") return {};
-		throw error;
-	}
-}
-
-function isNodeError(error: unknown): error is NodeJS.ErrnoException {
-	return error instanceof Error && "code" in error;
-}
-
-function globalSettingsPath(): string {
-	return join(getAgentDir(), "settings.json");
-}
-
-function projectSettingsPath(cwd: string): string {
-	return join(cwd, ".pi", "settings.json");
-}
-
 async function loadFastMode(cwd: string): Promise<boolean | undefined> {
-	const globalSettings = await readJsonObject(globalSettingsPath());
-	const projectSettings = await readJsonObject(projectSettingsPath(cwd));
-	const globalFast = asSettings(globalSettings[SETTINGS_KEY]);
-	const projectFast = asSettings(projectSettings[SETTINGS_KEY]);
-	return projectFast?.enabled ?? globalFast?.enabled;
-}
-
-async function persistFastMode(enabled: boolean): Promise<void> {
-	const path = globalSettingsPath();
-	const settings = await readJsonObject(path);
-	const existing = isRecord(settings[SETTINGS_KEY]) ? settings[SETTINGS_KEY] : {};
-	settings[SETTINGS_KEY] = { ...existing, enabled };
-
-	await mkdir(dirname(path), { recursive: true });
-	const tempPath = `${path}.tmp-${process.pid}-${Date.now()}`;
-	await writeFile(tempPath, `${JSON.stringify(settings, null, 2)}\n`, "utf8");
-	await rename(tempPath, path);
+	const globalFast = asSettings(await loadPreference(SETTINGS_KEY, getAgentDir()));
+	const projectSettings = await readJsonObject(join(cwd, ".pi", "settings.json"));
+	return asSettings(projectSettings[SETTINGS_KEY])?.enabled ?? globalFast?.enabled;
 }
 
 export default function codexFastExtension(pi: ExtensionAPI): void {
@@ -102,7 +65,7 @@ export default function codexFastExtension(pi: ExtensionAPI): void {
 	function persistState(enabled: boolean, ctx: ExtensionContext): void {
 		settingsWriteQueue = settingsWriteQueue
 			.catch(() => undefined)
-			.then(() => persistFastMode(enabled));
+			.then(() => savePreference(SETTINGS_KEY, { enabled }, getAgentDir()));
 
 		void settingsWriteQueue.catch((error: unknown) => {
 			if (!ctx.hasUI) return;
