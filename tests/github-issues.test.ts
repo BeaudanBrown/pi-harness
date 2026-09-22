@@ -4,8 +4,21 @@ import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
 import { mkdtemp } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { bodyWithMarker, completeMigrationCleanup, executeMigration, frontierIssueNumbers, inspectGraph, issueMarker, migrationIssuePlan, retrieveCurrentRepositoryEpicContext, validateIssuePlan, type MigrationRecord, type MigrationReconciliation } from "../config/agent/extensions/github-issues/index.js";
+import registerGitHubIssues, { bodyWithMarker, completeMigrationCleanup, executeMigration, frontierIssueNumbers, inspectGraph, issueMarker, migrationIssuePlan, retrieveCurrentRepositoryEpicContext, validateIssuePlan, type MigrationRecord, type MigrationReconciliation } from "../config/agent/extensions/github-issues/index.js";
 import { retrieveGitHubEpicContext } from "../config/agent/extensions/github-issues/github-context.js";
+
+test("migration tool is available only in the dedicated launcher", () => {
+	const prior = process.env.PI_HARNESS_TK_MIGRATION;
+	try {
+		for (const enabled of [false, true]) {
+			process.env.PI_HARNESS_TK_MIGRATION = enabled ? "1" : "0";
+			const tools: string[] = [];
+			registerGitHubIssues({ registerTool: (tool: { name: string }) => tools.push(tool.name) } as any);
+			assert.equal(tools.includes("github_issue_migration"), enabled);
+			assert.ok(tools.includes("github_issue_plan"));
+		}
+	} finally { if (prior === undefined) delete process.env.PI_HARNESS_TK_MIGRATION; else process.env.PI_HARNESS_TK_MIGRATION = prior; }
+});
 
 test("issue plans receive stable provenance markers", () => {
 	assert.equal(issueMarker("migration-2026", "closed-epic"), "<!-- pi-harness-plan:migration-2026/closed-epic -->");

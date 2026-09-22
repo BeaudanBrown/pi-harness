@@ -482,7 +482,9 @@
               echo "pi-migrate-tk: GitHub CLI authentication is required; run gh auth login first." >&2
               exit 1
             fi
-            exec ${piHarnessPackage}/bin/pi "$@"
+            export PI_HARNESS_TK_MIGRATION=1
+            exec ${piHarnessPackage}/bin/pi \
+              --skill "${piHarnessResources}/share/pi-harness/agent/migration-skills/migrate-tk-to-github" "$@"
           '';
         };
         verification = import ./nix/verification.nix {

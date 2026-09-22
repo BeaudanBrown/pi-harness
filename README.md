@@ -634,7 +634,8 @@ project, run:
 nix run github:BeaudanBrown/pi-harness#migrate-tk
 ```
 
-Then invoke `/skill:migrate-tk-to-github`. Its inventory phase reviews every
+Only this launcher enables `github_issue_migration`; ordinary engineering sessions
+do not advertise migration instructions or tools. Then invoke `/skill:migrate-tk-to-github`. Its inventory phase reviews every
 source ticket with code, Git, and GitHub evidence and asks about stale or
 ambiguous work. It never creates issues or removes `.tickets/` before later
 approved publication and reconciliation phases.

@@ -243,7 +243,8 @@ let
     test -f ${piHarnessResources.managedSessionExtensions.coordinator}
     test -f ${piHarnessResources.managedSessionExtensions.modelPolicy}
     test -d "$agent_root/extensions/node_modules/typebox"
-    test -f "$agent_root/skills/migrate-tk-to-github/SKILL.md"
+    test -f "$agent_root/migration-skills/migrate-tk-to-github/SKILL.md"
+    test ! -e "$agent_root/skills/migrate-tk-to-github"
     test -f "$agent_root/skills/playwright-browser/SKILL.md"
     test ! -e "$agent_root/extensions/remote-session"
 

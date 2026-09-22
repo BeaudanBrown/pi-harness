@@ -850,7 +850,7 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		},
 	});
 
-	pi.registerTool({
+	if (process.env.PI_HARNESS_TK_MIGRATION === "1") pi.registerTool({
 		name: "github_issue_migration",
 		label: "GitHub Issue Migration",
 		description: "Execute or explicitly clean up a validated tk-to-GitHub migration with fresh live reconciliation; dry-run by default.",
