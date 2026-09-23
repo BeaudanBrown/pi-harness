@@ -4,7 +4,7 @@
 
 A fresh agent started from the `pi-harness` checkout should use this document to create one GitHub epic and its native sub-issues in `BeaudanBrown/pi-harness`. GitHub Issues are the source of truth; this document is only a publication handoff and may be removed after the issue graph has been published and reconciled.
 
-Use the typed GitHub issue tools, not `gh` through Bash. Inspect existing issues first, validate the complete plan with `apply: false`, review it, then publish with `apply: true`. Use native sub-issue and blocker relationships. Do not create issues in another repository from the pi-harness checkout.
+Use the typed GitHub issue tools, not `gh` through Bash. Inspect existing issues first, then publish the complete authorized plan with `apply: true`; use `apply: false` only if a preview would resolve uncertainty. Use native sub-issue and blocker relationships. Do not create issues in another repository from the pi-harness checkout.
 
 Suggested stable issue-plan key:
 
@@ -611,10 +611,9 @@ For future pi-r pack changes, run pi-r's canonical deterministic gate in that ch
 6. Set each child `parent: "epic"`.
 7. Encode `blockedBy` exactly as listed.
 8. Label only `contracts` as `ready-for-agent` initially. Use category labels on all issues; use `documentation` in addition to `enhancement` for the final docs issue if desired.
-9. Call `github_issue_plan` with `apply: false` first and review every title, body, label, parent, and blocker edge.
-10. Publish with `apply: true` only after the dry run is valid.
-11. Inspect the resulting parent and native sub-issue graph.
-12. If blocker relationships require a separate publication step, use the typed native relationship tool with dry-run first.
-13. Report issue numbers and the ready frontier.
-14. Do not start implementation unless the user asks or a ready issue is explicitly selected.
-15. Once the graph is durable and reconciled, remove this handoff document in a separate documentation commit if it is no longer useful.
+9. Publish the authorized plan with `apply: true`; use `apply: false` first only if a preview would resolve uncertainty about a title, body, label, parent, or blocker edge.
+10. Inspect the resulting parent and native sub-issue graph.
+11. If blocker relationships require a separate publication step, apply authorized relationships directly with the typed native relationship tool and preview only uncertain relationships.
+12. Report issue numbers and the ready frontier.
+13. Do not start implementation unless the user asks or a ready issue is explicitly selected.
+14. Once the graph is durable and reconciled, remove this handoff document in a separate documentation commit if it is no longer useful.

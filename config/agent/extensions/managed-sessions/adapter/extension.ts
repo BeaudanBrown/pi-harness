@@ -1,5 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
 	ALOOP_LIFECYCLE_ENTRY_TYPE,
@@ -58,6 +59,14 @@ type ControlResult = { controlId: string; status: "ok" | "rejected"; message: st
 
 export function renderMatrixParticipantInput(senderUserId: string | undefined, body: string): string {
 	return senderUserId ? `Matrix participant ${senderUserId}:\n\n${body}` : body;
+}
+
+export function projectedCheckpointHistoryText(value: unknown): string | undefined {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return undefined;
+	const marker = value as { status?: unknown; checkpoint?: unknown };
+	if (marker.status !== "projected") return undefined;
+	try { return renderRemoteCheckpoint(validateRemoteCheckpoint(marker.checkpoint)); }
+	catch { return undefined; }
 }
 type StatefulControlName = "model" | "thinking" | "compact" | "new" | "stop";
 type ControlExecution = { controlId: string; name: StatefulControlName; argument?: string; state: "started" };
@@ -230,6 +239,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		throw new ManagedAdapterError("Closing activity limit must be a positive bounded integer");
 	}
 	return function managedSessionAdapter(pi: ExtensionAPI): void {
+		pi.registerEntryRenderer?.(CHECKPOINT_ENTRY_TYPE, (entry, _options, theme) => {
+			const body = projectedCheckpointHistoryText(entry.data);
+			return new Text(body ? theme.fg("accent", body) : "", 0, 0);
+		});
 		let config: AdapterEnvironment;
 		try { config = environmentConfig(environment); } catch (error) {
 			pi.on("session_start", (_event, ctx) => notify(ctx, error instanceof Error ? error.message : "Managed-session adapter configuration failed", "error"));
@@ -239,6 +252,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let client: BoundAdapterClient | undefined;
 		let currentContext: ExtensionContext | undefined;
 		let reconnectTimer: NodeJS.Timeout | undefined;
+		let connectWork: Promise<void> | undefined;
+		let bindingEpoch = 0;
 		let reconnectAttempt = 0;
 		let stopped = false;
 		let deliveries = new Map<string, DeliveryMarker>();
@@ -1006,17 +1021,32 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		async function connectBinding(ctx: ExtensionContext): Promise<void> {
-			if (!binding || stopped || client?.connected) return;
+			const epoch = bindingEpoch;
+			if (connectWork) {
+				await connectWork;
+				if (!stopped && bindingEpoch === epoch && !client?.connected) await connectBinding(ctx);
+				return;
+			}
+			const work = connectBindingOnce(ctx, epoch).finally(() => { if (connectWork === work) connectWork = undefined; });
+			connectWork = work;
+			await work;
+		}
+
+		async function connectBindingOnce(ctx: ExtensionContext, epoch: number): Promise<void> {
+			const attemptBinding = binding;
+			if (!attemptBinding || stopped || client?.connected || epoch !== bindingEpoch) return;
 			if (!config.attachmentNonce) {
 				notify(ctx, "Managed-session attachment nonce is unavailable", "error");
 				return;
 			}
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
-				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding,
+				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
 				onEnvelope: handleEnvelope, onMedia: (image) => handleMedia(image, ctx),
 				onDisconnect: () => {
-					if (client === next) setCheckpointActive(false);
+					if (client !== next || bindingEpoch !== epoch) return;
+					client = undefined;
+					setCheckpointActive(false);
 					setStatus(ctx);
 					scheduleReconnect(ctx);
 				},
@@ -1024,25 +1054,45 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			client = next;
 			try {
 				await next.connect();
-				if (stopped || client !== next || !binding || !next.connected) {
-					await next.close("shutdown").catch(() => undefined);
-					return;
-				}
-				// The authenticated manifest is authoritative even when an external
-				// tmux launcher only forwards the canonical workspace path.
-				if (next.placement) config.placement = next.placement;
+			} catch (error) {
+				await next.close("shutdown").catch(() => undefined);
+				if (client === next) client = undefined;
+				setCheckpointActive(false);
+				notify(ctx, error instanceof Error ? error.message : "Managed-session relay connection failed", "warning");
+				scheduleReconnect(ctx);
+				setStatus(ctx);
+				return;
+			}
+			if (stopped || bindingEpoch !== epoch || client !== next || binding?.conversationId !== attemptBinding.conversationId ||
+				binding.sessionId !== attemptBinding.sessionId || !next.connected) {
+				await next.close("shutdown").catch(() => undefined);
+				return;
+			}
+			// Attachment establishes transport ownership. Recovery failures below are
+			// application-state failures and must not create reconnect storms.
+			if (next.placement) config.placement = next.placement;
+			setCheckpointActive(true);
+			reconnectAttempt = 0;
+			try {
 				if (activity) sendActivityUpdate(activity, true);
 				await finishFinalizations([...closingActivities]);
-				setCheckpointActive(true);
-				reconnectAttempt = 0;
 				replayAcknowledgements();
 				for (const marker of checkpoints.values()) {
-					if (marker.status === "offered") {
-						await next.offerCheckpoint({ checkpointId: marker.checkpointId, originDeliveryId: marker.originDeliveryId, checkpoint: marker.checkpoint });
-						const projected = { ...marker, status: "projected" as const };
-						appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, projected); checkpoints.set(marker.checkpointId, projected);
+					if (marker.status === "abandoned") continue;
+					let current = marker;
+					if (current.status === "offered") {
+						try {
+							await next.offerCheckpoint({ checkpointId: current.checkpointId, originDeliveryId: current.originDeliveryId, checkpoint: current.checkpoint });
+							current = { ...current, status: "projected" as const };
+						} catch (error) {
+							if (!(error instanceof ManagedAdapterError) || error.code !== "invalid_state") throw error;
+							current = { ...current, status: "abandoned" as const };
+							notify(ctx, `Skipped unrecoverable checkpoint ${current.checkpointId}`, "warning");
+						}
+						appendMarker(pi, ctx, CHECKPOINT_ENTRY_TYPE, current); checkpoints.set(current.checkpointId, current);
 					}
-					const origin = deliveries.get(marker.originDeliveryId);
+					if (current.status !== "projected") continue;
+					const origin = deliveries.get(current.originDeliveryId);
 					if (origin?.status === "persisted" && origin.piEntryId) {
 						const completed = { ...origin, status: "completed" as const };
 						recordDelivery(ctx, completed); activeDeliveries.delete(origin.deliveryId); acknowledge(completed);
@@ -1068,21 +1118,26 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				aloopProjectionWork = aloopProjectionWork.then(() => projectAloopLifecycle(ctx));
 				await aloopProjectionWork;
 			} catch (error) {
-				await next.close("shutdown").catch(() => undefined);
-				if (client === next) client = undefined;
-				setCheckpointActive(false);
-				notify(ctx, error instanceof Error ? error.message : "Managed-session relay connection failed", "warning");
-				scheduleReconnect(ctx);
+				notify(ctx, error instanceof Error ? error.message : "Managed-session recovery failed", "warning");
 			}
 			setStatus(ctx);
 		}
 
 		pi.on("session_start", async (event, ctx) => {
 			closingActivities.clear(); // Session-local feedback never crosses a binding/session switch.
+			const sessionId = ctx.sessionManager.getSessionId();
+			const sessionChanged = !currentContext || currentContext.sessionManager.getSessionId() !== sessionId;
+			if (sessionChanged) {
+				bindingEpoch += 1;
+				if (reconnectTimer) clearTimeout(reconnectTimer);
+				reconnectTimer = undefined;
+				const previousClient = client;
+				client = undefined;
+				await previousClient?.close();
+			}
 			stopped = false;
 			setCheckpointActive(false);
 			currentContext = ctx;
-			const sessionId = ctx.sessionManager.getSessionId();
 			unregisterAloopCheckpointDelegate();
 			if (role === "ordinary_adapter") unregisterAloopCheckpointDelegate = registerManagedAloopCheckpointDelegate(sessionId, async (toolCallId, checkpoint) => { await executeRemoteCheckpoint(toolCallId, checkpoint, ctx); });
 			if (event.reason === "new" || event.reason === "fork") {
@@ -1133,7 +1188,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			expandedRecoveryPending.clear();
 			pendingUserPersistence.length = 0;
 			inFlightDeliveries.clear();
-			const checkpointOrigins = new Set([...checkpoints.values()].map((marker) => marker.originDeliveryId));
+			const checkpointOrigins = new Set([...checkpoints.values()].filter((marker) => marker.status !== "abandoned").map((marker) => marker.originDeliveryId));
 			for (const marker of deliveries.values()) {
 				if (marker.status === "persisted" && marker.piEntryId) {
 					activeDeliveries.set(marker.deliveryId, marker.piEntryId);
@@ -1197,14 +1252,17 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				pendingUserPersistence.splice(index, 1);
 				persistExpanded(ctx, marker, piEntryKey);
 			}
+			const offeredCheckpointOrigins = new Set([...checkpoints.values()]
+				.filter((marker) => marker.status === "offered").map((marker) => marker.originDeliveryId));
 			for (const [deliveryId, piEntryId] of activeDeliveries) {
+				if (offeredCheckpointOrigins.has(deliveryId)) continue;
 				const previous = deliveries.get(deliveryId);
 				if (!previous) continue;
 				const completed: DeliveryMarker = { ...previous, status: "completed", piEntryId };
 				recordDelivery(ctx, completed);
+				activeDeliveries.delete(deliveryId);
 				acknowledge(completed);
 			}
-			activeDeliveries.clear();
 			setCheckpointActive(Boolean(binding && client?.connected));
 			if (projectionRun) await projectionRun;
 			await projectEligibleEntries(ctx, true);
@@ -1217,6 +1275,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			stopped = true;
+			bindingEpoch += 1;
 			unsubscribeAloopLifecycle();
 			unregisterAloopCheckpointDelegate();
 			clearAloopLifecycle(ctx.sessionManager.getSessionId());

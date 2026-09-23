@@ -19,21 +19,23 @@ Implement within the stated ownership boundary. During development, run the smal
 
 Do not repeatedly run the canonical repository gate or production builds during ordinary edit cycles unless a project-specific constraint requires it.
 
-## 3. One exhaustive review
+## 3. Exhaustive review at the right boundary
 
-After focused and broader affected checks pass, call `review_agents` once with both Standards and Spec tasks when both sources are available. For uncommitted work, use `mode: "worktree"` and a fixed point; the tool captures staged, unstaged, untracked, and binary content into one immutable synthetic Git snapshot without changing source files. Use the existing `mode: "diff"` for an already committed branch comparison.
+For an individual issue, the implementation agent decides whether the change warrants `review_agents` after focused and broader affected checks pass. Use it for risky, cross-cutting, or ambiguous changes; a review is not mandatory merely because an issue is ending.
 
-Ask both axes to inspect the complete pinned change. Every finding must include:
+At the end of an epic, always call `review_agents` once against the complete cumulative epic change, with both Standards and Spec tasks when both sources are available. For uncommitted work, use `mode: "worktree"` and a fixed point; the tool captures staged, unstaged, untracked, and binary content into one immutable synthetic Git snapshot without changing source files. Use `mode: "diff"` for an already committed branch comparison.
+
+Whenever review runs, ask both axes to inspect the complete pinned change. Every finding must include:
 
 - severity: critical, high, medium, or low;
 - ownership: current issue, dependent issue, deployment-only, or justified deferral;
 - concrete evidence and an actionable correction or explicit deferral rationale.
 
-Treat this as the final exhaustive review, not the first pass in a routine review loop.
+Treat each invocation as the final exhaustive review for that issue or epic boundary, not the first pass in a routine review loop.
 
 ## 4. Batch remediation and final gate
 
-Triage all findings together. Fix accepted current-issue findings in one remediation batch. Record dependent, deployment-only, and subjective justified deferrals in the handoff or issue evidence. Do not routinely re-run the subjective review after remediation; re-review only when remediation materially changes the design or invalidates the pinned review.
+When review was run, triage all findings together. Fix accepted current-issue or current-epic findings in one remediation batch. Record dependent, deployment-only, and subjective justified deferrals in the handoff or issue evidence. Do not routinely re-run the subjective review after remediation; re-review only when remediation materially changes the design or invalidates the pinned review.
 
 After remediation, run the canonical repository verification gate once, then each applicable production build once. If a trivial, isolated change is required after that gate, run focused verification for that change and document why the canonical gate was not repeated; otherwise repeat the affected final gate.
 

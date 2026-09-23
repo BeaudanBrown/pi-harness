@@ -37,9 +37,9 @@ Use the configured GitHub lifecycle labels. See `docs/agents/triage-labels.md`.
 
 Read project guidance and relevant documentation before work. See `docs/agents/domain.md`.
 
-### Issue implementation
+### Issue and epic implementation
 
-Use the preflight, acceptance-evidence, scope-ownership, one-pass review, and final verification ladder in `docs/agents/implementation-workflow.md`. Crash-boundary analysis is conditional on persistent state, retries, concurrency, or external side effects.
+Use the preflight, acceptance-evidence, scope-ownership, review-boundary, and final verification ladder in `docs/agents/implementation-workflow.md`. Review agents are discretionary at an individual issue boundary and mandatory at the end of an epic. Crash-boundary analysis is conditional on persistent state, retries, concurrency, or external side effects.
 
 ### Browser automation
 

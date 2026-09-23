@@ -29,7 +29,7 @@ layout remains external and uses regular tmux through fixed host-owned actions.
 - dedicated parallel code-review agents under `config/agent/extensions/review-agents`
 - reusable architecture diagram tools under `config/agent/extensions/diagram-tools`
 - a `playwright-browser` skill and `pi-playwright` resolver for project-first browser automation with an optional Nix-pinned fallback
-- typed dry-run-first GitHub Issue tools under `config/agent/extensions/github-issues`
+- typed GitHub Issue tools with optional dry-run previews under `config/agent/extensions/github-issues`
 - a GitHub-native `/aloop #<epic>` supervisor with fresh sequential implementation workers
 - an `aloop-policy` skill for creating and reviewing project-owned verification policy
 - an `architecture-diagrams` skill for live diagrams, deterministic generated evidence, and durable architecture docs
@@ -285,8 +285,9 @@ leaves the Pi session, process/window, workspace, and project files intact. The 
 Managed room controls retain Pi's established control semantics while using
 host-owned room routing: ordinary text is an idle prompt or steering input for the active run; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. Status combines a typed live adapter snapshot with relay-authoritative conversation, generation, saved/requested model and thinking, queue, checkpoint, connection, redacted launch-failure, and reconciliation state; it explicitly flags a runtime/requested-model mismatch without exposing paths, credentials, prompts, arguments, output, or reasoning. Adapter-executed controls and slash commands hold reference-counted Matrix typing feedback until durable completion without cancelling typing for concurrent model activity. State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new --confirm` creates a fresh generation while preserving the room and prior Pi session files. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
 queued during wake cancels that wake input. The `remote_checkpoint` tool emits
-one durable structured question, blocker, or issue-completion boundary, then
-hard-aborts the run until a new currently joined participant reply. Declared question options become
+one durable structured question, blocker, or issue-completion boundary to Matrix
+and records the rendered checkpoint visibly in Pi's persisted chat history,
+then hard-aborts the run until a new currently joined participant reply. Declared question options become
 single-select polls with durable opaque answer mappings and deterministic room-mention notification requests; the first valid vote or
 an ordinary text fallback atomically retires the poll and resumes exactly once.
 Authorized unencrypted Element X JPEG, PNG, and WebP events pass original downloaded bytes to the model without harness inbound size caps, declared-size comparisons, dimension checks, or normalization. Matrix, model and available machine resources impose their own limits. Authenticated downloads, durable spooling and digest-verified bounded IPC chunks remain; outbound artifact restrictions are unchanged. Captions and images enter Pi as one ordered user turn; captionless images use a neutral prompt. Models without image input support reject the whole delivery with a Matrix notice and cleanup, without a silent model switch or caption-only fallback. A connected ordinary adapter also activates `remote_artifact_export`, which validates one workspace-relative regular file before streaming digest-verified bounded chunks to the relay. The relay durably reserves and uploads bounded images, audio, or generic files and sends one stable Matrix media event without exposing contents or host paths in activity. Accepted input and media, persisted
@@ -618,12 +619,14 @@ Use `/skill:tdd` for bounded test-first work, `/skill:diagnosing-bugs` for hard
 bugs, `/skill:triage` for incoming requests, `/skill:wayfinder` for uncertain
 large efforts, and `/skill:handoff` before session transitions.
 
-Issue implementation follows the shared [one-pass workflow](docs/agents/implementation-workflow.md): deliberate relationship/domain/ADR preflight, acceptance-to-evidence and scope ownership, focused checks, one exhaustive pinned Standards/Spec review, batched remediation, then one canonical verification gate and applicable production builds. Crash-boundary analysis applies only to persistent state, retries, concurrency, or external side effects.
+Issue implementation follows the shared [review-boundary workflow](docs/agents/implementation-workflow.md): deliberate relationship/domain/ADR preflight, acceptance-to-evidence and scope ownership, focused checks, discretionary review at an individual issue boundary, mandatory exhaustive pinned Standards/Spec review at the end of an epic, batched remediation, then one canonical verification gate and applicable production builds. Crash-boundary analysis applies only to persistent state, retries, concurrency, or external side effects.
 
 The `github_issue_inspect`, `github_issue_mutate`, `github_issue_plan`,
-`github_issue_relationship`, and `github_issue_graph` tools provide a typed,
-dry-run-first boundary for current-repository issue work. They resolve GitHub
-REST database IDs internally; callers use ordinary issue numbers.
+`github_issue_relationship`, and `github_issue_graph` tools provide a typed
+boundary for current-repository issue work. Mutations may be applied directly
+when already authorized; dry-run previews remain available when they help
+resolve uncertainty. The tools resolve GitHub REST database IDs internally;
+callers use ordinary issue numbers.
 
 ### tk migration
 

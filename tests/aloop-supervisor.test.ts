@@ -194,13 +194,13 @@ test("accepted v3 handoffs on open children are closure recoveries, not executab
 	assert.match(kickoff, /never launch a duplicate worker/);
 });
 
-test("epic evidence accepts only validated accepted handoffs bound to review and verification", () => {
+test("epic evidence accepts validated supervised handoffs with canonical verification and optional issue review", () => {
 	const base = {
 		version: 3 as const, issue: 2, issueBaseCommit: "a".repeat(40), commitRange: `${"a".repeat(40)}..${"b".repeat(40)}`,
 		outcome: "accepted" as const, summary: "Done.", outstandingFindings: [], decisions: [],
 		nextAction: "Close.", attemptKey: "c".repeat(24), timestamp: "2026-09-03T00:00:00Z",
 	};
-	const valid = formatAloopHandoffV3({ ...base, verification: [`Independent review completed at ${"b".repeat(40)}.`, `Canonical command passed at ${"b".repeat(40)}.`] });
+	const valid = formatAloopHandoffV3({ ...base, verification: [`Canonical command passed at ${"b".repeat(40)}.`] });
 	assert.match(validatedChildReviewEvidence(issue({ number: 2, title: "Closed", state: "closed", recentHandoffs: [comment(1, valid, "2026-09-03T00:00:00Z")] }), "supervisor") ?? "", /Accepted v3 handoff/);
 	const malformed = `<!-- pi-aloop-handoff:v3:${Buffer.from("not-json").toString("base64url")} -->`;
 	assert.equal(validatedChildReviewEvidence(issue({ number: 2, title: "Malformed", state: "closed", recentHandoffs: [comment(2, malformed, "2026-09-03T00:00:00Z")] }), "supervisor"), null);
@@ -215,7 +215,7 @@ test("epic evidence accepts only validated accepted handoffs bound to review and
 	const missingCanonical = formatAloopHandoffV3({ ...base, verification: [`Independent review completed at ${"b".repeat(40)}.`] });
 	assert.equal(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Unverified", recentHandoffs: [comment(4, missingCanonical, "2026-09-03T00:03:00Z")] }), "b".repeat(40)), null, "recovery requires canonical evidence at the recovered HEAD");
 	const humanClaim = formatAloopHandoffV3({ ...base, verification: [`Human review decision recorded at ${"b".repeat(40)}.`, `Canonical command passed at ${"b".repeat(40)}.`] });
-	assert.equal(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Asserted review", recentHandoffs: [comment(5, humanClaim, "2026-09-03T00:04:00Z")] }), "b".repeat(40)), null, "a handoff sentence alone is not a human review attestation");
+	assert.ok(validatedAcceptedCurrentStateHandoff(issue({ number: 2, title: "Optional review", recentHandoffs: [comment(5, humanClaim, "2026-09-03T00:04:00Z")] }), "b".repeat(40)), "canonical verification remains authoritative whether issue review ran or not");
 	const marker = "e".repeat(20);
 	const attested = issue({ number: 2, title: "Attested review", recentHandoffs: [
 		comment(5, `<!-- pi-aloop-review-decision:${marker}:${"b".repeat(40)}:open -->`, "2026-09-03T00:04:00Z"),
@@ -223,7 +223,7 @@ test("epic evidence accepts only validated accepted handoffs bound to review and
 		comment(7, humanClaim, "2026-09-03T00:06:00Z"),
 	] });
 	assert.ok(validatedAcceptedCurrentStateHandoff(attested, "b".repeat(40), "supervisor"));
-	assert.equal(validatedAcceptedCurrentStateHandoff(attested, "b".repeat(40), "different-user"), null);
+	assert.ok(validatedAcceptedCurrentStateHandoff(attested, "b".repeat(40), "different-user"));
 });
 
 test("v3 handoffs show concise current state while hiding recoverable snapshot payload", () => {
@@ -399,7 +399,7 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 		assert.match(activeGraph.issues[1]!.recentHandoffs.at(-1)!.body, /pi-aloop-recovery-authorization:v1:/);
 		await commands.get("aloop")!.handler("#1", ctx);
 		fakeHead = "c".repeat(40);
-		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx), /durable review and canonical verification evidence bound to the clean current HEAD/);
+		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("changed-after-approval", recoveryParams, ctx.signal, undefined, ctx), /canonical verification evidence bound to the clean current HEAD/);
 		fakeHead = "a".repeat(40);
 		const recovered = await tools.get("aloop_finish_attempt").execute("recover", recoveryParams, ctx.signal, undefined, ctx);
 		assert.equal(recovered.details.idempotent, true);
@@ -428,7 +428,7 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		const head = "c".repeat(40);
 		const graph = context([issue({ number: 2, title: "Leaf", body: "## Acceptance criteria\n- Done" })]);
 		const published: Array<{ body: string; apply: boolean }> = [];
-		let closes = 0;
+		let closes = 0; const reviewRequests: any[] = [];
 		const pi = {
 			registerTool: (tool: any) => tools.set(tool.name, tool), registerCommand: (name: string, command: any) => commands.set(name, command),
 			on: () => undefined, getActiveTools: () => [], setActiveTools: () => undefined, setSessionName: () => undefined, sendUserMessage: () => undefined,
@@ -441,7 +441,7 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		} as unknown as ExtensionAPI;
 		registerAloopExtension(pi, {
 			retrieveEpicContext: async () => graph,
-			runReview: async () => ({ content: [{ type: "text", text: "No findings." }], details: { reports: 2 } }),
+			runReview: async (_pi, _ctx, params) => { reviewRequests.push(params); return { content: [{ type: "text", text: "No findings." }], details: { reports: 2 } }; },
 			diagnoseCommand: async () => ({ summary: "canonical failed" }),
 			runWorker: async () => ({ status: "completed", summary: "done", commit: head, workerResult: null, contract: { valid: true, commit: head, violations: [] }, process: { exitCode: 0, signal: null, timedOut: false, cancelled: false, durationMs: 1 }, artifacts: { directory: ".pi/tmp/aloop/issue-2-1-abcdef", prompt: "p", stdout: "o", stderr: "e", result: "r" } }),
 			publishComment: async (_cwd, _issue, body, apply) => { published.push({ body, apply }); return apply ? { user: { login: "test-supervisor" } } : {}; },
@@ -458,9 +458,7 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		await commands.get("aloop-decision").handler("2 A", ctx);
 		assert.match(published.at(-1)!.body, /human decision recorded: A/i);
 		assert.equal(JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/decisions", `${checkpoint.details.marker}.json`), "utf8")).approvedVia, "aloop-decision command");
-		await assert.rejects(() => tools.get("aloop_finish_attempt").execute("generic-does-not-approve-review", params, ctx.signal, undefined, ctx), /fresh independent review.*review checkpoint/i);
-		await tools.get("aloop_review_attempt").execute("review", { issue: 2 }, ctx.signal, undefined, ctx);
-		const failed = await tools.get("aloop_finish_attempt").execute("failed", params, ctx.signal, undefined, ctx);
+		const failed = await tools.get("aloop_finish_attempt").execute("failed-with-discretionary-issue-review-omitted", params, ctx.signal, undefined, ctx);
 		assert.equal(failed.details.settled, false);
 		assert.equal(closes, 0);
 		assert.equal(published.filter((item) => item.body.includes("pi-aloop-handoff:v3")).length, 0);
@@ -482,14 +480,19 @@ test("high-level review and finish publish one v3 handoff, close, and retry idem
 		const repeated = await tools.get("aloop_finish_attempt").execute("repeated", params, ctx.signal, undefined, ctx);
 		assert.equal(repeated.details.closed, true);
 		assert.equal(closes, 2);
-		await assert.rejects(() => tools.get("aloop_epic_completion").execute("missing-evidence", { phase: "prepare" }, ctx.signal, undefined, ctx), /requires acceptance_criteria evidence/);
-		const prepared = await tools.get("aloop_epic_completion").execute("prepare", {
+		const reviewed = await tools.get("aloop_epic_completion").execute("review-epic", { phase: "prepare" }, ctx.signal, undefined, ctx);
+		assert.equal(reviewed.details.reviewComplete, true);
+		assert.equal(reviewed.details.ready, false);
+		assert.deepEqual({ mode: reviewRequests.at(-1)?.mode, fixedPoint: reviewRequests.at(-1)?.fixed_point }, { mode: "audit", fixedPoint: undefined });
+		await assert.rejects(() => tools.get("aloop_epic_completion").execute("missing-evidence", { phase: "prepare" }, ctx.signal, undefined, ctx), /requires acceptance_criteria evidence after mandatory review/);
+		const epicPreparation = {
 			phase: "prepare",
 			acceptance_criteria: [
 				{ criterion: "All children complete", satisfied: true, evidence: "#2 closed" },
 				{ criterion: "Verification passes", satisfied: true, evidence: "canonical passed" },
 			],
-		}, ctx.signal, undefined, ctx);
+		};
+		const prepared = await tools.get("aloop_epic_completion").execute("prepare", epicPreparation, ctx.signal, undefined, ctx);
 		assert.equal(prepared.terminate, true);
 		const preparedRecord = JSON.parse(readFileSync(join(cwd, ".pi/tmp/aloop/epic-approval.json"), "utf8"));
 		assert.equal(preparedRecord.version, 2);
@@ -538,16 +541,17 @@ test("supervisor gate binds successful evidence to a clean exact commit", () => 
 
 test("closure gate requires closed descendants, review, verification, and every epic criterion", () => {
 	const openGraph = context([issue({ number: 2, title: "Open child" })]);
-	const blocked = evaluateEpicClosure(openGraph, { verification: [], acceptanceCriteria: [], descendantReviews: [] });
+	const blocked = evaluateEpicClosure(openGraph, { verification: [], acceptanceCriteria: [], descendantReviews: [], epicReview: { reviewed: false, evidence: "" } });
 	assert.equal(blocked.allowed, false);
 	assert.match(blocked.reasons.join(" "), /Open descendants/);
-	assert.match(blocked.reasons.join(" "), /review evidence/);
+	assert.match(blocked.reasons.join(" "), /epic review evidence/);
 	assert.match(blocked.reasons.join(" "), /No project verification/);
 	assert.match(blocked.reasons.join(" "), /acceptance criteria/);
 
 	const closedGraph = context([issue({ number: 2, title: "Closed child", state: "closed" })]);
 	const allowed = evaluateEpicClosure(closedGraph, {
 		verification: [{ check: "canonical", passed: true, evidence: "140 tests passed" }],
+		epicReview: { reviewed: true, evidence: "Standards and Spec review completed at HEAD" },
 		acceptanceCriteria: [
 			{ criterion: "All children complete", satisfied: true, evidence: "#2 is closed after review" },
 			{ criterion: "Verification passes", satisfied: true, evidence: "canonical gate passed" },

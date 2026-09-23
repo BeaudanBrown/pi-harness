@@ -166,6 +166,7 @@ export type ClosureEvidence = {
 	verification: Array<{ check: string; passed: boolean; evidence: string }>;
 	acceptanceCriteria: Array<{ criterion: string; satisfied: boolean; evidence: string }>;
 	descendantReviews: Array<{ issue: number; reviewed: boolean; evidence: string }>;
+	epicReview: { reviewed: boolean; evidence: string };
 };
 
 export function evaluateSupervisorAttempt(input: {
@@ -306,24 +307,13 @@ export function latestCurrentStateHandoff(issue: Pick<EpicIssueContext, "number"
 }
 
 /** Validates the single current v3 state used by both recovery and epic closure evidence. */
-export function validatedAcceptedCurrentStateHandoff(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, expectedHead?: string, trustedAuthor?: string | null): CurrentStateHandoff | null {
+export function validatedAcceptedCurrentStateHandoff(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, expectedHead?: string, _trustedAuthor?: string | null): CurrentStateHandoff | null {
 	const current = latestCurrentStateHandoff(issue);
 	if (!current || current.handoff.outcome !== "accepted" || current.handoff.outstandingFindings.length !== 0) return null;
 	const head = current.handoff.commitRange.split("..").at(-1)!;
 	if (expectedHead !== undefined && head !== expectedHead) return null;
-	const independentReview = current.handoff.verification.some((item) => item === `Independent review completed at ${head}.`);
-	const reviewOpen = new Map<string, string | null>();
-	const reviewResolved = new Map<string, string | null>();
-	for (const comment of issue.recentHandoffs) {
-		const open = comment.body.match(/pi-aloop-review-decision:([a-f0-9]{20}):([a-f0-9]{7,64}):open/);
-		if (open?.[2] === head) reviewOpen.set(open[1]!, comment.author);
-		const resolved = comment.body.match(/pi-aloop-review-decision:([a-f0-9]{20}):([a-f0-9]{7,64}):resolved/);
-		if (resolved?.[2] === head) reviewResolved.set(resolved[1]!, comment.author);
-	}
-	const humanReview = trustedAuthor !== null && trustedAuthor !== undefined && [...reviewOpen].some(([marker, author]) => author === trustedAuthor && reviewResolved.get(marker) === trustedAuthor);
-	const reviewed = independentReview || humanReview;
 	const verified = current.handoff.verification.some((item) => item === `Canonical command passed at ${head}.`);
-	return reviewed && verified ? current : null;
+	return verified ? current : null;
 }
 
 export function validatedChildReviewEvidence(issue: Pick<EpicIssueContext, "number" | "recentHandoffs">, trustedAuthor: string | null): string | null {
@@ -331,7 +321,7 @@ export function validatedChildReviewEvidence(issue: Pick<EpicIssueContext, "numb
 	const current = validatedAcceptedCurrentStateHandoff(issue, undefined, trustedAuthor);
 	if (!current || current.author !== trustedAuthor) return null;
 	const head = current.handoff.commitRange.split("..").at(-1)!;
-	return `Accepted v3 handoff ${current.url ?? "recorded on GitHub"} binds review and canonical verification to ${head}.`;
+	return `Accepted v3 handoff ${current.url ?? "recorded on GitHub"} binds supervisor acceptance and canonical verification to ${head}.`;
 }
 
 export function acceptedOpenAloopIssues(context: GitHubEpicContext, recoveryRecords?: ReadonlyMap<string, AloopAcceptedRecoveryRecord>): number[] {
@@ -398,11 +388,13 @@ export function evaluateEpicClosure(context: GitHubEpicContext, evidence: Closur
 	const open = descendants.filter((issue) => issue.state !== "closed").map((issue) => `#${issue.number}`);
 	if (open.length > 0) reasons.push(`Open descendants remain: ${open.join(", ")}.`);
 
+	if (!evidence.epicReview?.reviewed || !evidence.epicReview.evidence.trim()) reasons.push("Final epic review evidence is missing.");
+
 	const reviews = new Map(evidence.descendantReviews.map((review) => [review.issue, review]));
 	const missingReviews = descendants
 		.filter((issue) => !reviews.get(issue.number)?.reviewed || !reviews.get(issue.number)?.evidence.trim())
 		.map((issue) => `#${issue.number}`);
-	if (missingReviews.length > 0) reasons.push(`Descendant review evidence is missing: ${missingReviews.join(", ")}.`);
+	if (missingReviews.length > 0) reasons.push(`Descendant supervised handoff evidence is missing: ${missingReviews.join(", ")}.`);
 
 	if (evidence.verification.length === 0) reasons.push("No project verification evidence was supplied.");
 	const failedChecks = evidence.verification.filter((check) => !check.passed || !check.evidence.trim()).map((check) => check.check);
@@ -471,11 +463,11 @@ ${budget ? `- Implementation cutoff: ${new Date(budget.deadlineMs).toISOString()
 Operating procedure:
 1. GitHub and Git are authoritative. Use aloop_context as the cached navigation view; request refresh only when external GitHub state may have changed. First recover any accepted handoff awaiting child closure by calling aloop_finish_attempt for that issue; never launch a duplicate worker for it.
 2. Select one open, unblocked descendant leaf and call aloop_launch_worker. Full workers are fresh and sequential; labels and assignments are advisory.
-3. For every returned or recovered attempt, call aloop_review_attempt. Use aloop_apply_patch for a narrow correction, a fresh full remediation worker for substantial work, or a trivial direct edit only when clearly safe. Review again after changes.
+3. For every returned or recovered attempt, decide whether to call aloop_review_attempt based on the issue's risk, breadth, and ambiguity. Use aloop_apply_patch for a narrow correction, a fresh full remediation worker for substantial work, or a trivial direct edit only when clearly safe. If issue review found defects and changes follow, review again when those changes materially alter or invalidate the review.
 4. Call aloop_finish_attempt exactly once for the full attempt. It owns canonical verification, v3 handoff publication, accepted-child closure, crash recovery, and next-frontier selection. Never call legacy receipt/spool/closure tools.
-5. If independent review is unavailable, canonical verification fails, or product/scope ambiguity needs a human, use aloop_checkpoint and stop. There is no semantic retry-count gate.
+5. If a required epic review is unavailable, canonical verification fails, or product/scope ambiguity needs a human, use aloop_checkpoint and stop. There is no semantic retry-count gate.
 6. Continue review, optional remediation, finalization, and next-child selection until worker bounds or a genuine decision boundary. The implementation deadline and 20-launch cap stop new full workers; supervisor settlement may continue only until the settlement cutoff. Checks not completed for budget reasons are not failed checks and cannot authorize acceptance. Emergency preservation uses its own independent bounded allowance.
-7. When all descendants are closed, call aloop_epic_completion with phase=prepare and complete final review/acceptance evidence. Request explicit human approval, then call phase=apply only for the unchanged prepared HEAD.
+7. When all descendants are closed, call aloop_epic_completion with phase=prepare. Its first call runs the mandatory cumulative epic review and returns that report for disposition; remediate material findings, then call prepare again on the reviewed HEAD with complete acceptance evidence. Request explicit human approval, then call phase=apply only for the unchanged prepared HEAD.
 8. End with a concise report of completed children, commits, verification, deferred work, and the human-decision or epic-approval state.
 
 Do not push. Do not restore tk or create ticket files. Keep working in this supervisor turn until the epic is complete or a genuine human decision is required.`;

@@ -163,16 +163,16 @@ before rerunning `/aloop`; no automatic WIP commit or cleanup is offered.
 ## Durable handoffs and issue closure
 
 `aloop_review_attempt` resolves the cumulative issue base and current `HEAD`,
-then runs fresh Standards and Spec agents. Review prose informs supervisor
-judgment; it is not machine-parsed. If review is unavailable or stale,
-`aloop_finish_attempt` refuses automatic acceptance. The supervisor must create
-an explicitly `review`-kind `aloop_checkpoint`; only its GitHub-authenticated,
-resolved decision bound to the current `HEAD` can replace independent review.
-Generic decision checkpoints never authorize review bypass.
+then runs fresh Standards and Spec agents when the supervisor judges that the
+issue's risk, breadth, or ambiguity warrants review. Review prose informs
+supervisor judgment; it is not machine-parsed. If a requested review is
+unavailable, an explicitly `review`-kind `aloop_checkpoint` can record the
+GitHub-authenticated decision bound to the current `HEAD`; generic decision
+checkpoints never substitute for that requested review.
 
 `aloop_finish_attempt` hides verification receipts, local spool IDs, exact
 publication bytes, and closure ordering. For accepted work it requires a clean
-unchanged reviewed `HEAD`, runs the startup policy's canonical and applicable
+unchanged `HEAD`, runs the startup policy's canonical and applicable
 production commands, publishes one concise v3 current-state handoff, closes the
 child, updates the cached graph, and returns the next frontier. Canonical or
 production failure cannot be overridden autonomously and leaves the attempt
@@ -196,15 +196,21 @@ never authorize closure after restart. `aloop_context`
 serves the startup-cached GitHub graph and accepts an explicit refresh;
 successful publication and closure update that snapshot in memory.
 
-`aloop_epic_completion` is two phase. `prepare` refreshes the graph, requires no
-open descendants or unsettled attempts, runs canonical verification plus any
-epic-frequency integration, and validates only accepted child handoffs authored by the GitHub-authenticated
-supervisor that bind durable review and canonical verification, plus supplied
-evidence for every epic acceptance criterion before terminating at a
-human approval boundary. Child-level independent reviews remain the semantic
-review evidence; there is no mandatory separate epic review or machine-parsed
-prose gate. The durable preparation record retains that final
-evidence snapshot. The operator records approval with
+`aloop_epic_completion` is two phase. `prepare` refreshes the graph and requires
+no open descendants or unsettled attempts. The first preparation call at a new
+final HEAD reconstructs a Git-verified baseline from authenticated accepted child
+handoffs, fails closed if no durable baseline is available, runs one mandatory
+pinned cumulative Standards and Spec review (an audit only when the baseline is
+already final `HEAD`), and returns its report for
+supervisor disposition. Child-level independent review remains
+discretionary; accepted child handoffs authored by the GitHub-authenticated
+supervisor bind acceptance and canonical verification. A subsequent preparation
+call validates those handoffs, runs canonical verification plus any epic-frequency
+integration, and requires supplied evidence for every epic acceptance criterion
+before terminating at a human approval boundary. After any remediation, preparation must be called again
+on the reviewed HEAD before verification and approval can proceed. There is no
+machine-parsed prose gate. The durable preparation record retains that final
+review and evidence snapshot. The operator records approval with
 `/aloop-approve-epic <prepared-head>`; `apply` closes the parent only when that
 durable command attestation matches the unchanged prepared `HEAD`. Human
 checkpoint answers are similarly recorded with `/aloop-decision <issue>
@@ -318,17 +324,17 @@ On startup, aloop also scans the latest 200 local attempt directories. Results
 are filtered by their commit, or validated starting commit when the result is
 interrupted, to the current branch. A matching directory name alone cannot
 establish interrupted identity; a validated startup record is required. If it finds an attempt artifact with no matching durable GitHub
-handoff, it blocks another worker launch. Inspect the result and commit, run
-`aloop_review_attempt`, remediate if needed, then use `aloop_finish_attempt` to
-verify and publish the v3 handoff. If an accepted v3 handoff is already published
+handoff, it blocks another worker launch. Inspect the result and commit, use
+`aloop_review_attempt` when the issue's risk, breadth, or ambiguity warrants it,
+remediate if needed, then use `aloop_finish_attempt` to verify and publish the v3 handoff. If an accepted v3 handoff is already published
 but its child remains open after an interrupted closure, aloop excludes that
 child from the worker frontier and requires `aloop_finish_attempt` to recover the
 closure before any new worker starts. Automatic recovery requires the exact
 current-process publication body or the GitHub-authenticated supervisor as the
-v3 comment author, and requires that reviewed HEAD to remain clean in Git. Local
+v3 comment author, and requires that accepted, canonically verified HEAD to remain clean in Git. Local
 finalization records aid diagnosis but are not closure authority. When that
 evidence cannot apply, `/aloop-authorize-recovery <issue> <attempt-key>` writes
-an auditable GitHub-recorded authorization bound to the same issue, attempt, reviewed
+an auditable GitHub-recorded authorization bound to the same issue, attempt, accepted
 HEAD, exact comment digest, and current clean closure HEAD. Any later HEAD change
 invalidates the authorization. Arbitrary
 parseable accepted comments and unrelated decisions never become closure

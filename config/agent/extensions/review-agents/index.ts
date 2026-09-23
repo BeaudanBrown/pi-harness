@@ -226,7 +226,8 @@ export default function reviewAgentsExtension(pi: ExtensionAPI): void {
 		promptSnippet: "Delegate Standards and Spec code-review axes to isolated read-only review agents using review_agents.",
 		promptGuidelines: [
 			"Use review_agents for subjective code review instead of run_worker.",
-			"After focused and affected checks pass, call review_agents once with both Standards and Spec tasks so they exhaustively review the same pinned snapshot.",
+			"At the end of an individual issue, use review_agents at your discretion after focused and affected checks pass; always use it once at the end of an epic.",
+			"When using review_agents, send both available Standards and Spec tasks together so they inspect the same pinned snapshot.",
 			"Require review_agents findings to state severity and ownership: current issue, dependent issue, deployment-only, or justified deferral.",
 		],
 		parameters: ReviewAgentsParams,

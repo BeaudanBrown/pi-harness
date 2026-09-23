@@ -55,7 +55,7 @@ export interface ManagedCheckpointMarker {
 	checkpointId: string;
 	originDeliveryId: string;
 	checkpoint: Record<string, unknown>;
-	status: "offered" | "projected";
+	status: "offered" | "projected" | "abandoned";
 }
 
 export interface DeliveryMediaMarker {
@@ -210,11 +210,11 @@ export function restoreCheckpoints(entries: readonly unknown[]): Map<string, Man
 		if (value.version !== MANAGED_SESSION_STATE_VERSION || typeof value.checkpointId !== "string" ||
 			!/^checkpoint-[a-f0-9]{32}$/.test(value.checkpointId) || typeof value.originDeliveryId !== "string" ||
 			!/^delivery_[a-f0-9]{32}$/.test(value.originDeliveryId) || typeof value.checkpoint !== "object" || value.checkpoint === null ||
-			(value.status !== "offered" && value.status !== "projected")) continue;
+			!(["offered", "projected", "abandoned"] as unknown[]).includes(value.status)) continue;
 		const marker = value as unknown as ManagedCheckpointMarker;
 		const previous = checkpoints.get(marker.checkpointId);
 		if (previous && (previous.originDeliveryId !== marker.originDeliveryId || JSON.stringify(previous.checkpoint) !== JSON.stringify(marker.checkpoint) ||
-			(previous.status === "projected" && marker.status !== "projected"))) throw new Error(`Conflicting managed-session checkpoint history ${marker.checkpointId}`);
+			(previous.status !== "offered" && marker.status !== previous.status))) throw new Error(`Conflicting managed-session checkpoint history ${marker.checkpointId}`);
 		checkpoints.set(marker.checkpointId, marker);
 	}
 	return checkpoints;

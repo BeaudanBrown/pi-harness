@@ -18,6 +18,36 @@ import { ManagedMatrixClient } from "./matrix-client.js";
 import { ProjectReconciler } from "./project-reconciliation.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
+export const PROJECT_ATTACHMENT_TIMEOUT_MS = 60_000;
+
+export async function waitForProjectAttachment(options: {
+	timeoutMs: number;
+	state: () => "active" | string;
+	inspectWindow: () => Promise<boolean>;
+	now?: () => number;
+	sleep?: (milliseconds: number) => Promise<void>;
+	inspectionIntervalMs?: number;
+}): Promise<"attached" | "exited" | "timeout"> {
+	const now = options.now ?? Date.now;
+	const sleep = options.sleep ?? ((milliseconds: number) => new Promise<void>((resolveWait) => setTimeout(resolveWait, milliseconds)));
+	const deadline = now() + options.timeoutMs;
+	let nextInspection = now() + (options.inspectionIntervalMs ?? 1_000);
+	while (options.state() !== "active" && now() < deadline) {
+		await sleep(Math.min(100, Math.max(1, deadline - now())));
+		if (options.state() === "active") return "attached";
+		if (now() >= nextInspection) {
+			const live = await options.inspectWindow();
+			if (options.state() === "active") return "attached";
+			if (!live) return "exited";
+			nextInspection = now() + (options.inspectionIntervalMs ?? 1_000);
+		}
+	}
+	if (options.state() === "active") return "attached";
+	const live = await options.inspectWindow();
+	if (options.state() === "active") return "attached";
+	return live ? "timeout" : "exited";
+}
+
 export interface ManagedWindow {
 	conversationId: string;
 	sessionName: string;
@@ -278,9 +308,13 @@ export class HostLifecycle {
 		projectNotice?: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void>;
 		generationReady?: (conversationId: string) => Promise<void>;
 		generationRetryMs?: number;
+		attachmentTimeoutMs?: number;
 		endOperationFeedback?: (conversationId: string, operationId: string) => Promise<void>;
 	}) {
 		if (!isAbsolute(options.launcher)) throw new Error("Managed lifecycle launcher must be absolute");
+		if (options.attachmentTimeoutMs !== undefined && (!Number.isSafeInteger(options.attachmentTimeoutMs) || options.attachmentTimeoutMs < 100 || options.attachmentTimeoutMs > 10 * 60_000)) {
+			throw new Error("Managed lifecycle attachment timeout must be between 100ms and 10 minutes");
+		}
 		this.reconciler = new ProjectReconciler({ registry: options.registry, matrix: options.matrix, intentDirectory: options.projectSessionDirectory,
 			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement) });
 	}
@@ -966,11 +1000,13 @@ export class HostLifecycle {
 		if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd) || typeof resolved.workspacePath !== "string" || !isAbsolute(resolved.workspacePath)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical workspace paths");
 		const root = await this.invoke("root-ensure", manifest.placement);
 		if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
+		const rootSessionName = root.sessionName;
 		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal);
 		if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {
 			throw new RelayRegistryError("invalid_state", "Project Pi session identity conflicts with the conversation manifest");
 		}
 		await this.options.registry.beginLaunch(manifest.conversationId);
+		let attachmentTimedOut = false;
 		try {
 			const inspected = this.parseWindowInspection(await this.invoke("window-inspect", { conversationId: manifest.conversationId }), manifest, root.sessionName);
 			let window: ManagedWindow;
@@ -995,13 +1031,25 @@ export class HostLifecycle {
 			await this.options.registry.setManagedWindow(manifest.conversationId, {
 				sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId,
 			});
-			for (let attempt = 0; attempt < 100 && this.options.registry.conversationState(manifest.conversationId) !== "active"; attempt += 1) {
-				await new Promise((resolveWait) => setTimeout(resolveWait, 100));
-			}
-			if (this.options.registry.conversationState(manifest.conversationId) !== "active") {
+			const attachment = await waitForProjectAttachment({
+				timeoutMs: this.options.attachmentTimeoutMs ?? PROJECT_ATTACHMENT_TIMEOUT_MS,
+				state: () => this.options.registry.conversationState(manifest.conversationId),
+				inspectWindow: async () => Boolean(this.parseWindowInspection(
+					await this.invoke("window-inspect", { conversationId: manifest.conversationId }), manifest, rootSessionName,
+				)),
+			});
+			if (attachment === "exited") throw new RelayRegistryError("launch_failed", "Managed project Pi exited before attachment");
+			if (attachment === "timeout") {
+				attachmentTimedOut = true;
 				throw new RelayRegistryError("launch_failed", "Managed project Pi attachment timed out");
 			}
 		} catch (error) {
+			// A live window that misses the deadline remains eligible to attach; terminating it
+			// would race the adapter's active-state transition at the exact timeout boundary.
+			if (attachmentTimedOut) {
+				if (this.options.registry.conversationState(manifest.conversationId) === "active") return;
+				throw error;
+			}
 			await this.invoke("window-terminate", { conversationId: manifest.conversationId }).catch(() => undefined);
 			await this.options.registry.markDormant(manifest.conversationId, true);
 			await this.options.registry.recordLaunchError(manifest.conversationId, "launch_failed", error instanceof Error ? error.message : "Project launch failed");

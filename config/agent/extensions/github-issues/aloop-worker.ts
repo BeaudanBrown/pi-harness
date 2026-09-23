@@ -154,7 +154,7 @@ export function buildAloopWorkerPrompt(input: Omit<AloopWorkerInput, "cwd" | "la
 
 Call aloop_issue_context first and derive the issue body, relationships, decisions, base commit, and prior findings from that immutable startup snapshot. The selected child is the strict implementation boundary.
 
-Read repository guidance. Implement the issue, use LSP and focused checks, request independent review, remediate findings you accept, and create one or more coherent local commits. Never push, fetch, mutate GitHub, contact the operator, run canonical acceptance, or broaden scope. Project worker feedback is advisory. If material ambiguity or an environment blocker prevents safe completion, stop instead of guessing.
+Read repository guidance. Implement the issue, use LSP and focused checks, request independent review when the issue's risk, breadth, or ambiguity warrants it, remediate findings you accept, and create one or more coherent local commits. Never push, fetch, mutate GitHub, contact the operator, run canonical acceptance, or broaden scope. Project worker feedback is advisory. If material ambiguity or an environment blocker prevents safe completion, stop instead of guessing.
 
 Finish every outcome by calling aloop_submit_result as your final action. Use candidate-complete for committed clean work, already-satisfied when no change is needed, incomplete for unfinished work, decision-required for material ambiguity, or environment-blocked for an external blocker. Do not rely on final-message JSON.`;
 }

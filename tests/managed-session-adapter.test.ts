@@ -19,7 +19,7 @@ import { BoundAdapterClient, CoordinatorAdapterClient, MAX_NODE_TIMER_DELAY_MS, 
 import { ActivityProjector } from "../config/agent/extensions/managed-sessions/relay/activity-projector.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import type { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
-import { createManagedSessionAdapterExtension } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
+import { createManagedSessionAdapterExtension, projectedCheckpointHistoryText } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	CHECKPOINT_ENTRY_TYPE,
@@ -35,6 +35,7 @@ import {
 	hasProjectionCapacityDiagnostic,
 	planTranscriptBackfill,
 	restoreBindingAttempt,
+	restoreCheckpoints,
 	restoreDeliveries,
 	restoreProjections,
 	restoreSessionBinding,
@@ -73,6 +74,7 @@ class FakeRelay {
 	readonly interruptedActivities = new Set<string>();
 	projectActivity?: (envelope: ManagedSessionEnvelope) => Promise<"updated" | "finalized">;
 	beforeActivityAck?: (socket: Socket, envelope: ManagedSessionEnvelope) => Promise<void>;
+	checkpointError?: { code: string; message: string };
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
@@ -170,7 +172,8 @@ class FakeRelay {
 			}
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
 		} else if (envelope.type === "checkpoint.offer") {
-			socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
+			if (this.checkpointError) socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { ...this.checkpointError, retryable: false } }));
+			else socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
 		} else if (envelope.type === "aloop.notice") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "aloop.acknowledge", payload: { lifecycleId: envelope.payload.lifecycleId, status: "projected" } }));
 		} else if (envelope.type === "transcript.offer") {
@@ -268,6 +271,10 @@ test("transcript classification is boundary-ordered, provenance-aware, and final
 	{ type: "message", id: "reply-final", message: { role: "assistant", content: "resumed answer", stopReason: "stop" } }];
 	assert.equal(eligibleTranscriptEntries(checkpointBranch, boundaryBinding, new Map([[matrixDeliveryId, delivery]])).some((entry) => entry.body.includes("duplicate checkpoint")), false);
 	assert.equal(eligibleTranscriptEntries(checkpointBranch, boundaryBinding, new Map([[matrixDeliveryId, delivery]])).some((entry) => entry.body === "resumed answer"), true);
+	const checkpointHistory = checkpointBranch.slice(7, 8);
+	const abandonedCheckpoint = { ...(checkpointHistory[0] as any).data, status: "abandoned" };
+	assert.equal(restoreCheckpoints([...checkpointHistory, custom("abandoned", CHECKPOINT_ENTRY_TYPE, abandonedCheckpoint)]).values().next().value?.status, "abandoned");
+	assert.throws(() => restoreCheckpoints([...checkpointHistory, custom("abandoned", CHECKPOINT_ENTRY_TYPE, abandonedCheckpoint), ...checkpointHistory]));
 	const offered = { version: MANAGED_SESSION_STATE_VERSION, entryId: deriveTranscriptEntryId(sessionId, "final"), piEntryKey: "final", kind: "assistant_final" as const, status: "offered" as const };
 	assert.equal(restoreProjections([custom("binding", BINDING_ENTRY_TYPE, binding), custom("offer", PROJECTION_ENTRY_TYPE, offered)]).get(offered.entryId)?.status, "offered");
 	assert.equal(restoreProjections([custom("offer", PROJECTION_ENTRY_TYPE, offered), custom("unbound", UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION })]).size, 0);
@@ -437,9 +444,11 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 		const commands = new Map<string, unknown>();
 		const tools: string[] = [];
 		const handlers: string[] = [];
+		const entryRenderers: string[] = [];
 		const api = {
 			registerCommand: (name: string, options: unknown) => commands.set(name, options),
 			registerTool: (tool: { name: string }) => tools.push(tool.name),
+			registerEntryRenderer: (customType: string) => entryRenderers.push(customType),
 			on: (event: string) => handlers.push(event),
 		} as unknown as ExtensionAPI;
 		createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: "/tmp/relay.sock" })(api);
@@ -451,6 +460,7 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 			"remote_worktree_remove_preview", "remote_worktree_remove_apply", "remote_worktree_cleanup_preview", "remote_worktree_cleanup_apply",
 			"remote_worktree_branch_delete", "remote_session_start", "remote_session_resume", "remote_session_stop", "remote_session_refresh", "remote_session_delete",
 		]);
+		assert.deepEqual(entryRenderers, [CHECKPOINT_ENTRY_TYPE]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));
 	}
 });
@@ -472,6 +482,122 @@ test("a shutdown racing attachment startup cannot reactivate managed conversatio
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 	await startup;
 	assert.deepEqual(activeTools, ["read"]);
+});
+
+test("managed adapter serializes concurrent startup attachment attempts", async (t) => {
+	const relay = await FakeRelay.start(0, 75); t.after(() => relay.close());
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, registerEntryRenderer: () => undefined, getCommands: () => [], appendEntry: () => undefined,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const branch = [custom("binding", BINDING_ENTRY_TYPE, binding)];
+	const ctx: any = { hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding" } };
+	await Promise.all([handlers.get("session_start")!({ reason: "resume" }, ctx), handlers.get("session_start")!({ reason: "resume" }, ctx)]);
+	assert.equal(relay.frames.filter((frame) => frame.type === "attachment.attach").length, 1);
+	assert.equal(relay.sockets.size, 1);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("session switch invalidates an in-flight attachment before connecting the new binding", async (t) => {
+	const relay = await FakeRelay.start(0, 75); t.after(() => relay.close());
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, registerEntryRenderer: () => undefined, getCommands: () => [], appendEntry: () => undefined,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const secondSessionId = "session-second"; const secondConversationId = deriveConversationId("host", "second");
+	const secondBinding = { ...binding, sessionId: secondSessionId, conversationId: secondConversationId,
+		bindingBoundaryEntryId: deriveTranscriptEntryId(secondSessionId, "boundary") };
+	const context = (session: string, branchBinding: SessionBinding) => ({ hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => session, getBranch: () => [custom("binding", BINDING_ENTRY_TYPE, branchBinding)], getLeafId: () => "binding" } }) as any;
+	const first = handlers.get("session_start")!({ reason: "resume" }, context(sessionId, binding));
+	await new Promise((resolve) => setTimeout(resolve, 15));
+	const secondCtx = context(secondSessionId, secondBinding);
+	await Promise.all([first, handlers.get("session_start")!({ reason: "switch" }, secondCtx)]);
+	assert.deepEqual(relay.frames.filter((frame) => frame.type === "attachment.attach").map((frame) => frame.conversationId), [conversationId, secondConversationId]);
+	assert.equal(relay.sockets.size, 1, "the stale session transport is closed before the current binding remains attached");
+	await handlers.get("session_shutdown")!({ reason: "quit" }, secondCtx);
+});
+
+test("session switch closes an established attachment before connecting the new binding", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, registerEntryRenderer: () => undefined, getCommands: () => [], appendEntry: () => undefined,
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const context = (session: string, branchBinding: SessionBinding) => ({ hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => session, getBranch: () => [custom("binding", BINDING_ENTRY_TYPE, branchBinding)], getLeafId: () => "binding" } }) as any;
+	const firstCtx = context(sessionId, binding);
+	await handlers.get("session_start")!({ reason: "resume" }, firstCtx);
+	assert.equal(relay.sockets.size, 1);
+	const secondSessionId = "session-established-second"; const secondConversationId = deriveConversationId("host", "established-second");
+	const secondBinding = { ...binding, sessionId: secondSessionId, conversationId: secondConversationId,
+		bindingBoundaryEntryId: deriveTranscriptEntryId(secondSessionId, "boundary") };
+	const secondCtx = context(secondSessionId, secondBinding);
+	await handlers.get("session_start")!({ reason: "switch" }, secondCtx);
+	assert.deepEqual(relay.frames.filter((frame) => frame.type === "attachment.attach").map((frame) => frame.conversationId), [conversationId, secondConversationId]);
+	assert.equal(relay.sockets.size, 1);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, secondCtx);
+});
+
+test("unrecoverable checkpoint replay is abandoned without disconnecting the attached adapter", async (t) => {
+	const relay = await FakeRelay.start(); relay.checkpointError = { code: "invalid_state", message: "Checkpoint origin delivery is not available for this boundary" };
+	t.after(() => relay.close());
+	const handlers = new Map<string, (...args: any[]) => any>(); const branch: any[] = []; const warnings: string[] = []; let leaf = "checkpoint"; let sequence = 0;
+	const originDeliveryId = deriveDeliveryId(conversationId, "$stranded");
+	branch.push(custom("binding", BINDING_ENTRY_TYPE, binding));
+	branch.push(custom("delivery", DELIVERY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, deliveryId: originDeliveryId, matrixEventId: "$stranded",
+		kind: "prompt", status: "completed", expandedText: "stranded", piEntryId: deriveTranscriptEntryId(sessionId, "stranded") }));
+	branch.push(custom("checkpoint", CHECKPOINT_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, checkpointId: `checkpoint-${"b".repeat(32)}`,
+		originDeliveryId, checkpoint: { kind: "question", decision: "Old question?" }, status: "offered" }));
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, registerEntryRenderer: () => undefined, getCommands: () => [],
+		appendEntry: (customType: string, data: unknown) => { leaf = `recovery-${++sequence}`; branch.push(custom(leaf, customType, data)); },
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
+		ui: { notify: (message: string, level: string) => { if (level === "warning") warnings.push(message); }, setStatus() {} },
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	await new Promise((resolve) => setTimeout(resolve, 350));
+	assert.equal(relay.frames.filter((frame) => frame.type === "attachment.attach").length, 1, warnings.join(" | "));
+	assert.equal(relay.frames.filter((frame) => frame.type === "checkpoint.offer").length, 1);
+	assert.equal(relay.sockets.size, 1, "semantic replay failure preserves the healthy transport");
+	assert.equal(restoreCheckpoints(branch).get(`checkpoint-${"b".repeat(32)}`)?.status, "abandoned");
+	assert.deepEqual(warnings, [`Skipped unrecoverable checkpoint checkpoint-${"b".repeat(32)}`]);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("failed checkpoint projection keeps its origin persisted for reconnect recovery", async (t) => {
+	const relay = await FakeRelay.start(); relay.checkpointError = { code: "matrix_unavailable", message: "temporary Matrix outage" }; t.after(() => relay.close());
+	const handlers = new Map<string, (...args: any[]) => any>(); const tools = new Map<string, any>(); const branch: any[] = [
+		custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding),
+	];
+	let leaf = "binding"; let sequence = 0;
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: (tool: any) => tools.set(tool.name, tool), registerEntryRenderer: () => undefined, getCommands: () => [],
+		appendEntry: (customType: string, data: unknown) => { leaf = `checkpoint-failure-${++sequence}`; branch.push({ ...custom(leaf, customType, data), parentId: branch.at(-1)?.id ?? null }); },
+		sendMessage: () => undefined,
+		sendUserMessage: (text: string, options: { onPromptExpanded: (text: string) => void }) => { options.onPromptExpanded(text); const id = `user-${++sequence}`;
+			branch.push({ type: "message", id, parentId: leaf, message: { role: "user", content: text } }); leaf = id; },
+	} as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => true, hasPendingMessages: () => false, abort: () => undefined, getContextUsage: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf, getSessionFile: () => "/tmp/session.jsonl" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const deliveryId = deriveDeliveryId(conversationId, "$checkpoint-failure");
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "checkpoint-failure-delivery", conversationId, role: "relay", type: "input.deliver",
+		payload: { deliveryId, matrixEventId: "$checkpoint-failure", kind: "prompt", body: "finish work" } });
+	await activityWait(() => restoreDeliveries(branch).get(deliveryId)?.status === "expanded", 1_000);
+	await assert.rejects(() => tools.get("remote_checkpoint").execute("checkpoint-failure-tool", { kind: "question", decision: "Proceed?" }, undefined, undefined, ctx), /temporary Matrix outage/);
+	await handlers.get("agent_settled")!({}, ctx);
+	assert.equal(restoreDeliveries(branch).get(deliveryId)?.status, "persisted");
+	assert.equal([...restoreCheckpoints(branch).values()].at(-1)?.status, "offered");
+	assert.equal(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === deliveryId && frame.payload.status === "completed"), false);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 
 test("typed runtime controls reject busy mutation and use authenticated scoped native state without prompts", async (t) => {
@@ -935,6 +1061,14 @@ test("managed aloop projects only durable lifecycle summaries and hides routine 
 	assert.deepEqual(abortOrder, ["signal-abort", "aloop-deactivate"]);
 	unregisterAbort();
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("projected checkpoints render in persisted Pi chat history while offered markers stay hidden", () => {
+	const checkpoint = { kind: "question", decision: "Approve completion?", context: "Verification passed." };
+	assert.equal(projectedCheckpointHistoryText({ status: "offered", checkpoint }), undefined);
+	assert.equal(projectedCheckpointHistoryText({ status: "projected", checkpoint }),
+		"❓ Question\n\nDecision required: Approve completion?\n\nContext: Verification passed.\n\nReply in this room to continue.");
+	assert.equal(projectedCheckpointHistoryText({ status: "projected", checkpoint: {} }), undefined);
 });
 
 test("managed adapter steers busy Matrix prompts and replay while preserving idle, explicit follow-up and checkpoint semantics", async (t) => {

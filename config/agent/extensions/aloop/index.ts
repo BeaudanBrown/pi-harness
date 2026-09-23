@@ -166,6 +166,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 	let pendingHandoffs: PendingHandoff[] = [];
 	const issueBaseCommits = new Map<number, string>();
 	const attemptReviews = new Map<number, { base: string; head: string; available: boolean; details?: unknown; error?: string }>();
+	let epicReview: { head: string; details?: unknown } | null = null;
 	let workerRunning = false;
 	let runBudget: AloopRunBudget | null = null;
 	let policySnapshot: AloopPolicySnapshot | null = null;
@@ -219,6 +220,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		pendingHandoffs = [];
 		issueBaseCommits.clear();
 		attemptReviews.clear();
+		epicReview = null;
 		workerRunning = false;
 		runBudget = null;
 		policySnapshot = null;
@@ -235,6 +237,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		activeSessionId = ctx.sessionManager.getSessionId();
 		pendingHandoffs = recovered;
 		issueBaseCommits.clear();
+		epicReview = null;
 		settlementAbort = new AbortController();
 		runBudget = { deadlineMs: Date.now() + maxMinutes * 60_000, settlementDeadlineMs: Date.now() + (maxMinutes + settlementMinutes) * 60_000, maxWorkerLaunches, workerLaunchesStarted: 0, settled: false };
 		settlementTimer = setTimeout(() => {
@@ -923,7 +926,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 						const closureHead = head.stdout.trim();
 						const validated = validatedAcceptedCurrentStateHandoff(issue, closureHead, supervisorLogin);
 						if (!validated || validated.handoff.attemptKey !== settled.attemptKey || validated.body !== settledComment.body) {
-							throw new Error("Recovery closure requires the latest accepted v3 handoff with no findings and durable review and canonical verification evidence bound to the clean current HEAD.");
+							throw new Error("Recovery closure requires the latest accepted v3 handoff with no findings and canonical verification evidence bound to the clean current HEAD.");
 						}
 						const automaticProvenance = publishedAttemptDigests.get(settled.attemptKey) === createHash("sha256").update(settledComment.body).digest("hex") || authenticatedSupervisorComment(settledComment.author);
 						const explicitAuthorization = recoveryAuthorized(params.issue, settled, settledComment.body, closureHead, issue.recentHandoffs);
@@ -964,10 +967,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (params.outcome === "accepted") {
 				if (statusResult.stdout.trim()) throw new Error("Accepted finalization requires a clean worktree.");
 				const hasReviewDecision = reviewCheckpoints.open.some((marker) => reviewCheckpoints.resolved.includes(marker));
-				if ((!review || review.head !== head || !review.available) && !hasReviewDecision) throw new Error("Accepted finalization requires fresh independent review at the current HEAD; unavailable review requires a resolved authenticated review checkpoint bound to that HEAD.");
-				verification.push(review?.available && review.head === head
-					? `Independent review completed at ${head}.`
-					: `Human review decision recorded at ${head}.`);
+				if (review?.available && review.head === head) verification.push(`Independent review completed at ${head}.`);
+				else if (hasReviewDecision) verification.push(`Human review decision recorded at ${head}.`);
 				const policy = activePolicy().policy;
 				const canonical = await executeVerificationCommand("canonical", policy.canonicalCommand, ctx, signal, onUpdate);
 				if (canonical.result.code !== 0 || canonical.result.timedOut || canonical.result.cancelled || canonical.result.spawnError) {
@@ -999,9 +1000,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			if (params.outcome === "accepted") {
 				const durable = parseAloopHandoffV3(body);
 				const durableHead = durable?.commitRange.split("..").at(-1);
-				const hasReview = durable?.verification.some((item) => item === `Independent review completed at ${durableHead}.` || item === `Human review decision recorded at ${durableHead}.`) ?? false;
 				const hasCanonical = durable?.verification.some((item) => item === `Canonical command passed at ${durableHead}.`) ?? false;
-				if (!durable || durable.outstandingFindings.length > 0 || !hasReview || !hasCanonical) throw new Error("Accepted handoff normalization must retain review and canonical verification bound to HEAD.");
+				if (!durable || durable.outstandingFindings.length > 0 || !hasCanonical) throw new Error("Accepted handoff normalization must retain canonical verification bound to HEAD.");
 			}
 			if (!publishedComment) {
 				await dependencies.publishComment(ctx.cwd, params.issue, body, false, { signal });
@@ -1099,7 +1099,35 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 			const head = headResult.stdout.trim();
 			const approvalPath = path.resolve(ctx.cwd, ".pi/tmp/aloop/epic-approval.json");
 			if (params.phase === "prepare") {
-				if (!params.acceptance_criteria) throw new Error("Epic preparation requires acceptance_criteria evidence.");
+				if (epicReview?.head !== head) {
+					try {
+						const epicIssue = context.issues.find((issue) => issue.number === context.epic.number)!;
+						const durableBases = context.issues
+							.filter((issue) => issue.number !== context.epic.number)
+							.map((issue) => validatedAcceptedCurrentStateHandoff(issue))
+							.filter((entry) => entry?.author === supervisorLogin)
+							.map((entry) => entry!.handoff.issueBaseCommit);
+						const baselineCandidates = [...new Set(durableBases)];
+						if (!baselineCandidates.length) throw new Error("Could not establish a durable cumulative epic review baseline from accepted child handoffs.");
+						const baselineResult = await pi.exec("git", ["merge-base", "--octopus", head, ...baselineCandidates], { cwd: ctx.cwd, timeout: 30_000, signal });
+						const epicBase = baselineResult.stdout.trim();
+						if (baselineResult.code !== 0 || !/^[0-9a-f]{7,64}$/i.test(epicBase)) throw new Error("Could not verify the cumulative epic review baseline against Git history.");
+						const reviewMode = epicBase === head ? "audit" : "diff";
+						const result = await dependencies.runReview(pi, ctx, {
+							mode: reviewMode, ...(reviewMode === "diff" ? { fixed_point: epicBase } : {}),
+							tasks: [
+								{ axis: "standards", instructions: `Review the complete repository state at the end of epic #${context.epic.number} against repository standards. Report concrete defects introduced or left unresolved by the epic.` },
+								{ axis: "spec", instructions: `Review the complete repository state for epic #${context.epic.number}: ${context.epic.title}.\n\nEpic specification and acceptance criteria:\n${epicIssue.body.slice(0, 16_000)}\n\nReport every unmet or partial epic requirement.` },
+							],
+						}, signal, onUpdate);
+						epicReview = { head, details: result.details };
+						return { content: [...result.content, { type: "text" as const, text: `Mandatory epic review completed at ${head}. Disposition all findings, then call epic preparation again on this unchanged HEAD.` }], details: { ready: false, reviewComplete: true, head, review: result.details } };
+					} catch (error) {
+						const message = error instanceof Error ? error.message : String(error);
+						return { content: [{ type: "text", text: `Mandatory epic review unavailable: ${message}. Epic preparation cannot continue.` }], details: { ready: false, reviewComplete: false, head, error: message } };
+					}
+				}
+				if (!params.acceptance_criteria) throw new Error("Epic preparation requires acceptance_criteria evidence after mandatory review.");
 				const snapshot = activePolicy();
 				const policy = snapshot.policy;
 				await assertCleanHead(head, ctx, signal);
@@ -1118,6 +1146,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				const evidence: ClosureEvidence = {
 					verification,
 					acceptanceCriteria: params.acceptance_criteria,
+					epicReview: { reviewed: true, evidence: `Mandatory Standards and Spec review completed at ${head}.` },
 					descendantReviews: context.issues
 						.filter((issue) => issue.number !== context.epic.number)
 						.map((issue) => {
@@ -1129,7 +1158,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				if (!gate.allowed) return { content: [{ type: "text", text: `Epic evidence is incomplete: ${gate.reasons.join(" ")}` }], details: { ready: false, gate, evidence } };
 				await writeDurableResult(approvalPath, { version: 2, epic: context.epic.number, head, policySha256: snapshot.sha256, evidence, preparedAt: new Date().toISOString() });
 				pendingHumanBoundaries.add(`epic:${head}`);
-				projectLifecycle("epic-ready", context.epic.number, `Epic #${context.epic.number} passed final verification with ${evidence.descendantReviews.length} reviewed descendants and ${evidence.acceptanceCriteria.length} evidenced acceptance criteria. Explicit approval is required before closure: /aloop-approve-epic ${head}`);
+				projectLifecycle("epic-ready", context.epic.number, `Epic #${context.epic.number} passed mandatory final review and verification with ${evidence.descendantReviews.length} supervised descendant handoffs and ${evidence.acceptanceCriteria.length} evidenced acceptance criteria. Explicit approval is required before closure: /aloop-approve-epic ${head}`);
 				return { content: [{ type: "text", text: `Epic #${context.epic.number} passed final verification at ${head}; all ${evidence.descendantReviews.length} descendants have durable supervised handoffs and ${evidence.acceptanceCriteria.length} epic criteria have evidence. Human approval is required: /aloop-approve-epic ${head}` }], details: { ready: true, epic: context.epic.number, head, evidence }, terminate: true };
 			}
 			let durableApproval: any = null;

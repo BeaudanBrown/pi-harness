@@ -10,7 +10,7 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, deriveTranscriptEntryId, type ConversationManifest, type ManagedSessionEnvelope,
 	encodeNdjsonEnvelope, parseNdjsonEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { HostLifecycle, parseProjectWindow } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import { HostLifecycle, parseProjectWindow, PROJECT_ATTACHMENT_TIMEOUT_MS, waitForProjectAttachment } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { CoordinatorRouter } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
@@ -20,6 +20,18 @@ import { TranscriptProjector } from "../config/agent/extensions/managed-sessions
 
 const hostId = "lifecycle-host";
 const matrixConfig = { homeserver: "https://matrix.example.com", accessToken: "relay-secret", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
+
+assert.equal(PROJECT_ATTACHMENT_TIMEOUT_MS, 60_000, "cold direnv and extension startup has a production-sized attachment deadline");
+
+test("attachment wait distinguishes a live timeout and accepts attachment during the final liveness check", async () => {
+	let clock = 0;
+	const common = { timeoutMs: 250, state: () => "dormant", now: () => clock, sleep: async (milliseconds: number) => { clock += milliseconds; } };
+	assert.equal(await waitForProjectAttachment({ ...common, inspectWindow: async () => true }), "timeout");
+	clock = 0; let state = "dormant";
+	assert.equal(await waitForProjectAttachment({ ...common, state: () => state,
+		inspectWindow: async () => { state = "active"; return false; } }), "attached",
+	"a negative boundary inspection cannot terminate a conversation that attached while inspection was in flight");
+});
 
 test("packaged project-create launcher confines creation, initializes only local Git main, and resumes exact partial work", async (t) => {
 	const launcher = process.env.PI_MANAGED_TEST_LAUNCHER; if (!launcher) return t.skip("packaged launcher is unavailable");

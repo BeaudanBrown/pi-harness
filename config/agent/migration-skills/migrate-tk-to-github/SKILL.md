@@ -96,10 +96,9 @@ Show the map to the user. Obtain explicit approval before publishing it.
 Use `github_issue_migration`; never paste a large plan or hundreds of relationships into inline tool calls.
 
 1. Write the approved issue graph to `.pi/tmp/tk-to-github/github-issue-plan.json`. It must contain `{ key, issues }`; each issue has `key`, `title`, `body`, optional `labels`, `state`, `parent`, and `blockedBy` keys. Use the source tk ID as the stable issue key.
-2. Run `github_issue_migration` with `operation: dry_run`, the inventory manifest path, and the issue-plan path. Confirm counts, labels, and relationship totals with the user.
-3. Run `operation: resume` with `apply: true`. It processes the next bounded issue batch, then bounded relationship batches, and finally reconciliation without requiring inline payloads or manual cursors.
-4. If it returns `paused: true` with `reason: github-rate-limit`, wait until `retryAfter` when present, then run the same `resume` request again. Do not recreate the plan or alter a cursor.
-5. A `resume` result that reaches `phase: reconcile` must have `passed: true` before cleanup can be proposed.
+2. Once the map is approved, run `operation: resume` with `apply: true`. It processes the next bounded issue batch, then bounded relationship batches, and finally reconciliation without requiring inline payloads or manual cursors. Use `operation: dry_run` first only when a preview would resolve remaining uncertainty about counts, labels, or relationships.
+3. If it returns `paused: true` with `reason: github-rate-limit`, wait until `retryAfter` when present, then run the same `resume` request again. Do not recreate the plan or alter a cursor.
+4. A `resume` result that reaches `phase: reconcile` must have `passed: true` before cleanup can be proposed.
 
 The executor defaults to ten items and a 750ms delay between writes, creates missing labels once, reuses persisted outcomes before GitHub marker lookups, and retains every issue and relationship outcome under `.pi/tmp/tk-to-github/`. If a batch fails, leave `.tickets/` untouched and run the same `resume` request later.
 

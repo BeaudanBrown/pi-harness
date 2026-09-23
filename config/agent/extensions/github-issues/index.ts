@@ -114,7 +114,7 @@ const MutationSchema = Type.Union([
 
 const BaseParams = {
 	repo: Type.Optional(Type.String({ description: "GitHub owner/repository. Defaults to the current checkout remote; any different repository is rejected." })),
-	apply: Type.Optional(Type.Boolean({ description: "Persist the mutation after reviewing the default dry run. Defaults to false." })),
+	apply: Type.Optional(Type.Boolean({ description: "Persist the mutation immediately when true; preview without writing when false. Defaults to false." })),
 };
 
 const MutateParamsSchema = Type.Object({
@@ -805,9 +805,9 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "github_issue_mutate",
 		label: "GitHub Issue Mutate",
-		description: "Dry-run-first, typed GitHub label and issue mutations scoped to the current checkout repository.",
-		promptSnippet: "Mutate current-repository GitHub labels or issues through typed dry-run-first operations.",
-		promptGuidelines: ["Call with apply false first, review the result, then repeat with apply true only after approval.", "Never use this tool for a repository other than the current checkout."],
+		description: "Typed GitHub label and issue mutations scoped to the current checkout repository, with optional dry-run preview.",
+		promptSnippet: "Mutate current-repository GitHub labels or issues through typed operations with an optional dry-run preview.",
+		promptGuidelines: ["Use github_issue_mutate with apply true when the requested mutation is already authorized; use apply false when a preview would resolve uncertainty.", "Never use this tool for a repository other than the current checkout."],
 		parameters: MutateParamsSchema,
 		async execute(_id, params: { repo?: string; apply?: boolean; mutation: any }, signal, _update, ctx: ExtensionContext) {
 			const commandOptions = { signal };
@@ -821,9 +821,9 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "github_issue_relationship",
 		label: "GitHub Issue Relationship",
-		description: "Dry-run-first native GitHub sub-issue and blocker mutations scoped to the current checkout repository.",
+		description: "Native GitHub sub-issue and blocker mutations scoped to the current checkout repository, with optional dry-run preview.",
 		promptSnippet: "Create native GitHub sub-issue or blocker links using issue numbers; database IDs are resolved internally.",
-		promptGuidelines: ["Call with apply false first, then apply true only after reviewing the relationship.", "Use native relationships rather than body-text conventions when the repository supports them."],
+		promptGuidelines: ["Use github_issue_relationship with apply true when the requested relationship is already authorized; use apply false when a preview would resolve uncertainty.", "Use native relationships rather than body-text conventions when the repository supports them."],
 		parameters: RelationshipParamsSchema,
 		async execute(_id, params: { repo?: string; apply?: boolean; op: "add_subissue" | "add_blocker"; parent?: number; child: number; blocker?: number }, signal, _update, ctx: ExtensionContext) {
 			const commandOptions = { signal };
@@ -855,7 +855,7 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 		label: "GitHub Issue Migration",
 		description: "Execute or explicitly clean up a validated tk-to-GitHub migration with fresh live reconciliation; dry-run by default.",
 		promptSnippet: "Run a local migration manifest through dry-run, bounded issue batches, relationship batches, and reconciliation.",
-		promptGuidelines: ["Keep migration artifacts under .pi/tmp/tk-to-github/.", "Run dry_run first, then use resume with apply true until it reports reconciliation.", "When paused for a rate limit, wait until retryAfter and run resume again; do not change cursors or recreate the plan.", "Use cleanup only after separate explicit user approval: dry-run it first, review, then apply; cleanup performs a fresh live reconciliation before removing .tickets/."],
+		promptGuidelines: ["Keep migration artifacts under .pi/tmp/tk-to-github/.", "Use resume with apply true when the validated migration is already authorized; use dry_run when a preview would resolve uncertainty.", "When paused for a rate limit, wait until retryAfter and run resume again; do not change cursors or recreate the plan.", "Use cleanup with apply true only after separate explicit user approval; an optional dry-run preview is available, and apply performs a fresh live reconciliation before removing .tickets/."],
 		parameters: MigrationParamsSchema,
 		async execute(_id, params: { repo?: string; apply?: boolean; operation: "dry_run" | "apply_issues" | "apply_relationships" | "reconcile" | "resume" | "cleanup"; manifest_path: string; issue_plan_path: string; cursor?: number; batch_size?: number; write_delay_ms?: number; cleanup_approved?: boolean }, signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo, { signal });
@@ -875,9 +875,9 @@ export default function registerGitHubIssues(pi: ExtensionAPI): void {
 	pi.registerTool({
 		name: "github_issue_plan",
 		label: "GitHub Issue Plan",
-		description: "Validate and publish a declarative GitHub issue graph with stable idempotency markers; dry-run by default.",
-		promptSnippet: "Validate or publish a declarative GitHub issue plan with stable idempotency markers and dry-run first.",
-		promptGuidelines: ["Validate the full plan with apply false before publishing.", "Use stable plan and issue keys so interrupted runs can resume without duplicate issues.", "Blocker edges are validated here; relationship publication is a separate operation."],
+		description: "Validate or publish a declarative GitHub issue graph with stable idempotency markers; dry-run remains available but is not mandatory.",
+		promptSnippet: "Validate or publish a declarative GitHub issue plan with stable idempotency markers and an optional dry-run preview.",
+		promptGuidelines: ["Use github_issue_plan with apply true when publication is already authorized; use apply false when a preview would resolve uncertainty.", "Use stable plan and issue keys so interrupted runs can resume without duplicate issues.", "Blocker edges are validated here; relationship publication is a separate operation."],
 		parameters: PlanParamsSchema,
 		async execute(_id, params: { repo?: string; apply?: boolean; plan: GitHubIssuePlan }, signal, _update, ctx: ExtensionContext) {
 			const repo = await currentRepo(ctx.cwd, params.repo, { signal });

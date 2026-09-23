@@ -16,9 +16,9 @@ For persistent state, retries, concurrency, or external side effects, create a c
 
 Use /tdd where possible, at pre-agreed seams. Run focused tests, type/LSP checks, and other small affected checks during development. Before review, run broader affected checks and update the acceptance-to-evidence matrix with actual evidence.
 
-Then use /code-review once for one exhaustive Standards and Spec review of a pinned snapshot. Use `review_agents` worktree mode for uncommitted changes or committed diff mode for an already committed branch. Require every finding to classify severity and ownership as current issue, dependent issue, deployment-only, or justified deferral.
+At the end of an individual issue, decide whether the risk, breadth, or ambiguity warrants /code-review; issue-level review is discretionary. At the end of an epic, always use /code-review once for one exhaustive Standards and Spec review of the cumulative pinned change. Use `review_agents` worktree mode for uncommitted changes or committed diff mode for an already committed branch. Require every finding to classify severity and ownership as current issue, dependent issue, deployment-only, or justified deferral.
 
-Triage all findings together and batch accepted current-issue remediation. Document subjective deferrals. Do not routinely re-run review unless remediation materially changes the design or invalidates the review.
+When review runs, triage all findings together and batch accepted current-scope remediation. Document subjective deferrals. Do not routinely re-run review unless remediation materially changes the design or invalidates the review.
 
 After remediation, run the repository's canonical verification gate once and applicable production builds once. A trivial isolated post-gate change may use focused verification when the reason is documented; otherwise repeat the affected final gate.
 
