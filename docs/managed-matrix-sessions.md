@@ -151,6 +151,17 @@ Repeated restarts, `!new`, or manually changing the cursor are not a safe fix.
 Downgrading to the old runtime-directory launcher would reopen stale state and
 is unsupported; rollback must restore a matched package and complete state set.
 
+## Updating without terminating sessions
+
+See [restart-safe updates](managed-session-updates.md). On hosts with independent
+tmux ownership, rebuilds replace only the relay through
+`pi-managed-session-rollout.service`. A failed migration guard leaves existing
+sessions untouched; inspect that unit's journal rather than restarting the relay
+manually. `pi-managed-session-status` reports the running versus installed relay
+closure and fresh sync readiness. New Pi launchers retain a Nix GC root for their
+lifetime; SIGKILL may leave a conservative stale root requiring explicit cleanup.
+Sessions started before this release do not retroactively gain runtime roots.
+
 ## Token rotation and device revocation
 
 Rotation does not rebuild Pi sessions, recreate rooms, or clear registry/projection state:
@@ -160,7 +171,7 @@ Rotation does not rebuild Pi sessions, recreate rooms, or clear registry/project
 3. Restart and verify:
 
    ```sh
-   systemctl --user restart pi-managed-session-relay.service
+   systemctl --user restart pi-managed-session-rollout.service
    pi-managed-session-status
    journalctl --user -u pi-managed-session-relay.service -n 50
    ```

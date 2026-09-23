@@ -9,6 +9,13 @@
 {
   service: "active",
   socket: "ready",
+  runtime: {
+    running: ($health[0].runtimeBuild // "unknown"),
+    installed: ($ARGS.named.desiredRuntime // "unknown"),
+    updatePending: (($ARGS.named.desiredRuntime // null) != null and $health[0].runtimeBuild != $ARGS.named.desiredRuntime)
+  },
+  pendingInputs: ([.conversations[]?.pendingInputs[]? | select(.status != "completed" and .status != "cancelled")] | length),
+  pendingProjections: ([.conversations[]?.projection[]? | select(.status != "projected")] | length),
   conversations: (.conversations | length),
   states: (.conversations | group_by(.state) | map({key: .[0].state, value: length}) | from_entries),
   cursorConfigured: any(.conversations[]?; .matrixCursor.status == "established"),

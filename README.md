@@ -300,6 +300,12 @@ not lose or duplicate participant turns. Generation changes durably create the n
 The legacy per-Pi `remote-session` bridge and `services.pi-harness.remoteSession`
 option are not loaded or exposed. Legacy rooms, bindings, and sidecar state are
 not imported. Enabled hosts use only the relay-owned managed-session path above.
+Compatible updates keep tmux and Pi processes alive while a guarded user-unit
+rollout replaces the relay. Hosts must provide `managedSessions.updateGuard`;
+a missing or failed guard leaves the old relay running and reports a blocked
+rollout. See [restart-safe updates](docs/managed-session-updates.md) for the
+initial ownership migration, runtime retention and compatibility policy.
+
 See [`docs/managed-matrix-sessions.md`](docs/managed-matrix-sessions.md) for the
 operator runbook, health checks, token rotation, restart recovery, controls,
 transcript policy, troubleshooting, and deferred scope.

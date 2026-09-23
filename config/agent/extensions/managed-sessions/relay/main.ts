@@ -29,6 +29,7 @@ import { ManagedArtifactExporter } from "./artifact-export.js";
 import { renderManagedConversationStatus } from "./status.js";
 import { prepareRelayStateDirectory } from "./state-directory.js";
 import { AtomicJsonFile } from "./atomic-json.js";
+import { retryMatrixStartup } from "./startup-retry.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -42,7 +43,7 @@ export interface RunningRelay {
 	stop(): Promise<void>;
 }
 
-export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = process.env): Promise<RunningRelay> {
+export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = process.env, signal?: AbortSignal): Promise<RunningRelay> {
 	const runtimeDirectory = resolve(required(environment, "PI_MANAGED_SESSIONS_RUNTIME_DIR"));
 	const stateDirectory = resolve(required(environment, "PI_MANAGED_SESSIONS_STATE_DIR"));
 	const manifestDirectory = resolve(required(environment, "PI_MANAGED_SESSIONS_MANIFEST_DIR"));
@@ -71,26 +72,24 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await registry.load();
 		// Ephemeral observation, never a recovery source. No tokens or error text.
 		let lastSuccessfulSyncAt: string | null = null;
-		const healthFile = new AtomicJsonFile<{ status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null }>(
-			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null });
-		await healthFile.write({ status: "starting", lastSuccessfulSyncAt });
+		const runtimeBuild = environment.PI_MANAGED_RELAY_BUILD ?? "unknown";
+		const healthFile = new AtomicJsonFile<{ status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string }>(
+			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string });
+		await healthFile.write({ status: "starting", lastSuccessfulSyncAt, runtimeBuild });
 		const syncHealth = async (healthy: boolean): Promise<void> => {
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
-			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt });
+			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt, runtimeBuild });
 		};
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
 		const spool = new BlobSpool(resolve(stateDirectory, "media-spool"));
 		const media = new ManagedImageTransport(spool, matrix);
 		await media.initialize(registry.liveMediaBlobIds());
-		const authenticatedUserId = await matrix.whoami();
-		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
 		const artifactExporter = new ManagedArtifactExporter(spool, registry, matrix, {
 			notice: async (conversationId, uploadId) => eventProjector.projectNotice(conversationId, `${uploadId}:failed`,
 				"Artifact export failed permanently at the media service. Resolve the service error and request a new export; conversation history is preserved."),
 		});
 		closeArtifactExporter = () => artifactExporter.close();
 		const controlPollPublisher = new ControlPollPublisher(registry, matrix);
-		await controlPollPublisher.reconcile();
 		const coordinatorValues = [
 			environment.PI_MANAGED_COORDINATOR_WORKSPACE_DIR,
 			environment.PI_MANAGED_COORDINATOR_SESSION_FILE,
@@ -100,13 +99,6 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			throw new Error("Coordinator workspace, session file, and launcher must be configured together");
 		}
 		let coordinator: CoordinatorIdentity | undefined;
-		if (coordinatorValues.every((value) => value?.trim())) {
-			coordinator = await bootstrapCoordinator(hostId, {
-				workspaceDirectory: coordinatorValues[0]!.trim(),
-				sessionFile: coordinatorValues[1]!.trim(),
-				concept: environment.PI_MANAGED_COORDINATOR_CONCEPT?.trim() || `${hostId} coordinator`,
-			}, registry, matrix);
-		}
 		const transcriptProjector = new TranscriptProjector(registry, matrix);
 		activityProjector = new ActivityProjector(stateDirectory, registry, matrix);
 		await activityProjector.load();
@@ -316,6 +308,21 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				return undefined;
 			},
 		});
+		// Reattach surviving Pi processes before waiting for remote readiness.
+		await server.start();
+		const authenticatedUserId = await retryMatrixStartup(() => matrix.whoami(signal), async () => {
+			await syncHealth(false);
+			process.stderr.write("pi-managed-session-relay: waiting for Matrix startup connectivity; local IPC remains available\n");
+		}, signal);
+		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
+		await controlPollPublisher.reconcile();
+		if (coordinatorValues.every((value) => value?.trim())) {
+			coordinator = await bootstrapCoordinator(hostId, {
+				workspaceDirectory: coordinatorValues[0]!.trim(),
+				sessionFile: coordinatorValues[1]!.trim(),
+				concept: environment.PI_MANAGED_COORDINATOR_CONCEPT?.trim() || `${hostId} coordinator`,
+			}, registry, matrix);
+		}
 		if (coordinator) {
 			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(stateDirectory, "project-sessions");
 			hostLifecycle = new HostLifecycle({
@@ -328,7 +335,6 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			const pendingReconciliation = hostLifecycle.pendingReconciliationCount();
 			if (pendingReconciliation > 0) process.stderr.write(`pi-managed-session-relay: ${pendingReconciliation} managed project conversation(s) require explicit Space reconciliation\n`);
 		}
-		await server.start();
 		artifactExporter.start();
 		if (coordinator) {
 			const identity = coordinator;
@@ -402,7 +408,16 @@ async function main(): Promise<void> {
 		return;
 	}
 	if (process.argv.length !== 2) throw new Error("Managed-session relay accepts only --migrate-v1-to-v2");
-	const relay = await startManagedSessionRelay();
+	const startup = new AbortController();
+	const cancelStartup = () => startup.abort();
+	process.once("SIGINT", cancelStartup);
+	process.once("SIGTERM", cancelStartup);
+	let relay: RunningRelay;
+	try { relay = await startManagedSessionRelay(process.env, startup.signal); }
+	finally {
+		process.removeListener("SIGINT", cancelStartup);
+		process.removeListener("SIGTERM", cancelStartup);
+	}
 	let stopping = false;
 	const stop = () => {
 		if (stopping) return;

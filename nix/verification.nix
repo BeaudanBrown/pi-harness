@@ -306,10 +306,15 @@ let
   '';
 
   moduleContracts = pkgs.runCommand "pi-harness-module-contracts" {
-    nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep pkgs.jq ];
+    nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep pkgs.jq pkgs.python3 ];
   } ''
+    ${prepareSource}
+    python3 -m unittest discover -s tests -p test_runtime_pin.py -v
     jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4
       and (.hasGeneralEnvironmentFile | not) and (.hasPrivateTmp | not)
+      and (.relayRestartIfChanged | not) and (.relayStopIfChanged | not)
+      and (.rolloutAfter | index("pi-managed-session-relay.service") != null)
+      and (.rolloutScript | contains("rollout blocked"))
       and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"
       and (.serviceEnvironment.PI_MATRIX_IGNORED_SENDER_USER_IDS | fromjson) == ["@signalbot:example.com", "@facebookbot:example.com"]' \
       ${managedSessionModuleReport} >/dev/null

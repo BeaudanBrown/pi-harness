@@ -121,8 +121,18 @@ let
     extension_args+=(--extension "${managedExtensions.ordinary}")
   '';
 
+  pinRuntime = lib.optionalString (managedSessionsEnabled && cfg.managedSessions.retainRuntime) ''
+    launcher="$(${pkgs.coreutils}/bin/readlink -f "$0")"
+    if [[ "''${PI_HARNESS_PINNED_LAUNCHER:-}" != "$launcher" ]]; then
+      export PI_RUNTIME_NIX_STORE=${pkgs.nix}/bin/nix-store
+      exec ${pkgs.python3}/bin/python3 ${../scripts/pin-runtime.py} "$launcher" "$@"
+    fi
+    unset PI_HARNESS_PINNED_LAUNCHER PI_RUNTIME_NIX_STORE
+  '';
+
   piWithRuntime = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
+    ${pinRuntime}
     ${runtimeEnvironmentSetup}
     ${sessionDirectoryEnvironment}
     ${managedSessionEnvironment}
@@ -143,6 +153,7 @@ let
 
   coordinatorPi = pkgs.writeShellScriptBin "pi-managed-coordinator" ''
     set -euo pipefail
+    ${pinRuntime}
     : "''${PI_MANAGED_COORDINATOR_CWD:?PI_MANAGED_COORDINATOR_CWD is required}"
     : "''${PI_MANAGED_COORDINATOR_SESSION_FILE:?PI_MANAGED_COORDINATOR_SESSION_FILE is required}"
     export PI_HARNESS_AGENT_PROFILE="managed-coordinator"
@@ -168,6 +179,7 @@ let
 
   managedPiDispatch = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
+    ${pinRuntime}
     case "''${PI_MANAGED_SESSION_LAUNCH_ROLE:-}" in
       coordinator)
         exec ${coordinatorPi}/bin/pi-managed-coordinator "$@"
@@ -346,8 +358,14 @@ let
   managedStatus = pkgs.writeShellScriptBin "pi-managed-session-status" ''
     set -euo pipefail
     runtime="''${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/pi-managed-sessions"
-    ${pkgs.systemd}/bin/systemctl --user is-active --quiet pi-managed-session-relay.service
-    test -S "$runtime/relay.sock"
+    if ! ${pkgs.systemd}/bin/systemctl --user is-active --quiet pi-managed-session-relay.service; then
+      printf '%s\n' '{"service":"inactive","socket":"unavailable","sync":{"ready":false}}'
+      exit 3
+    fi
+    if ! test -S "$runtime/relay.sock"; then
+      printf '%s\n' '{"service":"active","socket":"unavailable","sync":{"ready":false}}'
+      exit 3
+    fi
     state_dir=${lib.escapeShellArg cfg.managedSessions.stateDirectory}
     state_dir="''${state_dir//%h/$HOME}"
     registry="$state_dir/registry.json"
@@ -360,7 +378,7 @@ let
     if ${pkgs.bash}/bin/bash -c 'compgen -G "$1/conv_*.json" >/dev/null' _ "$manifest_dir"; then
       pending_reconciliation=$(${pkgs.jq}/bin/jq -s '[.[] | select(.kind == "project" and (.projectKey == null))] | length' "$manifest_dir"/conv_*.json)
     fi
-    report=$(${pkgs.jq}/bin/jq --slurpfile health "$runtime/sync-health.json" --argjson pending "$pending_reconciliation" \
+    report=$(${pkgs.jq}/bin/jq --slurpfile health "$runtime/sync-health.json" --argjson pending "$pending_reconciliation" --arg desiredRuntime ${lib.escapeShellArg (toString managedRelayPackage)} \
       -f ${../scripts/managed-session-status.jq} "$registry")
     printf '%s\n' "$report"
     ${pkgs.jq}/bin/jq -e '.sync.ready' <<< "$report" >/dev/null
@@ -453,6 +471,18 @@ in
         default = null;
         example = "operator";
         description = "Unix user whose lingered systemd user manager owns the single host relay.";
+      };
+
+      retainRuntime = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = "Keep indirect Nix GC roots for live Pi launcher closures. Disable only in isolated test stores without a Nix daemon; production sessions otherwise risk losing helpers after GC.";
+      };
+
+      updateGuard = lib.mkOption {
+        type = lib.types.nullOr lib.types.package;
+        default = null;
+        description = "Host-owned read-only executable that succeeds only when replacing the relay cannot terminate the shared tmux server. Missing guard blocks rollout, never stops an existing relay.";
       };
 
       relayPackage = lib.mkOption {
@@ -635,12 +665,17 @@ in
 
     systemd.user.services.pi-managed-session-relay = lib.mkIf managedSessionsEnabled {
       description = "Boot-persistent Pi managed-session host relay";
+      # The guarded rollout owns replacement. In particular, the first switch
+      # must never stop a legacy relay whose cgroup still owns shared tmux.
+      restartIfChanged = false;
+      stopIfChanged = false;
       wantedBy = [ "default.target" ];
       after = [ "network-online.target" ];
       wants = [ "network-online.target" ];
       unitConfig.ConditionUser = nonNullString cfg.managedSessions.user;
       path = [ managedDirenv managedPiDispatch managedLauncherPackage pkgs.coreutils ];
       environment = {
+        PI_MANAGED_RELAY_BUILD = toString managedRelayPackage;
         PI_MANAGED_SESSIONS_HOST_ID = nonNullString cfg.managedSessions.hostId;
         PI_MANAGED_SESSIONS_WORKSPACE_ROOTS = builtins.toJSON cfg.managedSessions.workspaceRoots;
         PI_MANAGED_COORDINATOR_CONCEPT = cfg.managedSessions.coordinator.concept;
@@ -658,6 +693,31 @@ in
         UMask = "0077";
         NoNewPrivileges = true;
       };
+    };
+
+    systemd.user.services.pi-managed-session-rollout = lib.mkIf managedSessionsEnabled {
+      description = "Guarded Pi relay update (preserves running sessions)";
+      wantedBy = [ "default.target" ];
+      after = [ "pi-managed-session-relay.service" ];
+      unitConfig.ConditionUser = nonNullString cfg.managedSessions.user;
+      restartTriggers = [ (pkgs.writeText "pi-relay-rollout-definition.json" (builtins.toJSON {
+        inherit (config.systemd.user.services.pi-managed-session-relay) environment serviceConfig;
+        path = map toString config.systemd.user.services.pi-managed-session-relay.path;
+      })) ];
+      serviceConfig = {
+        Type = "oneshot";
+        RemainAfterExit = true;
+      };
+      script = ''
+        set -euo pipefail
+        ${if cfg.managedSessions.updateGuard == null then ''
+          echo "pi relay rollout blocked: configure managedSessions.updateGuard; existing sessions left untouched" >&2
+          exit 1
+        '' else ''
+          export PATH=${pkgs.systemd}/bin:$PATH
+          exec ${pkgs.bash}/bin/bash ${../scripts/relay-rollout.sh} ${lib.getExe cfg.managedSessions.updateGuard} pi-managed-session-relay.service
+        ''}
+      '';
     };
 
     environment.systemPackages =

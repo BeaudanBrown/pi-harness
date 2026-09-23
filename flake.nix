@@ -312,6 +312,9 @@
                 lsp.enable = true;
                 managedSessions = {
                   enable = true;
+                  # Nix build sandboxes have immutable inputs but no writable
+                  # daemon store. The runtime-pin suite tests rooting separately.
+                  retainRuntime = false;
                   user = "operator";
                   environmentFile = "/run/secrets/pi-managed-session.env";
                   homeserver = "https://matrix.example.com";
@@ -356,6 +359,10 @@
         managedSessionModuleReport = pkgs.writeText "pi-harness-managed-session-module-test.json" (builtins.toJSON {
           assertions = map (item: item.assertion) managedSessionModuleTest.config.assertions;
           relayUserLingers = managedSessionModuleTest.config.users.users.operator.linger;
+          relayRestartIfChanged = managedSessionService.restartIfChanged;
+          relayStopIfChanged = managedSessionService.stopIfChanged;
+          rolloutAfter = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-rollout.after;
+          rolloutScript = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-rollout.script;
           serviceEnvironment = managedSessionService.environment;
           servicePathCount = builtins.length managedSessionService.path;
           execStart = managedSessionService.serviceConfig.ExecStart;

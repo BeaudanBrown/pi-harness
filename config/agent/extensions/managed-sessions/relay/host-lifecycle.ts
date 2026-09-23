@@ -1007,6 +1007,7 @@ export class HostLifecycle {
 		}
 		await this.options.registry.beginLaunch(manifest.conversationId);
 		let attachmentTimedOut = false;
+		let createdWindow: ManagedWindow | undefined;
 		try {
 			const inspected = this.parseWindowInspection(await this.invoke("window-inspect", { conversationId: manifest.conversationId }), manifest, root.sessionName);
 			let window: ManagedWindow;
@@ -1027,6 +1028,7 @@ export class HostLifecycle {
 					...((manifest.selectedThinking ?? activeGeneration.thinking) ? { PI_MANAGED_SESSION_THINKING: manifest.selectedThinking ?? activeGeneration.thinking } : {}),
 				});
 				window = parseProjectWindow(result, manifest);
+				createdWindow = window;
 			}
 			await this.options.registry.setManagedWindow(manifest.conversationId, {
 				sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId,
@@ -1044,14 +1046,15 @@ export class HostLifecycle {
 				throw new RelayRegistryError("launch_failed", "Managed project Pi attachment timed out");
 			}
 		} catch (error) {
+			if (this.options.registry.conversationState(manifest.conversationId) === "active") return;
 			// A live window that misses the deadline remains eligible to attach; terminating it
 			// would race the adapter's active-state transition at the exact timeout boundary.
-			if (attachmentTimedOut) {
-				if (this.options.registry.conversationState(manifest.conversationId) === "active") return;
-				throw error;
-			}
-			await this.invoke("window-terminate", { conversationId: manifest.conversationId }).catch(() => undefined);
-			await this.options.registry.markDormant(manifest.conversationId, true);
+			if (attachmentTimedOut) throw error;
+			// An inspection or reconnect failure is not authority to kill a
+			// surviving process. Cleanup applies only to this attempt's exact window.
+			if (createdWindow) await this.invoke("window-terminate", { conversationId: manifest.conversationId,
+				windowId: createdWindow.windowId, paneId: createdWindow.paneId }).catch(() => undefined);
+			await this.options.registry.markDormant(manifest.conversationId, Boolean(createdWindow));
 			await this.options.registry.recordLaunchError(manifest.conversationId, "launch_failed", error instanceof Error ? error.message : "Project launch failed");
 			throw error;
 		}
