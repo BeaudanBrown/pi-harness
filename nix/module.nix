@@ -187,6 +187,9 @@ let
       project)
         : "''${PI_MANAGED_PROJECT_SESSION_FILE:?PI_MANAGED_PROJECT_SESSION_FILE is required}"
         export PI_HARNESS_AGENT_PROFILE="managed-project"
+        runtime_id="$(printf '%s' "$(${pkgs.coreutils}/bin/readlink -f "$0")" | ${pkgs.coreutils}/bin/sha256sum)"
+        export PI_MANAGED_SESSION_RUNTIME_ID="''${runtime_id%% *}"
+        unset runtime_id
         export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER="${lib.getExe pkgs.imagemagick}"
         export PI_MANAGED_LOCAL_MODEL_TOOLS=${lib.escapeShellArg managedLocalModelTools}
         export PI_HARNESS_RESOURCES_ROOT="${cfg.package.harnessResources}/share/pi-harness/agent"
@@ -321,6 +324,7 @@ let
         # discard any stale managed identity before entering the normal wrapper.
         unset \
           PI_MANAGED_SESSION_LAUNCH_ROLE \
+          PI_MANAGED_SESSION_RUNTIME_ID \
           PI_MANAGED_PROJECT_SESSION_FILE \
           PI_MANAGED_COORDINATOR_CWD \
           PI_MANAGED_COORDINATOR_SESSION_FILE \
@@ -676,6 +680,7 @@ in
       path = [ managedDirenv managedPiDispatch managedLauncherPackage pkgs.coreutils ];
       environment = {
         PI_MANAGED_RELAY_BUILD = toString managedRelayPackage;
+        PI_MANAGED_PROJECT_RUNTIME_ID = builtins.hashString "sha256" "${managedPiDispatch}/bin/pi";
         PI_MANAGED_SESSIONS_HOST_ID = nonNullString cfg.managedSessions.hostId;
         PI_MANAGED_SESSIONS_WORKSPACE_ROOTS = builtins.toJSON cfg.managedSessions.workspaceRoots;
         PI_MANAGED_COORDINATOR_CONCEPT = cfg.managedSessions.coordinator.concept;

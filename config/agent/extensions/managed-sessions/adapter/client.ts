@@ -81,6 +81,7 @@ export interface BoundAdapterOptions {
 	socketPath: string;
 	role: AdapterRole;
 	attachmentNonce: string;
+	runtimeId?: string;
 	binding: SessionBinding;
 	onEnvelope: (envelope: ManagedSessionEnvelope) => Promise<void> | void;
 	onMedia?: (image: ReceivedImage) => Promise<void> | void;
@@ -112,6 +113,13 @@ export class BoundAdapterClient {
 
 	get generation(): number { return this.#generation; }
 
+	/** Recovery must follow already-received controls, whose handlers may await IPC. */
+	runAfterInbound(action: () => void): Promise<void> {
+		const work = this.#inboundWork.then(action);
+		this.#inboundWork = work.catch(() => undefined);
+		return work;
+	}
+
 	get connected(): boolean {
 		return this.#socket !== undefined && !this.#socket.destroyed && this.#attachmentId !== undefined;
 	}
@@ -133,6 +141,7 @@ export class BoundAdapterClient {
 				type: "attachment.attach",
 				payload: {
 					sessionId: this.options.binding.sessionId,
+					...(this.options.runtimeId ? { runtimeId: this.options.runtimeId } : {}),
 					attachmentNonce: this.options.attachmentNonce,
 					bindingBoundaryEntryId: this.options.binding.bindingBoundaryEntryId,
 				},

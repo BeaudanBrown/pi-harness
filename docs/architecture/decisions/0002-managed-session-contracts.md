@@ -156,6 +156,26 @@ maintenance/migration decision, never automatic busy-session refresh. See
 [update operations](../../managed-session-updates.md) for retention, migration,
 crash boundaries and acceptance evidence.
 
+## Delivery and idle-runtime update amendment (#95)
+
+Input dispatch is serialized through user persistence, not through the full model
+run. Explicit receipts identify the Pi user entry; ambiguous expansion-only
+historical state is held for operator cancellation rather than blindly replayed.
+The relay's terminal receipts must authorize any persisted-work continuation.
+Stop cancellation is durable before shutdown; confirmed reset freezes a queued
+input cutoff and cancels that cutoff atomically with transition creation. Inputs
+accepted after the cutoff remain available for the new generation.
+
+A Nix-provided opaque launcher identity on project attachments enables bounded,
+idle-only automatic refresh using the existing project refresh authority. It
+never restarts shared tmux, aborts busy work, wakes dormant conversations, or
+refreshes the lifecycle-only coordinator. This is a maintenance cutover for the
+new optional fields: deploy the new relay before new adapters, preserve stores,
+and do not downgrade to strict older readers. The operator has approved a final
+manual tmux ownership migration, not automatic termination of the old server.
+See [input/runtime operations](../../managed-input-runtime-updates.md) for
+acceptance and crash-boundary evidence.
+
 ## Consequences
 
 - Relay, ordinary adapter, coordinator adapter, and tests share one small interface while authority remains relay-enforced.

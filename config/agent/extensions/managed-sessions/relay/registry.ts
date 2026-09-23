@@ -144,6 +144,13 @@ export class RelayRegistry {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
 			const inserted = this.addPendingControl(conversation, control);
+			if (inserted && control.name === "new" && control.argument === "--confirm") {
+				conversation.pendingControls.find((item) => item.controlId === control.controlId)!.cancelDeliveryIds =
+					conversation.pendingInputs.filter((item) => item.status !== "completed" && item.status !== "cancelled").map((item) => item.deliveryId);
+			}
+			if (inserted && control.name === "stop") {
+				for (const input of conversation.pendingInputs) if (input.status !== "completed") input.status = "cancelled";
+			}
 			if (inserted && conversation.publishingControlPoll?.scope === control.name) {
 				const supersededId = conversation.publishingControlPoll.sourceControl.controlId;
 				const sourceIndex = conversation.pendingControls.findIndex((candidate) => candidate.controlId === supersededId);
@@ -492,6 +499,10 @@ export class RelayRegistry {
 			const active = this.activeGeneration(manifest); const ordinal = active.ordinal + 1;
 			const transition = { transitionId: deriveGenerationTransitionId(conversationId, active.ordinal, ordinal), sourceControlId, phase: "requested" as const,
 				fromGenerationId: active.generationId, toGenerationId: deriveGenerationId(conversationId, ordinal), ordinal, requestedAt: new Date().toISOString(), ...metadata };
+			const cutoff = conversation.pendingControls.find((control) => control.controlId === sourceControlId)?.cancelDeliveryIds;
+			for (const input of conversation.pendingInputs) {
+				if ((cutoff === undefined || cutoff.includes(input.deliveryId)) && input.status !== "completed") input.status = "cancelled";
+			}
 			conversation.generationTransition = transition;
 			return structuredClone(transition);
 		});
@@ -943,7 +954,7 @@ export class RelayRegistry {
 			if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 			const role = envelope.role as AdapterRole;
 			if (role !== expectedRole(manifest)) throw new RelayRegistryError("permission_denied", "Adapter role is not authorized for this conversation");
-			const payload = envelope.payload as { sessionId: string; attachmentNonce: string; bindingBoundaryEntryId: string };
+			const payload = envelope.payload as { sessionId: string; attachmentNonce: string; bindingBoundaryEntryId: string; runtimeId?: string };
 			if (payload.sessionId !== manifest.piSessionId || payload.bindingBoundaryEntryId !== manifest.bindingBoundaryEntryId) {
 				throw new RelayRegistryError("permission_denied", "Adapter session binding does not match the conversation manifest");
 			}
@@ -960,7 +971,7 @@ export class RelayRegistry {
 			}
 			const attachmentId = `attachment-${randomUUID()}`;
 			conversation.state = "active";
-			conversation.attachment = { attachmentId, sessionId: payload.sessionId, connectedAt: new Date().toISOString() };
+			conversation.attachment = { attachmentId, sessionId: payload.sessionId, connectedAt: new Date().toISOString(), ...(payload.runtimeId ? { runtimeId: payload.runtimeId } : {}) };
 			this.liveConnections.set(manifest.conversationId, connectionId);
 			return { attachmentId, conversationId: manifest.conversationId, role, state: "active", generation: this.activeGeneration(manifest).ordinal };
 		});

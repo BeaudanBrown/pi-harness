@@ -18,6 +18,7 @@ import {
 	type ManagedSessionEnvelope,
 	parseHostRuntimeState,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "../config/agent/extensions/managed-sessions/relay/atomic-json.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { RelayRegistry, RelayRegistryError } from "../config/agent/extensions/managed-sessions/relay/registry.js";
@@ -66,6 +67,25 @@ async function fixture(manifests = [manifest()]): Promise<{ root: string; store:
 	await registry.load();
 	return { root, store, registry };
 }
+
+test("reset cutoff and stop cancellation survive restart and late receipts", async () => {
+	const value = manifest(); const { root, store, registry } = await fixture([value]); const id = value.conversationId;
+	const input = (event: string) => ({ deliveryId: deriveDeliveryId(id, event), matrixEventId: event, kind: "prompt" as const, body: event, status: "accepted" as const });
+	const old = input("$old"), next = input("$next");
+	await registry.recordAcceptedInput(id, old);
+	const control = { controlId: deriveControlId(id, "$new"), matrixEventId: "$new", name: "new" as const, argument: "--confirm" };
+	await registry.recordPendingControl(id, control);
+	await registry.recordAcceptedInput(id, next);
+	await registry.recordPendingControl(id, control); // replay cannot move the cutoff
+	const restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	await restarted.beginGenerationTransition(id, control.controlId, {});
+	assert.deepEqual(restarted.pendingInputs(id).map((item) => item.status), ["cancelled", "accepted"]);
+	await assert.rejects(() => restarted.acknowledgeInput(id, old.deliveryId, "persisted", deriveTranscriptEntryId(value.piSessionId, "old")), /regressed/);
+	await restarted.recordPendingControl(id, { controlId: deriveControlId(id, "$stop"), matrixEventId: "$stop", name: "stop" });
+	const stopped = new RelayRegistry(hostId, join(root, "runtime"), store); await stopped.load();
+	assert.deepEqual(stopped.pendingInputs(id).map((item) => item.status), ["cancelled", "cancelled"]);
+	await assert.rejects(() => stopped.acknowledgeInput(id, next.deliveryId, "completed", deriveTranscriptEntryId(value.piSessionId, "next")), /regressed/);
+});
 
 test("atomic JSON keeps the last complete primary and rejects malformed primary state", async () => {
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-atomic-"));

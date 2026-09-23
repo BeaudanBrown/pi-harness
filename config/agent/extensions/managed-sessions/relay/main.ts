@@ -209,6 +209,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 								sourceControl: source, scope: source.name, prompt: payload.message, options });
 						} else await eventProjector.projectNotice(manifest.conversationId, payload.controlId, projectedMessage);
 						await registry.acknowledgeControlResult(attachment.conversationId, payload.controlId);
+						if (source?.name === "new" && payload.status === "rejected") setImmediate(() => {
+							void coordinatorRouter?.attachmentReady(attachment.conversationId).catch(() => undefined);
+						});
 					}
 					await activityProjector!.endOperationFeedback(attachment.conversationId, payload.controlId);
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "control.result", status: "ok" });
@@ -238,6 +241,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						? "The active model does not support image input. The image was not delivered; choose an image-capable model and resend it."
 						: "The managed image transfer failed validation and was not delivered.");
 					await media.consume(payload.blobId, registry.liveMediaBlobIds());
+					setImmediate(() => { void coordinatorRouter?.attachmentReady(attachment.conversationId).catch(() => undefined); });
 					return response(attachment.conversationId, envelope.messageId, "media.result", { deliveryId: payload.deliveryId, blobId: payload.blobId, status: "rejected" });
 				}
 				if (envelope.type === "input.acknowledge") {
@@ -248,6 +252,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						throw new RelayRegistryError("invalid_state", "Extension-command completion did not match a command delivery");
 					}
 					await registry.acknowledgeInput(attachment.conversationId, payload.deliveryId, payload.status, payload.piEntryId, payload.completionKind);
+					if (["persisted", "completed", "cancelled"].includes(payload.status)) setImmediate(() => {
+						void coordinatorRouter?.attachmentReady(attachment.conversationId).catch(() => undefined);
+					});
 					if (command && (payload.status === "completed" || payload.status === "cancelled")) await activityProjector!.endOperationFeedback(attachment.conversationId, payload.deliveryId);
 					if (input?.media && (payload.status === "completed" || payload.status === "cancelled")) await media.consume(input.media.blobId, registry.liveMediaBlobIds());
 					if (command && command !== "aloop" && !command.startsWith("aloop-")) await eventProjector.projectNotice(attachment.conversationId, `${payload.deliveryId}:command`, `Command dispatched: /${command}`);
@@ -389,12 +396,24 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	}, graceMilliseconds);
 	reconciliationTimer.unref();
 	let stopped = false;
+	let runtimeUpdate: Promise<void> | undefined;
+	const desiredRuntime = environment.PI_MANAGED_PROJECT_RUNTIME_ID;
+	const runtimeUpdateTimer = desiredRuntime && /^[a-f0-9]{64}$/.test(desiredRuntime) ? setInterval(() => {
+		if (stopped || runtimeUpdate || !hostLifecycle) return;
+		runtimeUpdate = hostLifecycle.reconcileRuntimeUpdates(desiredRuntime).catch(() => {
+			process.stderr.write("pi-managed-session-relay: managed runtime update deferred\n");
+		}).finally(() => { runtimeUpdate = undefined; });
+	}, Math.max(graceMilliseconds, 30_000)) : undefined;
+	runtimeUpdateTimer?.unref();
 	return {
 		registry,
 		server,
 		async stop() {
 			if (stopped) return;
 			stopped = true;
+			if (runtimeUpdateTimer) clearInterval(runtimeUpdateTimer);
+			hostLifecycle?.stopRuntimeUpdates();
+			await runtimeUpdate;
 			clearTimeout(reconciliationTimer);
 			await closeArtifactExporter();
 			await coordinatorRouter?.stop();

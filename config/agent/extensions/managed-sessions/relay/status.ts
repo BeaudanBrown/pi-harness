@@ -12,6 +12,7 @@ export function renderManagedConversationStatus(
 	live: ManagedAdapterLiveStatus | undefined,
 	pendingReconciliation: number,
 	currentControlId?: string,
+	desiredRuntimeId = process.env.PI_MANAGED_PROJECT_RUNTIME_ID,
 ): string {
 	const generation = activeGeneration(manifest);
 	const requestedModel = manifest.selectedModel ?? generation?.model;
@@ -24,6 +25,7 @@ export function renderManagedConversationStatus(
 		...(manifest.checkoutDisplayName ? [`Checkout: ${manifest.checkoutDisplayName}`] : []),
 		`State: ${runtime.state}; Pi ${live?.state ?? "unavailable"}; adapter ${runtime.attachment ? "connected" : "disconnected"}`,
 		`Generation: ${generation?.ordinal ?? 1}/${manifest.generations?.length ?? 1}`,
+		...(manifest.kind === "project" && desiredRuntimeId ? [`Tooling update: ${runtime.attachment?.runtimeId === desiredRuntimeId ? "current" : runtime.state === "dormant" ? "next launch" : "pending — waiting for verified idle adapter"}`] : []),
 		...(runtime.generationTransition ? [`Generation transition: ${runtime.generationTransition.phase}; queued input retained${runtime.generationTransition.failure ? `; latest failure ${runtime.generationTransition.failure.code}` : ""}`] : []),
 		`Model: ${live?.model ?? "unavailable"}`,
 		`Saved model: ${manifest.selectedModel ?? "none"}; requested: ${requestedModel ?? "configured default"}`,

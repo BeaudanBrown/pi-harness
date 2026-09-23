@@ -305,6 +305,9 @@ rollout replaces the relay. Hosts must provide `managedSessions.updateGuard`;
 a missing or failed guard leaves the old relay running and reports a blocked
 rollout. See [restart-safe updates](docs/managed-session-updates.md) for the
 initial ownership migration, runtime retention and compatibility policy.
+[Input recovery and runtime updates](docs/managed-input-runtime-updates.md)
+define durable stop/reset cancellation, held ambiguous historical input, and
+automatic idle-only refresh of changed managed project launchers.
 
 See [`docs/managed-matrix-sessions.md`](docs/managed-matrix-sessions.md) for the
 operator runbook, health checks, token rotation, restart recovery, controls,

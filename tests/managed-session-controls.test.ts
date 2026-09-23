@@ -64,6 +64,46 @@ async function readMany(socket: Socket, count: number): Promise<ManagedSessionEn
 	});
 }
 
+test("delivery waits for persistence and terminal receipts prevent replay into a fresh attachment", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ordered-ipc") });
+	await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const matrix = new ManagedMatrixClient(config, async () => Response.json({}), [manifest.roomId]);
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
+	for (const eventId of ["$one", "$two"]) await registry.recordAcceptedInput(manifest.conversationId, {
+		deliveryId: deriveDeliveryId(manifest.conversationId, eventId), matrixEventId: eventId, kind: "prompt", body: "identical", status: "accepted",
+	});
+	const first = readMany(socket, 1); await router.attachmentReady(manifest.conversationId);
+	const [one] = await first;
+	assert.equal(one!.payload.deliveryId, deriveDeliveryId(manifest.conversationId, "$one"));
+	assert.deepEqual(registry.pendingInputs(manifest.conversationId).map((item) => item.status), ["delivered", "accepted"]);
+	await registry.acknowledgeInput(manifest.conversationId, String(one!.payload.deliveryId), "persisted", deriveTranscriptEntryId(manifest.piSessionId, "u1"));
+	const second = readMany(socket, 1); await router.attachmentReady(manifest.conversationId);
+	const [two] = await second;
+	assert.equal(two!.payload.deliveryId, deriveDeliveryId(manifest.conversationId, "$two"));
+	await registry.cancelPendingInputs(manifest.conversationId);
+	let unexpected = false; socket.on("data", () => { unexpected = true; });
+	await router.attachmentReady(manifest.conversationId);
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(unexpected, false, "cancelled entries never re-enter the adapter");
+});
+
+test("stop accepted during slash feedback prevents subsequent native command dispatch", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "feedback-race") });
+	await server.start(); t.after(() => server.close()); const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const id = manifest.conversationId;
+	await registry.recordAcceptedInput(id, { deliveryId: deriveDeliveryId(id, "$slash"), matrixEventId: "$slash", kind: "prompt", body: "/dangerous-command", status: "accepted" });
+	let dispatched = false; socket.on("data", () => { dispatched = true; });
+	const matrix = new ManagedMatrixClient(config, async () => Response.json({}), [manifest.roomId]);
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+		async () => { await registry.recordPendingControl(id, { controlId: deriveControlId(id, "$stop-race"), matrixEventId: "$stop-race", name: "stop" }); });
+	await router.attachmentReady(id); await new Promise((resolve) => setTimeout(resolve, 30));
+	assert.equal(dispatched, false);
+	assert.equal(registry.pendingInputs(id)[0]?.status, "cancelled");
+});
+
 test("relay persists controls before delivery and replays stable identities after an attachment crash and restart", async (t) => {
 	const { root, registry, manifest } = await fixture();
 	const control = { controlId: `control_${"a".repeat(32)}`, matrixEventId: "$durable-control", name: "model" as const, argument: "scoped/model" };
@@ -294,7 +334,7 @@ test("bootstrap accepts a limited initial timeline without replay, then routes n
 	} finally { await router.stop(); }
 	assert.deepEqual(diagnostics, []);
 	assert.deepEqual(registry.snapshot().conversations[0]?.matrixCursor, { status: "established", since: "after-new" });
-	assert.deepEqual(delivered.map((item) => item.payload.body), ["new task"]);
+	assert.deepEqual(delivered, [], "new input is held until a real adapter attaches");
 	assert.deepEqual(registry.pendingInputs(manifest.conversationId).map((item) => item.matrixEventId), ["$new"]);
 });
 
@@ -365,11 +405,13 @@ test("all joined Matrix and bridge-puppet senders have equal authority while exa
 		return Response.json({ event_id: "$ok" });
 	}, [manifest.roomId], { maxAttempts: 1 });
 	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
-	router.start(); const delivered = await readMany(socket, 5); await router.stop();
+	router.start(); const delivered = await readMany(socket, 2);
+	for (let i = 0; i < 100 && registry.pendingInputs(manifest.conversationId).length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+	await router.stop();
 	assert.deepEqual(delivered.map((item) => item.type === "input.deliver" ? [item.payload.senderUserId, item.payload.body] : ["control", item.payload.name]), [
-		[config.operatorUserId, "operator"], [member, "member"], [puppet, "puppet"], ["control", "thinking"],
-		[similarlyNamedHuman, "not ignored by a name heuristic"],
+		[config.operatorUserId, "operator"], ["control", "thinking"],
 	]);
+	assert.deepEqual(registry.pendingInputs(manifest.conversationId).map((input) => input.body), ["operator", "member", "puppet", "not ignored by a name heuristic"]);
 	assert.deepEqual(registry.pendingInputs(manifest.conversationId).map((input) => input.senderUserId), [config.operatorUserId, member, puppet, similarlyNamedHuman]);
 	assert.equal(registry.pendingControls(manifest.conversationId)[0]?.senderUserId, member);
 });
@@ -457,12 +499,12 @@ test("active prompt, steer, abort, valid reply fallback, and fail-closed relatio
 		return Response.json({ event_id: "$ok" });
 	}, [manifest.roomId]);
 	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
-	router.start(); const delivered = await readMany(socket, 4); await router.stop();
-	assert.deepEqual(delivered.map((item) => [item.payload.kind, item.payload.body]), [
-		["prompt", "plain"], ["steer", "redirect"], ["prompt", "reply body"], ["abort", undefined],
-	]);
-	assert.equal(registry.pendingInputs(manifest.conversationId).length, 4);
-	assert.equal(registry.pendingInputs(manifest.conversationId).every((input) => input.status === "cancelled"), true);
+	router.start(); const delivered = await readMany(socket, 2); await router.stop();
+	assert.deepEqual(delivered.map((item) => [item.payload.kind, item.payload.body]), [["prompt", "plain"], ["abort", undefined]]);
+	const inputs = registry.pendingInputs(manifest.conversationId);
+	assert.deepEqual(inputs.map((input) => [input.kind, input.body]), [["prompt", "plain"], ["steer", "redirect"], ["prompt", "reply body"], ["abort", undefined]]);
+	assert.equal(inputs.slice(0, 3).every((input) => input.status === "cancelled"), true);
+	assert.equal(inputs[3]?.status, "delivered", "abort itself still reaches the adapter and receives its own receipt");
 });
 
 test("persisted unfinished delivery wakes a crashed process but explicit cancellation never recovers", async () => {
@@ -697,8 +739,11 @@ test("ordinary checkpoint text closes the poll and bypasses configured options e
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "text-ipc") }); await server.start(); t.after(() => server.close());
 	const socket = await attach(server, manifest); t.after(() => socket.destroy());
 	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
-	const delivered = readMany(socket, 2); router.start(); const answers = await delivered; await router.stop();
-	assert.deepEqual(answers.map((answer) => answer.payload.body), ["Use a custom safe answer", "must not replace"]);
+	const delivered = readMany(socket, 1); router.start(); const answers = await delivered;
+	for (let i = 0; i < 100 && !registry.pendingInputs(manifest.conversationId).some((input) => input.body === "must not replace"); i++) await new Promise((resolve) => setTimeout(resolve, 10));
+	await router.stop();
+	assert.deepEqual(answers.map((answer) => answer.payload.body), ["Use a custom safe answer"]);
+	assert.ok(registry.pendingInputs(manifest.conversationId).some((input) => input.body === "must not replace" && input.status === "accepted"));
 	assert.equal(registry.snapshot().conversations[0]?.activeCheckpointPoll, null);
 	assert.equal(pollEnds, 1);
 });

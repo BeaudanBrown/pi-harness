@@ -294,6 +294,28 @@ export class HostLifecycle {
 	private readonly promotions = new Map<string, Promise<void>>();
 	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
 	private readonly refreshWaiters = new Map<string, { refreshId: string; resolve: (ready: boolean) => void }>();
+	private runtimeUpdateRunning = false;
+	private runtimeUpdatesStopped = false;
+	stopRuntimeUpdates(): void { this.runtimeUpdatesStopped = true; }
+
+	async reconcileRuntimeUpdates(runtimeId: string): Promise<void> {
+		if (this.runtimeUpdateRunning || this.runtimeUpdatesStopped) return;
+		this.runtimeUpdateRunning = true;
+		try {
+			for (const manifest of this.options.registry.listManifests()) {
+				if (this.runtimeUpdatesStopped) break;
+				if (manifest.kind !== "project" || !manifest.placement) continue;
+				const runtime = this.options.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
+				// Never wake dormant work or infer that an unknown/disconnected process
+				// is idle. Refresh itself holds delivery and obtains live idle consent.
+				if (!runtime?.attachment || runtime.state !== "active" || runtime.attachment.runtimeId === runtimeId ||
+					!this.options.registry.managedWindow(manifest.conversationId) || runtime.pendingControls.length ||
+					this.options.registry.hasGenerationBoundary(manifest.conversationId) || this.options.registry.isRefreshing(manifest.conversationId)) continue;
+				try { await this.refresh(manifest.conversationId, { attachmentId: runtime.attachment.attachmentId, desiredRuntimeId: runtimeId }); }
+				catch { /* Busy, unknown and failed launches remain pending; retry on the next bounded poll. */ }
+			}
+		} finally { this.runtimeUpdateRunning = false; }
+	}
 	private readonly reconciler: ProjectReconciler;
 
 	constructor(private readonly options: {
@@ -901,13 +923,19 @@ export class HostLifecycle {
 		waiter.resolve(status === "ready");
 	}
 
-	private async refresh(conversationId: string): Promise<Record<string, unknown>> {
+	private async refresh(conversationId: string, expected?: { attachmentId: string; desiredRuntimeId: string }): Promise<Record<string, unknown>> {
 		const manifest = this.projectManifest(conversationId);
 		this.options.registry.beginRefresh(conversationId);
 		try {
 			return await this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), async () => {
 				// Resolve configuration before touching the running process.
 				await this.resolveWorkspaceIdentity(manifest.placement!);
+				if (expected) {
+					const attachment = this.options.registry.snapshot().conversations.find((item) => item.conversationId === conversationId)?.attachment;
+					if (attachment?.attachmentId !== expected.attachmentId || attachment.runtimeId === expected.desiredRuntimeId) {
+						throw new RelayRegistryError("invalid_state", "Runtime refresh deferred: attachment changed during resolution");
+					}
+				}
 				const window = this.options.registry.managedWindow(conversationId);
 				if (this.options.registry.conversationState(conversationId) === "active") {
 					if (!window) throw new RelayRegistryError("invalid_state", "Refresh requires an exact managed window");

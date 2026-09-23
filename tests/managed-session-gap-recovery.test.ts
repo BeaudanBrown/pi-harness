@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, type ConversationManifest, type ManagedSessionEnvelope } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveTranscriptEntryId, type ConversationManifest, type ManagedSessionEnvelope } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { CoordinatorRouter } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
@@ -100,11 +100,15 @@ test("unrecoverable gaps block dispatch; interrupted dispatch resumes with stabl
 		assert.equal(url.searchParams.get("since"), "old-sync");
 		return Response.json({ ...response(), next_batch: "new-sync" });
 	}, [room], { maxAttempts: 1 });
+	let liveRegistry = registry;
 	const server = { sendToConversation: (envelope: ManagedSessionEnvelope) => {
 		if (interruptDispatch && envelope.payload.body === "$tail") throw new Error("synthetic interruption after durable acceptance");
-		accepted.push(String(envelope.payload.body)); return true;
+		accepted.push(String(envelope.payload.body));
+		void liveRegistry.acknowledgeInput(manifest.conversationId, String(envelope.payload.deliveryId), "persisted", deriveTranscriptEntryId(manifest.piSessionId, String(envelope.payload.deliveryId)));
+		return true;
 	} } as unknown as ManagedSessionIpcServer;
 	const run = async (registry: RelayRegistry) => {
+		liveRegistry = registry;
 		diagnosed = false;
 		const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined, async () => undefined,
 			async () => undefined, () => { diagnosed = true; });

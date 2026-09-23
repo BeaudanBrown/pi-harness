@@ -63,6 +63,8 @@ console.log(JSON.stringify(result));
 	const request = (operation: string, more: object = {}) => lifecycle.request({ protocolVersion: "1.0.0", messageId: "request", conversationId: deriveConversationId("refresh-host", "coordinator"),
 		role: "coordinator_adapter", type: "lifecycle.request", payload: { request: { operation, targetConversationId: id, ...more } } } as ManagedSessionEnvelope);
 	let busy = true;
+	let runtimeId = "a".repeat(64);
+	let refreshRequests = 0;
 	const clients: BoundAdapterClient[] = []; t.after(async () => { await Promise.all(clients.map((client) => client.close("shutdown"))); });
 	async function attach(): Promise<BoundAdapterClient> {
 		let launch: { nonce: string; env: object } | undefined;
@@ -70,9 +72,9 @@ console.log(JSON.stringify(result));
 		assert.ok(launch);
 		assert.deepEqual(launch.env, { ROOT_KEY: "projects", WORKSPACE: "workspace", RELATIVE_CWD: "sub", WORKSPACE_PATH: workspace });
 		const manifest = registry.manifestByConversationId(id)!;
-		const client = new BoundAdapterClient({ socketPath: server.socketPath, role: "ordinary_adapter", attachmentNonce: launch.nonce,
+		const client = new BoundAdapterClient({ socketPath: server.socketPath, role: "ordinary_adapter", attachmentNonce: launch.nonce, runtimeId,
 			binding: { version: "1.0.0", role: "ordinary_adapter", conversationId: id, sessionId: manifest.piSessionId, concept: manifest.concept, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId },
-			onEnvelope: async (envelope) => { if (envelope.type === "refresh.request") { await client.refreshResult(String(envelope.payload.refreshId), busy ? "busy" : "ready"); if (!busy) await client.close("shutdown"); } },
+			onEnvelope: async (envelope) => { if (envelope.type === "refresh.request") { refreshRequests += 1; const ready = !busy; await client.refreshResult(String(envelope.payload.refreshId), ready ? "ready" : "busy"); if (ready) await client.close("shutdown"); } },
 		}); clients.push(client); await client.connect(); return client;
 	}
 	const attaching = attach();
@@ -92,4 +94,37 @@ console.log(JSON.stringify(result));
 	assert.equal(registry.conversationState(id), "dormant"); assert.deepEqual(registry.pendingInputs(id), [queued]);
 	await rm(fail); await rm(record); const recovering = attach(); await request("conversation.refresh", { confirmed: true }); await recovering;
 	assert.deepEqual(registry.manifestByConversationId(id), manifest); assert.deepEqual(registry.pendingInputs(id), [queued]);
+	const before = refreshRequests;
+	await lifecycle.reconcileRuntimeUpdates(runtimeId);
+	assert.equal(refreshRequests, before, "matching runtime is not restarted");
+	busy = true; const target = "b".repeat(64);
+	await lifecycle.reconcileRuntimeUpdates(target);
+	assert.equal(refreshRequests, before + 1, "busy adapter is queried, never terminated");
+	assert.equal(registry.conversationState(id), "active");
+	busy = false; runtimeId = target; await rm(record); const updated = attach();
+	await lifecycle.reconcileRuntimeUpdates(target); await updated;
+	assert.equal(registry.snapshot().conversations.find((item) => item.conversationId === id)?.attachment?.runtimeId, target);
+	assert.deepEqual(registry.manifestByConversationId(id), manifest);
+	assert.deepEqual(registry.pendingInputs(id), [queued]);
+	const after = refreshRequests; await lifecycle.reconcileRuntimeUpdates(target);
+	assert.equal(refreshRequests, after, "successful update does not loop");
+	// Replace the attachment while the real refresh operation awaits its resolver.
+	const resolving = lifecycle as unknown as { resolveWorkspaceIdentity: (placement: unknown) => Promise<unknown> };
+	const resolveIdentity = resolving.resolveWorkspaceIdentity.bind(lifecycle);
+	const newest = "c".repeat(64);
+	resolving.resolveWorkspaceIdentity = async (placement) => {
+		const result = await resolveIdentity(placement);
+		await clients.at(-1)!.close("shutdown");
+		await new Promise((resolve) => setTimeout(resolve, 30));
+		runtimeId = newest; await attach();
+		return result;
+	};
+	await lifecycle.reconcileRuntimeUpdates(newest);
+	resolving.resolveWorkspaceIdentity = resolveIdentity;
+	assert.equal(refreshRequests, after, "new current attachment is not refreshed using a stale snapshot");
+	assert.equal(registry.snapshot().conversations.find((item) => item.conversationId === id)?.attachment?.runtimeId, newest);
+	await clients.at(-1)!.close("shutdown");
+	await new Promise((resolve) => setTimeout(resolve, 30));
+	await lifecycle.reconcileRuntimeUpdates("c".repeat(64));
+	assert.equal(registry.conversationState(id), "dormant", "updates never wake dormant conversations");
 });

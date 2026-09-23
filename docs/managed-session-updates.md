@@ -14,7 +14,9 @@
 
 ## Ownership and update contract
 
-The host owns tmux and activation. The harness owns relay shutdown, IPC,
+The host owns tmux and activation. The consuming host has restored its original
+`nr` (`nh os switch`); the detached activation evidence below describes the #93
+implementation, not a current `nr` guarantee. The harness owns relay shutdown, IPC,
 reconciliation, and Pi launchers. No new general session manager is introduced.
 A host supplies a pre-update guard; a failed guard never stops the old relay.
 NixOS does not directly stop/start the relay during switches: a separate
@@ -23,7 +25,9 @@ no timer that restarts intentionally stopped units.
 
 A compatible update preserves tmux and Pi PIDs. Existing Pi processes retain
 their loaded adapter and runtime; new launches resolve the installed dispatcher.
-Refresh remains explicit and idle-only. Unknown live activity is not permission
+Refresh remains idle-only. The later [runtime-update amendment](managed-input-runtime-updates.md)
+automatically refreshes changed managed project launchers after live idle consent;
+manual refresh remains available. Unknown live activity is not permission
 to replace a process. Reboot, deliberate server shutdown, and an approved
 incompatible upgrade are maintenance, not transparent updates.
 

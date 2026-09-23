@@ -72,6 +72,8 @@ function custom(id: string, customType: string, data: unknown) {
 class FakeRelay {
 	readonly frames: ManagedSessionEnvelope[] = [];
 	readonly interruptedActivities = new Set<string>();
+	readonly cancelledDeliveries = new Set<string>();
+	stopAfterPersistedAck?: string;
 	projectActivity?: (envelope: ManagedSessionEnvelope) => Promise<"updated" | "finalized">;
 	beforeActivityAck?: (socket: Socket, envelope: ManagedSessionEnvelope) => Promise<void>;
 	checkpointError?: { code: string; message: string };
@@ -146,7 +148,17 @@ class FakeRelay {
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
-			socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } }));
+			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
+				socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "invalid_state", message: "Managed delivery acknowledgement regressed", retryable: false } }));
+				return;
+			}
+			const receipt = encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } });
+			if (this.stopAfterPersistedAck === envelope.payload.deliveryId && envelope.payload.status === "persisted") {
+				this.stopAfterPersistedAck = undefined;
+				const stop = encodeNdjsonEnvelope({ protocolVersion: "1.0.0", messageId: "stop-after-receipt", conversationId,
+					role: "relay", type: "control.deliver", payload: { controlId: `control_${"d".repeat(32)}`, name: "stop" } });
+				socket.write(receipt + stop);
+			} else socket.write(receipt);
 		} else if (envelope.type === "media.reject") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "media.result", payload: { deliveryId: envelope.payload.deliveryId, blobId: envelope.payload.blobId, status: "rejected" } }));
 		} else if (envelope.type === "refresh.result") {
@@ -1162,7 +1174,17 @@ test("managed adapter steers busy Matrix prompts and replay while preserving idl
 	const recoveryCtx: any = { ...ctx, sessionManager: { ...ctx.sessionManager, getBranch: () => recoveryBranch, getLeafId: () => recoveryLeaf } };
 	await recoveryHandlers.get("session_start")!({ reason: "resume" }, recoveryCtx);
 	assert.equal(resumeTriggers, 1, "persisted unfinished delivery resumes without reinjecting its Pi user entry");
-	assert.equal(reinjectedExpanded, 1, "expanded-before-persistence crash is reinjected exactly once from its durable expansion");
+	assert.equal(reinjectedExpanded, 0, "ambiguous historical expansion is held instead of replaying instructions");
+	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
+	relay.cancelledDeliveries.add(recoveryId);
+	await recoveryHandlers.get("session_start")!({ reason: "resume" }, recoveryCtx);
+	assert.equal(resumeTriggers, 1, "relay cancellation prevents a stale persisted receipt from resuming work");
+	assert.equal(reinjectedExpanded, 0, "ambiguous expansion remains held across repeated restarts");
+	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
+	relay.cancelledDeliveries.clear(); relay.stopAfterPersistedAck = recoveryId;
+	await recoveryHandlers.get("session_start")!({ reason: "resume" }, recoveryCtx);
+	assert.equal(resumeTriggers, 1, "a stop received alongside the receipt wins before recovery continuation");
+	assert.equal(restoreDeliveries(recoveryBranch).get(recoveryId)?.status, "cancelled");
 	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
 });
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { ALOOP_LIFECYCLE_ENTRY_TYPE, parseAloopLifecycleEvent } from "../aloop-lifecycle.js";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
@@ -184,20 +185,43 @@ export function restoreDeliveries(entries: readonly unknown[]): Map<string, Deli
 }
 
 export function findDeliveredUserEntry(entries: readonly unknown[], deliveryId: string): string | undefined {
-	let expandedEntryId: string | undefined;
-	for (const entry of entries) {
-		const marker = customData(entry, DELIVERY_ENTRY_TYPE);
-		if (marker?.data.deliveryId === deliveryId && (marker.data.status === "expanded" || marker.data.status === "reinjecting")) expandedEntryId = marker.id;
-	}
-	if (!expandedEntryId) return undefined;
+	return deliveredUserEntries(entries).get(deliveryId);
+}
+
+function deliveredUserEntries(entries: readonly unknown[]): Map<string, string> {
+	// Expansion markers may all be appended before Pi persists any queued user
+	// messages. Match in dispatch order, once per user entry, along its ancestry;
+	// adjacency alone both loses early deliveries and misattributes the last one.
+	const parents = new Map<string, string | null>();
+	const pending = new Map<string, { id: string; text: string; imageHash?: string }>();
+	const matched = new Map<string, string>();
 	for (const entry of entries) {
 		if (typeof entry !== "object" || entry === null) continue;
-		const candidate = entry as { type?: unknown; id?: unknown; parentId?: unknown; message?: unknown };
-		if (candidate.type !== "message" || candidate.parentId !== expandedEntryId || typeof candidate.id !== "string" ||
-			typeof candidate.message !== "object" || candidate.message === null || (candidate.message as { role?: unknown }).role !== "user") continue;
-		return candidate.id;
+		const candidate = entry as { type?: string; id?: string; parentId?: string | null; message?: { role?: string; content?: unknown } };
+		if (typeof candidate.id !== "string") continue;
+		parents.set(candidate.id, candidate.parentId ?? null);
+		const marker = customData(entry, DELIVERY_ENTRY_TYPE);
+		if (marker && typeof marker.data.deliveryId === "string" && typeof marker.data.expandedText === "string" &&
+			(marker.data.status === "expanded" || marker.data.status === "reinjecting") && !matched.has(marker.data.deliveryId)) {
+			const media = marker.data.media as { sha256?: string } | undefined;
+			pending.set(marker.data.deliveryId, { id: marker.id, text: marker.data.expandedText, imageHash: media?.sha256 });
+		}
+		if (candidate.type !== "message" || candidate.message?.role !== "user") continue;
+		const content = candidate.message.content;
+		const text = typeof content === "string" ? content : Array.isArray(content)
+			? content.filter((part) => part?.type === "text").map((part) => part.text).join("\n") : undefined;
+		const images = Array.isArray(content) ? content.filter((part) => part?.type === "image") : [];
+		const imageHash = images.length === 1 && typeof images[0].data === "string"
+			? createHash("sha256").update(Buffer.from(images[0].data, "base64")).digest("hex") : undefined;
+		const ancestors = new Set<string>();
+		let parent = candidate.parentId;
+		while (parent && !ancestors.has(parent)) { ancestors.add(parent); parent = parents.get(parent); }
+		for (const [id, expansion] of pending) {
+			if (expansion.text !== text || expansion.imageHash !== imageHash || !ancestors.has(expansion.id)) continue;
+			matched.set(id, candidate.id); pending.delete(id); break;
+		}
 	}
-	return undefined;
+	return matched;
 }
 
 export function restoreCheckpoints(entries: readonly unknown[]): Map<string, ManagedCheckpointMarker> {
@@ -295,12 +319,8 @@ export function eligibleTranscriptEntries(
 	const matrixEntryIds = new Set([...deliveries.values()]
 		.filter((delivery) => delivery.status === "persisted" || delivery.status === "completed")
 		.map((delivery) => delivery.piEntryId).filter((value): value is string => value !== undefined));
-	const pendingMatrixUserParents = new Set(branch.flatMap((value) => {
-		const marker = customData(value, DELIVERY_ENTRY_TYPE);
-		if (!marker || (marker.data.status !== "expanded" && marker.data.status !== "reinjecting") ||
-			typeof marker.data.deliveryId !== "string" || !deliveries.has(marker.data.deliveryId)) return [];
-		return [marker.id];
-	}));
+	const inferred = deliveredUserEntries(branch);
+	const pendingMatrixUserEntries = new Set([...deliveries.keys()].map((id) => inferred.get(id)).filter(Boolean));
 	const result: EligibleTranscriptEntry[] = [];
 	let checkpointBoundary = false;
 	for (const value of branch) {
@@ -312,7 +332,7 @@ export function eligibleTranscriptEntries(
 		const entryId = persistedEntryId(binding.sessionId, entry.id);
 		if (message.role === "user") {
 			checkpointBoundary = false;
-			if (matrixEntryIds.has(entryId) || (typeof entry.parentId === "string" && pendingMatrixUserParents.has(entry.parentId))) continue;
+			if (matrixEntryIds.has(entryId) || pendingMatrixUserEntries.has(entry.id)) continue;
 			const body = textContent(message.content, false);
 			if (body) result.push({ entryId, piEntryKey: entry.id, kind: "local_user", body });
 			continue;

@@ -151,6 +151,7 @@ const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload:
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
 const attachmentFields = {
+	runtimeId: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	sessionId: identifier,
 	attachmentNonce: Type.String({ pattern: "^[A-Za-z0-9_-]{32,128}$" }),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
@@ -505,6 +506,7 @@ const pendingControl = strictObject({
 		Type.Literal("compact"), Type.Literal("new"), Type.Literal("stop"),
 	]),
 	argument: Type.Optional(boundedString(4_096)),
+	cancelDeliveryIds: Type.Optional(Type.Array(stableId("delivery"), { maxItems: MAX_PENDING_INPUTS })),
 	senderUserId: Type.Optional(MatrixUserIdSchema),
 });
 const controlPollScope = Type.Union([Type.Literal("model"), Type.Literal("thinking")]);
@@ -580,6 +582,7 @@ const runtimeConversation = strictObject({
 			attachmentId: identifier,
 			sessionId: identifier,
 			connectedAt: timestamp,
+			runtimeId: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 		}),
 	),
 	matrixCursor: Type.Union([
@@ -671,11 +674,11 @@ export interface HostRuntimeState {
 		conversationId: string;
 		state: "starting" | "active" | "dormant";
 		attachmentNonceHash?: string;
-		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string };
+		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string; runtimeId?: string };
 		matrixCursor: { status: "bootstrap" } | { status: "established"; since: string };
 		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string; piEntryId?: string; status: string;
 			media?: { blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp"; byteLength: number; width: number; height: number; chunkCount: number } }>;
-		pendingControls: Array<{ controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string }>;
+		pendingControls: Array<{ controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string; cancelDeliveryIds?: string[] }>;
 		completedControlIds: string[];
 		publishingControlPoll: null | {
 			sourceControl: { controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };

@@ -965,6 +965,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				beginControlExecution(ctx, payload.controlId, "stop", payload.argument);
 				recoveredControlExecutions.delete(payload.controlId);
 				await controlReply(payload.controlId, "ok", "Managed process stopping; Matrix and Pi history are preserved.");
+				for (const marker of deliveries.values()) {
+					if (marker.status === "completed" || marker.status === "cancelled") continue;
+					const cancelled = { ...marker, status: "cancelled" as const };
+					recordDelivery(ctx, cancelled); acknowledge(cancelled);
+				}
+				activeDeliveries.clear(); pendingUserPersistence.length = 0;
+				persistedRecoveryPending.clear(); expandedRecoveryPending.clear(); inFlightDeliveries.clear();
 				ctx.abort(); ctx.shutdown();
 			}
 		}
@@ -1047,6 +1054,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
+				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				onEnvelope: handleEnvelope, onMedia: (image) => handleMedia(image, ctx),
 				onDisconnect: () => {
 					if (client !== next || bindingEpoch !== epoch) return;
@@ -1103,21 +1111,26 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 						recordDelivery(ctx, completed); activeDeliveries.delete(origin.deliveryId); acknowledge(completed);
 					}
 				}
-				for (const deliveryId of expandedRecoveryPending) {
-					expandedRecoveryPending.delete(deliveryId);
-					const marker = deliveries.get(deliveryId);
-					if (!marker?.expandedText) continue;
-					const dispatching: DeliveryMarker = { ...marker, status: "reinjecting" };
-					recordDelivery(ctx, dispatching); inFlightDeliveries.add(deliveryId); pendingUserPersistence.push(dispatching);
-					pi.sendUserMessage(dispatching.expandedText!, {
-						...(ctx.isIdle() ? {} : { deliverAs: marker.kind === "follow_up" ? "followUp" as const : "steer" as const }),
-						expandPromptTemplates: false, onPromptExpanded: () => undefined,
-					});
+				if (expandedRecoveryPending.size) {
+					notify(ctx, `${expandedRecoveryPending.size} ambiguous managed deliveries held; use !stop or !new --confirm to discard stale work. No input was replayed.`, "warning");
 				}
 				for (const deliveryId of persistedRecoveryPending) {
 					persistedRecoveryPending.delete(deliveryId);
-					pi.sendMessage({ customType: "managed-session.resume", content: "Continue the interrupted managed Matrix delivery.", display: false },
-						{ deliverAs: "followUp", triggerTurn: true });
+					const marker = deliveries.get(deliveryId);
+					if (!marker?.piEntryId) continue;
+					// Relay cancellation/completion wins over stale local history. Await
+					// authoritative acceptance before triggering any recovery model turn.
+					try { await next.acknowledgeInput(deliveryId, "persisted", marker.piEntryId); }
+					catch (error) {
+						if (!(error instanceof ManagedAdapterError) || error.code !== "invalid_state") throw error;
+						notify(ctx, "Managed recovery held: relay receipt is terminal or inconsistent; no task was resumed.", "warning");
+						continue;
+					}
+					await next.runAfterInbound(() => {
+						if (stopped || client !== next || !next.connected || bindingEpoch !== epoch || deliveries.get(deliveryId)?.status !== "persisted") return;
+						pi.sendMessage({ customType: "managed-session.resume", content: "Continue the interrupted managed Matrix delivery.", display: false },
+							{ deliverAs: "followUp", triggerTurn: true });
+					});
 				}
 				queueProjection(ctx);
 				aloopProjectionWork = aloopProjectionWork.then(() => projectAloopLifecycle(ctx));
@@ -1200,11 +1213,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					if (!checkpointOrigins.has(marker.deliveryId)) persistedRecoveryPending.add(marker.deliveryId);
 				}
 				if (binding && (marker.status === "expanded" || marker.status === "reinjecting")) {
-					const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
-					if (piEntryKey) {
-						persistExpanded(ctx, marker, piEntryKey);
-						if (!checkpointOrigins.has(marker.deliveryId)) persistedRecoveryPending.add(marker.deliveryId);
-					} else if (!marker.media) expandedRecoveryPending.add(marker.deliveryId);
+					// Without an explicit receipt, historical state cannot prove whether
+					// the model already acted. Keep it held across subsequent restarts too.
+					expandedRecoveryPending.add(marker.deliveryId);
 				}
 			}
 			setStatus(ctx);
@@ -1247,6 +1258,18 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("session_before_compact", () => { if (activity) sendActivityUpdate(activity, true, "compaction"); });
 		pi.on("session_compact", () => { if (activity) { activity.compactions += 1; sendActivityUpdate(activity, true); } });
 		pi.on("session_compact_failed", (event) => { if (activity) { if (!event.aborted) activity.requestedOutcome = "failed"; sendActivityUpdate(activity, true); } });
+
+		// Record correlation as soon as the user entry exists, not only after a
+		// potentially long agent run. Explicit receipts remain restart authority.
+		pi.on("message_end", (event, ctx) => {
+			if (event.message.role !== "user") return;
+			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
+				const marker = pendingUserPersistence[index]!;
+				const key = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
+				if (!key) continue;
+				pendingUserPersistence.splice(index, 1); persistExpanded(ctx, marker, key);
+			}
+		});
 
 		pi.on("agent_settled", async (_event, ctx) => {
 			const finalizations = captureFinalizations(ctx);

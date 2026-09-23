@@ -189,7 +189,7 @@ test("unprefixed authorized coordinator text is durable before wake and delivere
 		}, "router-connection");
 	});
 	router.start();
-	for (let index = 0; index < 50 && launches === 0; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+	for (let index = 0; index < 500 && value.registry.conversationState(conversationId) !== "active"; index += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.equal(launches, 1);
 	assert.equal(value.registry.pendingInputs(conversationId).length, 1, "unauthorized text is ignored");
 	attached = true;

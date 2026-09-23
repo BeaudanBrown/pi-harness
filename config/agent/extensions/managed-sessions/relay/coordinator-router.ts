@@ -226,13 +226,9 @@ export class CoordinatorRouter {
 		for (const control of this.registry.pendingControls(conversationId)) {
 			await this.beginOperationFeedback(conversationId, control.controlId); this.server.sendToConversation(this.controlEnvelope(conversationId, control));
 		}
-		for (const input of this.registry.pendingInputs(conversationId)) {
-			if (input.status !== "accepted" && input.status !== "delivered") continue;
-			if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(conversationId, input.deliveryId);
-			const delivered = input.media ? await this.media?.deliver(this.server, conversationId, input) ?? false
-				: this.server.sendToConversation(this.deliveryEnvelope(conversationId, input));
-			if (delivered) await this.registry.markInputDelivered(conversationId, input.deliveryId);
-		}
+		const manifest = this.registry.manifestByConversationId(conversationId);
+		const input = this.registry.pendingInputs(conversationId).find((item) => item.status === "accepted" || item.status === "delivered");
+		if (manifest && input) await this.deliverRecordedInput(manifest, input);
 	}
 
 	private async run(signal: AbortSignal): Promise<void> {
@@ -348,6 +344,11 @@ export class CoordinatorRouter {
 		}
 		const state = this.registry.conversationState(manifest.conversationId);
 		if (state === "dormant" && (control.name === "help" || control.name === "status" || control.name === "stop")) {
+			if (control.name === "stop") {
+				const controlId = deriveControlId(manifest.conversationId, eventId);
+				await this.registry.recordPendingControl(manifest.conversationId, { controlId, matrixEventId: eventId, senderUserId, name: "stop" });
+				await this.registry.acknowledgeControlResult(manifest.conversationId, controlId);
+			}
 			let message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>."
 				: "Managed conversation is already dormant.";
 			if (control.name === "status") {
@@ -407,14 +408,39 @@ export class CoordinatorRouter {
 		}
 	}
 
-	private async deliverRecordedInput(manifest: ConversationManifest, input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
-		if (this.registry.isRefreshing(manifest.conversationId)) return;
-		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
-		const state = this.registry.conversationState(manifest.conversationId);
-		const delivered = input.media ? await this.media?.deliver(this.server, manifest.conversationId, input) ?? false
-			: this.server.sendToConversation(this.deliveryEnvelope(manifest.conversationId, input));
-		if (delivered) await this.registry.markInputDelivered(manifest.conversationId, input.deliveryId);
-		else if (state === "dormant") await this.registry.beginLaunch(manifest.conversationId);
+	private readonly delivering = new Set<string>();
+	private readonly deliveryAgain = new Set<string>();
+	private async deliverRecordedInput(manifest: ConversationManifest, _input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
+		const id = manifest.conversationId;
+		if (this.delivering.has(id)) { this.deliveryAgain.add(id); return; }
+		if (this.registry.isRefreshing(id) || this.registry.hasGenerationBoundary(id) ||
+			this.registry.pendingControls(id).some((control) => control.name === "stop")) return;
+		this.delivering.add(id);
+		try {
+			// The registry, not a stale caller snapshot, decides eligibility. At most
+			// one input crosses expansion/persistence at a time; model runs may continue.
+			const input = this.registry.pendingInputs(id).find((item) => item.status === "accepted" || item.status === "delivered");
+			if (!input || input.deliveryId !== _input.deliveryId) return;
+			const state = this.registry.conversationState(id);
+			if (state !== "active") {
+				if (state === "dormant") await this.registry.beginLaunch(id);
+				return;
+			}
+			await this.registry.markInputDelivered(id, input.deliveryId);
+			const current = this.registry.pendingInputs(id).find((item) => item.deliveryId === input.deliveryId);
+			if (!current || current.status !== "delivered" || this.registry.hasGenerationBoundary(id) || this.registry.isRefreshing(id)) return;
+			if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(id, input.deliveryId);
+			// Feedback can await disk/Matrix work. Cancellation or a reset accepted
+			// during it must win before any native slash-command dispatch.
+			if (this.registry.pendingInputs(id).find((item) => item.deliveryId === input.deliveryId)?.status !== "delivered" ||
+				this.registry.hasGenerationBoundary(id) || this.registry.isRefreshing(id) ||
+				this.registry.pendingControls(id).some((control) => control.name === "stop")) return;
+			if (input.media) await this.media?.deliver(this.server, id, input);
+			else this.server.sendToConversation(this.deliveryEnvelope(id, input));
+		} finally {
+			this.delivering.delete(id);
+			if (this.deliveryAgain.delete(id)) setImmediate(() => { void this.attachmentReady(id).catch((error) => this.diagnostic(String(error))); });
+		}
 	}
 
 	private async acceptImage(manifest: ConversationManifest, event: MatrixImageEvent, signal: AbortSignal): Promise<void> {
@@ -476,7 +502,6 @@ export class CoordinatorRouter {
 		await this.registry.recordAcceptedInput(manifest.conversationId, {
 			deliveryId, matrixEventId: event.eventId, senderUserId: event.senderUserId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
 		});
-		if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(manifest.conversationId, deliveryId);
 		const recordedState = this.registry.conversationState(manifest.conversationId);
 		if (recordedState === "starting" && input.kind === "abort") {
 			if (this.launching.has(manifest.conversationId)) {
@@ -491,7 +516,7 @@ export class CoordinatorRouter {
 			return;
 		}
 		if (recordedState === "active" && input.kind === "abort") {
-			await this.registry.cancelPendingInputs(manifest.conversationId);
+			await this.registry.cancelPendingInputsExcept(manifest.conversationId, deliveryId);
 			await this.endCancelledCommandFeedback(manifest.conversationId);
 		}
 		await this.deliverRecordedInput(manifest, {
