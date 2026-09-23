@@ -24,6 +24,7 @@ export function renderManagedConversationStatus(
 		...(manifest.checkoutDisplayName ? [`Checkout: ${manifest.checkoutDisplayName}`] : []),
 		`State: ${runtime.state}; Pi ${live?.state ?? "unavailable"}; adapter ${runtime.attachment ? "connected" : "disconnected"}`,
 		`Generation: ${generation?.ordinal ?? 1}/${manifest.generations?.length ?? 1}`,
+		...(runtime.generationTransition ? [`Generation transition: ${runtime.generationTransition.phase}; queued input retained${runtime.generationTransition.failure ? `; latest failure ${runtime.generationTransition.failure.code}` : ""}`] : []),
 		`Model: ${live?.model ?? "unavailable"}`,
 		`Saved model: ${manifest.selectedModel ?? "none"}; requested: ${requestedModel ?? "configured default"}`,
 		`Model match: ${requestedModel && live?.model ? (requestedModel === live.model ? "yes" : "NO — runtime differs from requested model") : "unknown"}`,

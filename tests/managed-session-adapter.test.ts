@@ -826,6 +826,23 @@ test("rewinding a settled branch creates a distinct activity without editing its
 	assert.deepEqual(f.errors, []); assert.deepEqual(f.notices, []);
 });
 
+test("coalescing retains tool changes made during a slow initial activity request", async t => {
+	const f = await activityIntegration(t); let release!: () => void; let blocked = false;
+	const gate = new Promise<void>(resolve => { release = resolve; });
+	f.relay.beforeActivityAck = async (_socket, event) => {
+		if (event.type === "activity.update" && !blocked) { blocked = true; await gate; }
+	};
+	const starting = f.start();
+	try {
+		await activityWait(() => blocked);
+		f.handlers.get("tool_execution_start")!({ toolCallId: "slow", toolName: "read" });
+		await new Promise(resolve => setTimeout(resolve, 5_100));
+		release(); await starting;
+		await activityWait(() => f.frames().some(event => event.type === "activity.update" && Array.isArray(event.payload.tools) && event.payload.tools.length > 0), 6_000);
+	} finally { release(); await starting; }
+	f.answer(); await f.settle(); assert.deepEqual(f.errors, []);
+});
+
 test("real adapter/projector single-flight overlapping settlement", async t => {
 	const f = await activityIntegration(t); await f.start(); f.answer();
 	await Promise.all([f.settle(), f.settle()]);

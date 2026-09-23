@@ -12,9 +12,20 @@ import { CheckpointPollPublisher } from "./checkpoint-poll-publisher.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { renderTranscript } from "./transcript-renderer.js";
+import { NoticeOutbox } from "./notice-outbox.js";
 
 export class RelayEventProjector {
 	readonly checkpointPollPublisher: CheckpointPollPublisher;
+	private notices?: NoticeOutbox;
+
+	async startNoticeOutbox(path: string, diagnostic: (message: string) => void): Promise<void> {
+		this.notices = new NoticeOutbox(path, async (notice) => {
+			if (!this.registry.manifestByConversationId(notice.conversationId)) return;
+			await this.project(notice.conversationId, notice.piSessionId, notice.roomId, `notice:${notice.sourceId}`, "notice", notice.body);
+		}, diagnostic);
+		await this.notices.load(); this.notices.start();
+	}
+	async close(): Promise<void> { await this.notices?.close(); }
 
 	constructor(private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient) {
 		this.checkpointPollPublisher = new CheckpointPollPublisher(registry, matrix);
@@ -67,7 +78,9 @@ export class RelayEventProjector {
 	async projectNotice(conversationId: string, sourceId: string, body: string): Promise<void> {
 		const manifest = this.registry.manifestByConversationId(conversationId);
 		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
-		await this.project(conversationId, manifest.piSessionId, manifest.roomId, `notice:${sourceId}`, "notice", body);
+		if (this.notices) {
+			await this.notices.enqueue({ conversationId, sourceId, piSessionId: manifest.piSessionId, roomId: manifest.roomId, body });
+		} else await this.project(conversationId, manifest.piSessionId, manifest.roomId, `notice:${sourceId}`, "notice", body);
 	}
 
 	private async project(conversationId: string, piSessionId: string, roomId: string, sourceKey: string,

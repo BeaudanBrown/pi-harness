@@ -42,13 +42,15 @@ export class CheckpointPollPublisher {
 		await this.registry.completeCheckpointPollClosure(conversationId, closing.pollEventId, closing.closureTransactionId);
 	}
 
-	async reconcile(): Promise<void> {
+	async reconcile(targetConversationId?: string): Promise<void> {
 		for (const { conversationId, intent } of this.registry.publishingCheckpointPolls()) {
+			if (targetConversationId && conversationId !== targetConversationId) continue;
 			const manifest = this.registry.manifestByConversationId(conversationId);
 			if (!manifest) throw new RelayRegistryError("not_found", "Checkpoint poll conversation was not found");
 			await this.publish(conversationId, manifest.roomId, intent);
 		}
 		for (const { conversationId, closing } of this.registry.closingCheckpointPolls()) {
+			if (targetConversationId && conversationId !== targetConversationId) continue;
 			const manifest = this.registry.manifestByConversationId(conversationId);
 			if (!manifest) throw new RelayRegistryError("not_found", "Closing checkpoint poll conversation was not found");
 			await this.close(conversationId, manifest.roomId, closing);

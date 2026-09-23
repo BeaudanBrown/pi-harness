@@ -92,6 +92,7 @@ export class ManagedMatrixClient {
 	readonly #managedRoomIds: Set<string>;
 	readonly #http: MatrixHttp;
 	readonly #retry: Required<MatrixRetryOptions>;
+	#sendRetryAt = 0;
 
 	constructor(config: ManagedMatrixConfig, private readonly fetchImplementation: FetchLike = fetch, managedRoomIds: Iterable<string> = [], retry: ManagedMatrixRetryOptions = {}) {
 		const parsed = new URL(config.homeserver);
@@ -492,7 +493,16 @@ export class ManagedMatrixClient {
 		return { serverName: parsed.host, mediaId };
 	}
 
-	private request(method: string, path: string, body?: JsonObject, signal?: AbortSignal): Promise<unknown> {
-		return this.#http.request(method, path, body, signal);
+	private async request(method: string, path: string, body?: JsonObject, signal?: AbortSignal): Promise<unknown> {
+		const scheduled = this.#retry.maxAttempts === 1;
+		const eventSend = method === "PUT" && path.includes("/send/");
+		if (scheduled && eventSend && this.#sendRetryAt > Date.now()) throw new ManagedMatrixError("http", "Matrix event sending is cooling down", 429, true, this.#sendRetryAt - Date.now());
+		const bounded = scheduled ? AbortSignal.any([...(signal ? [signal] : []), AbortSignal.timeout(10_000)]) : signal;
+		try { return await this.#http.request(method, path, body, bounded); }
+		catch (error) {
+			if (scheduled && eventSend && error instanceof ManagedMatrixError && error.status === 429) this.#sendRetryAt = Math.max(this.#sendRetryAt, Date.now() + Math.max(1_000, error.retryAfterMs ?? 5_000));
+			if (scheduled && !signal?.aborted && bounded?.aborted) throw new ManagedMatrixError("network", "Matrix request deadline exceeded", undefined, true);
+			throw error;
+		}
 	}
 }

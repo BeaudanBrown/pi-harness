@@ -10,6 +10,7 @@ import {
 	parseNdjsonEnvelope,
 } from "../contracts.js";
 import { ensurePrivateDirectory } from "./atomic-json.js";
+import { MatrixError } from "../../matrix-shared/http.js";
 import { type AcceptedAttachment, RelayRegistry, RelayRegistryError } from "./registry.js";
 
 export type PeerUidResolver = (socket: Socket) => number | undefined | Promise<number | undefined>;
@@ -30,6 +31,7 @@ interface ConnectionState {
 
 function relayError(conversationId: string, inReplyTo: string, error: unknown): ManagedSessionEnvelope {
 	const registryError = error instanceof RelayRegistryError ? error : undefined;
+	const matrixError = error instanceof MatrixError ? error : undefined;
 	return {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: `relay-${randomUUID()}`,
@@ -38,9 +40,9 @@ function relayError(conversationId: string, inReplyTo: string, error: unknown): 
 		type: "error",
 		inReplyTo,
 		payload: {
-			code: registryError?.code ?? "invalid_state",
-			message: registryError?.message ?? "Relay operation failed",
-			retryable: false,
+			code: registryError?.code ?? (matrixError ? "matrix_unavailable" : "invalid_state"),
+			message: registryError?.message ?? (matrixError ? `Matrix ${matrixError.status === 429 ? "rate limited" : "request failed"}${matrixError.status ? ` (HTTP ${matrixError.status})` : ""}; durable work retained for retry` : "Relay operation failed"),
+			retryable: matrixError?.retryable ?? false,
 		},
 	};
 }
@@ -233,8 +235,8 @@ export class ManagedSessionIpcServer {
 			} catch (error) {
 				const conversationId = envelope.conversationId;
 				if (conversationId) this.send(socket, relayError(conversationId, envelope.messageId, error));
-				const recoverable = state.attachment && error instanceof RelayRegistryError &&
-					["not_found", "invalid_state", "capacity_reached", "launch_failed", "matrix_unavailable", "activity_interrupted"].includes(error.code);
+				const recoverable = state.attachment && (error instanceof MatrixError || error instanceof RelayRegistryError &&
+					["not_found", "invalid_state", "capacity_reached", "launch_failed", "matrix_unavailable", "activity_interrupted"].includes(error.code));
 				if (recoverable) continue;
 				socket.destroySoon();
 				return;

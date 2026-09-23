@@ -36,8 +36,9 @@ export class ControlPollPublisher {
 		await this.publishIntent(publication.conversationId, publication.roomId, intent);
 	}
 
-	async reconcile(): Promise<void> {
+	async reconcile(targetConversationId?: string): Promise<void> {
 		for (const { conversationId, intent } of this.registry.publishingControlPolls()) {
+			if (targetConversationId && conversationId !== targetConversationId) continue;
 			const manifest = this.registry.manifestByConversationId(conversationId);
 			if (!manifest) throw new Error("Publishing control poll has no managed conversation");
 			await this.publishIntent(conversationId, manifest.roomId, intent);

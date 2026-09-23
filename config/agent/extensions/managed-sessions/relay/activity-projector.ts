@@ -61,7 +61,9 @@ function renderFinal(payload: ActivityFinal): string {
 export class ActivityProjector {
 	private readonly file: AtomicJsonFile<ActivityState>;
 	private state: ActivityState = { schemaVersion: ACTIVITY_STATE_VERSION, activities: [] };
-	private operation: Promise<void> = Promise.resolve();
+	private readonly operations = new Map<string, Promise<void>>();
+	private writes: Promise<void> = Promise.resolve();
+	private readonly live = new Map<string, Set<string>>();
 	private readonly typing = new Map<string, TypingState>();
 	private closed = false;
 	private readonly operationLeases = new Map<string, Set<string>>();
@@ -81,7 +83,17 @@ export class ActivityProjector {
 	}
 	async load(): Promise<void> { this.state = await this.file.read() ?? this.state; for (const item of this.state.activities) if (!item.finalized) this.attachmentDisconnected(item.conversationId); }
 	async project(envelope: ManagedSessionEnvelope): Promise<"updated" | "finalized"> {
-		return this.serialize(() => this.projectOnce(envelope));
+		if (this.closed) throw new RelayRegistryError("matrix_unavailable", "Activity projection is shutting down; retry after reconnect");
+		if (envelope.conversationId && envelope.role === "ordinary_adapter" && ["activity.update", "activity.finalize"].includes(envelope.type)) {
+			const id = envelope.conversationId;
+			const spans = this.live.get(id) ?? new Set<string>();
+			if (envelope.type === "activity.update" && !this.state.activities.some((item) => item.conversationId === id && item.activityId === envelope.payload.activityId && item.finalized)) spans.add(String(envelope.payload.activityId));
+			else spans.delete(String(envelope.payload.activityId));
+			this.live.set(id, spans);
+			const manifest = this.registry.manifestByConversationId(id);
+			if (manifest) this.desireTyping(id, manifest.roomId, spans.size > 0);
+		}
+		return this.serialize(() => this.projectOnce(envelope), envelope.conversationId);
 	}
 	private async projectOnce(envelope: ManagedSessionEnvelope, preserveInterruption = false, stillCurrent: () => boolean = () => true): Promise<"updated" | "finalized"> {
 		if (!envelope.conversationId || envelope.role !== "ordinary_adapter" || !["activity.update", "activity.finalize"].includes(envelope.type)) throw new RelayRegistryError("permission_denied", "Activity requires an attached ordinary adapter");
@@ -100,7 +112,7 @@ export class ActivityProjector {
 		if (!item) {
 			if (this.state.activities.length >= MAX_ACTIVITIES) throw new RelayRegistryError("capacity_reached", "Activity history capacity was reached");
 			item = { conversationId: envelope.conversationId, activityId: payload.activityId, revision: payload.revision, finalized: false, payload };
-			this.state.activities.push(item); await this.file.write(this.state);
+			this.state.activities.push(item); await this.persist();
 		}
 		const body = envelope.type === "activity.finalize" ? renderFinal(payload as ActivityFinal) : renderUpdate(payload as ActivityUpdate);
 		if (!item.eventId) {
@@ -110,10 +122,8 @@ export class ActivityProjector {
 		}
 		if (!stillCurrent()) return "updated";
 		item.revision = payload.revision; item.payload = payload; item.finalized = envelope.type === "activity.finalize";
-		await this.file.write(this.state);
+		await this.persist();
 		if (!preserveInterruption) this.recordReconnectedActivity(envelope.conversationId, payload.activityId);
-		if (item.finalized && !this.hasOperationLease(envelope.conversationId) && !this.hasUnfinalized(envelope.conversationId)) void this.stopTyping(envelope.conversationId, manifest.roomId).catch(() => undefined);
-		else void this.startTyping(envelope.conversationId, manifest.roomId).catch(() => undefined);
 		return item.finalized ? "finalized" : "updated";
 	}
 	hasUnfinalized(conversationId: string): boolean { return this.state.activities.some((item) => item.conversationId === conversationId && !item.finalized); }
@@ -122,7 +132,7 @@ export class ActivityProjector {
 			const manifest = this.registry.manifestByConversationId(conversationId);
 			if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 			const leases = this.operationLeases.get(conversationId) ?? new Set<string>(); leases.add(operationId); this.operationLeases.set(conversationId, leases);
-			void this.startTyping(conversationId, manifest.roomId).catch(() => undefined);
+			// Controls are operation feedback, not evidence of agent generation.
 		});
 	}
 	async endOperationFeedback(conversationId: string, operationId: string): Promise<void> {
@@ -130,8 +140,7 @@ export class ActivityProjector {
 			const leases = this.operationLeases.get(conversationId); const existed = leases?.delete(operationId) ?? false;
 			if (!existed) return;
 			if (leases?.size === 0) this.operationLeases.delete(conversationId);
-			if (this.hasOperationLease(conversationId) || this.hasUnfinalized(conversationId)) return;
-			const manifest = this.registry.manifestByConversationId(conversationId); if (manifest) void this.stopTyping(conversationId, manifest.roomId).catch(() => undefined);
+			// Releasing a control must never change the independent generation signal.
 		});
 	}
 	async attachmentConnected(conversationId: string): Promise<void> {
@@ -143,10 +152,12 @@ export class ActivityProjector {
 			const deadline = this.interruptionDeadlines.get(conversationId) ?? Date.now();
 			this.reconnectedActivities.set(conversationId, new Set()); this.scheduleInterruption(conversationId, deadline);
 		}
-		const manifest = this.registry.manifestByConversationId(conversationId);
-		if (manifest) void this.startTyping(conversationId, manifest.roomId).catch(() => undefined);
+		// A reconnect alone is not evidence of generation; the adapter replays live activity.
 	}
 	attachmentDisconnected(conversationId: string): void {
+		this.live.delete(conversationId);
+		const manifest = this.registry.manifestByConversationId(conversationId);
+		if (manifest) this.desireTyping(conversationId, manifest.roomId, false);
 		this.reconnectedActivities.delete(conversationId);
 		const interruption = this.interruptions.get(conversationId); if (interruption) clearTimeout(interruption);
 		this.interruptions.delete(conversationId); this.scheduleInterruption(conversationId);
@@ -160,6 +171,9 @@ export class ActivityProjector {
 				if (stillDisconnected()) this.clearInterruption(conversationId);
 				return;
 			}
+			for (const item of items) this.live.get(conversationId)?.delete(item.activityId);
+			const manifest = this.registry.manifestByConversationId(conversationId);
+			if (manifest) this.desireTyping(conversationId, manifest.roomId, (this.live.get(conversationId)?.size ?? 0) > 0);
 			try {
 				for (const item of items) {
 					if (!stillDisconnected()) return;
@@ -173,13 +187,15 @@ export class ActivityProjector {
 				this.attachmentDisconnected(conversationId);
 				throw error;
 			}
-		});
+		}, conversationId);
 	}
 	async close(): Promise<void> {
 		this.closed = true;
 		for (const state of this.typing.values()) { clearInterval(state.timer); state.controller?.abort(); }
 		for (const timer of this.interruptions.values()) clearTimeout(timer);
 		this.typing.clear(); this.operationLeases.clear(); this.interruptions.clear(); this.interruptionDeadlines.clear(); this.interruptionVersions.clear(); this.reconnectedActivities.clear();
+		await Promise.all(this.operations.values());
+		await this.writes;
 	}
 	private scheduleInterruption(conversationId: string, deadline = Date.now() + this.interruptionGraceMs): void {
 		const version = (this.interruptionVersions.get(conversationId) ?? 0) + 1;
@@ -202,8 +218,6 @@ export class ActivityProjector {
 		this.clearInterruption(conversationId);
 	}
 	private hasOperationLease(conversationId: string): boolean { return (this.operationLeases.get(conversationId)?.size ?? 0) > 0; }
-	private async startTyping(conversationId: string, roomId: string): Promise<void> { this.desireTyping(conversationId, roomId, true); }
-	private async stopTyping(conversationId: string, roomId: string): Promise<void> { this.desireTyping(conversationId, roomId, false); }
 	private desireTyping(conversationId: string, roomId: string, desired: boolean): void {
 		if (this.closed) return;
 		const state = this.typing.get(conversationId) ?? { roomId, desired, pending: false, running: false };
@@ -229,5 +243,14 @@ export class ActivityProjector {
 			if (!state.desired && this.typing.get(conversationId) === state) this.typing.delete(conversationId);
 		}
 	}
-	private serialize<T>(work: () => Promise<T>): Promise<T> { const result = this.operation.then(work, work); this.operation = result.then(() => undefined, () => undefined); return result; }
+	private persist(): Promise<void> {
+		const result = this.writes.then(() => this.file.write(structuredClone(this.state)));
+		this.writes = result.catch(() => undefined); return result;
+	}
+	private serialize<T>(work: () => Promise<T>, key = "control"): Promise<T> {
+		const result = (this.operations.get(key) ?? Promise.resolve()).then(work, work);
+		const settled = result.then(() => undefined, () => undefined); this.operations.set(key, settled);
+		void settled.then(() => { if (this.operations.get(key) === settled) this.operations.delete(key); });
+		return result;
+	}
 }

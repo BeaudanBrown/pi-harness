@@ -67,6 +67,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let hostLifecycle: HostLifecycle | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
+	let closeNotices = async (): Promise<void> => undefined;
 	try {
 		await prepareRelayStateDirectory(hostId, stateDirectory, runtimeDirectory, manifestStore);
 		await registry.load();
@@ -80,7 +81,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
 			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt, runtimeBuild });
 		};
-		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds());
+		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds(), { maxAttempts: 1 });
 		const spool = new BlobSpool(resolve(stateDirectory, "media-spool"));
 		const media = new ManagedImageTransport(spool, matrix);
 		await media.initialize(registry.liveMediaBlobIds());
@@ -103,6 +104,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		activityProjector = new ActivityProjector(stateDirectory, registry, matrix);
 		await activityProjector.load();
 		const eventProjector = new RelayEventProjector(registry, matrix);
+		await eventProjector.startNoticeOutbox(resolve(stateDirectory, "notice-outbox.json"),
+			(message) => process.stderr.write(`pi-managed-session-relay: ${redactManagedValue(message, environment)}\n`));
+		closeNotices = () => eventProjector.close();
 		registry.beginRestartReconciliation();
 		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "media.result" | "artifact.acknowledge" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
@@ -315,7 +319,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			process.stderr.write("pi-managed-session-relay: waiting for Matrix startup connectivity; local IPC remains available\n");
 		}, signal);
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
-		await controlPollPublisher.reconcile();
+		// Pending publications are reconciled in independent room workers, never on the boot/intake path.
 		if (coordinatorValues.every((value) => value?.trim())) {
 			coordinator = await bootstrapCoordinator(hostId, {
 				workspaceDirectory: coordinatorValues[0]!.trim(),
@@ -356,15 +360,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					"Managed conversation wake failed; queued input remains available for retry.");
 			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
-			() => controlPollPublisher.reconcile(), () => eventProjector!.checkpointPollPublisher.reconcile(), media,
+			(conversationId) => controlPollPublisher.reconcile(conversationId), (conversationId) => eventProjector!.checkpointPollPublisher.reconcile(conversationId), media,
 			(conversationId, operationId) => activityProjector!.beginOperationFeedback(conversationId, operationId),
 			(conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId), syncHealth);
+			await coordinatorRouter.loadInbox(resolve(stateDirectory, "inbox.json"));
 			coordinatorRouter.start();
 			await hostLifecycle!.reconcileGenerationTransitions();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
 	} catch (error) {
 		await closeArtifactExporter().catch(() => undefined);
+		await closeNotices().catch(() => undefined);
 		await coordinatorRouter?.stop().catch(() => undefined);
 		await activityProjector?.close().catch(() => undefined);
 		await server?.close({ preserveAttachments: true }).catch(() => undefined);
@@ -392,6 +398,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			clearTimeout(reconciliationTimer);
 			await closeArtifactExporter();
 			await coordinatorRouter?.stop();
+			await closeNotices();
 			await activityProjector?.close();
 			await server.close({ preserveAttachments: true });
 			await relayLock?.release();

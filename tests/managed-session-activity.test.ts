@@ -25,6 +25,7 @@ test("typing serializes a delayed stop before a newer start without blocking wor
 	let remoteTyping = false; const otherRoom = "!other:example.com"; let otherTyping = false;
 	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
 		async (input, init) => {
+			if (!String(input).includes("/typing/")) return Response.json({ event_id: "$card" });
 			const value = Boolean(JSON.parse(String(init?.body)).typing);
 			if (decodeURIComponent(String(input)).includes(otherRoom)) otherTyping = value;
 			else { if (!value) { stopped(); await stopGate; } remoteTyping = value; }
@@ -32,10 +33,10 @@ test("typing serializes a delayed stop before a newer start without blocking wor
 		}, [roomId, otherRoom]);
 	const registry = { manifestByConversationId: (id: string) => ({ roomId: id === conversationId ? roomId : otherRoom }) } as unknown as RelayRegistry;
 	const projector = new ActivityProjector(root, registry, matrix); t.after(() => projector.close());
-	await projector.beginOperationFeedback(conversationId, "old");
-	await projector.endOperationFeedback(conversationId, "old"); await stopStarted;
-	await projector.beginOperationFeedback(conversationId, "new");
-	await projector.beginOperationFeedback("other", "independent");
+	await projector.project(envelope("activity.update", { activityId, revision: 0, state: "busy" }));
+	await projector.project(envelope("activity.finalize", { activityId, revision: 1, outcome: "completed" })); await stopStarted;
+	await projector.project(envelope("activity.update", { activityId: deriveActivityId(deriveGenerationId(conversationId, 1), "new"), revision: 0, state: "busy" }));
+	await projector.project({ ...envelope("activity.update", { activityId, revision: 0, state: "busy" }), conversationId: "other" });
 	assert.equal(otherTyping, true);
 	releaseStop(); await new Promise((resolve) => setImmediate(resolve));
 	assert.equal(remoteTyping, true, "old stop must finish before sending the newest typing intent");
@@ -144,7 +145,7 @@ test("reconnect fences successful and failed interruption I/O already in flight"
 	}
 });
 
-test("reconnect cancels an expired interruption still queued behind projection", async (t) => {
+test("a slow room cannot block interruption recovery in another room", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "managed-typing-queued-interrupt-"));
 	let unblock!: () => void; let blocked!: () => void;
 	const started = new Promise<void>((resolve) => { blocked = resolve; });
@@ -158,11 +159,11 @@ test("reconnect cancels an expired interruption still queued behind projection",
 	await projector.project(envelope("activity.update", { activityId, revision: 0, state: "busy" }));
 	const slow = projector.project({ ...envelope("activity.update", { activityId, revision: 0, state: "busy" }), conversationId: "other" });
 	await started; projector.attachmentDisconnected(conversationId);
-	await new Promise((resolve) => setTimeout(resolve, 20));
+	for (let i = 0; i < 200 && projector.hasUnfinalized(conversationId); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+	assert.equal(projector.hasUnfinalized(conversationId), false);
 	await projector.attachmentConnected(conversationId);
-	const replay = projector.project(envelope("activity.update", { activityId, revision: 1, state: "busy" }));
-	unblock(); await Promise.all([slow, replay]);
-	assert.equal(projector.hasUnfinalized(conversationId), true);
+	await assert.rejects(() => projector.project(envelope("activity.update", { activityId, revision: 1, state: "busy" })), { code: "activity_interrupted" });
+	unblock(); await slow;
 });
 
 test("typing requests have deadlines, coalesce refreshes, and abort on close without late sends", async (t) => {
@@ -170,15 +171,17 @@ test("typing requests have deadlines, coalesce refreshes, and abort on close wit
 	let calls = 0; let aborted = 0; let active = 0; let maxActive = 0;
 	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
 		async (_input, init) => {
+			if (!String(_input).includes("/typing/")) return Response.json({ event_id: "$card" });
 			calls++; active++; maxActive = Math.max(maxActive, active);
 			await new Promise<void>((_resolve, reject) => init!.signal!.addEventListener("abort", () => { aborted++; active--; reject(new Error("aborted")); }, { once: true }));
 			return Response.json({});
 		}, [roomId]);
 	const registry = { manifestByConversationId: () => ({ roomId }) } as unknown as RelayRegistry;
 	const projector = new ActivityProjector(root, registry, matrix, { typingRequestMs: 30, typingRefreshMs: 5 }); t.after(() => projector.close());
-	await projector.beginOperationFeedback(conversationId, "one");
-	for (let i = 0; i < 20; i++) await projector.beginOperationFeedback(conversationId, String(i));
-	assert.equal(calls, 1, "pending feedback coalesces rather than launching concurrent requests");
+	await projector.project(envelope("activity.update", { activityId, revision: 0, state: "busy" }));
+	const updates = Array.from({ length: 20 }, (_, i) => projector.project(envelope("activity.update", { activityId, revision: i + 1, state: "busy" })));
+	assert.equal(maxActive, 1, "pending feedback coalesces rather than launching concurrent requests");
+	await Promise.all(updates);
 	for (let i = 0; i < 100 && calls < 2; i++) await new Promise((resolve) => setTimeout(resolve, 5));
 	assert.ok(aborted >= 1, "request deadline releases the single-flight sender"); assert.ok(calls >= 2);
 	await projector.close(); const closedCalls = calls;
@@ -219,7 +222,7 @@ test("activity projector edits one stable card, balances the final snapshot, and
 	await projector.close(); await rm(root, { recursive: true, force: true });
 });
 
-test("command feedback leases keep typing active across compaction and concurrent model activity", async () => {
+test("command feedback never signals typing or prolongs completed model activity", async () => {
 	const root = await mkdtemp(join(tmpdir(), "managed-operation-feedback-")); const typing: boolean[] = [];
 	const fetcher = async (input: string | URL | Request, init?: RequestInit) => {
 		const path = String(input); if (path.includes("/typing/")) typing.push(Boolean(JSON.parse(String(init?.body)).typing));
@@ -229,13 +232,13 @@ test("command feedback leases keep typing active across compaction and concurren
 	const registry = { manifestByConversationId: () => ({ conversationId, roomId }) } as unknown as RelayRegistry;
 	const projector = new ActivityProjector(root, registry, matrix); await projector.load();
 	await projector.beginOperationFeedback(conversationId, `control_${"a".repeat(32)}`);
-	assert.equal(typing.at(-1), true, "remote compaction/control feedback starts typing without a model span");
+	assert.equal(typing.length, 0, "controls cannot start typing without a model span");
 	await projector.project(envelope("activity.update", { activityId, revision: 0, state: "busy" }));
 	await projector.endOperationFeedback(conversationId, `control_${"a".repeat(32)}`);
 	assert.equal(typing.at(-1), true, "one operation completing cannot cancel concurrent model activity");
 	await projector.beginOperationFeedback(conversationId, `delivery_${"b".repeat(32)}`);
 	await projector.project(envelope("activity.finalize", { activityId, revision: 1, outcome: "completed" }));
-	assert.equal(typing.at(-1), true, "a model span completing cannot cancel concurrent slash-command feedback");
+	assert.equal(typing.at(-1), false, "model completion stops typing despite slash-command feedback");
 	await projector.endOperationFeedback(conversationId, `delivery_${"b".repeat(32)}`);
 	assert.equal(typing.at(-1), false);
 	await projector.close(); await rm(root, { recursive: true, force: true });
@@ -249,7 +252,7 @@ test("typing endpoint failures never gate durable operation feedback", async () 
 	const projector = new ActivityProjector(root, registry, matrix); await projector.load();
 	await projector.beginOperationFeedback(conversationId, `control_${"c".repeat(32)}`);
 	await projector.endOperationFeedback(conversationId, `control_${"c".repeat(32)}`);
-	assert.equal(calls, 2, "best-effort typing attempts do not reject durable control delivery or completion");
+	assert.equal(calls, 0, "controls send no typing requests");
 	await projector.close(); await rm(root, { recursive: true, force: true });
 });
 

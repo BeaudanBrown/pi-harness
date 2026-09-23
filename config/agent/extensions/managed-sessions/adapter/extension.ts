@@ -160,7 +160,7 @@ type ActivityOutcome = "completed" | "checkpoint" | "cancelled" | "interrupted" 
 interface BusyActivity {
 	activityId: string; revision: number; startedAt: number; startContext?: number; inputTokens: number; outputTokens: number;
 	modelTurns: number; toolTotal: number; toolErrors: number; compactions: number; requestedOutcome?: ActivityOutcome;
-	toolCounts: Map<string, number>; activeTools: Map<string, string>; failedTools: Set<string>; timer?: NodeJS.Timeout; work: Promise<void>;
+	toolCounts: Map<string, number>; activeTools: Map<string, string>; failedTools: Set<string>; timer?: NodeJS.Timeout; work: Promise<void>; updateQueued?: boolean; updateDirty?: boolean;
 }
 
 interface ClosingActivity {
@@ -339,14 +339,19 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const send = () => {
 				span.timer = undefined;
 				if (activity !== span || !client?.connected) return;
+				if (span.updateQueued) { span.updateDirty = true; return; }
+				span.updateQueued = true;
 				span.work = span.work.then(async () => {
 					if (activity !== span || !client?.connected) return;
 					const tools = activityTools(span);
 					await publishActivity(span, { state: stateOverride ?? (tools.length ? "tool" : "busy"), ...(!stateOverride && tools.length ? { tools } : {}) });
-				}).catch(() => undefined);
+				}).catch(() => undefined).finally(() => {
+					span.updateQueued = false;
+					if (span.updateDirty) { span.updateDirty = false; sendActivityUpdate(span); }
+				});
 			};
 			if (immediate) { if (span.timer) clearTimeout(span.timer); send(); return; }
-			if (!span.timer) { span.timer = setTimeout(send, 750); span.timer.unref(); }
+			if (!span.timer) { span.timer = setTimeout(send, 5_000); span.timer.unref(); }
 		};
 		// Claim the span synchronously, before settlement awaits transcript work.
 		// A new agent run can now own a different active span while this one closes.

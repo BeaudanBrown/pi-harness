@@ -13,6 +13,7 @@ import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { type MatrixImageEvent, ManagedImageTransport } from "./image-media.js";
 import { renderManagedConversationStatus } from "./status.js";
+import { DurableInbox } from "./durable-inbox.js";
 
 interface MatrixTextEvent {
 	eventId: string;
@@ -147,6 +148,35 @@ export class CoordinatorRouter {
 	private controller?: AbortController;
 	private loop?: Promise<void>;
 	private readonly launching = new Map<string, Promise<void>>();
+	private inbox?: DurableInbox;
+	async loadInbox(path: string): Promise<void> {
+		this.inbox = new DurableInbox(path, async (conversationId, response) => {
+			const manifest = this.registry.manifestByConversationId(conversationId);
+			if (manifest) await this.routeRoom(manifest, response, this.controller!.signal);
+		}, this.diagnostic);
+		await this.inbox.load();
+	}
+
+	private async routeRoom(manifest: ConversationManifest, response: unknown, signal: AbortSignal): Promise<void> {
+		const publications = await Promise.allSettled([
+			this.reconcileControlPollPublications(manifest.conversationId),
+			this.reconcileCheckpointPollPublications(manifest.conversationId),
+		]);
+		const publicationFailed = publications.some((result) => result.status === "rejected");
+		const candidates = roomEventSenderIds(response, manifest.roomId, this.matrix.ignoredSenderUserIds, true);
+		const members = candidates.size ? await this.matrix.joinedMemberIds(manifest.roomId, signal) : new Set<string>();
+		const events = authorizedRoomEvents(response, manifest.roomId, new Set([...candidates].filter((sender) => members.has(sender))), true);
+		for (const event of events) {
+			if (event.kind === "poll_response") {
+				if (publicationFailed) throw new RelayRegistryError("matrix_unavailable", "Poll identity recovery pending; vote retained in inbox");
+				await this.acceptPoll(manifest, event, signal);
+			}
+			else if (event.kind === "image") await this.acceptImage(manifest, event, signal);
+			else await this.accept(manifest, event);
+		}
+		if (!events.length && publicationFailed) throw new RelayRegistryError("matrix_unavailable", "Pending poll publication retained for retry");
+		await this.ensureWake(manifest);
+	}
 
 	constructor(
 		private readonly manifest: ConversationManifest,
@@ -157,8 +187,8 @@ export class CoordinatorRouter {
 		private readonly notifyLaunchFailure: (sourceId: string, manifest: ConversationManifest) => Promise<void> = async () => undefined,
 		private readonly projectNotice: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void> = async () => undefined,
 		private readonly diagnostic: (message: string) => void = () => undefined,
-		private readonly reconcileControlPollPublications: () => Promise<void> = async () => undefined,
-		private readonly reconcileCheckpointPollPublications: () => Promise<void> = async () => undefined,
+		private readonly reconcileControlPollPublications: (conversationId?: string) => Promise<void> = async () => undefined,
+		private readonly reconcileCheckpointPollPublications: (conversationId?: string) => Promise<void> = async () => undefined,
 		private readonly media?: ManagedImageTransport,
 		private readonly beginOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
 		private readonly endOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
@@ -170,12 +200,14 @@ export class CoordinatorRouter {
 	start(): void {
 		if (this.loop) return;
 		this.controller = new AbortController();
+		this.inbox?.start();
 		this.loop = this.run(this.controller.signal).finally(() => { this.loop = undefined; });
 	}
 
 	async stop(): Promise<void> {
 		this.controller?.abort();
 		await this.loop?.catch(() => undefined);
+		await this.inbox?.close();
 	}
 
 	async reconcileWake(): Promise<void> {
@@ -224,21 +256,24 @@ export class CoordinatorRouter {
 				// execute a truncated interval or advance past an unrecoverable room.
 				const response = await this.matrix.recoverSyncTimelines(sync.response, cursor.since, sync.nextBatch,
 					this.registry.listManifests().map((item) => item.roomId), signal);
-				// A vote may already be in this response from the uncertain PUT window. Bind the
-				// idempotently recovered poll event before inspecting or advancing the response.
-				await this.reconcileControlPollPublications();
-				await this.reconcileCheckpointPollPublications();
-				for (const manifest of this.registry.listManifests()) {
-					const candidateSenders = roomEventSenderIds(response, manifest.roomId, this.matrix.ignoredSenderUserIds, established);
-					const joinedMembers = established && candidateSenders.size > 0 ? await this.matrix.joinedMemberIds(manifest.roomId, signal) : new Set<string>();
-					const authorizedSenders = new Set([...candidateSenders].filter((sender) => joinedMembers.has(sender)));
-					const events = authorizedRoomEvents(response, manifest.roomId, authorizedSenders, established);
-					if (established) for (const event of events) {
-						if (event.kind === "poll_response") await this.acceptPoll(manifest, event, signal);
-						else if (event.kind === "image") await this.acceptImage(manifest, event, signal);
-						else await this.accept(manifest, event);
-					}
-					await this.ensureWake(manifest);
+				if (this.inbox) {
+					// Keep uncertain poll responses in the durable room lane until its poll
+					// identity is reconciled. A different room never waits for that PUT.
+					const recovery = new Set([
+						...this.registry.publishingControlPolls(), ...this.registry.publishingCheckpointPolls(), ...this.registry.closingCheckpointPolls(),
+					].map((item) => item.conversationId));
+					const jobs = this.registry.listManifests().flatMap((manifest) => {
+						const candidates = roomEventSenderIds(response, manifest.roomId, this.matrix.ignoredSenderUserIds, true);
+						const eligible = new Set(authorizedRoomEvents(response, manifest.roomId, candidates, true).map((event) => event.eventId));
+						// Syntax/sender filtering here avoids persisting our own activity events.
+						// Fresh membership authorization still happens in the room worker.
+						const events = roomTimeline(response, manifest.roomId).filter((event) => event !== null && typeof event === "object" && eligible.has((event as { event_id: string }).event_id));
+						return events.length || recovery.has(manifest.conversationId) && !this.inbox!.hasPending(manifest.conversationId) ? [{ conversationId: manifest.conversationId,
+							response: { rooms: { join: { [manifest.roomId]: { timeline: { events } } } } } }] : [];
+					});
+					await this.inbox.accept(sync.nextBatch, jobs);
+				} else {
+					for (const manifest of this.registry.listManifests()) await this.routeRoom(manifest, response, signal);
 				}
 				await this.registry.setMatrixCursor(this.manifest.conversationId, sync.nextBatch);
 				await this.syncHealth(true);
@@ -292,12 +327,19 @@ export class CoordinatorRouter {
 	}
 
 	private async dispatchControl(manifest: ConversationManifest, eventId: string, senderUserId: string, control: TypedRemoteControl): Promise<void> {
+		if (this.registry.controlResultState(manifest.conversationId, deriveControlId(manifest.conversationId, eventId)) === "completed") return;
 		if (control.name === "new" && manifest.kind !== "project") {
 			await this.projectNotice(eventId, manifest, "Fresh session generations are available only in project conversations; the coordinator session was not changed.");
 			return;
 		}
 		if (control.name === "new" && control.argument !== "--confirm") {
 			await this.projectNotice(eventId, manifest, "Start a fresh Pi context with `!new --confirm`. The Matrix room and all previous Pi session files will be preserved.");
+			return;
+		}
+		if (this.registry.hasGenerationTransition(manifest.conversationId) && (control.name === "status" || control.name === "help")) {
+			const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId)!;
+			await this.projectNotice(eventId, manifest, renderManagedConversationStatus(manifest, runtime, undefined,
+				this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length));
 			return;
 		}
 		if (this.registry.hasGenerationTransition(manifest.conversationId)) {

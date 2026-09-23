@@ -146,31 +146,26 @@ test("production relay attaches, reports status, and deletes only bridge state",
 	assert.equal(statusRequests.length, 1, "lost control.result acknowledgements retry without duplicate Matrix projection");
 	assert.match(statusRequests[0]?.body ?? "", /Saved model:/, "relay composes durable state with the adapter live snapshot");
 	assert.doesNotMatch(statusRequests[0]?.body ?? "", /roomId|workspacePath|matrixEventId/, "status remains redacted");
+	for (let i = 0; i < 200 && requests.filter((request) => request.path.includes("/send/")).length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 5));
 	failLeave = true;
-	await assert.rejects(() => replayClient.selfDelete(), /Relay operation failed/);
+	await assert.rejects(() => replayClient.selfDelete(), /Matrix request failed \(HTTP 503\)/);
 	assert.equal(running.registry.snapshot().conversations.length, 1, "failed Matrix leave must restore relay persistence and attachment");
 	failLeave = false;
-	await new Promise((resolve) => setTimeout(resolve, 25));
-	const retryClient = new BoundAdapterClient({
-		socketPath: running.server.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding, onEnvelope: () => undefined,
-	});
-	await retryClient.connect();
-	assert.equal((await retryClient.selfDelete()).payload.status, "ok");
-	await retryClient.close("bridge_delete");
+	assert.equal((await replayClient.selfStatus()).payload.conversationState, "active", "transient Matrix errors preserve IPC attachment");
+	assert.equal((await replayClient.selfDelete()).payload.status, "ok");
+	await replayClient.close("bridge_delete");
 	assert.deepEqual(running.registry.snapshot().conversations, []);
-	assert.deepEqual(requests.map((request) => request.path), [
+	assert.deepEqual(requests.filter((request) => !request.path.includes("/typing/")).map((request) => request.path), [
 		"/_matrix/client/v3/account/whoami",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, transcript.entryId, 0)}`,
-		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`,
-		"/_matrix/client/v3/rooms/!production%3Aexample.com/typing/%40bot%3Aexample.com",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, modelNoticeEntryId, 0)}`,
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, thinkingNoticeEntryId, 0)}`,
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 	]);
-	assert.deepEqual(requests.filter((request) => request.path.includes("/typing/")).map((request) => JSON.parse(request.body ?? "{}").typing), [true, false],
-		"replayed adapter-executed controls expose bounded typing feedback through durable completion");
+	assert.equal(requests.filter((request) => request.path.includes("/typing/")).every((request) => JSON.parse(request.body ?? "{}").typing === false), true,
+		"replayed controls never claim the agent is generating");
 	assert.ok(requests.every((request) => request.authorization === "Bearer test-token-never-in-ipc"));
 	const sent = requests.find((request) => request.path.includes("/send/"));
 	const sentContent = JSON.parse(sent?.body ?? "{}") as { body?: string; formatted_body?: string };
