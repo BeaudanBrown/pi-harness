@@ -732,8 +732,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					const requestedContext = projectionRequestedContext;
 					projectionRequestedContext = undefined;
 					try {
-						await projectAloopLifecycle(requestedContext);
+						// A slow/failed lifecycle notice must not hold a newly persisted
+						// manual user prompt behind unrelated Matrix work.
 						await projectEligibleEntries(requestedContext, true);
+						await projectAloopLifecycle(requestedContext);
 						await finishFinalizations([...closingActivities]);
 						await projectEligibleEntries(requestedContext);
 					}
@@ -1269,6 +1271,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (!key) continue;
 				pendingUserPersistence.splice(index, 1); persistExpanded(ctx, marker, key);
 			}
+			// Project a durable local prompt without waiting for the model to finish.
+			// The shared planner excludes Matrix-origin entries and deduplicates retries.
+			if (binding && client?.connected) queueProjection(ctx);
 		});
 
 		pi.on("agent_settled", async (_event, ctx) => {

@@ -941,6 +941,40 @@ test("closing backlog bounds feedback only and drains without losing frozen fina
 	assert.deepEqual(f.errors, []);
 });
 
+test("manual Pi user entry reaches Matrix before agent settles without echoing Matrix input", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
+	let leaf = "binding"; let sequence = 0;
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [], appendEntry: (customType: string, data: unknown) => {
+			const id = `manual-marker-${++sequence}`; branch.push({ ...custom(id, customType, data), parentId: leaf }); leaf = id;
+		}, sendUserMessage: (text: string, options: { onPromptExpanded: (value: string) => void }) => {
+			options.onPromptExpanded(text);
+			const message = { role: "user", content: text };
+			branch.push({ type: "message", id: "matrix-user", parentId: leaf, message }); leaf = "matrix-user";
+			handlers.get("message_end")!({ message }, ctx);
+		}, sendMessage: () => undefined } as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => false, abort: () => undefined, shutdown: () => undefined, getContextUsage: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
+			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const user = { role: "user", content: "manual prompt" };
+	branch.push({ type: "message", id: "manual-user", parentId: leaf, message: user }); leaf = "manual-user";
+	handlers.get("message_end")!({ message: user }, ctx);
+	await activityWait(() => relay.frames.some((frame) => frame.type === "transcript.offer" && frame.payload.kind === "local_user"));
+	assert.equal(relay.frames.find((frame) => frame.type === "transcript.offer")!.payload.body, "manual prompt");
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "matrix-prompt", conversationId,
+		role: "relay", type: "input.deliver", payload: { deliveryId: deriveDeliveryId(conversationId, "$matrix-early"), matrixEventId: "$matrix-early", kind: "prompt", body: "/matrix-note" } });
+	await activityWait(() => relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "persisted"));
+	assert.equal(relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "local_user").length, 1,
+		"Matrix-origin prompt is not echoed by early projection");
+	await handlers.get("agent_settled")!({}, ctx);
+	assert.equal(relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "local_user").length, 1);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
 test("activity lifecycle is one redacted busy span across parallel tools, retries, compaction, and follow-ups", async (t) => {
 	const relay = await FakeRelay.start(); t.after(() => relay.close());
 	const branch: any[] = [

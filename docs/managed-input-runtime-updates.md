@@ -44,7 +44,10 @@ and never aborts a busy run. Dormant conversations are never woken for updates.
 The existing host launcher replaces the exact managed window after graceful
 shutdown; the shared tmux **server and unrelated windows are not restarted**.
 
-`!status` reports current, pending, or next-launch project tooling updates. A
+Locally typed Pi user entries can be projected to Matrix as soon as Pi persists
+them; they need not wait for the agent response. Matrix-origin prompts remain
+excluded by the existing delivery correlation, and stable entry IDs retain
+projection retry/deduplication. `!status` reports current, pending, or next-launch project tooling updates. A
 failed relaunch remains visible through the existing launch-failure status and
 can be recovered by normal wake/explicit refresh. The relay stops scheduling
 refreshes on shutdown and drains its current operation before closing IPC.
