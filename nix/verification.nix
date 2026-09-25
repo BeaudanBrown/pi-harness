@@ -462,7 +462,51 @@ let
     touch "$out"
   '';
 
+  workspaceModule = lib.evalModules {
+    specialArgs = { inherit pkgs; };
+    modules = [
+      {
+        options.assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
+        options.systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
+        options.users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
+      }
+      ./chat-workspace.nix
+    ];
+  };
+  workspaceEnabled = workspaceModule.extendModules {
+    modules = [ { services.pi-harness.bridgeChat.workspaceExecutor = {
+      enable = true; projectDirectory = "/var/lib/dump-site/project"; user = "operator";
+    }; } ];
+  };
+  workspaceReport = pkgs.writeText "chat-workspace-module.json" (builtins.toJSON {
+    disabledServices = workspaceModule.config.systemd.services;
+    assertions = map (a: a.assertion) workspaceEnabled.config.assertions;
+    service = workspaceEnabled.config.systemd.services.pi-chat-workspace;
+    rejectsRoot = !(lib.all (a: a.assertion) (workspaceEnabled.extendModules {
+      modules = [ { services.pi-harness.bridgeChat.workspaceExecutor.projectDirectory = lib.mkForce "/"; } ];
+    }).config.assertions);
+  });
+  workspaceTests = pkgs.runCommand "pi-chat-workspace-tests" {
+    nativeBuildInputs = [ pkgs.python3 pkgs.jq ];
+  } ''
+    cp -R ${../.} source
+    chmod -R u+w source
+    cd source
+    python3 -B -m unittest discover -s tests -p test_chat_workspace.py -v
+    jq -e '.disabledServices == {} and (.assertions | all) and .rejectsRoot
+      and .service.serviceConfig.User == "operator"
+      and .service.serviceConfig.RestrictAddressFamilies == ["AF_UNIX"]
+      and .service.serviceConfig.ProtectSystem == "strict"
+      and .service.serviceConfig.NoNewPrivileges
+      and .service.serviceConfig.ReadWritePaths == ["/var/lib/dump-site/project"]
+      and (.service.serviceConfig | has("LoadCredential") | not)
+      and (.service.serviceConfig | has("EnvironmentFile") | not)' ${workspaceReport}
+    test -x ${import ./chat-workspace-package.nix { inherit pkgs; }}/bin/pi-chat-workspace
+    touch "$out"
+  '';
+
   deterministicChecks = {
+    chat-workspace = workspaceTests;
     bridge-chat = bridgeChatTests;
     bridge-chat-preflight = bridgePreflightTests;
     source-contracts = sourceContracts;
@@ -512,8 +556,14 @@ let
         node --test ${testBuild}/build/tests/lsp-live.test.js
     '';
   };
+  verifyWorkspaceLiveApp = pkgs.writeShellApplication {
+    name = "verify-chat-workspace-live";
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -I -B ${../tests/chat-workspace-live.py} ${import ./chat-workspace-package.nix { inherit pkgs; }}/bin/pi-chat-workspace
+    '';
+  };
 in
 {
   checks = deterministicChecks // { inherit verify; };
-  inherit verifyApp verifyLspLiveApp;
+  inherit verifyApp verifyLspLiveApp verifyWorkspaceLiveApp;
 }

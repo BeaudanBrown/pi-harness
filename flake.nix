@@ -528,6 +528,7 @@
         packages.pi-harness-resources = piHarnessResources;
         packages.managed-session-relay = managedSessionRelay;
         packages.bridge-chat = import ./nix/bridge-chat-package.nix { inherit pkgs piPackage; };
+        packages.chat-workspace = import ./nix/chat-workspace-package.nix { inherit pkgs; };
         packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
         packages.playwright-agent-cli = playwrightAgentCli;
@@ -545,6 +546,7 @@
         apps.eval-self-test = flake-utils.lib.mkApp { drv = evalSelfTestApp; };
         apps.verify = flake-utils.lib.mkApp { drv = verifyApp; };
         apps.verify-lsp-live = flake-utils.lib.mkApp { drv = verifyLspLiveApp; };
+        apps.verify-chat-workspace-live = flake-utils.lib.mkApp { drv = verification.verifyWorkspaceLiveApp; };
         apps.default = flake-utils.lib.mkApp {
           drv = piHarnessPackage;
           exePath = "/bin/pi";
