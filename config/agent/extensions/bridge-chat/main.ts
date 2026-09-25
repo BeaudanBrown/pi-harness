@@ -33,7 +33,7 @@ async function main(): Promise<void> {
 	enterStage("credential_read");
 	const token = readToken(path.join(process.env.CREDENTIALS_DIRECTORY!, "matrix"));
 	enterStage("matrix_client");
-	const matrix = new OwnerMatrix({ homeserver: config.homeserver, accessToken: token });
+	const matrix = new OwnerMatrix({ homeserver: config.homeserver, accessToken: token, filesDirectory: config.filesDirectory });
 	const stop = new AbortController();
 	process.on("SIGTERM", () => stop.abort());
 	enterStage("identity_request");
@@ -62,7 +62,7 @@ async function main(): Promise<void> {
 				console.log('{"event":"sync_unavailable"}');
 				await matrixDelay(5000, stop.signal).catch(() => {}); continue;
 			}
-			await store.step(matrix, (q, workspace) => modelAnswer(config.modelSocket, q, stop.signal, workspace), config, Date.now, stop.signal);
+			await store.step(matrix, (q, workspace) => modelAnswer(config.modelSocket, q, stop.signal, workspace, !!config.filesDirectory), config, Date.now, stop.signal);
 		}
 	} finally { store.close(); }
 }

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import http from "node:http";
 import net from "node:net";
+import { FileSession } from "../config/agent/extensions/bridge-chat/file-tools.mjs";
 import { workspaceRequest } from "../config/agent/extensions/bridge-chat/workspace-tools.mjs";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
@@ -43,6 +44,14 @@ function fakeStream(captured: Context[], firstTool?: string) {
 		}); return stream;
 	};
 }
+test('file tools are explicit chat capabilities and need no project grant', async t => {
+	const f = fixture(t), r = await runtime(f.auth);
+	const files = new FileSession({ directory: f.dir, downloader: '/unused' });
+	const session = await createChatSession(r, 'gpt-5.4', f.dir, undefined, files);
+	try { assert.deepEqual(session.getActiveToolNames(), ['web_search', 'download_file', 'send_file']); }
+	finally { session.dispose(); }
+});
+
 test('real Pi SDK creates a fresh unsaved web-search-only session without ambient resources', async t => {
 	const f = fixture(t), r = await runtime(f.auth);
 	for (const q of ['first question', '/skill:private second question']) {

@@ -5,6 +5,7 @@ workflow engine. Paths are relative to the approved workspace. Commands come
 from an immutable host configuration, never from model-supplied shell text.
 """
 import contextlib
+import base64
 import ctypes
 import json
 import os
@@ -18,7 +19,8 @@ import time
 import uuid
 
 MAX_BYTES = 1024 * 1024
-MAX_FRAME = 7 * MAX_BYTES
+MAX_FILE_BYTES = 25 * MAX_BYTES
+MAX_FRAME = 36 * MAX_BYTES
 MAX_ENTRIES = 2000
 DIRECTORY = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC
 REGULAR = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
@@ -116,28 +118,28 @@ class Workspace:
             yield fd, components[-1]
 
     @staticmethod
-    def info(fd, name):
+    def info(fd, name, limit=MAX_BYTES):
         value = os.stat(name, dir_fd=fd, follow_symlinks=False)
         require(stat.S_ISREG(value.st_mode) and value.st_nlink == 1, 'not_single_regular_file')
-        require(value.st_size <= MAX_BYTES, 'file_too_large')
+        require(value.st_size <= limit, 'file_too_large')
         return value
 
     @staticmethod
     def identity(value):
         return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
 
-    def load(self, fd, name):
-        before = self.info(fd, name)
+    def load(self, fd, name, limit=MAX_BYTES):
+        before = self.info(fd, name, limit)
         source = os.open(name, REGULAR, dir_fd=fd)
         try:
             require(self.identity(before) == self.identity(os.fstat(source)), 'source_changed')
             data = bytearray()
             while True:
-                block = os.read(source, min(65536, MAX_BYTES + 1 - len(data)))
+                block = os.read(source, min(65536, limit + 1 - len(data)))
                 if not block:
                     break
                 data.extend(block)
-                require(len(data) <= MAX_BYTES, 'file_too_large')
+                require(len(data) <= limit, 'file_too_large')
             require(self.identity(before) == self.identity(os.fstat(source)), 'source_changed')
             return bytes(data), before
         finally:
@@ -174,12 +176,20 @@ class Workspace:
                 'write': {'path', 'text'}, 'edit': {'path', 'old', 'new'},
                 'mkdir': {'path'}, 'rename': {'path', 'destination'},
                 'delete': {'path'}, 'command': {'name'},
+                'export': {'path'}, 'import': {'path', 'data'},
             }
             require(action in schemas and set(request) == schemas[action] | {'action'})
             if action == 'command':
                 require(isinstance(request['name'], str) and request['name'] in self.commands, 'command_not_allowed')
                 return run_command(self.commands[request['name']], self.path, cancelled=cancelled)
             parts(request['path'], root=action in ('list', 'search'))
+            if action == 'import':
+                require(isinstance(request['data'], str) and len(request['data']) <= 4 * ((MAX_FILE_BYTES + 2) // 3))
+                with self.parent(request['path']) as (fd, name):
+                    data = base64.b64decode(request['data'], validate=True)
+                    require(0 < len(data) <= MAX_FILE_BYTES, 'file_too_large')
+                    self.replace(fd, name, data, None)
+                return {'path': request['path']}
             for key in ('text', 'old', 'new'):
                 if key in request:
                     require(isinstance(request[key], str) and len(request[key].encode()) <= MAX_BYTES)
@@ -190,7 +200,7 @@ class Workspace:
             if action == 'rename':
                 parts(request['destination'])
             return self.execute(request)
-        except (Rejected, OSError, UnicodeError, subprocess.TimeoutExpired) as exc:
+        except (Rejected, OSError, ValueError, UnicodeError, subprocess.TimeoutExpired) as exc:
             # Errors after a mutation/command may indicate partial completion.
             # Report it; never retry the filesystem action or publication here.
             return {'error': str(exc) if isinstance(exc, Rejected) else 'operation_failed',
@@ -258,6 +268,9 @@ class Workspace:
                             return {'matches': matches, 'truncated': True}
             return {'matches': matches, 'truncated': False}
         with self.parent(path) as (fd, name):
+            if action == 'export':
+                data, _ = self.load(fd, name, MAX_FILE_BYTES)
+                return {'filename': name, 'data': base64.b64encode(data).decode('ascii')}
             if action == 'mkdir':
                 os.mkdir(name, 0o755, dir_fd=fd)
                 return {'path': path}
@@ -268,7 +281,10 @@ class Workspace:
                     before = None
                 data = request['text'].encode()
             else:
-                data, before = self.load(fd, name)
+                if action in ('delete', 'rename'):
+                    data, before = b'', self.info(fd, name, MAX_FILE_BYTES)
+                else:
+                    data, before = self.load(fd, name)
                 if action == 'read':
                     return {'text': data.decode('utf-8')}
                 if action == 'edit':

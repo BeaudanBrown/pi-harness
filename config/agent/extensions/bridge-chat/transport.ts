@@ -1,11 +1,14 @@
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { MatrixHttp, MatrixError } from "../matrix-shared/http.js";
+import { fileRefs, type FileRef, type ChatReply } from "./file-types.js";
+import { readStagedFile, removeFiles } from "./file-store.js";
+import { inspectArtifactBytes } from "../managed-sessions/adapter/artifact-export.js";
 
 import { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS } from "./limits.js";
 export { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS };
 export const FAILURE = "I couldn't complete that request. Please send a new !pi command to try again.";
-export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string; workspaceRoomIds?: string[] };
+export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string; workspaceRoomIds?: string[]; filesDirectory?: string };
 export function object(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid object");
 	return value as Record<string, unknown>;
@@ -18,6 +21,7 @@ export function validateConfig(value: unknown): ChatConfig {
 		!Array.isArray(c.roomIds) || c.roomIds.length > 256 || !c.roomIds.every(r => typeof r === "string" && r.startsWith("!") && r.length <= 512) ||
 		(!c.allJoinedRooms && !c.roomIds.length) || typeof c.modelSocket !== "string" || !c.modelSocket.startsWith("/")) throw Error("Invalid chat configuration");
 	if (c.workspaceRoomIds !== undefined && (!Array.isArray(c.workspaceRoomIds) || c.workspaceRoomIds.length > 256 || !c.workspaceRoomIds.every(r => typeof r === "string" && r.startsWith("!") && (c.allJoinedRooms || (c.roomIds as string[]).includes(r))))) throw Error("Invalid workspace room scope");
+	if (c.filesDirectory !== undefined && (typeof c.filesDirectory !== "string" || !c.filesDirectory.startsWith("/") || c.filesDirectory === "/" || c.filesDirectory.includes("\0"))) throw Error("Invalid file staging policy");
 	return c as ChatConfig;
 }
 export function command(event: unknown, senders: Set<string>, floor: number, now: number): string | undefined {
@@ -37,10 +41,13 @@ export function command(event: unknown, senders: Set<string>, floor: number, now
 export interface ChatMatrix {
 	usable(room: string, owner: string, signal?: AbortSignal): Promise<boolean>;
 	send(room: string, txn: string, text: string, signal?: AbortSignal): Promise<unknown>;
+	sendFile?(room: string, txn: string, file: FileRef, signal?: AbortSignal): Promise<unknown>;
 }
 export class OwnerMatrix implements ChatMatrix {
 	readonly http: MatrixHttp;
-	constructor(config: { homeserver: string; accessToken: string }, fetcher: typeof fetch = fetch) {
+	private readonly filesDirectory?: string;
+	constructor(config: { homeserver: string; accessToken: string; filesDirectory?: string }, fetcher: typeof fetch = fetch) {
+		this.filesDirectory = config.filesDirectory;
 		// Unlike engineering delivery, unknown bridge send outcomes are NEVER retried.
 		this.http = new MatrixHttp(config, fetcher, { maxAttempts: 1 });
 	}
@@ -51,6 +58,17 @@ export class OwnerMatrix implements ChatMatrix {
 		const creation = object(await this.http.request("GET", prefix + "m.room.create/", undefined, signal));
 		const member = object(await this.http.request("GET", prefix + "m.room.member/" + encodeURIComponent(owner), undefined, signal));
 		return creation.type !== "m.space" && member.membership === "join";
+	}
+	async sendFile(room: string, txn: string, file: FileRef, signal?: AbortSignal): Promise<unknown> {
+		if (!this.filesDirectory) throw Error("Attachments are disabled");
+		const data = readStagedFile(this.filesDirectory, file);
+		const checked = await inspectArtifactBytes(file.filename, data);
+		if (checked.mimeType !== file.mimeType || checked.mediaType !== file.mediaType || checked.width !== file.width || checked.height !== file.height) throw Error("Attachment metadata changed");
+		const upload = object(await this.http.upload(file.filename, file.mimeType, data, signal));
+		if (typeof upload.content_uri !== "string" || upload.content_uri.length > 2048 || !/^mxc:\/\/[^\s/]+\/[^\s/?#]+$/.test(upload.content_uri)) throw Error("Invalid media upload acknowledgement");
+		return this.http.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.room.message/${encodeURIComponent(txn)}`,
+			{ msgtype: "m." + file.mediaType, body: file.filename, filename: file.filename, url: upload.content_uri,
+				info: { mimetype: file.mimeType, size: file.byteLength, ...(file.width ? { w: file.width, h: file.height } : {}) }, "m.mentions": {} }, signal);
 	}
 	async sync(cursor: string, senders: string[], pending: number, signal?: AbortSignal): Promise<unknown> {
 		const filter = { presence: { types: [] }, account_data: { types: [] }, room: {
@@ -67,7 +85,7 @@ export class OwnerMatrix implements ChatMatrix {
 	}
 }
 
-type Row = { id: string; room: string; created: number; phase: string; question: string; answer: string };
+type Row = { id: string; room: string; created: number; phase: string; question: string; answer: string; files: string };
 export class Store {
 	readonly db: DatabaseSync;
 	constructor(filename: string) {
@@ -79,9 +97,10 @@ export class Store {
 				CREATE TABLE IF NOT EXISTS rooms(id TEXT PRIMARY KEY, floor INTEGER NOT NULL DEFAULT 0);
 				CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY, room TEXT NOT NULL, created INTEGER NOT NULL,
 				phase TEXT NOT NULL, question TEXT NOT NULL DEFAULT '', answer TEXT NOT NULL DEFAULT ''); COMMIT;`);
+			if (!this.db.prepare("PRAGMA table_info(requests)").all().some(column => column.name === "files")) this.db.exec("ALTER TABLE requests ADD COLUMN files TEXT NOT NULL DEFAULT '[]'");
 			this.atomic(() => {
-				this.db.prepare("UPDATE requests SET phase='ready', question='', answer=? WHERE phase='running'").run(FAILURE);
-				this.db.exec("UPDATE requests SET phase='uncertain', question='', answer='' WHERE phase='sending'");
+				this.db.prepare("UPDATE requests SET phase='ready', question='', answer=?, files='[]' WHERE phase='running'").run(FAILURE);
+				this.db.exec("UPDATE requests SET phase='uncertain', question='', answer='', files='[]' WHERE phase='sending'");
 			});
 		} catch (e) { this.db.close(); throw e; }
 	}
@@ -94,7 +113,7 @@ export class Store {
 	get(key: string, fallback = ""): string { return String(this.db.prepare("SELECT value FROM meta WHERE key=?").get(key)?.value ?? fallback); }
 	put(key: string, value: string | number): void { this.db.prepare("INSERT OR REPLACE INTO meta VALUES (?,?)").run(key, String(value)); }
 	pending(): number { return Number(this.db.prepare("SELECT count(*) AS n FROM requests WHERE phase IN ('queued','ready','running','sending')").get()!.n); }
-	resetPolicy(): void { this.atomic(() => this.db.exec("UPDATE requests SET phase='discarded', question='', answer='' WHERE phase IN ('queued','ready')")); }
+	resetPolicy(): void { this.atomic(() => this.db.exec("UPDATE requests SET phase='discarded', question='', answer='', files='[]' WHERE phase IN ('queued','ready')")); }
 	ingest(value: unknown, config: ChatConfig, now: number, fresh = false): number {
 		const batch = object(value), rooms = object(batch.rooms ?? {}), joined = object(rooms.join ?? {}), left = object(rooms.leave ?? {});
 		if (typeof batch.next_batch !== "string" || !batch.next_batch || batch.next_batch.length > 16384 || Object.keys(joined).length > 10000 || Object.keys(left).length > 10000) throw Error("Sync shape");
@@ -133,32 +152,41 @@ export class Store {
 			this.put("cursor", cursor); return dropped;
 		});
 	}
-	phase(id: string, phase: string, answer = ""): void {
-		this.atomic(() => this.db.prepare("UPDATE requests SET phase=?, question='', answer=? WHERE id=?").run(phase, answer, id));
+	phase(id: string, phase: string, answer = "", files: FileRef[] = []): void {
+		this.atomic(() => this.db.prepare("UPDATE requests SET phase=?, question='', answer=?, files=? WHERE id=?").run(phase, answer, JSON.stringify(fileRefs(files)), id));
 	}
-	async step(matrix: ChatMatrix, execute: (question: string, workspace: boolean) => Promise<string>, config: ChatConfig, now: () => number = Date.now, signal?: AbortSignal): Promise<void> {
+	async step(matrix: ChatMatrix, execute: (question: string, workspace: boolean) => Promise<ChatReply>, config: ChatConfig, now: () => number = Date.now, signal?: AbortSignal): Promise<void> {
 		const row = this.db.prepare("SELECT * FROM requests WHERE phase IN ('queued','ready') ORDER BY created,id LIMIT 1").get() as Row | undefined;
 		if (!row) return;
 		const { id, room } = row;
 		if ((row.phase === "ready" && now() - row.created > MAX_AGE_MS) || (!config.allJoinedRooms && !config.roomIds.includes(room))) { this.phase(id, "discarded"); return; }
 		try { if (!await matrix.usable(room, config.ownerUserId, signal)) { this.phase(id, "discarded"); return; } }
 		catch { if (now() - row.created > MAX_AGE_MS) this.phase(id, "discarded"); return; }
-		let result = row.answer;
+		let result = row.answer, files: FileRef[] = [];
+		try { files = fileRefs(JSON.parse(row.files)); } catch { this.phase(id, "discarded"); return; }
 		if (row.phase === "queued") {
 			this.phase(id, "running");
 			try {
-				result = now() - row.created <= MAX_AGE_MS ? await execute(row.question, config.workspaceRoomIds?.includes(room) === true) : "That request expired. Please send a new !pi command.";
-				if (typeof result !== "string" || !result || Buffer.byteLength(result) > MAX_ANSWER) throw Error("Answer size");
-			} catch { result = FAILURE; }
-			this.phase(id, "ready", result);
+				const reply = now() - row.created <= MAX_AGE_MS ? await execute(row.question, config.workspaceRoomIds?.includes(room) === true) : "That request expired. Please send a new !pi command.";
+				result = typeof reply === "string" ? reply : reply.text;
+				files = typeof reply === "string" ? [] : fileRefs(reply.files);
+				if (typeof result !== "string" || !result || Buffer.byteLength(result) > MAX_ANSWER || files.length && (!config.filesDirectory || !matrix.sendFile)) throw Error("Answer shape");
+			} catch { result = FAILURE; files = []; }
+			this.phase(id, "ready", result, files);
 		}
 		if (signal?.aborted) return;
 		try { if (!await matrix.usable(room, config.ownerUserId, signal)) { this.phase(id, "discarded"); return; } } catch { return; }
-		this.phase(id, "sending", result);
+		this.phase(id, "sending", result, files);
 		try {
+			for (const [index, file] of files.entries()) {
+				if (!config.filesDirectory || !matrix.sendFile || !await matrix.usable(room, config.ownerUserId, signal)) throw Error("File delivery not permitted");
+				const sent = object(await matrix.sendFile(room, `pi-${id}-file-${index}`, file, signal));
+				if (typeof sent.event_id !== "string" || !sent.event_id.startsWith("$")) throw Error("File acknowledgement");
+			}
 			const sent = object(await matrix.send(room, "pi-" + id, result, signal));
 			if (typeof sent.event_id !== "string" || !sent.event_id.startsWith("$")) throw Error("Acknowledgement");
 		} catch { this.phase(id, "uncertain"); console.log('{"event":"send_uncertain"}'); return; }
+		finally { if (config.filesDirectory) removeFiles(config.filesDirectory, files); }
 		this.phase(id, "done"); console.log('{"event":"matrix_reply_accepted","remoteDeliveryVerified":false}');
 	}
 }

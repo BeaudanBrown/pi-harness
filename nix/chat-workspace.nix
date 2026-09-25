@@ -72,7 +72,7 @@ in {
         PrivateNetwork = true;
         RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_NETLINK" ];
         InaccessiblePaths = [ "-/run/secrets" "-/run/agenix" "-/run/user" ];
-        MemoryMax = "256M";
+        MemoryMax = "512M";
         TasksMax = 16;
         CPUQuota = "100%";
         LimitCORE = 0;

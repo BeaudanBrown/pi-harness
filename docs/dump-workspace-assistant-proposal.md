@@ -1,6 +1,6 @@
 # NAS !pi project and file capabilities (#97)
 
-Status: implementation underway; not yet a rebuild-ready handoff. GitHub Issues are the task source of truth. This document records the latest operator-approved scope and supersedes the earlier staged/transactional proposal.
+Status: implementation and cumulative review complete; consuming revision handoff and operator-controlled activation remain. GitHub Issues are the task source of truth. This document records the latest operator-approved scope and supersedes the earlier staged/transactional proposal.
 
 ## Approved behavior
 
@@ -28,11 +28,13 @@ Status: implementation underway; not yet a rebuild-ready handoff. GitHub Issues 
 - Dump baseline changes committed as `b1a9954`; no push or test publication.
 - Initial isolated executor foundation was committed as `a8d43a8`, then normal GRILL access clarified in `69d5dd9`.
 - Current increment removes the foundation's locks/journal and adds a small ordinary file API plus named commands. See [executor contract](chat-workspace-executor.md).
-- Dedicated chat SDK registers project tools only for an explicit verified room capability. Empty bindings preserve web-search-only behavior. No CLI profile changes.
+- Dedicated chat SDK registers project tools only for an explicit verified room capability. Empty bindings preserve no-project access; separately enabled file tools do not grant a project. No CLI profile changes.
 - Downstream publisher adds sandbox-local submit/status while preserving GRILL's existing NFS guard. It uses the existing validated source snapshot, queue, separate publisher and receipt—not a new orchestration system.
 - NAS declaration prepares Note to Self's dump binding and fixed check/publish/status argv, with queue/status mounted outside generic file access.
 
-Not yet complete: safe downloads and outbound attachments, cumulative epic review, final downstream pin/activation handoff and live acceptance. Do not rebuild merely because these intermediate declarations exist.
+- Public HTTPS downloads now run in a credential-free, DNS-pinned sandbox, with private bounded staging and shared artifact validation. Chat-only `download_file` and `send_file` queue validated attachments through the owner transport to the original room. The existing reply state covers interruptions without new per-file workflow/journal scaffolding.
+
+Code, cumulative review and final verification are complete. Not yet complete: final downstream pin/activation handoff and live acceptance. Do not rebuild merely because these intermediate declarations exist.
 
 ## Verification baseline
 
@@ -42,9 +44,9 @@ Current checks and review dispositions live in [implementation evidence](dump-wo
 
 ## Remaining delivery work
 
-1. Complete and verify public-only bounded downloads, private staging and owner-account attachment delivery (#100).
-2. Verify immutable host argv/data mounts and actual Hugo build/publication protocol with disposable fixtures; keep live publication operator-controlled until rollout.
-3. Finish NAS module validation, update the consuming input pin, run affected/canonical/package checks and both epic review axes, then report the exact host rebuild order (#101).
+1. Completed: downloads/staging/owner-account attachment implementation, regression suite and actual packaged public-PDF/image sandbox probes (#100).
+2. Completed: immutable host argv/data mounts and actual Hugo check/publish/status -> published receipt with disposable source/queue/release fixtures. No live publication performed.
+3. Completed: full NAS and GRILL configuration dry evaluation, canonical/package gates and both cumulative review axes. Finish the consuming revision pin/availability and exact operator rebuild handoff (#101).
 4. After operator activation, prove Note to Self site edits through receipt and changed-page GET, rejected builds preserving the site, public PDF delivery, owner filtering and conservative interrupted-send behavior. Additional bridges need their own live tests.
 
 ## Sources

@@ -34,9 +34,9 @@ The lock-free design does not protect against a hostile host owner/kernel or gua
 
 The service exposes `/run/pi-chat-workspace/workspace.sock` to trusted group `pi-chat`. Membership grants tool-caller authority; do not grant it to arbitrary users. Only one service is launched. It has no persistent operation state; obsolete state from the earlier unreleased foundation is unused.
 
-The assistant's separate `workspaceRoomIds` list grants the project capability only to listed enabled rooms. `workspaceSocket` and `projectCommands` (name-to-description map) provide the SDK interface. Empty `workspaceRoomIds` retains the old web-search-only sessions. The transport selects the capability from the verified originating room; the model socket receives only question text and a boolean capability, not arbitrary paths or room IDs.
+The assistant's separate `workspaceRoomIds` list grants the project capability only to listed enabled rooms. `workspaceSocket` and `projectCommands` (name-to-description map) provide the SDK interface. Empty `workspaceRoomIds` grants no project access; separately enabled chat file tools remain available without a project. The transport selects the capability from the verified originating room; the model socket receives only question text and a boolean capability, not arbitrary paths or room IDs.
 
-The model runtime registers exactly web search plus these custom tools for approved project questions, disables local built-ins and ambient resources, and keeps fresh in-memory sessions. Project turns have a ten-minute/24-turn ceiling; ordinary questions retain their existing smaller budget. Plain CLI profiles are not modified.
+The model runtime registers web search plus these project tools for approved project questions, and optional chat file tools when explicitly enabled. It disables local built-ins and ambient resources and keeps fresh in-memory sessions. Project turns have a ten-minute/24-turn ceiling; ordinary questions retain their existing smaller budget. Plain CLI profiles are not modified.
 
 ## Wire protocol / limits
 
@@ -47,8 +47,12 @@ One bounded JSON object plus LF per Unix connection; keep the connection open wh
 - `edit`: `action`, `path`, `old`, `new`.
 - `rename`: `action`, `path`, `destination` (regular files only; no clobber).
 - `command`: `action`, `name`.
+- Private attachment bridge `export`: `action`, `path`; returns `filename` and base64 `data` for a bounded regular file.
+- Private attachment bridge `import`: `action`, `path`, base64 `data`; creates a new file only, with the same path confinement and no overwrite. The caller validates downloaded content before importing it.
 
-Text files/arguments: 1 MiB; frame: 7 MiB; list: at most 2,000 examined entries and 1 MiB encoded results, with explicit truncation; literal search: 8 MiB scanned and 100 results. Files for media delivery belong to the separate attachment path, not these text tools. Commands: 360 seconds/64 KiB output. No automatic retry of mutations or commands.
+`import`/`export` are used internally by chat file tools, not exposed as actions in the model's `workspace` schema. Binary bytes never enter model context. Binary files are limited to 25 MiB; rename/delete can operate on such files, while ordinary read/write/edit retain the text limit.
+
+Text files/arguments: 1 MiB; wire frame: 36 MiB (to carry bounded base64 attachments); list: at most 2,000 examined entries and 1 MiB encoded results, with explicit truncation; literal search: 8 MiB scanned and 100 results. Files for media delivery belong to the separate attachment path, not these text tools. Commands: 360 seconds/64 KiB output. No automatic retry of mutations or commands.
 
 ## Verification
 
@@ -56,4 +60,4 @@ Text files/arguments: 1 MiB; frame: 7 MiB; list: at most 2,000 examined entries 
 - `nix run .#verify-chat-workspace-live`: real packaged sandbox against disposable files, namespace/mount/environment checks, no real project or host service change.
 - `nix run .#verify`: canonical deterministic gate.
 
-Downloads/attachments (#100), final input pin and NAS activation/live checks (#101) remain separate work. Local tests do not establish deployed Note to Self acceptance.
+Downloads/attachments (#100) use this private binary bridge; their delivery policy is documented in [the assistant contract](bridge-chat-assistant.md). Final input pin and NAS activation/live checks (#101) remain separate work. Local tests do not establish deployed Note to Self acceptance.

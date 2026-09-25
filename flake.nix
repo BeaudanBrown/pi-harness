@@ -294,6 +294,7 @@
         managedSessionModuleTest = lib.evalModules {
           specialArgs = { inherit pkgs; };
           modules = [
+            { options.systemd.tmpfiles.rules = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; }; }
             {
               options = {
                 users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
@@ -332,6 +333,7 @@
         lspDisabledModuleTest = lib.evalModules {
           specialArgs = { inherit pkgs; };
           modules = [
+            { options.systemd.tmpfiles.rules = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; }; }
             {
               options = {
                 users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
@@ -529,6 +531,7 @@
         packages.managed-session-relay = managedSessionRelay;
         packages.bridge-chat = import ./nix/bridge-chat-package.nix { inherit pkgs piPackage; };
         packages.chat-workspace = import ./nix/chat-workspace-package.nix { inherit pkgs; };
+        packages.chat-files = import ./nix/chat-files-package.nix { inherit pkgs; };
         packages.mattpocock-skills-resources = mattPocockSkillsResources;
         packages.pi-lsp-extension = piLspExtension;
         packages.playwright-agent-cli = playwrightAgentCli;
@@ -547,6 +550,7 @@
         apps.verify = flake-utils.lib.mkApp { drv = verifyApp; };
         apps.verify-lsp-live = flake-utils.lib.mkApp { drv = verifyLspLiveApp; };
         apps.verify-chat-workspace-live = flake-utils.lib.mkApp { drv = verification.verifyWorkspaceLiveApp; };
+        apps.verify-chat-files-live = flake-utils.lib.mkApp { drv = verification.verifyFilesLiveApp; };
         apps.default = flake-utils.lib.mkApp {
           drv = piHarnessPackage;
           exePath = "/bin/pi";

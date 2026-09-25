@@ -3,14 +3,19 @@ let
   cfg = config.services.pi-harness.bridgeChat.assistant;
   package = import ./bridge-chat-package.nix { inherit pkgs; piPackage = config.services.pi-harness.package.pi; };
   socket = "/run/pi-chat-model/answer.sock";
-  settings = pkgs.writeText "pi-chat-transport.json" (builtins.toJSON {
+  filePackage = import ./chat-files-package.nix { inherit pkgs; };
+  filesDirectory = "/var/lib/pi-chat-files";
+  fileEnvironment = lib.optionalAttrs cfg.files.enable {
+    PI_MANAGED_SESSIONS_IMAGE_NORMALIZER = "${filePackage}/bin/pi-chat-image";
+  };
+  settings = pkgs.writeText "pi-chat-transport.json" (builtins.toJSON ({
     inherit (cfg) homeserver ownerUserId remoteOwnerUserIds roomIds allJoinedRooms workspaceRoomIds;
     modelSocket = socket;
-  });
-  workspacePolicy = pkgs.writeText "pi-chat-workspace-policy.json" (builtins.toJSON {
+  } // lib.optionalAttrs cfg.files.enable { inherit filesDirectory; }));
+  workspacePolicy = pkgs.writeText "pi-chat-workspace-policy.json" (builtins.toJSON ({
     socket = cfg.workspaceSocket;
     commands = cfg.projectCommands;
-  });
+  } // lib.optionalAttrs cfg.files.enable { files = { directory = filesDirectory; downloader = "${filePackage}/bin/pi-chat-download"; }; }));
   privatePath = value: lib.hasPrefix "/" value && !(lib.hasPrefix "/nix/store/" value)
     && builtins.match "[^:\n\r]+" value != null;
   common = {
@@ -29,11 +34,11 @@ let
     ProtectControlGroups = true;
     RestrictSUIDSGID = true;
     LockPersonality = true;
-    RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ];
+    RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_INET6" ] ++ lib.optional cfg.files.enable "AF_NETLINK";
     CapabilityBoundingSet = "";
     InaccessiblePaths = [ "-/run/postgresql" "-/var/lib/postgresql" "-/run/secrets" "-/run/user" "-/var/lib/mautrix-signal" "-/var/lib/mautrix-meta-facebook" ];
     LimitCORE = 0;
-    MemoryMax = "256M";
+    MemoryMax = if cfg.files.enable then "512M" else "256M";
     TasksMax = 32;
     Restart = "on-failure";
     RestartSec = 10;
@@ -53,6 +58,7 @@ in {
       type = lib.types.listOf (lib.types.strMatching "![^[:space:]]+"); default = [ ];
       description = "Explicit chat-to-project grant. Only these enabled rooms receive file and project-command tools; ordinary CLI sessions are unaffected.";
     };
+    files.enable = lib.mkEnableOption "private public-file downloads and owner-account attachments in every enabled chat (no CLI tools)";
     workspaceSocket = lib.mkOption { type = lib.types.str; default = "/run/pi-chat-workspace/workspace.sock"; };
     projectCommands = lib.mkOption {
       type = lib.types.attrsOf lib.types.str; default = { };
@@ -70,11 +76,12 @@ in {
       { assertion = builtins.length cfg.roomIds <= 256 && builtins.length cfg.remoteOwnerUserIds <= 8; message = "Chat allowlists exceed their bounds."; }
     ];
     users.groups.pi-chat = { };
+    systemd.tmpfiles.rules = lib.optional cfg.files.enable "d ${filesDirectory} 0770 ${cfg.modelUser} pi-chat 1d -";
     systemd.services.pi-chat-model = {
       description = "Restricted stateless Pi SDK worker using existing Pi authentication";
       after = [ "network-online.target" ] ++ lib.optional (cfg.workspaceRoomIds != [ ]) "pi-chat-workspace.service";
       wants = [ "network-online.target" ] ++ lib.optional (cfg.workspaceRoomIds != [ ]) "pi-chat-workspace.service";
-      environment = {
+      environment = fileEnvironment // {
         HOME = "/var/lib/pi-chat-model";
         PI_CODING_AGENT_DIR = "/var/lib/pi-chat-model/isolated";
       };
@@ -85,8 +92,8 @@ in {
         # private bind of only auth.json would break Pi's refresh coordination.
         ProtectHome = "tmpfs";
         BindPaths = [ cfg.piAgentDirectory ];
-        ReadWritePaths = [ cfg.piAgentDirectory ];
-        ExecStart = "${package}/bin/pi-chat-model ${socket} ${lib.escapeShellArg "${cfg.piAgentDirectory}/auth.json"} ${cfg.model}${lib.optionalString (cfg.workspaceRoomIds != [ ]) " ${workspacePolicy}"}";
+        ReadWritePaths = [ cfg.piAgentDirectory ] ++ lib.optional cfg.files.enable filesDirectory;
+        ExecStart = "${package}/bin/pi-chat-model ${socket} ${lib.escapeShellArg "${cfg.piAgentDirectory}/auth.json"} ${cfg.model}${lib.optionalString (cfg.workspaceRoomIds != [ ] || cfg.files.enable) " ${workspacePolicy}"}";
         RuntimeDirectory = "pi-chat-model";
         RuntimeDirectoryMode = "0750";
         StateDirectory = "pi-chat-model";
@@ -98,7 +105,9 @@ in {
       wantedBy = [ "multi-user.target" ];
       after = [ "network-online.target" "pi-chat-model.service" ];
       wants = [ "network-online.target" "pi-chat-model.service" ];
+      environment = fileEnvironment;
       serviceConfig = common // {
+        ReadWritePaths = lib.optional cfg.files.enable filesDirectory;
         ExecStart = "${package}/bin/pi-chat-transport ${settings}";
         LoadCredential = [ "matrix:${cfg.matrixTokenFile}" ];
         StateDirectory = "pi-chat-transport";

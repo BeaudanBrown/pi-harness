@@ -1,4 +1,4 @@
-/** Account-local Matrix JSON transport; callers own room policy, cursors and retry safety. */
+/** Account-local Matrix transport; callers own room policy, cursors and retry safety. */
 export interface MatrixRetryOptions {
 	maxAttempts?: number;
 	baseDelayMs?: number;
@@ -43,7 +43,15 @@ export class MatrixHttp {
 		if (typeof nextBatch !== "string" || !nextBatch || nextBatch.length > 16384) throw new MatrixError("invalid_response", "Matrix sync omitted its cursor");
 		return { nextBatch, response };
 	}
-	async request(method: string, path: string, body?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+	request(method: string, path: string, body?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
+		return this.perform(method, path, body ? { data: JSON.stringify(body), contentType: "application/json" } : undefined, signal);
+	}
+	/** Upload is POST and therefore never automatically retried. */
+	upload(filename: string, mimeType: string, data: Buffer, signal?: AbortSignal): Promise<unknown> {
+		if (!data.length || data.length > 25 * 1024 * 1024 || filename.length > 255 || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mimeType)) throw Error("Invalid media upload");
+		return this.perform("POST", "/_matrix/media/v3/upload?filename=" + encodeURIComponent(filename), { data: new Uint8Array(data), contentType: mimeType }, signal);
+	}
+	private async perform(method: string, path: string, body?: { data: string | Uint8Array<ArrayBuffer>; contentType: string }, signal?: AbortSignal): Promise<unknown> {
 		if (!path.startsWith("/_matrix/") || new URL(path, this.homeserver).origin !== this.homeserver) throw Error("Invalid Matrix request path");
 		const safePath = path.split("?")[0]; let last: MatrixError | undefined;
 		for (let attempt = 0; attempt < this.retry.maxAttempts; attempt++) {
@@ -52,8 +60,8 @@ export class MatrixHttp {
 			if (boundedSignal.aborted) throw new MatrixError("cancelled", "Matrix request was cancelled");
 			try {
 				const response = await this.fetchImplementation(new URL(path, this.homeserver), { method, redirect: "error", headers: {
-					Authorization: `Bearer ${this.#token}`, ...(body ? { "Content-Type": "application/json" } : {}),
-				}, body: body ? JSON.stringify(body) : undefined, signal: boundedSignal });
+					Authorization: `Bearer ${this.#token}`, ...(body ? { "Content-Type": body.contentType } : {}),
+				}, body: body?.data, signal: boundedSignal });
 				const declared = response.headers.get("content-length");
 				if (declared !== null && Number(declared) > MAX_MATRIX_RESPONSE_BYTES) {
 					await response.body?.cancel().catch(() => {});

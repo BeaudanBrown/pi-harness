@@ -409,6 +409,7 @@ let
         options.systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
         options.users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
         options.services.pi-harness.package = lib.mkOption { type = lib.types.anything; default = { pi = piPackage; }; };
+        options.systemd.tmpfiles.rules = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; };
       }
       ./bridge-chat.nix
       {
@@ -427,6 +428,9 @@ let
   bridgeChatReport = pkgs.writeText "bridge-chat-module.json" (builtins.toJSON {
     assertions = map (a: a.assertion) bridgeChatModule.config.assertions;
     services = bridgeChatModule.config.systemd.services;
+    filesServices = (bridgeChatModule.extendModules {
+      modules = [ { services.pi-harness.bridgeChat.assistant.files.enable = true; } ];
+    }).config.systemd.services;
     rejectsEmptyScope = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
       modules = [ { services.pi-harness.bridgeChat.assistant.roomIds = lib.mkForce [ ]; } ];
     }).config.assertions);
@@ -457,6 +461,9 @@ let
       and .services["pi-chat-model"].serviceConfig.ReadWritePaths == ["/home/operator/.pi/agent"]
       and .services["pi-chat-transport"].serviceConfig.DynamicUser
       and .services["pi-chat-transport"].serviceConfig.LoadCredential == ["matrix:/run/secrets/chat-matrix"]
+      and .filesServices["pi-chat-model"].serviceConfig.ReadWritePaths == ["/home/operator/.pi/agent", "/var/lib/pi-chat-files"]
+      and .filesServices["pi-chat-transport"].serviceConfig.ReadWritePaths == ["/var/lib/pi-chat-files"]
+      and (.filesServices["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
       and (.services | all(.serviceConfig.ProtectSystem == "strict" and .serviceConfig.StateDirectoryMode == "0700"
         and (.serviceConfig.InaccessiblePaths | index("-/run/postgresql")) != null
         and (.serviceConfig | has("EnvironmentFile") | not)))' ${bridgeChatReport}
@@ -494,6 +501,7 @@ let
     chmod -R u+w source
     cd source
     python3 -B -m unittest discover -s tests -p test_chat_workspace.py -v
+    python3 -B -m unittest discover -s tests -p test_chat_downloads.py -v
     jq -e '.disabledServices == {} and (.assertions | all) and .rejectsRoot
       and .service.serviceConfig.User == "operator"
       and .service.serviceConfig.RestrictAddressFamilies == ["AF_UNIX", "AF_INET", "AF_NETLINK"]
@@ -558,6 +566,12 @@ let
         node --test ${testBuild}/build/tests/lsp-live.test.js
     '';
   };
+  verifyFilesLiveApp = pkgs.writeShellApplication {
+    name = "verify-chat-files-live";
+    text = ''
+      exec ${pkgs.python3}/bin/python3 -I -B ${../tests/chat-files-live.py} ${import ./chat-files-package.nix { inherit pkgs; }}
+    '';
+  };
   verifyWorkspaceLiveApp = pkgs.writeShellApplication {
     name = "verify-chat-workspace-live";
     text = ''
@@ -574,5 +588,5 @@ let
 in
 {
   checks = deterministicChecks // { inherit verify; };
-  inherit verifyApp verifyLspLiveApp verifyWorkspaceLiveApp;
+  inherit verifyApp verifyLspLiveApp verifyWorkspaceLiveApp verifyFilesLiveApp;
 }

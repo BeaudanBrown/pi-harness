@@ -1,4 +1,5 @@
 import importlib.util
+import base64
 import os
 from pathlib import Path
 import tempfile
@@ -39,6 +40,24 @@ class Files(unittest.TestCase):
         self.call('delete', path='content/new.md')
         self.assertEqual(self.call('list', path='content'), {'entries': [], 'truncated': False})
         self.assertFalse((self.root / '.pi-workspace.lock').exists())
+
+    def test_binary_transfer_is_bounded_confined_and_does_not_overwrite(self):
+        data = b'%PDF-1.4\n' + b'x' * (2 * 1024 * 1024) + b'\n%%EOF\n'
+        encoded = base64.b64encode(data).decode('ascii')
+        self.call('import', path='document.pdf', data=encoded)
+        self.assertEqual(self.call('export', path='document.pdf'), {'filename': 'document.pdf', 'data': encoded})
+        self.assertIn('error', self.worker.handle(dict(action='read', path='document.pdf')))
+        self.assertIn('error', self.worker.handle(dict(action='import', path='document.pdf', data=encoded)))
+        for path in ('../outside', '/etc/passwd', '.git/config'):
+            self.assertIn('error', self.worker.handle(dict(action='import', path=path, data=encoded)))
+            self.assertIn('error', self.worker.handle(dict(action='export', path=path)))
+        (self.root / 'link.pdf').symlink_to(self.root / 'document.pdf')
+        self.assertIn('error', self.worker.handle(dict(action='export', path='link.pdf')))
+        self.call('rename', path='document.pdf', destination='renamed.pdf')
+        self.call('delete', path='renamed.pdf')
+        self.assertIn('error', self.worker.handle(dict(action='import', path='bad.pdf', data='invalid!')))
+        with mock.patch.object(module, 'MAX_FILE_BYTES', 10):
+            self.assertIn('error', self.worker.handle(dict(action='import', path='large.pdf', data=encoded)))
 
     def test_support_files_and_independent_host_edit(self):
         self.call('write', path='.gitignore', text='public/')

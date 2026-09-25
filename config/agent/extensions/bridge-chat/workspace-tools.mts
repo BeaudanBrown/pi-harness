@@ -17,7 +17,7 @@ const params = Type.Union([
 ]);
 
 export function workspaceRequest(socket: string, request: unknown, signal?: AbortSignal): Promise<unknown> {
-	const data = JSON.stringify(request) + "\n", limit = 7 * 1024 * 1024;
+	const data = JSON.stringify(request) + "\n", limit = 36 * 1024 * 1024;
 	if (Buffer.byteLength(data) > limit) return Promise.reject(Error("Workspace request too large"));
 	return new Promise((resolve, reject) => {
 		const connection = net.createConnection(socket);

@@ -62,8 +62,9 @@ are disabled. Only the explicit built-in Codex model is selected; no silent
 fallback to another model or paid API-key setup. The existing Pi login must
 include ChatGPT/Codex for the web-search tool. Entitlement is a live gate.
 
-`noTools: builtin` plus an exact `web_search` allowlist prevents local tools.
-The entire registered/active tool set is checked. Search is the same tool
+`noTools: builtin` plus an explicit allowlist prevents ambient local tools.
+By default only `web_search` is registered; explicit chat-only workspace and file
+capabilities are described below. The entire registered/active tool set is checked. Search is the same tool
 factory used by the normal harness extension, defaulting to `gpt-5.6-luna`
 (independent of the answering model), with cancellable Pi-managed authentication
 and redacted errors. All callers receive the same 48,000-byte UTF-8 search text
@@ -72,18 +73,59 @@ search call, concurrency, argument or HTTP-body limits. Pi chooses whether
 to call it. No request reuses another request's session or previous-response ID.
 Plain question text is passed with prompt/template/skill expansion disabled.
 Answers must finish normally; aborted/partial responses are never delivered.
-Execution is limited to four turns, ninety seconds and bounded text output.
+Plain question execution is limited to four turns and ninety seconds; explicitly
+enabled project/file sessions have up to 24 turns and ten minutes, with the same
+bounded final text output.
 
-Future tools or directory access are explicit reviewed capability upgrades to
-this module, not ambient inheritance from interactive Pi. In particular, adding
-file tools requires revisiting the exposed auth-directory seam: it must not make
-Pi's credentials model-readable. There is no generic arbitrary-tools option now.
+## Explicit chat-only project and file capabilities
+
+`workspaceRoomIds`, `workspaceSocket` and `projectCommands` grant the isolated
+executor only to specified enabled chats. The originating room is verified by the
+transport, not taken from the question. See [executor contract](chat-workspace-executor.md).
+
+`files.enable = true` adds `download_file` and `send_file` in **every enabled chat**,
+independently of a project grant. Public HTTPS downloads run in a credential-free
+Bubblewrap helper, validate DNS addresses and every redirect, pin the chosen
+numeric destination while authenticating the original TLS hostname, ignore proxy
+variables, and enforce byte/time limits. The helper sees its one temporary output
+directory, selected immutable runtime closures and DNS/CA data—not the model login,
+Matrix token, project or other chats' downloads. Image decoding uses a separate
+network-isolated invocation of the same packaged sandbox.
+
+Files reuse the managed artifact byte/type validator, not managed conversation
+state. Supported types are PDF, text/Markdown/CSV/JSON, ZIP, WAV, PNG/JPEG/WebP;
+executables, HTML/SVG, credentials and malformed media are rejected. These checks
+are not antivirus or a guarantee that a PDF/ZIP is safe to open: files remain
+untrusted, and archives are not extracted or executed.
+
+Downloads are private by default. An optional workspace destination creates a new
+validated file (normally under `inbox/`); only a subsequent project publication
+makes approved site content public. `send_file` accepts only a current-request
+download handle or an approved project-relative file, never a host path or another
+room. Up to four attachments, each at most 25 MiB, are queued with the final answer.
+The owner-account transport revalidates the staged bytes and uploads/sends them to
+the original room. Queued or Matrix-accepted is not proof of Signal delivery.
+
+Private staging at `/var/lib/pi-chat-files` is shared only by the trusted model and
+transport processes: at most 256 MiB of validated blobs plus one bounded temporary
+download, 64 entries and 24-hour expiry. Successful/uncertain delivery and unused
+current-request downloads remove their files; hourly and systemd retention cleanup
+cover interruptions. The existing durable reply state also stores bounded file
+descriptors. A restarted ready reply can deliver its files; sending/uncertain
+batches never retry automatically, including an upload with a lost acknowledgement.
+A partially delivered batch requires a new explicit request, not a new journal or
+multi-stage agent workflow.
+
+All tools are registered only in the dedicated SDK worker. Ordinary CLI sessions,
+resource discovery and GRILL editing are unchanged. There is no arbitrary-shell
+or arbitrary-tool option, and no model tool reads the auth directory.
 
 ## Process and persistence isolation
 
 The transport remains a systemd DynamicUser with only its Matrix LoadCredential.
 The Pi worker runs as the configured existing user, without Matrix credentials.
-A shared group permits only the bounded Unix socket. Both have private state,
+A shared group permits the bounded Unix socket and, when explicitly enabled, the
+private attachment spool. Both have private state,
 resource limits, strict filesystem protection, no privilege escalation and no
 access to host PostgreSQL sockets. The worker's home is hidden by a tmpfs, except
 for its original Pi agent directory, explicitly mounted read/write for auth
@@ -205,8 +247,8 @@ configuring it; do not accept all bridge senders to make a test pass.
 
 Do not widen room scope until acceptance. Do not reset bridge logins or delete
 portals as assistant recovery. Keep #90 open until approved live acceptance;
-memory, history, workspace tools, encrypted Matrix and general group provisioning
-remain deferred.
+memory, history, encrypted Matrix and general group provisioning remain deferred.
+Project/file capabilities are the separate #97 opt-in rollout, initially Note to Self.
 
 ## Verification
 
@@ -214,4 +256,7 @@ remain deferred.
 chat store, private socket, shared login locking and packaged worker using only
 fake credentials/model output. Shared Matrix tests belong to unit-tests; managed
 regressions cover existing consumers. All are included in `nix run .#verify`.
-`nix build .#bridge-chat --no-link` builds the production pair without activation.
+`nix build .#bridge-chat .#chat-files --no-link` builds the production pair and
+helpers without activation. `nix run .#verify-chat-files-live` exercises real
+sandbox launch/denial and image decoding, and fetches one public W3C sample PDF;
+it never sends Matrix messages or publishes project content.

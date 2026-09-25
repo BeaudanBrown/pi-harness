@@ -84,6 +84,17 @@ async function validateContent(data: Buffer, extension: string, mimeType: string
 	return { mediaType: "file" };
 }
 
+/** Shared byte/type policy; callers own path confinement and delivery authority. */
+export async function inspectArtifactBytes(filename: string, data: Buffer) {
+	const extension = extname(filename).toLowerCase();
+	if (!filename || filename.length > 255 || filename.startsWith(".") || /[\\/\u0000-\u001f\u007f]/.test(filename) || SENSITIVE_FILENAMES.test(filename) || SENSITIVE_EXTENSIONS.has(extension)) throw new Error("Artifact filename is unsafe or sensitive");
+	if (!data.length || data.length > MAX_BLOB_BYTES) throw new Error("Artifact must be between 1 byte and 25 MiB");
+	if (!ALLOWED_EXTENSIONS.has(extension)) throw new Error("Artifact type is not in the conservative export allowlist");
+	const mimeType = MIME_BY_EXTENSION[extension]!;
+	const classified = await validateContent(data, extension, mimeType);
+	return { filename, mimeType, ...classified, byteLength: data.length, sha256: createHash("sha256").update(data).digest("hex") };
+}
+
 export async function resolveWorkspaceArtifact(options: {
 	requestedPath: string; cwd: string; workspacePath: string; placement: WorkspaceIdentity; conversationId: string; toolCallId: string;
 }): Promise<WorkspaceArtifact> {
@@ -130,14 +141,8 @@ export async function resolveWorkspaceArtifact(options: {
 		if (error instanceof Error && "code" in error && ["ELOOP", "ENOTDIR"].includes(String(error.code))) throw new Error("Artifact path contains a symlink or non-directory");
 		throw error;
 	} finally { for (const handle of handles.reverse()) await handle.close(); }
-	const filename = segments.at(-1)!; const extension = extname(filename).toLowerCase();
-	if (!filename || filename.length > 255 || /[\\/\u0000-\u001f\u007f]/.test(filename) || SENSITIVE_FILENAMES.test(filename) || SENSITIVE_EXTENSIONS.has(extension)) throw new Error("Artifact filename is unsafe or sensitive");
-	if (!ALLOWED_EXTENSIONS.has(extension)) throw new Error("Artifact type is not in the conservative export allowlist");
-	const mimeType = MIME_BY_EXTENSION[extension]!;
-	const classified = await validateContent(data, extension, mimeType);
-	const sha256 = createHash("sha256").update(data).digest("hex");
-	return { uploadId: deriveUploadId(options.conversationId, options.toolCallId), blobId: deriveBlobId(options.conversationId, sha256), sha256,
-		filename, mimeType, ...classified, byteLength: data.length, data };
+	const descriptor = await inspectArtifactBytes(segments.at(-1)!, data);
+	return { uploadId: deriveUploadId(options.conversationId, options.toolCallId), blobId: deriveBlobId(options.conversationId, descriptor.sha256), ...descriptor, data };
 }
 
 export function artifactChunks(data: Buffer): Buffer[] {
