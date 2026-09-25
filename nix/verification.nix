@@ -446,6 +446,7 @@ let
     mkdir -p "$TMPDIR/chat-tests/node_modules/@earendil-works"
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-coding-agent"
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-ai"
+    ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$TMPDIR/chat-tests/node_modules/typebox"
     node --test --test-concurrency=1 "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
     jq -e '(.assertions | all) and .rejectsEmptyScope and .rejectsStoreSecret
       and (.services["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
@@ -495,7 +496,8 @@ let
     python3 -B -m unittest discover -s tests -p test_chat_workspace.py -v
     jq -e '.disabledServices == {} and (.assertions | all) and .rejectsRoot
       and .service.serviceConfig.User == "operator"
-      and .service.serviceConfig.RestrictAddressFamilies == ["AF_UNIX"]
+      and .service.serviceConfig.RestrictAddressFamilies == ["AF_UNIX", "AF_INET", "AF_NETLINK"]
+      and .service.serviceConfig.PrivateNetwork
       and .service.serviceConfig.ProtectSystem == "strict"
       and .service.serviceConfig.NoNewPrivileges
       and .service.serviceConfig.ReadWritePaths == ["/var/lib/dump-site/project"]
@@ -559,7 +561,14 @@ let
   verifyWorkspaceLiveApp = pkgs.writeShellApplication {
     name = "verify-chat-workspace-live";
     text = ''
-      exec ${pkgs.python3}/bin/python3 -I -B ${../tests/chat-workspace-live.py} ${import ./chat-workspace-package.nix { inherit pkgs; }}/bin/pi-chat-workspace
+      exec ${pkgs.python3}/bin/python3 -I -B ${../tests/chat-workspace-live.py} ${import ./chat-workspace-package.nix {
+        inherit pkgs;
+        commands.probe = [ (pkgs.writeShellScript "workspace-command-probe" ''
+          test -f /workspace/hello.txt
+          test -z "''${PI_WORKSPACE_SECRET_CANARY:-}"
+          printf 'host-approved command works\n'
+        '') ];
+      }}/bin/pi-chat-workspace probe
     '';
   };
 in

@@ -1,7 +1,7 @@
 { config, lib, pkgs, ... }:
 let
   cfg = config.services.pi-harness.bridgeChat.workspaceExecutor;
-  package = import ./chat-workspace-package.nix { inherit pkgs; };
+  package = import ./chat-workspace-package.nix { inherit pkgs; inherit (cfg) commands commandMounts; };
   privatePath = value: lib.hasPrefix "/" value && value != "/"
     && !(lib.hasPrefix "/nix/store/" value) && builtins.match "[^:\n\r]+" value != null;
 in {
@@ -10,7 +10,22 @@ in {
     projectDirectory = lib.mkOption {
       type = lib.types.str;
       default = "";
-      description = "Host-approved canonical project directory. The operator must arrange editor ownership and serialize writers.";
+      description = "Host-approved canonical project directory. Normal host editing remains available; use one editor at a time.";
+    };
+    commands = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.listOf lib.types.str);
+      default = { };
+      description = "Named fixed argv commands, starting with a Nix store executable. Executed in the sandbox, never through a shell. Use trusted packaged commands, not project scripts.";
+    };
+    commandMounts = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.submodule {
+        options = {
+          source = lib.mkOption { type = lib.types.str; };
+          readOnly = lib.mkOption { type = lib.types.bool; default = true; };
+        };
+      });
+      default = { };
+      description = "Trusted data mounts for commands, under /commands/data/<name>; unavailable to generic file tools.";
     };
     user = lib.mkOption {
       type = lib.types.strMatching "[a-z_][a-z0-9_-]*";
@@ -20,7 +35,10 @@ in {
   };
   config = lib.mkIf cfg.enable {
     assertions = [ {
-      assertion = pkgs.stdenv.isLinux && privatePath cfg.projectDirectory;
+      assertion = pkgs.stdenv.isLinux && privatePath cfg.projectDirectory
+        && lib.all (name: builtins.match "[A-Za-z_][A-Za-z0-9_]*" name != null) (builtins.attrNames cfg.commands ++ builtins.attrNames cfg.commandMounts)
+        && lib.all (argv: argv != [ ] && lib.hasPrefix "/nix/store/" (builtins.head argv)) (builtins.attrValues cfg.commands)
+        && lib.all (mount: privatePath mount.source) (builtins.attrValues cfg.commandMounts);
       message = "workspaceExecutor requires Linux and an absolute runtime project directory.";
     } ];
     users.groups.pi-chat = { };
@@ -32,15 +50,13 @@ in {
         Type = "simple";
         User = cfg.user;
         Group = "pi-chat";
-        ExecStart = "${package}/bin/pi-chat-workspace ${lib.escapeShellArg cfg.projectDirectory} /var/lib/pi-chat-workspace /run/pi-chat-workspace";
-        StateDirectory = "pi-chat-workspace";
-        StateDirectoryMode = "0700";
+        ExecStart = "${package}/bin/pi-chat-workspace ${lib.escapeShellArg cfg.projectDirectory} /run/pi-chat-workspace";
         RuntimeDirectory = "pi-chat-workspace";
         RuntimeDirectoryMode = "0750";
         UMask = "0077";
         ProtectSystem = "strict";
         ProtectHome = true;
-        ReadWritePaths = [ cfg.projectDirectory ];
+        ReadWritePaths = [ cfg.projectDirectory ] ++ map (mount: mount.source) (builtins.filter (mount: !mount.readOnly) (builtins.attrValues cfg.commandMounts));
         PrivateTmp = true;
         PrivateDevices = true;
         NoNewPrivileges = true;
@@ -51,7 +67,10 @@ in {
         ProtectControlGroups = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;
-        RestrictAddressFamilies = [ "AF_UNIX" ];
+        # Bubblewrap needs route netlink (and libc's interface lookup socket)
+        # to initialise loopback in its private network namespace.
+        PrivateNetwork = true;
+        RestrictAddressFamilies = [ "AF_UNIX" "AF_INET" "AF_NETLINK" ];
         InaccessiblePaths = [ "-/run/secrets" "-/run/agenix" "-/run/user" ];
         MemoryMax = "256M";
         TasksMax = 16;

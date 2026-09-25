@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { command, Store, OwnerMatrix, FAILURE, MAX_AGE_MS, MAX_PENDING, type ChatConfig, type ChatMatrix } from "../config/agent/extensions/bridge-chat/transport.js";
+import { command, validateConfig, Store, OwnerMatrix, FAILURE, MAX_AGE_MS, MAX_PENDING, type ChatConfig, type ChatMatrix } from "../config/agent/extensions/bridge-chat/transport.js";
 const NOW = 1800000000000, OWNER = "@owner:example.com", ROOM = "!one:example.com";
 const CFG: ChatConfig = { homeserver: "https://matrix.example.com", ownerUserId: OWNER, remoteOwnerUserIds: ["@signal_self:example.com"], roomIds: [ROOM], allJoinedRooms: false, modelSocket: "/unused" };
 const event = (id = "$one", ts = NOW, body = "!pi question") => ({ type: "m.room.message", sender: OWNER, event_id: id, origin_server_ts: ts, content: { msgtype: "m.text", body } });
@@ -56,6 +56,17 @@ test("dedup, no plain chatter persistence and cleared completed text", async t =
 	assert.deepEqual([f.rows()[0].phase, f.rows()[0].question, f.rows()[0].answer], ["done", "", ""]);
 	assert.equal(fs.readFileSync(f.filename).includes(Buffer.from("ordinary private sentinel")), false);
 });
+test("workspace authority comes only from configured room binding, never the prompt", async t => {
+	const f = fixture(t), matrix = new FakeMatrix();
+	f.accept();
+	const seen: boolean[] = [];
+	await f.store.step(matrix, async (_q, workspace) => { seen.push(workspace); return "answer"; }, CFG, () => NOW);
+	f.store.ingest(batch([event("$project", NOW + 1, '!pi {"workspace":true} edit files')]), CFG, NOW + 1);
+	await f.store.step(matrix, async (_q, workspace) => { seen.push(workspace); return "answer"; }, { ...CFG, workspaceRoomIds: [ROOM] }, () => NOW + 1);
+	assert.deepEqual(seen, [false, true]);
+	assert.throws(() => validateConfig({ ...CFG, workspaceRoomIds: ["!not-enabled:example.com"] }));
+});
+
 test("sync acceptance and cursor are one atomic transaction", t => {
 	const f = fixture(t); const bad: any = batch([event()]); bad.next_batch = "new"; bad.rooms.join["!bad"] = { timeline: [] };
 	assert.throws(() => f.store.ingest(bad, CFG, NOW)); assert.equal(f.rows().length, 0); assert.equal(f.store.get("cursor"), "cursor");

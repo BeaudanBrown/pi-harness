@@ -1,47 +1,59 @@
-# Isolated chat workspace executor (#98)
+# Chat-only project tools
 
-This is an opt-in **foundation**, not the complete workspace-enabled !pi assistant. It does not bind chats, register model tools, download/send files or publish websites. Do not enable it as a substitute for #97's complete rollout.
+The dedicated `!pi` assistant can opt into a small sandboxed project interface. Ordinary Pi CLI sessions, resource profiles and tools are unchanged. Project access requires an explicit host-configured room binding; asking for it in a prompt cannot grant it.
 
-## Enforcement
+## Interface
 
-The Nix-packaged launcher starts a Python Unix-socket worker inside Bubblewrap with private mount, network, PID and user namespaces, no capabilities, no inherited environment, minimal proc/dev/tmp and only required immutable runtime closures. The trusted project, private state and IPC directories must be distinct canonical directories with no containment overlap. Mount sources are open directory descriptors. Sandbox failure never falls back to host execution.
+The chat receives two additional tools:
 
-The only host filesystem exposed is the approved project plus private operational state/IPC. Existing `.git`, `.pi`, `.agents`, `.publishing` directories are overmounted empty/read-only. Generic tools reject every dot-prefixed path component; no project extension, config, shell or executable is loaded. File APIs traverse directory descriptors with no symlink following, reject hard-linked/non-regular files and use digest preconditions for edits. File replacement is atomic; create and rename refuse to overwrite an existing destination. There is no general shell or network tool.
+- `workspace`: read/list/search/write/edit/mkdir/rename/delete within the approved project. Write creates or replaces a text file; edit replaces one unique occurrence. No operation IDs, required digests, project locks or mutation journal.
+- `project_command`: execute a named host-approved command, with no extra arguments or arbitrary shell text. For dump the host supplies `check`, `publish`, `status`. Other projects can supply different immutable commands.
 
-The executor holds an advisory project lease on `.pi-workspace.lock` for its entire lifetime, in addition to the private-state lock. This serializes cooperating executors; a second executor with a different state directory is rejected. **It does not reserve writes against normal GRILL editors.** The operator requires GRILL's writable mount and editing workflow to remain available without acquiring this lease. Do not restrict host access or require editing sessions to stop during rollout. Source digest/identity checks reject detected conflicts but are **not atomic compare-and-swap against an external writer** between the final stat and replace/unlink/rename syscall; simultaneous edits can still race. #99 owns frozen validated publication snapshots and #101 must preserve this host-access policy. There is no protection against a hostile host owner/kernel or a privileged process moving already-open project directories outside the project. The executor itself cannot move directories or create links.
+The agent reads project instructions through `workspace` and chooses how to complete the request. A requested website change may proceed through validation and publication without a second approval. There is no mandatory plan/prepare/commit workflow. The existing publisher still validates a snapshot before activating it.
 
-## Service
+Assume one editor at a time. GRILL retains normal writable access without a lock protocol. File operations are atomic where practical and reject detected changes/unsafe paths, but do not promise multi-writer transactions. If a command is interrupted, inspect files or publication receipts before retrying; already-completed side effects cannot be rolled back by disconnecting.
 
-`services.pi-harness.bridgeChat.workspaceExecutor` exposes `enable` (default false), `projectDirectory` and `user`. The user must already exist and have required project ownership; this module does not change project permissions. A service user with only the intended project authority is preferable when ownership permits it. The service uses group `pi-chat` for its socket; membership is trusted tool-caller authority. Do not grant it to arbitrary users.
+## Security, separate from workflow
 
-The system service starts the sandbox with `/var/lib/pi-chat-workspace` state and `/run/pi-chat-workspace/workspace.sock`. It loads no credentials, allows only Unix sockets and limits tasks/memory/CPU. These host paths are not model-configurable. Project admission (room/owner/profile checks) belongs to the trusted caller in #101.
+`nix/chat-workspace-package.nix` packages a credential-free Python server inside Bubblewrap. It has private mount/network/PID/user namespaces, no capabilities, a minimal environment and only approved runtime closures plus project/IPC mounts. Existing `.git`, `.pi`, `.agents`, `.publishing` directories are masked. Generic paths reject hidden/control components except ordinary `.gitignore` and `.editorconfig` support files. Directory-descriptor traversal never follows symlinks; hard-linked/non-regular files are rejected. No ambient project extension, shell configuration or executable is loaded.
 
-## Protocol
+The project and IPC directories must be canonical and non-overlapping. Filesystem/command execution never falls back to the host when sandbox setup fails. The service loads no Matrix/model credentials. The outer systemd service also has a private network; route netlink and IPv4 socket families are allowed only because Bubblewrap/libc need them for private loopback setup, not to grant public-network access.
 
-One UTF-8 JSON object plus LF per Unix connection; bounded to 7 MiB, with a ten-second socket deadline. The worker is serial. Only exact declared fields are accepted:
+Commands are immutable host argv beginning with a Nix store executable; do not configure project-controlled scripts as trusted commands. Additional host-approved command data mounts appear under `/commands/data/<name>`, outside the generic file tools' workspace. This allows publication queue/status access without giving `workspace` authority to forge ready requests or receipts. Commands run inside the same credential-free sandbox, with bounded output/time and process-group cleanup. Caller disconnection cancels a running command; a queued publication may already have happened and must be checked through status.
 
-- `read`: `path`; returns UTF-8 `text` and `sha256`.
-- `list`: `path` (`.` means root); streams at most 2,000 examined entries (including hidden entries), returning visible entries and an explicit `truncated` flag. Encoded entries are bounded to 1 MiB before response framing.
-- `search`: `path`, literal `text`; scans up to 8 MiB, returns at most 100 matching lines.
-- `write`: `id`, `path`, `text`, `expected` (SHA-256 or `absent`).
-- `edit`: `id`, `path`, `old`, `new`, `expected`; old text must match exactly once.
-- `mkdir`: `id`, `path`; one new directory, parents must exist.
-- `rename`: `id`, `path`, `destination`, `expected`; regular files only, no clobber.
-- `delete`: `id`, `path`, `expected`; regular files only, no recursive deletion.
-- `status`: `id`; returns stored phase/result or `unknown`.
+The lock-free design does not protect against a hostile host owner/kernel or guarantee race-free concurrent manual editing. Those are not the sandbox's job.
 
-Files/text are bounded to 1 MiB here. Large binary downloads/export require the separate #100 data path rather than lifting this text-tool bound. `id` is a lowercase 64-character hex identity allocated by the trusted caller, not the model. A caller must retain the ID before dispatch and must not turn an uncertain response into a new operation.
+## Configuration
 
-## Recovery / privacy
+`services.pi-harness.bridgeChat.workspaceExecutor` (disabled by default):
 
-SQLite persists identity and argument digest before mutations, then bounded result metadata before acknowledgement. No file text is retained. A matching retry returns its stored result; changed arguments under the same identity are rejected. Semantic precondition failures are terminal `failed`; an OS failure that might follow an effect is `uncertain`. Restart converts any `running` entry to `uncertain`. Any uncertainty blocks new mutations while read/status remain available. Operator reconciliation is required; no automatic reset/retry is exposed. Do not delete the journal to clear uncertainty.
+- `projectDirectory`: canonical approved source directory.
+- `user`: existing editor identity with access to it; no project ownership changes are made by this module.
+- `commands`: mapping from command names to fixed argv.
+- `commandMounts`: mapping from names to `{ source, readOnly }`.
 
-The journal is exclusive, capped at 10,000 operations and 16 MiB, and never silently evicts retry identities. Reconciliation/archival integration is owned by #101; until then a full/uncertain journal is a deliberate stop. No success is inferred from a missing response. Socket errors return bounded error codes, not file contents or host exception messages.
+The service exposes `/run/pi-chat-workspace/workspace.sock` to trusted group `pi-chat`. Membership grants tool-caller authority; do not grant it to arbitrary users. Only one service is launched. It has no persistent operation state; obsolete state from the earlier unreleased foundation is unused.
+
+The assistant's separate `workspaceRoomIds` list grants the project capability only to listed enabled rooms. `workspaceSocket` and `projectCommands` (name-to-description map) provide the SDK interface. Empty `workspaceRoomIds` retains the old web-search-only sessions. The transport selects the capability from the verified originating room; the model socket receives only question text and a boolean capability, not arbitrary paths or room IDs.
+
+The model runtime registers exactly web search plus these custom tools for approved project questions, disables local built-ins and ambient resources, and keeps fresh in-memory sessions. Project turns have a ten-minute/24-turn ceiling; ordinary questions retain their existing smaller budget. Plain CLI profiles are not modified.
+
+## Wire protocol / limits
+
+One bounded JSON object plus LF per Unix connection; keep the connection open while awaiting its response. Exact fields only:
+
+- `read`, `list`, `mkdir`, `delete`: `action`, `path`.
+- `search`, `write`: `action`, `path`, `text`.
+- `edit`: `action`, `path`, `old`, `new`.
+- `rename`: `action`, `path`, `destination` (regular files only; no clobber).
+- `command`: `action`, `name`.
+
+Text files/arguments: 1 MiB; frame: 7 MiB; list: at most 2,000 examined entries and 1 MiB encoded results, with explicit truncation; literal search: 8 MiB scanned and 100 results. Files for media delivery belong to the separate attachment path, not these text tools. Commands: 360 seconds/64 KiB output. No automatic retry of mutations or commands.
 
 ## Verification
 
-- `nix build .#checks.x86_64-linux.chat-workspace --no-link`: deterministic protocol/path/journal/race tests and module contract.
-- `nix run .#verify-chat-workspace-live`: real packaged sandbox/IPC against disposable files, outside/control denial, namespace/mount/environment inspection and invalid-configuration fail-closed check. Requires Linux user namespaces; never skips on unavailable isolation. No real project or host service is changed.
-- `nix run .#verify`: canonical deterministic gate (includes workspace check).
+- `nix build .#checks.x86_64-linux.chat-workspace .#checks.x86_64-linux.bridge-chat --no-link`
+- `nix run .#verify-chat-workspace-live`: real packaged sandbox against disposable files, namespace/mount/environment checks, no real project or host service change.
+- `nix run .#verify`: canonical deterministic gate.
 
-Live sandbox checks on GRILL do not replace deployment checks under NAS's configured service identity and systemd restrictions. #99 owns automatic publication, #100 media, #101 model routing/configuration and final rollout.
+Downloads/attachments (#100), final input pin and NAS activation/live checks (#101) remain separate work. Local tests do not establish deployed Note to Self acceptance.

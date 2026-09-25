@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import http from "node:http";
+import net from "node:net";
+import { workspaceRequest } from "../config/agent/extensions/bridge-chat/workspace-tools.mjs";
 import { once } from "node:events";
 import { spawn } from "node:child_process";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -71,6 +73,37 @@ for (const tool of ['bash', 'read', 'write', 'run_worker']) test(`real SDK refus
 		assert.equal(fs.existsSync(path.join(f.dir, 'forbidden')), false);
 	} finally { session.dispose(); }
 });
+test('approved workspace adds only explicit tools and routes through isolated socket', async t => {
+	const f = fixture(t), socket = path.join(f.dir, 'workspace.sock');
+	const received: unknown[] = [];
+	const server = net.createServer(connection => {
+		let data = '';
+		connection.on('data', chunk => { data += chunk; if (!data.endsWith('\n')) return;
+			received.push(JSON.parse(data)); connection.end('{"text":"project fixture"}\n'); });
+	});
+	server.listen(socket); await once(server, 'listening');
+	const s = await createChatSession(await runtime(f.auth), 'gpt-5.4', f.dir, { socket, commands: { check: 'Check project' } });
+	try {
+		assert.deepEqual(s.getActiveToolNames(), ['web_search', 'workspace', 'project_command']);
+		assert.deepEqual(s.getAllTools().map(tool => tool.name), ['web_search', 'workspace', 'project_command']);
+		assert.deepEqual(await workspaceRequest(socket, { action: 'read', path: 'AGENTS.md' }, AbortSignal.timeout(5000)), { text: 'project fixture' });
+		assert.deepEqual(received, [{ action: 'read', path: 'AGENTS.md' }]);
+		const captured: Context[] = []; s.agent.streamFunction = fakeStream(captured);
+		await runQuestion(s, 'edit requested project', AbortSignal.timeout(5000), 24);
+		assert.equal(JSON.stringify(captured).includes('AMBIENT_'), false);
+		assert.equal(JSON.stringify(captured).includes('fixture-only'), false);
+	} finally { s.dispose(); await new Promise<void>(r => server.close(() => r())); }
+});
+
+test('private model socket transmits only a trusted workspace capability, never room paths', async t => {
+	const f = fixture(t), socket = path.join(f.dir, 'capability.sock');
+	const seen: boolean[] = [];
+	const server = createQuestionServer(async (_question, _signal, workspace) => { seen.push(workspace); return 'answer'; });
+	server.listen(socket); await once(server, 'listening');
+	try { await modelAnswer(socket, 'plain'); await modelAnswer(socket, 'project', undefined, true); assert.deepEqual(seen, [false, true]); }
+	finally { await new Promise<void>(r => server.close(() => r())); }
+});
+
 test('SDK web search reuses the existing shared extension tool and Pi-managed authentication', async t => {
 	const f = fixture(t), session = await createChatSession(await runtime(f.auth), 'gpt-5.4', f.dir);
 	const original = globalThis.fetch; let searches = 0;

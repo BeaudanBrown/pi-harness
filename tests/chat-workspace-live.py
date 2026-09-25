@@ -42,11 +42,11 @@ def descendants(pid):
     return values
 
 
-def main(launcher):
+def main(launcher, command=None):
     with tempfile.TemporaryDirectory(prefix='pi-workspace-live-') as temporary:
         base = Path(temporary).resolve()
-        root, state, ipc = [base / p for p in ('project', 'state', 'ipc')]
-        for path in (root, state, ipc):
+        root, ipc = [base / p for p in ('project', 'ipc')]
+        for path in (root, ipc):
             path.mkdir()
         (root / 'hello.txt').write_text('hello')
         for name in ('.git', '.pi', '.agents', '.publishing'):
@@ -56,7 +56,7 @@ def main(launcher):
         outside.write_text('outside-canary')
         (root / 'escape').symlink_to(outside)
         with (base / 'stderr').open('w+') as errors:
-            process = subprocess.Popen([launcher, str(root), str(state), str(ipc)], stdout=subprocess.DEVNULL,
+            process = subprocess.Popen([launcher, str(root), str(ipc)], stdout=subprocess.DEVNULL,
                                        stderr=errors, start_new_session=True,
                                        env={**os.environ, 'PI_WORKSPACE_SECRET_CANARY': 'must-not-enter'})
             try:
@@ -70,11 +70,14 @@ def main(launcher):
                 assert ask(endpoint, {'action': 'read', 'path': 'hello.txt'})['text'] == 'hello'
                 for path in (str(outside), '../outside-secret', 'escape', '.pi/private', '.publishing/private'):
                     assert 'error' in ask(endpoint, {'action': 'read', 'path': path}), path
-                request = {'action': 'write', 'id': 'a' * 64, 'path': 'new.txt', 'text': 'new', 'expected': 'absent'}
+                request = {'action': 'write', 'path': 'new.txt', 'text': 'new'}
                 result = ask(endpoint, request)
-                assert result['phase'] == 'done', result
-                assert ask(endpoint, request) == result
+                assert result == {'path': 'new.txt'}, result
                 assert (root / 'new.txt').read_text() == 'new'
+                if command:
+                    result = ask(endpoint, {'action': 'command', 'name': command})
+                    assert result == {'exitCode': 0, 'output': 'host-approved command works\n'}, result
+                    assert 'error' in ask(endpoint, {'action': 'command', 'name': command, 'args': ['bad']})
                 # Inspect actual worker namespaces/environment and mounted view,
                 # not just path validation responses from the public interface.
                 workers = []
@@ -97,7 +100,7 @@ def main(launcher):
                 for name in ('.git', '.pi', '.agents', '.publishing'):
                     assert list((view / 'workspace' / name).iterdir()) == [], name
                 assert len((proc / 'net/route').read_text().splitlines()) == 1, 'unexpected route'
-                print('PASS: packaged read/write/replay, outside/control denial, private namespaces, clean environment and selective mounts')
+                print('PASS: packaged read/write, outside/control denial, private namespaces, clean environment and selective mounts')
             finally:
                 try:
                     os.killpg(process.pid, signal.SIGTERM)
@@ -109,11 +112,11 @@ def main(launcher):
                     os.killpg(process.pid, signal.SIGKILL)
                     process.wait(timeout=5)
         # Launcher validation failures cannot mutate even if supplied paths overlap.
-        failed = subprocess.run([launcher, str(root), str(root), str(ipc)], capture_output=True, timeout=10)
+        failed = subprocess.run([launcher, str(root), str(root)], capture_output=True, timeout=10)
         assert failed.returncode != 0
         assert not (root / 'operations.sqlite').exists()
         print('PASS: invalid sandbox setup fails closed without executing worker')
 
 
 if __name__ == '__main__':
-    main(sys.argv[1])
+    main(sys.argv[1], sys.argv[2] if len(sys.argv) > 2 else None)

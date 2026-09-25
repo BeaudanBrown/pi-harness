@@ -1,102 +1,56 @@
-# Proposal: NAS-only workspace and attachment capabilities for !pi
+# NAS !pi project and file capabilities (#97)
 
-Status: operator-approved scope; implementation and deployment pending. GitHub Issues remain the implementation task source of truth. This document records research and design, not a separate executable backlog. This is a capability upgrade beyond #90's stateless assistant acceptance.
+Status: implementation underway; not yet a rebuild-ready handoff. GitHub Issues are the task source of truth. This document records the latest operator-approved scope and supersedes the earlier staged/transactional proposal.
 
-## Agreed scope
+## Approved behavior
 
-- Start with the existing **Note to Self** chat. Do not enable additional rooms now.
-- Keep chat intake, model calls, isolated project operations and publication on **NAS**. GRILL is not required for this workflow, but its existing writable project mount and normal editing workflow MUST remain available. The operator explicitly rejected reserving project writes exclusively for the agent.
-- A verified owner's `!pi` request authorises the requested changes through validation and publication. **No separate publication confirmation.** Ask only when the requested change is genuinely ambiguous.
-- Allow edits needed throughout the approved `dump` project, including content, templates, CSS/JavaScript and project support files. Do not restrict the feature to content-only edits.
-- Existing uncommitted dump changes are part of the baseline; the operator explicitly requested committing them. Recorded as dump commit `b1a9954` (`feat(site): preserve updated syllabus navigation and styling`). The dump working tree was clean afterward. No push or publication was performed.
-- File search/download/delivery should be available in **every enabled !pi chat**. Initial live testing remains Note to Self only. Enabling a chat does not automatically grant it dump or another project's filesystem authority: project bindings remain explicit.
-- Sending a downloaded or approved workspace file to chat is independent of publishing it on the website. Only add it to the site when requested.
-- Scope approval does not authorise host activation/restarts, secret inspection, Git pushes or arbitrary test publications. Those remain operator-controlled rollout actions.
+- Start in existing Note to Self only; the operator can add other chats later.
+- NAS handles chat, model requests, sandboxed project operations and publishing. GRILL is not required, but its writable project mount and normal editing remain unchanged.
+- Give the agent ordinary file operations throughout the approved dump project (except protected control/credential paths), and simple `check`, `publish`, `status` commands. It chooses how to complete the request, not a prescribed sequence.
+- A clear site-change request authorises publication without another confirmation. The existing publisher validates before activation. Ask only for genuinely ambiguous requests.
+- Assume one editor at a time. Do not add project locks, mandatory digests, mutation journals, prepare/commit stages, snapshot approval or transaction orchestration.
+- Keep filesystem confinement, credential separation, safe downloads, bounded tools and the publisher's existing snapshot/receipt handling. Interrupted publication needs status inspection, not a blind repeat.
+- File download/delivery should work in every enabled chat. Project filesystem access remains explicitly bound to rooms and is not automatically granted to other chats.
+- A file requested just for chat is staged privately on NAS and cleaned after delivery or bounded retention. Adding it to dump uses its inbox/appropriate content location and publishes only when requested.
+- Reuse existing managed-session artifact validation/media upload concepts where applicable; don't copy the engineering relay's lifecycle or retry machinery wholesale.
+- No changes to the tools, prompts, restrictions or background services of ordinary Pi CLI sessions. These capabilities belong only to the dedicated chat worker and opt-in host services.
 
-## Baseline and research evidence (2026-09-25)
+## Responsibility split
 
-Inspected from GRILL:
+**Harness:** reusable isolated file operations, named-command interface, room capability checks, download/send-file support. No hard-coded dump workflow.
 
-- `/home/beau/documents/projects/dump` is an active NFSv4 mount of NAS's `/var/lib/dump-site/project`, not a local fallback.
-- Two existing publication receipts report `published`, and an HTTPS GET to `https://dump.bepis.lol/` returned 200. This does not prove every current source file matches production or that the proposed assistant works.
-- Installed `dump-publish check` passes using Hugo 0.163.3: 65 pages, three static files. Content checks pass: 50 works and ten assignment pages. JavaScript syntax and whitespace checks also passed before the baseline commit.
-- Latest check log: `.pi/tmp/workers/2026-09-25T03-09-10-773Z-dump-baseline-before-commit-cc41840d915a/command.log`.
-- Inspected source bases: pi-harness `359554af1ddfb1ec29212b68d23e05a841737d47`; nix-dotfiles `053f8804d234c3a33142b628d08f42f911a89a0e` with staged/modified dump modules. Preserve unrelated pending changes in both repositories.
-- The existing assistant declaration is on NAS. Its worker receives question text only over a Unix socket and exposes only web search. Project tools and attachment delivery are not enabled there yet.
-- Dump's current instructions require editing on GRILL, and the submission helper insists on an NFS mount. These must be deliberately revised for a NAS-local editor; do not disable mount checks globally or remove GRILL's local-fallback protection.
+**Project:** AGENTS/README explain structure, content conventions and available commands. Project instructions can guide work but cannot grant paths/tools or replace host security policy.
 
-No NAS shell, host evaluation/build/restart, secret inspection, chat test messages or new publication requests were used for research. The baseline commit is the sole dump mutation in this planning work.
+**Host configuration:** grants the project path to Note to Self and defines immutable command argv and permitted command data mounts. Dump's existing publisher remains separately owned in nix-dotfiles.
 
-## Reuse the existing publishing module
+## Implemented so far
 
-Host-owned `dump-publish` already copies only `content/`, `layouts/`, `assets/`, `static/`, validates source, renders with pinned Hugo/fixed configuration, writes a hashed request snapshot and lets a separate NAS publisher activate a completed release atomically. Failure leaves the previous site live. A timeout means pending; a `published` receipt is required before claiming success, followed by a GET checking the affected public page.
+- Dump baseline changes committed as `b1a9954`; no push or test publication.
+- Initial isolated executor foundation was committed as `a8d43a8`, then normal GRILL access clarified in `69d5dd9`.
+- Current increment removes the foundation's locks/journal and adds a small ordinary file API plus named commands. See [executor contract](chat-workspace-executor.md).
+- Dedicated chat SDK registers project tools only for an explicit verified room capability. Empty bindings preserve web-search-only behavior. No CLI profile changes.
+- Downstream publisher adds sandbox-local submit/status while preserving GRILL's existing NFS guard. It uses the existing validated source snapshot, queue, separate publisher and receipt—not a new orchestration system.
+- NAS declaration prepares Note to Self's dump binding and fixed check/publish/status argv, with queue/status mounted outside generic file access.
 
-Production configuration is host-owned; changing project `hugo.toml` does not alter production routing/security. Other project files remain outside publication. Everything in the four publishable directories may become public, including unlinked page-bundle files.
+Not yet complete: safe downloads and outbound attachments, cumulative epic review, final downstream pin/activation handoff and live acceptance. Do not rebuild merely because these intermediate declarations exist.
 
-The publisher already has a dedicated Unix identity and systemd restrictions. That protects publication; it does not sandbox the editor. Existing managed project Pi sessions run with operator authority, not enforced project isolation.
+## Verification baseline
 
-## Pi sandboxing findings
+Research confirmed the GRILL NFS mount backed by `/var/lib/dump-site/project`, prior successful receipts and HTTP 200 from the live site. Current dump content rendered 65 pages with Hugo 0.163.3; 50 works and ten assignment pages passed content checks. This is not a new assistant round trip or proof that all current sources match production.
 
-Inspected installed Pi 0.85.0 README, SDK docs and example implementations:
+Current checks and review dispositions live in [implementation evidence](dump-workspace-implementation-evidence.md). No secrets were inspected, no host activated/restarted, and no new production request submitted during this work. Preserve unrelated dotfiles changes and the untracked Signal proposal.
 
-- `cwd`, tool allowlists and project trust are not filesystem confinement. Extensions are executable code; project trust permits loading that code.
-- The SDK supports explicit custom tools and a custom empty resource loader. Retain this pattern in the credential-owning model runtime.
-- `examples/extensions/sandbox/index.ts` wraps **bash/user bash only**, not file tools. Project configuration overrides global configuration, its default read policy is a denylist, and disabled/unsupported/failed initialization falls back to local bash. Do not deploy it unchanged as an enforced sandbox.
-- `examples/extensions/gondolin/index.ts` routes all seven built-in tools into a micro-VM with a workspace mount. Useful as an operations-routing example, but it does not sandbox arbitrary harness extensions and adds QEMU/guest packaging. No runtime evaluation was performed.
-- Bubblewrap supplies selective mounts and namespaces, not a complete policy. Recommend a small Nix-packaged executor using these primitives plus systemd limits. This shares the host kernel; it is not VM-strength isolation.
+## Remaining delivery work
 
-## Proposed NAS modules and interfaces
+1. Complete and verify public-only bounded downloads, private staging and owner-account attachment delivery (#100).
+2. Verify immutable host argv/data mounts and actual Hugo build/publication protocol with disposable fixtures; keep live publication operator-controlled until rollout.
+3. Finish NAS module validation, update the consuming input pin, run affected/canonical/package checks and both epic review axes, then report the exact host rebuild order (#101).
+4. After operator activation, prove Note to Self site edits through receipt and changed-page GET, rejected builds preserving the site, public PDF delivery, owner filtering and conservative interrupted-send behavior. Additional bridges need their own live tests.
 
-### Trusted policy and isolated executor
+## Sources
 
-Host policy maps a project key to a canonical path, authorised rooms/verified owner IDs, tools and publication authority. Bind only Note to Self to dump initially. Check identity and room policy before model invocation; GRILL or additional bridges are not prerequisites. Keep ordinary unbound chats free of project tools.
-
-The credential-owning model runtime must have no local built-in filesystem or shell tools. All file operations, including read/search/list, cross the isolated executor interface. No ambient project extensions, direnv, package hooks or resource discovery execute in that runtime. Matrix and model credentials stay outside the executor.
-
-Expose a synthetic workspace backed by approved dump files. Broad project editing does not grant write authority to security controls: hide Git administrative internals, agent control resources and publication queue/status internals from generic tools. Permit project support-file edits without executing them as trusted policy. Explicit trusted Git operations can be added separately if routine future commits are wanted; the existing-baseline commit instruction does not grant Git push authority.
-
-Use only required read-only runtime closures, minimal devices/private proc and temporary storage, a credential-free environment, private process visibility, bounded CPU/memory/output/time and descendant cancellation. No host home, sibling projects, secrets, general host `/run`, SSH-agent/systemd/Docker/Nix-daemon sockets or inherited file descriptors. No executor network by default. Fail closed if isolation cannot start; never retry locally.
-
-Initial tools: read/list/search/edit/write, controlled rename/delete if needed, and typed check/prepare/publish/status. No general shell, sudo, package installation or infrastructure deployment. Enforce path/symlink/hard-link/special-file/race safety; do not rely on string-prefix path checks or a shared Unix UID. Ensure writable parents cannot replace protected control mounts.
-
-### Automatic publication
-
-Use a host-owned publishing adapter with fixed project, executable and Hugo paths. Do not expose arbitrary CLI overrides (`--project`, `--state`, `--hugo`), `consume`, `rollback` or shell command input. Generic tools cannot write ready requests/status or live releases.
-
-For each authorised edit-and-publish task: finish edits, freeze a validated snapshot, bind its digest and request identity to that task, enqueue once, observe the receipt, verify the live result and reply. **This is an internal integrity step, not a human approval gate.** Source changes after preparation cannot silently change what is published.
-
-The current submit command creates a fresh request ID each time; add an idempotent prepare/submit/status seam. Persist operation identity before dispatch and reconcile the same identity after restart/timeout. Never blindly repeat edits or publication after an uncertain result. Serialize agent operations using the executor's project lease; it coordinates cooperating agents only, not normal GRILL editors. Preserve GRILL's writable mount and do not require human editors to acquire this lease or stop before activation. Detect changed source digests and reject detected conflicts; freeze and validate publication inputs rather than rendering a changing live tree. A final digest check is NOT atomic compare-and-swap against an external editor: simultaneous edits can still race. Do not claim strict multi-writer transaction safety or change host permissions to obtain it. Publication integrity and agent retry safety remain required; arbitrary host-owner actions are outside the sandbox threat model.
-
-Add an explicit trusted NAS-local source mode proving the configured canonical backing directory and expected storage/ownership. Preserve the existing GRILL NFS guard. Run checks/Hugo with filesystem and network restrictions too: writable templates must not gain general host access. Keep the separate NAS publisher and operator-only rollback.
-
-### Download and file delivery
-
-Reuse managed-session artifact validation, Matrix media upload and attachment formatting where compatible. Current `remote_artifact_export` supports approved files, PDFs, images/audio and a 25 MiB cap. Inspect its retry/lifecycle dependencies before extraction; owner-account bridge delivery must retain its conservative uncertain-send policy rather than inheriting engineering-relay retries blindly.
-
-Download only legitimate publicly accessible sources into private temporary staging. Enforce public-network egress policy including redirects/DNS changes, no private/internal/metadata addresses, bounded size/time, signature/type checks and safe filenames. Search results and documents are untrusted data, not instructions. Do not load auth from the browser or fetch authenticated/private sources by default. Download workers must not see workspace or provider/Matrix credentials.
-
-Transfer only approved workspace files or validated staged downloads. Do not accept arbitrary host paths or model-selected destination rooms. The credential-owning transport uploads bytes and replies in the authorised originating room. Record durable upload/send identities, bound retention, reconcile ambiguous sends and clean temporary data safely. File delivery does not implicitly submit website content.
-
-Reuse the existing conservative media cap initially, subject to actual homeserver/bridge limits. Test PDF delivery through Note to Self on Signal; Matrix acceptance alone is not downstream delivery proof. Additional enabled chats gain attachment capability without automatically gaining project access.
-
-## Implementation sequencing and verification
-
-Before implementation, publish scoped GitHub issues for harness work and explicitly record dependent dotfiles/publisher and dump-documentation ownership. Keep #90's original live transport acceptance separate.
-
-1. Define host-owned project/tool policy and package the NAS executor; prove confinement using disposable fixtures without model calls or publication.
-2. Connect exact SDK tools with no ambient resources. Test positive edits and negative out-of-root reads/writes, secrets/sockets/process access, symlink/race attacks, malicious project resources and failed startup.
-3. Adapt publisher local-source verification and retry-safe task-bound automatic submission. Test invalid builds, simultaneous edits, crashes before/after enqueue/activation/receipt and recovery without duplicate work.
-4. Extract reusable attachment mechanics; implement restricted download staging, export paths and durable owner-account delivery. Test malformed/oversized files, SSRF/redirect/DNS cases, forged senders/rooms, duplicate events and interrupted uploads/sends.
-5. Update dump instructions for the approved NAS-only path and automatic publication; retain correct GRILL manual workflow and fixed publication inputs.
-6. After operator-approved deployment, test one reversible requested edit from Note to Self through publication, an invalid edit preserving the live site, a requested public PDF attachment, unauthorized events and restarts. Existing dirty baseline is now committed; no other chats need enabling.
-
-Focused sandbox/protocol checks precede affected chat/managed regressions and canonical harness verification. Run packaged checks in the intended NAS isolation environment; do not equate local tests with deployed enforcement. Review Standards and Spec together at the epic boundary. No publication confirmation flow should be introduced during implementation.
-
-## Primary sources
-
-- `/home/beau/documents/projects/dump/{AGENTS.md,README.md,flake.nix}` and executed `tests/check_content.py`.
-- `/home/beau/documents/nix-dotfiles/specs/dump-publishing.md` and `modules/hosted-services/dump/{grill.nix,nas.nix,package.nix,publish.py}`.
-- `nix/bridge-chat.nix`, `config/agent/extensions/bridge-chat/model.mts`, [chat contract](bridge-chat-assistant.md), `nix/module.nix`.
-- `config/agent/extensions/managed-sessions/relay/artifact-export.ts`, managed-session contracts/adapter and [managed-session runbook](managed-matrix-sessions.md).
-- Installed Pi root `/nix/store/nd3v325g2l07x9l7s4wrrn7b3v9hqqrg-pi-0.85.0/libexec/pi/`: `README.md`, `docs/sdk.md`, `examples/extensions/sandbox/index.ts`, `examples/extensions/gondolin/index.ts`.
-- External primary design references (not evidence of installed enforcement): https://github.com/containers/bubblewrap/blob/main/README.md and https://github.com/anthropics/sandbox-runtime/blob/main/README.md.
+- `config/agent/extensions/bridge-chat/`, `nix/bridge-chat.nix`, `nix/chat-workspace*.nix`, existing managed-session artifact exporter and Matrix transport.
+- `/home/beau/documents/nix-dotfiles/modules/hosted-services/dump/{nas.nix,grill.nix,publish.py,test_publish.py}` and `specs/dump-publishing.md`.
+- `/home/beau/documents/projects/dump/{AGENTS.md,README.md}`.
+- Installed Pi 0.85.0 README/SDK docs and sandbox/Gondolin examples. Pi's bash-only sandbox example is not used unchanged: it leaves file tools outside isolation and allows local fallback.
+- https://github.com/containers/bubblewrap/blob/main/README.md and `network.c` (private loopback setup uses route netlink).

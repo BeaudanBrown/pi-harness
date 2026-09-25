@@ -62,7 +62,7 @@ async function main(): Promise<void> {
 				console.log('{"event":"sync_unavailable"}');
 				await matrixDelay(5000, stop.signal).catch(() => {}); continue;
 			}
-			await store.step(matrix, q => modelAnswer(config.modelSocket, q, stop.signal), config, Date.now, stop.signal);
+			await store.step(matrix, (q, workspace) => modelAnswer(config.modelSocket, q, stop.signal, workspace), config, Date.now, stop.signal);
 		}
 	} finally { store.close(); }
 }

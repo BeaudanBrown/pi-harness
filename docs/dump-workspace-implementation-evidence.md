@@ -1,5 +1,15 @@
 # NAS chat implementation evidence (#97)
 
+## Current increment: simple project tools (supersedes foundation workflow)
+
+The operator rejected extra workflow/reliability scaffolding. This increment removes the executor's project/state locks, journal, operation IDs and mandatory digest arguments. It retains descriptor-rooted file operations, private namespaces, bounded IO and fixed host-owned commands. Ordinary GRILL editing is unchanged. `workspace` and `project_command` are registered only in dedicated chat sessions with an explicit room grant; CLI profiles are untouched.
+
+Downstream nix-dotfiles adds sandbox-local `submit-local`/`status-local`, reusing existing validation/snapshots/receipts and preserving GRILL's NFS guard. Note to Self's NAS project binding and command mounts are prepared. Dump AGENTS/README document the simple tools and no routine publication approval. No host was activated and no production publication was submitted.
+
+Verification before commit: all 12 canonical checks pass; actual packaged sandbox including an immutable host-command probe passes; downstream publisher suite has 15 passing tests; downstream Nix syntax and whitespace pass. Log: `.pi/tmp/workers/2026-09-25T04-29-24-767Z-pre-commit-project-tools-check-97f9433e11f6/command.log`. An earlier canonical run had one ECONNRESET in an unchanged managed real-Pi fixture (238/239 passed); the exact unchanged test derivation passed on one diagnostic re-run, followed by the successful canonical gate. It was not fixed or hidden by changing that test.
+
+Still outstanding: #100 public downloads/attachments, #101 final downstream input pin/host checks/live acceptance, cumulative epic review. This is **not rebuild-ready**. The detailed journal/lease evidence below describes the earlier foundation only, not the current interface.
+
 ## Scope / preflight
 
 Approved behavior: docs/dump-workspace-assistant-proposal.md. GitHub #97 is the epic; #98 executor, #99 publisher/local-source adapter, #100 downloads/attachments, #101 integration/rollout. Selected initial frontier: #98. No production enablement, pushes or host activation. Preserve the unrelated untracked Signal proposal and existing dotfiles changes.

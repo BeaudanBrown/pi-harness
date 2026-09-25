@@ -5,7 +5,7 @@ import { MatrixHttp, MatrixError } from "../matrix-shared/http.js";
 import { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS } from "./limits.js";
 export { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS };
 export const FAILURE = "I couldn't complete that request. Please send a new !pi command to try again.";
-export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string };
+export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string; workspaceRoomIds?: string[] };
 export function object(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid object");
 	return value as Record<string, unknown>;
@@ -17,6 +17,7 @@ export function validateConfig(value: unknown): ChatConfig {
 		!Array.isArray(c.remoteOwnerUserIds) || c.remoteOwnerUserIds.length > 8 || !c.remoteOwnerUserIds.every(mxid) ||
 		!Array.isArray(c.roomIds) || c.roomIds.length > 256 || !c.roomIds.every(r => typeof r === "string" && r.startsWith("!") && r.length <= 512) ||
 		(!c.allJoinedRooms && !c.roomIds.length) || typeof c.modelSocket !== "string" || !c.modelSocket.startsWith("/")) throw Error("Invalid chat configuration");
+	if (c.workspaceRoomIds !== undefined && (!Array.isArray(c.workspaceRoomIds) || c.workspaceRoomIds.length > 256 || !c.workspaceRoomIds.every(r => typeof r === "string" && r.startsWith("!") && (c.allJoinedRooms || (c.roomIds as string[]).includes(r))))) throw Error("Invalid workspace room scope");
 	return c as ChatConfig;
 }
 export function command(event: unknown, senders: Set<string>, floor: number, now: number): string | undefined {
@@ -135,7 +136,7 @@ export class Store {
 	phase(id: string, phase: string, answer = ""): void {
 		this.atomic(() => this.db.prepare("UPDATE requests SET phase=?, question='', answer=? WHERE id=?").run(phase, answer, id));
 	}
-	async step(matrix: ChatMatrix, execute: (question: string) => Promise<string>, config: ChatConfig, now: () => number = Date.now, signal?: AbortSignal): Promise<void> {
+	async step(matrix: ChatMatrix, execute: (question: string, workspace: boolean) => Promise<string>, config: ChatConfig, now: () => number = Date.now, signal?: AbortSignal): Promise<void> {
 		const row = this.db.prepare("SELECT * FROM requests WHERE phase IN ('queued','ready') ORDER BY created,id LIMIT 1").get() as Row | undefined;
 		if (!row) return;
 		const { id, room } = row;
@@ -146,7 +147,7 @@ export class Store {
 		if (row.phase === "queued") {
 			this.phase(id, "running");
 			try {
-				result = now() - row.created <= MAX_AGE_MS ? await execute(row.question) : "That request expired. Please send a new !pi command.";
+				result = now() - row.created <= MAX_AGE_MS ? await execute(row.question, config.workspaceRoomIds?.includes(room) === true) : "That request expired. Please send a new !pi command.";
 				if (typeof result !== "string" || !result || Buffer.byteLength(result) > MAX_ANSWER) throw Error("Answer size");
 			} catch { result = FAILURE; }
 			this.phase(id, "ready", result);
