@@ -28,9 +28,12 @@ let
     ProtectSystem = "strict";
     ProtectHome = true;
     NoNewPrivileges = true;
-    ProtectKernelTunables = true;
+    # File tools launch Bubblewrap with a fresh PID/proc namespace. Avoid
+    # systemd's outer /proc masks in that mode; the nested mount would be
+    # rejected as "too revealing" before the sandbox starts.
+    ProtectKernelTunables = !cfg.files.enable;
     ProtectKernelModules = true;
-    ProtectKernelLogs = true;
+    ProtectKernelLogs = !cfg.files.enable;
     ProtectControlGroups = true;
     RestrictSUIDSGID = true;
     LockPersonality = true;

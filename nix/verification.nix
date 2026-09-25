@@ -457,12 +457,20 @@ let
       and .services["pi-chat-model"].serviceConfig.User == "operator"
       and .services["pi-chat-model"].serviceConfig.DynamicUser == false
       and .services["pi-chat-model"].serviceConfig.ProtectHome == "tmpfs"
+      and .services["pi-chat-model"].serviceConfig.ProtectKernelTunables
+      and .services["pi-chat-model"].serviceConfig.ProtectKernelLogs
+      and .services["pi-chat-transport"].serviceConfig.ProtectKernelTunables
+      and .services["pi-chat-transport"].serviceConfig.ProtectKernelLogs
       and .services["pi-chat-model"].serviceConfig.BindPaths == ["/home/operator/.pi/agent"]
       and .services["pi-chat-model"].serviceConfig.ReadWritePaths == ["/home/operator/.pi/agent"]
       and .services["pi-chat-transport"].serviceConfig.DynamicUser
       and .services["pi-chat-transport"].serviceConfig.LoadCredential == ["matrix:/run/secrets/chat-matrix"]
       and .filesServices["pi-chat-model"].serviceConfig.ReadWritePaths == ["/home/operator/.pi/agent", "/var/lib/pi-chat-files"]
       and .filesServices["pi-chat-transport"].serviceConfig.ReadWritePaths == ["/var/lib/pi-chat-files"]
+      and .filesServices["pi-chat-model"].serviceConfig.ProtectKernelTunables == false
+      and .filesServices["pi-chat-model"].serviceConfig.ProtectKernelLogs == false
+      and .filesServices["pi-chat-transport"].serviceConfig.ProtectKernelTunables == false
+      and .filesServices["pi-chat-transport"].serviceConfig.ProtectKernelLogs == false
       and (.filesServices["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
       and (.services | all(.serviceConfig.ProtectSystem == "strict" and .serviceConfig.StateDirectoryMode == "0700"
         and (.serviceConfig.InaccessiblePaths | index("-/run/postgresql")) != null
@@ -508,6 +516,8 @@ let
       and .service.serviceConfig.PrivateNetwork
       and .service.serviceConfig.ProtectSystem == "strict"
       and .service.serviceConfig.NoNewPrivileges
+      and .service.serviceConfig.ProtectKernelTunables == false
+      and .service.serviceConfig.ProtectKernelLogs == false
       and .service.serviceConfig.ReadWritePaths == ["/var/lib/dump-site/project"]
       and (.service.serviceConfig | has("LoadCredential") | not)
       and (.service.serviceConfig | has("EnvironmentFile") | not)' ${workspaceReport}

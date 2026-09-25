@@ -61,9 +61,11 @@ in {
         PrivateDevices = true;
         NoNewPrivileges = true;
         CapabilityBoundingSet = "";
-        ProtectKernelTunables = true;
+        # Bubblewrap owns the inner PID/proc namespace. Pre-masking paths below
+        # /proc here makes its fresh procfs mount fail with "Mount too revealing".
+        ProtectKernelTunables = false;
         ProtectKernelModules = true;
-        ProtectKernelLogs = true;
+        ProtectKernelLogs = false;
         ProtectControlGroups = true;
         RestrictSUIDSGID = true;
         LockPersonality = true;
