@@ -5,6 +5,7 @@ import type { WorkspaceIdentity } from "../contracts.js";
 import { AtomicJsonFile } from "./atomic-json.js";
 import type { ResolvedWorkspace } from "./host-lifecycle.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
+import { ProjectSpaces } from "./project-spaces.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 interface ReconciliationItem {
@@ -68,9 +69,11 @@ export class ProjectReconciler {
 	private readonly path: string;
 	private readonly file: AtomicJsonFile<ReconciliationIntent>;
 	private running?: Promise<unknown>;
+	private readonly spaces: ProjectSpaces;
 	constructor(private readonly options: { registry: RelayRegistry; matrix: ManagedMatrixClient; intentDirectory: string;
 		resolveWorkspace: (placement: WorkspaceIdentity) => Promise<ResolvedWorkspace> }) {
 		this.path = join(resolve(options.intentDirectory), "project-reconciliation.json"); this.file = new AtomicJsonFile(this.path, parseIntent);
+		this.spaces = new ProjectSpaces(options.registry, options.matrix);
 	}
 
 	pendingCount(): number { return this.options.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length; }
@@ -115,7 +118,7 @@ export class ProjectReconciler {
 			if (!manifest.placement) throw new RelayRegistryError("invalid_state", "Compatibility project manifest omitted workspace placement");
 			const resolved = await this.options.resolveWorkspace(manifest.placement); await this.options.matrix.assertRoomAuthority(manifest.roomId, false);
 			let targetProjectSpace = stableSpaces.get(resolved.projectKey);
-			if (!targetProjectSpace) targetProjectSpace = await this.options.matrix.resolvePrivateRoomAlias(`pi-${resolved.projectKey.slice("project_".length)}-space`, true);
+			if (!targetProjectSpace) targetProjectSpace = await this.spaces.find(resolved.projectKey);
 			if (targetProjectSpace) { stableSpaces.set(resolved.projectKey, targetProjectSpace); await this.options.matrix.assertRoomAuthority(targetProjectSpace, true, undefined, { spaceChild: true }); }
 			if (manifest.projectSpace) await this.options.matrix.assertRoomAuthority(manifest.projectSpace, true, undefined, { spaceChild: true });
 			const sourceManifestHash = hash(manifest); const target = targetProjectSpace ? { ...manifest, projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName,
@@ -130,7 +133,7 @@ export class ProjectReconciler {
 		return this.summary(intent);
 	}
 	private async applyOnce(reconciliationKey: string): Promise<Record<string, unknown>> {
-		let intent = await this.readIntent();
+		let intent = await this.readIntent(); const retry = intent !== undefined;
 		if (!intent) {
 			const preview = await this.previewOnce(); if (preview.reconciliationKey !== reconciliationKey) throw new RelayRegistryError("invalid_state", "Reconciliation preview changed before apply");
 			const stableSpaces = new Map<string, string>();
@@ -138,7 +141,7 @@ export class ProjectReconciler {
 			const items: ReconciliationItem[] = [];
 			for (const shown of preview.items) {
 				const manifest = this.options.registry.manifestByConversationId(shown.conversationId); if (!manifest || manifest.kind !== "project" || !manifest.placement) throw new RelayRegistryError("invalid_state", "Reconciliation source manifest disappeared");
-				const resolved = await this.options.resolveWorkspace(manifest.placement); const targetProjectSpace = stableSpaces.get(resolved.projectKey) ?? await this.options.matrix.resolvePrivateRoomAlias(`pi-${resolved.projectKey.slice("project_".length)}-space`, true);
+				const resolved = await this.options.resolveWorkspace(manifest.placement); const targetProjectSpace = stableSpaces.get(resolved.projectKey) ?? await this.spaces.find(resolved.projectKey);
 				if (targetProjectSpace) stableSpaces.set(resolved.projectKey, targetProjectSpace);
 				const target = targetProjectSpace ? { ...manifest, projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName, checkoutDisplayName: resolved.checkoutDisplayName, projectSpace: targetProjectSpace } : undefined;
 				items.push({ conversationId: manifest.conversationId, concept: manifest.concept, workspace: manifest.placement.workspace, roomId: manifest.roomId,
@@ -157,14 +160,13 @@ export class ProjectReconciler {
 			if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("invalid_state", "Reconciliation conversation disappeared");
 			if (!item.targetProjectSpace) {
 				const shared = intent.items.find((candidate) => candidate.projectKey === item.projectKey && candidate.targetProjectSpace)?.targetProjectSpace;
-				const spaceId = shared ?? await this.options.matrix.createPrivateSpaceIdempotent(item.projectDisplayName, `pi-${item.projectKey.slice("project_".length)}-space`);
+				const spaceId = shared ?? await this.spaces.ensure(item.projectKey, item.projectDisplayName, retry);
 				const target = { ...manifest, projectKey: item.projectKey, projectDisplayName: item.projectDisplayName, checkoutDisplayName: item.checkoutDisplayName, projectSpace: spaceId };
 				item = { ...item, targetProjectSpace: spaceId, targetManifestHash: hash(target) }; intent.items[index] = item; await this.file.write(intent);
 			}
 			const targetSpace = item.targetProjectSpace; const targetManifestHash = item.targetManifestHash;
 			if (!targetSpace || !targetManifestHash) throw new RelayRegistryError("invalid_state", "Reconciliation target Space identity is unavailable");
-			const aliasSpace = await this.options.matrix.resolvePrivateRoomAlias(`pi-${item.projectKey.slice("project_".length)}-space`, true);
-			if (aliasSpace !== targetSpace) throw new RelayRegistryError("invalid_state", "Reconciliation target Space no longer matches its deterministic alias");
+			await this.spaces.assertTarget(item.projectKey, targetSpace);
 			await this.options.matrix.assertRoomAuthority(item.roomId, false); await this.options.matrix.assertRoomAuthority(targetSpace, true, undefined, { spaceChild: true });
 			if (item.oldProjectSpace) await this.options.matrix.assertRoomAuthority(item.oldProjectSpace, true, undefined, { spaceChild: true });
 			if (!item.hostLinked) { if (coordinator?.kind === "coordinator" && coordinator.hostSpace) {

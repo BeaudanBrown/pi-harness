@@ -16,6 +16,7 @@ import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { ProjectReconciler } from "./project-reconciliation.js";
+import { ProjectSpaces } from "./project-spaces.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 export const PROJECT_ATTACHMENT_TIMEOUT_MS = 60_000;
@@ -317,6 +318,7 @@ export class HostLifecycle {
 		} finally { this.runtimeUpdateRunning = false; }
 	}
 	private readonly reconciler: ProjectReconciler;
+	private readonly projectSpaces: ProjectSpaces;
 
 	constructor(private readonly options: {
 		hostId: string;
@@ -337,6 +339,7 @@ export class HostLifecycle {
 		if (options.attachmentTimeoutMs !== undefined && (!Number.isSafeInteger(options.attachmentTimeoutMs) || options.attachmentTimeoutMs < 100 || options.attachmentTimeoutMs > 10 * 60_000)) {
 			throw new Error("Managed lifecycle attachment timeout must be between 100ms and 10 minutes");
 		}
+		this.projectSpaces = new ProjectSpaces(options.registry, options.matrix);
 		this.reconciler = new ProjectReconciler({ registry: options.registry, matrix: options.matrix, intentDirectory: options.projectSessionDirectory,
 			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement) });
 	}
@@ -409,7 +412,7 @@ export class HostLifecycle {
 	private async provisionConversationMatrixOnce(conversationId: string, concept: string, resolved: ResolvedWorkspace): Promise<{ roomId: string; projectSpace: string }> {
 		const intentPath = join(resolve(this.options.projectSessionDirectory), conversationId, "matrix-provisioning.json");
 		const file = new AtomicJsonFile(intentPath, parseMatrixProvisioningIntent);
-		let intent = await file.read();
+		let intent = await file.read(); const retry = intent !== undefined;
 		if (intent) {
 			const info = await lstat(intentPath); if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 ||
 				(process.getuid?.() !== undefined && info.uid !== process.getuid!())) throw new RelayRegistryError("invalid_state", "Existing Matrix provisioning intent is not a private relay-user file");
@@ -420,12 +423,9 @@ export class HostLifecycle {
 			await file.write(intent);
 		}
 		if (!intent.projectSpaceId) {
-			const matchingSpaces = new Set(this.options.registry.listManifests().filter((item) => item.kind === "project" && item.projectKey === resolved.projectKey)
-				.map((item) => item.projectSpace).filter((item): item is string => Boolean(item)));
-			if (matchingSpaces.size > 1) throw new RelayRegistryError("invalid_state", "Stable project identity maps to conflicting Matrix Spaces");
-			intent = { ...intent, projectSpaceId: [...matchingSpaces][0] ?? await this.options.matrix.createPrivateSpaceIdempotent(resolved.projectDisplayName,
-				`pi-${resolved.projectKey.slice("project_".length)}-space`) }; await file.write(intent);
-		}
+			intent = { ...intent, projectSpaceId: await this.projectSpaces.ensure(resolved.projectKey, resolved.projectDisplayName, retry) };
+			await file.write(intent);
+		} else await this.projectSpaces.assertTarget(resolved.projectKey, intent.projectSpaceId);
 		const projectSpace = intent.projectSpaceId;
 		if (!projectSpace) throw new RelayRegistryError("invalid_state", "Project Space identity is unavailable");
 		const coordinator = this.options.registry.listManifests().find((item) => item.kind === "coordinator");
@@ -433,6 +433,9 @@ export class HostLifecycle {
 			intent = { ...intent, hostSpaceLinked: true }; await file.write(intent); }
 		if (!intent.roomId) { intent = { ...intent, roomId: await this.options.matrix.createPrivateRoomIdempotent(
 			`pi · ${resolved.checkoutDisplayName} · ${concept}`, `pi-${conversationId.slice(5)}-room`) }; await file.write(intent); }
+		else if (await this.options.matrix.resolvePrivateRoomAlias(`pi-${conversationId.slice(5)}-room`, false) !== intent.roomId) {
+			throw new RelayRegistryError("invalid_state", "Project room no longer matches its deterministic alias");
+		}
 		const roomId = intent.roomId;
 		if (!roomId) throw new RelayRegistryError("invalid_state", "Project room identity is unavailable");
 		if (!intent.roomLinked) { await this.options.matrix.addSpaceChild(projectSpace, roomId); intent = { ...intent, roomLinked: true }; await file.write(intent); }
@@ -843,13 +846,17 @@ export class HostLifecycle {
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
 		await durableProjectSession(sessionFile, created.cwd, conversationId, request.creationKey, request.concept);
 		if (!intent.sessionPersisted) { intent = { ...intent, sessionPersisted: true }; await intentFile.write(intent); }
-		const roomAliasKey = conversationId.slice(5); const projectAliasKey = created.projectKey.slice("project_".length);
-		if (!intent.projectSpaceId) { intent = { ...intent, projectSpaceId: await this.options.matrix.createPrivateSpaceIdempotent(created.projectDisplayName, `pi-${projectAliasKey}-space`) }; await intentFile.write(intent); }
+		const roomAliasKey = conversationId.slice(5);
+		if (!intent.projectSpaceId) { intent = { ...intent, projectSpaceId: await this.projectSpaces.ensure(created.projectKey, created.projectDisplayName, retry) }; await intentFile.write(intent); }
+		else await this.projectSpaces.assertTarget(created.projectKey, intent.projectSpaceId);
 		const projectSpaceId = intent.projectSpaceId;
 		if (!projectSpaceId) throw new RelayRegistryError("invalid_state", "Project creation Space identity is unavailable");
 		const coordinator = this.options.registry.listManifests().find((item) => item.kind === "coordinator");
 		if (!intent.hostSpaceLinked) { if (coordinator?.kind === "coordinator" && coordinator.hostSpace) await this.options.matrix.addSpaceChild(coordinator.hostSpace, projectSpaceId); intent = { ...intent, hostSpaceLinked: true }; await intentFile.write(intent); }
 		if (!intent.roomId) { intent = { ...intent, roomId: await this.options.matrix.createPrivateRoomIdempotent(`pi · ${created.checkoutDisplayName} · ${request.concept}`, `pi-${roomAliasKey}-room`) }; await intentFile.write(intent); }
+		else if (await this.options.matrix.resolvePrivateRoomAlias(`pi-${roomAliasKey}-room`, false) !== intent.roomId) {
+			throw new RelayRegistryError("invalid_state", "Project creation room no longer matches its deterministic alias");
+		}
 		const roomId = intent.roomId;
 		if (!roomId) throw new RelayRegistryError("invalid_state", "Project creation room identity is unavailable");
 		if (!intent.roomLinked) { await this.options.matrix.addSpaceChild(projectSpaceId, roomId); intent = { ...intent, roomLinked: true }; await intentFile.write(intent); }

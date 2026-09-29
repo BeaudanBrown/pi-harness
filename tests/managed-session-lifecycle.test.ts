@@ -16,6 +16,7 @@ import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sess
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { projectSpaceAlias } from "../config/agent/extensions/managed-sessions/relay/project-spaces.js";
 import { TranscriptProjector } from "../config/agent/extensions/managed-sessions/relay/transcript-projector.js";
 
 const hostId = "lifecycle-host";
@@ -392,10 +393,15 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		roomId: "!coordinator:example.com", hostSpace: "!host:example.com", bindingBoundaryEntryId: `entry_${"1".repeat(32)}`, createdAt: new Date().toISOString() };
 	await registry.createCoordinatorConversation(coordinator);
 	await registry.setMatrixCursor(coordinatorId, "lifecycle-test-cursor");
-	const matrixCalls: string[] = [];
+	const matrixCalls: string[] = []; const aliases = new Map<string, string>();
 	let roomIndex = 0; let syncIndex = 0; const failSpaceLinks = new Set(["!room1:example.com", "!room3:example.com"]);
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
 		const path = new URL(String(input)).pathname; matrixCalls.push(`${init?.method ?? "GET"} ${path}`);
+		if (path.includes("/directory/room/")) {
+			const alias = decodeURIComponent(path.split("/directory/room/")[1]!).slice(1).split(":")[0]!;
+			return aliases.has(alias) ? Response.json({ room_id: aliases.get(alias) }) : new Response("missing", { status: 404 });
+		}
+		if (path.includes("/state/m.room.power_levels/")) return Response.json({ users: { [matrixConfig.botUserId]: 100 } });
 		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
@@ -414,9 +420,11 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		if (path.endsWith("/createRoom")) {
 			assert.ok((await stat(sessions)).isDirectory(), "project Pi session directory exists before Matrix binding");
 			const body = JSON.parse(String(init?.body)) as { room_alias_name?: string };
-			if (body.room_alias_name === `pi-${"b".repeat(32)}-space`) assert.ok(await stat(join(sessions, createdProjectId, "session.jsonl")),
+			if (body.room_alias_name === projectSpaceAlias(hostId, `project_${"b".repeat(32)}`)) assert.ok(await stat(join(sessions, createdProjectId, "session.jsonl")),
 				"the exact empty Pi session is durable before project-create starts Matrix binding");
-			roomIndex += 1; return Response.json({ room_id: `!room${roomIndex}:example.com` });
+			roomIndex += 1; const roomId = `!room${roomIndex}:example.com`;
+			if (body.room_alias_name) aliases.set(body.room_alias_name, roomId);
+			return Response.json({ room_id: roomId });
 		}
 		return Response.json({ event_id: "$ok" });
 	}, [coordinator.roomId, coordinator.hostSpace!], { maxAttempts: 1 });
@@ -505,7 +513,9 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const restartedMatrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/createRoom")) { restartCreates.push(JSON.parse(String(init?.body))); return Response.json({ room_id: "!restart-room:example.com" }); }
-		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId });
+		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId,
+			...(decodeURIComponent(path).includes(manifest.projectSpace!) ? { type: "m.space" } : {}) });
+		if (path.includes("/state/m.room.power_levels/")) return Response.json({ users: { [matrixConfig.botUserId]: 100 } });
 		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		return Response.json({ event_id: "$ok" });

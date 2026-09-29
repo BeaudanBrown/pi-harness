@@ -270,8 +270,11 @@ duplicating project Spaces or rooms. Starting a
 project conversation accepts only a named root, immediate-child workspace, safe
 relative cwd, and immutable concept. A harness-owned authority wrapper enriches the configured tmux launcher’s canonical workspace result and resolves Git common-directory
 identity so a main checkout and its linked worktrees share one deterministic private
-project Space while retaining distinct checkout room names; non-Git workspaces use
-a stable immediate-child fallback. Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. The coordinator can preview a bounded host-resolved plan, explicitly apply its stable reconciliation key without replacing rooms or sessions, and separately confirm cleanup of obsolete Spaces. Cleanup refuses referenced, non-empty, inaccessible, or foreign Spaces and removes the operator only from verified obsolete empty Spaces before the bot leaves. The relay resolves placement
+project Space on that host while retaining distinct checkout room names; non-Git
+workspaces use a stable immediate-child fallback. New project Space aliases include
+the stable host ID as well as the project key, so synchronized same-named workspaces
+on different hosts do not collide across bot accounts. Existing Space bindings and
+checkpointed provisioning IDs are preserved; see [shared-workspace recovery](docs/managed-matrix-sessions.md#shared-workspaces-across-hosts). Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. The coordinator can preview a bounded host-resolved plan, explicitly apply its stable reconciliation key without replacing rooms or sessions, and separately confirm cleanup of obsolete Spaces. Cleanup refuses referenced, non-empty, inaccessible, or foreign Spaces and removes the operator only from verified obsolete empty Spaces before the bot leaves. The relay resolves placement
 through the fixed launcher, durably creates the Pi session and binding boundary
 before Matrix rooms, and launches the ordinary adapter through the trusted
 `direnv exec`/Pi dispatch. No objective or orientation is lifecycle metadata:

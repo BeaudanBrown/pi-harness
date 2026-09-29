@@ -24,7 +24,7 @@ The original v1 trust boundary was one configured Unix user and one configured M
 - **Delivery:** One authorized Matrix text event accepted for ordered handling by one conversation. Acceptance is durable before adapter injection. A delivery progresses through accepted, delivered, persisted, completed, or cancelled states.
 - **Transcript projection:** Idempotent mapping of eligible persisted Pi entries or structured relay events into Matrix transactions. Persisted Pi transcript entries, not ephemeral adapter output, are the ordinary outbound source of truth.
 - **Workspace identity:** A portable tuple of configured root key, immediate-child workspace name, and safe relative cwd. It identifies checkout placement and is resolved and canonicalized by host-owned launcher code; it is not an arbitrary path.
-- **Project identity:** A host-authoritative stable key and display name. A harness-owned authority wrapper enriches the configured tmux launcher’s canonical workspace result: Git checkouts derive the key from the validated common directory shared by the main checkout and linked worktrees, while non-Git workspaces derive it from their workspace identity. Project identity selects a Matrix project Space, while workspace identity remains the conversation checkout identity.
+- **Project identity:** A host-authoritative stable key and display name. A harness-owned authority wrapper enriches the configured tmux launcher’s canonical workspace result: Git checkouts derive the key from the validated common directory shared by the main checkout and linked worktrees, while non-Git workspaces derive it from their workspace identity. Project identity together with the owning host selects a Matrix project Space, while workspace identity remains the conversation checkout identity. The same synchronized workspace can retain its name and project key across hosts without sharing Matrix authority.
 - **Managed worktree intent:** A private host-local, bounded, idempotent record binding one coordinator request to a canonical Git common directory, explicit existing base ref and commit, new local branch, deterministic sibling checkout, and lifecycle phase. Names never prove ownership without this intent and fresh host validation.
 - **Worktree removal preview:** A private stable snapshot of the exact linked checkout registration, local branch tip, cleanliness, lock state, optional explicit merge target, and optional bundled conversation. Confirmation applies only while that identity still matches.
 - **Conversation state:** Exactly `starting`, `active`, or `dormant`. Starting means a wake or creation is in progress; active means one attachment is accepted; dormant means no attachment is accepted. There is no archived state or idle timeout.
@@ -122,6 +122,24 @@ Derivations use SHA-256 with a distinct `pi-managed-sessions:<domain>:v1` prefix
 | Pi transcript entry ID | Pi session ID, persisted Pi entry key | `entry_` + 32 hex |
 | Transcript chunk ID | entry ID, zero-based chunk index | `chunk_` + 32 hex |
 | Matrix transaction ID | conversation ID, source ID, zero-based chunk index | `pi_` + 48 hex |
+| Project Space alias (v2 domain) | host ID, project key | `pi-project-v2-` + 32 hex + `-space` |
+
+Project Space aliases use the distinct `pi-managed-sessions:project-space:v2`
+prefix and the same length-framed UTF-8 encoding. The host ID must be stable and
+unique among relays on the Matrix server. This scopes Matrix ownership without
+changing shared workspace files, project keys, conversation IDs, or the IPC/store
+schema. Creation, reconciliation and retry use the same project-Space resolver.
+Existing manifest bindings remain authoritative; they are not automatically
+renamed or moved to the new alias. Saved provisioning/reconciliation targets
+retain their IDs and must pass authority checks. An interrupted operation without
+a saved Space ID first looks for its host-scoped alias, then may read the legacy
+global alias to recover an uncertain bot-owned create. An inaccessible (403 on
+that unbound legacy create-event read only) or explicitly foreign legacy Space
+is not adopted; creation uses only the new host-scoped alias. Authentication,
+directory, malformed-response, owned-Space power and saved-target failures still
+stop recovery. No join, invitation, permission change or foreign-Space cleanup
+is used to resolve collisions. This is not cross-host conversation migration or
+shared-room authority.
 
 Creation keys are durable retry keys, not display names. Coordinator-created conversation keys are supplied by the trusted coordinator adapter. Manual ordinary `/remote on` creates its key once, persists it with the binding-boundary attempt before contacting the relay, and reuses that key on retry. Promotion has persisted `prepared`, `shutdown_requested`, `shutdown_confirmed`, and `adopted` phases: failure before shutdown leaves the source process and file untouched; only an authenticated graceful-shutdown detach can confirm adoption authority, unqualified socket loss remains reconnectable, adoption handles cross-filesystem moves, and restart recovery resumes only confirmed shutdowns. The binding boundary also defines the projection start, so the adopted session retains earlier model history without backfilling it to Matrix. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
 

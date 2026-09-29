@@ -8,6 +8,7 @@ import { ConversationManifestStore } from "../config/agent/extensions/managed-se
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { ProjectReconciler } from "../config/agent/extensions/managed-sessions/relay/project-reconciliation.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { projectSpaceAlias } from "../config/agent/extensions/managed-sessions/relay/project-spaces.js";
 
 const hostId = "reconciliation-host";
 const config = { homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
@@ -35,7 +36,7 @@ async function fixture(fetcher: typeof fetch) {
 	const resolveWorkspace = async (placement: WorkspaceIdentity) => ({ ...placement, workspacePath: join(root, placement.workspace), cwd: join(root, placement.workspace),
 		projectKey: `project_${"a".repeat(32)}`, projectDisplayName: "main", checkoutDisplayName: placement.workspace });
 	const reconciler = new ProjectReconciler({ registry, matrix, intentDirectory: join(root, "sessions"), resolveWorkspace });
-	return { root, store, registry, reconciler, manifests };
+	return { root, store, registry, reconciler, manifests, matrix, resolveWorkspace };
 }
 
 function authority(path: string): Response | undefined {
@@ -144,4 +145,52 @@ test("cleanup refuses a non-empty managed Space and operation-specific foreign a
 	hostChildDenied = false; foreign = true;
 	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /authority/);
 	assert.ok(value.registry.manifestByConversationId(conversation("1")), "cleanup failure never removes a conversation");
+});
+
+test("reconciliation resumes a checkpointed legacy target after the alias-scope upgrade", async (t) => {
+	let upgraded = false; let interrupted = false; let creates = 0;
+	const fetcher: typeof fetch = async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		const owned = authority(path); if (owned) return owned;
+		if (path.includes("/directory/room/")) {
+			const alias = decodeURIComponent(path.split("/directory/room/")[1]!);
+			if (upgraded && alias === `#${projectSpaceAlias(hostId, `project_${"a".repeat(32)}`)}:example.com`) return new Response("missing", { status: 404 });
+			return Response.json({ room_id: "!legacy-stable:example.com" });
+		}
+		if (path.endsWith("/createRoom")) { creates += 1; throw new Error("must reuse checkpointed target"); }
+		if (path.includes("/state/m.space.child/")) {
+			if (!interrupted) { interrupted = true; return new Response("interrupted", { status: 503 }); }
+			return Response.json({ event_id: "$ok" });
+		}
+		throw new Error(`unexpected ${init?.method} ${path}`);
+	};
+	const value = await fixture(fetcher); t.after(() => rm(value.root, { recursive: true, force: true }));
+	const preview = await value.reconciler.preview();
+	await assert.rejects(() => value.reconciler.apply(preview.reconciliationKey), /Matrix PUT/);
+	// The saved intent has the same shape as a pre-upgrade operation, with its
+	// legacy target ID already fixed. A fresh client knows only manifest rooms.
+	upgraded = true;
+	const matrix = new ManagedMatrixClient(config, fetcher, value.registry.managedRoomIds(), { maxAttempts: 1 });
+	const restarted = new ProjectReconciler({ registry: value.registry, matrix, intentDirectory: join(value.root, "sessions"), resolveWorkspace: value.resolveWorkspace });
+	await restarted.apply(preview.reconciliationKey);
+	assert.equal(creates, 0);
+	for (const digit of ["1", "2"]) assert.equal(value.registry.manifestByConversationId(conversation(digit))!.projectSpace, "!legacy-stable:example.com");
+});
+
+test("reconciliation reuses a bound legacy Space without requiring the new alias", async (t) => {
+	let aliases = 0; let creates = 0;
+	const value = await fixture(async (input) => {
+		const path = new URL(String(input)).pathname; const owned = authority(path); if (owned) return owned;
+		if (path.includes("/directory/room/")) { aliases += 1; return new Response("missing", { status: 404 }); }
+		if (path.endsWith("/createRoom")) { creates += 1; throw new Error("must reuse bound Space"); }
+		if (path.includes("/state/m.space.child/")) return Response.json({ event_id: "$ok" });
+		throw new Error(`unexpected ${path}`);
+	});
+	t.after(() => rm(value.root, { recursive: true, force: true }));
+	await value.store.write({ ...value.manifests[1]!, projectKey: `project_${"a".repeat(32)}`, projectDisplayName: "main", checkoutDisplayName: "main" });
+	await value.registry.load();
+	const preview = await value.reconciler.preview(); assert.equal(preview.pending, 1);
+	const result = await value.reconciler.apply(preview.reconciliationKey);
+	assert.equal(result.obsoleteSpaces, 0); assert.equal(aliases, 0); assert.equal(creates, 0);
+	assert.equal(value.registry.manifestByConversationId(conversation("2"))!.projectSpace, "!old:example.com");
 });

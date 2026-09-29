@@ -332,7 +332,7 @@ export class ManagedMatrixClient {
 		}
 		return roomId;
 	}
-	async resolvePrivateRoomAlias(aliasLocalpart: string, space: boolean, signal?: AbortSignal): Promise<string | undefined> {
+	private async lookupPrivateRoomAlias(aliasLocalpart: string, signal?: AbortSignal): Promise<string | undefined> {
 		if (!/^[a-z0-9._=-]{1,128}$/.test(aliasLocalpart)) throw new Error("Matrix room alias localpart is malformed");
 		const server = this.botUserId.slice(this.botUserId.indexOf(":") + 1);
 		if (!server || server === this.botUserId) throw new ManagedMatrixError("invalid_response", "Matrix bot ID omitted its server name");
@@ -340,8 +340,35 @@ export class ManagedMatrixClient {
 		try { roomId = requiredString(await this.request("GET", `/_matrix/client/v3/directory/room/${encodeURIComponent(`#${aliasLocalpart}:${server}`)}`, undefined, signal), "room_id"); }
 		catch (error) { if (error instanceof ManagedMatrixError && error.status === 404) return undefined; throw error; }
 		if (!/^![^\s:]{1,200}:[^\s]{1,200}$/.test(roomId) || roomId.length > 255) throw new ManagedMatrixError("invalid_response", "Matrix alias returned a malformed room ID");
+		return roomId;
+	}
+	async resolvePrivateRoomAlias(aliasLocalpart: string, space: boolean, signal?: AbortSignal): Promise<string | undefined> {
+		const roomId = await this.lookupPrivateRoomAlias(aliasLocalpart, signal);
+		if (!roomId) return undefined;
 		this.#managedRoomIds.add(roomId);
 		try { await this.assertRoomAuthority(roomId, space, signal); } catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
+		return roomId;
+	}
+	/** Read-only recovery probe for the pre-host-scoping alias, never a permission bypass for a saved target. */
+	async resolveLegacyProjectSpace(projectKey: string, signal?: AbortSignal): Promise<string | undefined> {
+		if (!/^project_[a-f0-9]{32}$/.test(projectKey)) throw new Error("Project identity is malformed");
+		const roomId = await this.lookupPrivateRoomAlias(`pi-${projectKey.slice("project_".length)}-space`, signal);
+		if (!roomId) return undefined;
+		let create: unknown;
+		try { create = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.create/`, undefined, signal); }
+		catch (error) {
+			// Only this unbound legacy-room read may encounter another host's private
+			// Space. Directory/auth/network failures and bound-target failures propagate.
+			if (error instanceof ManagedMatrixError && error.status === 403) return undefined;
+			throw error;
+		}
+		if (typeof create !== "object" || create === null || Array.isArray(create) || (create as JsonObject).type !== "m.space") {
+			throw new ManagedMatrixError("invalid_response", "Legacy project alias is not a Matrix Space");
+		}
+		if ((create as JsonObject).creator !== undefined && (create as JsonObject).creator !== this.botUserId) return undefined;
+		this.#managedRoomIds.add(roomId);
+		try { await this.assertRoomAuthority(roomId, true, signal, { spaceChild: true }); }
+		catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
 		return roomId;
 	}
 	async assertRoomAuthority(roomId: string, space: boolean, signal?: AbortSignal, required: { spaceChild?: boolean; kick?: boolean } = {}): Promise<void> {
