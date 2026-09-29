@@ -1,0 +1,194 @@
+diff -ruN a/dist/core/agent-session.d.ts b/dist/core/agent-session.d.ts
+--- a/dist/core/agent-session.d.ts	2026-09-29 22:03:31.443856711 +1000
++++ b/dist/core/agent-session.d.ts	2026-09-29 22:04:25.597514066 +1000
+@@ -151,6 +151,8 @@
+     expandPromptTemplates?: boolean;
+     /** Called after command, skill, and prompt expansion, before delivery. */
+     onPromptExpanded?: (text: string) => void;
++    /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++    onQueuedMessageRemoved?: () => void;
+     /** Image attachments */
+     images?: ImageContent[];
+     /** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
+@@ -424,6 +426,8 @@
+         deliverAs?: "steer" | "followUp";
+         expandPromptTemplates?: boolean;
+         onPromptExpanded?: (text: string) => void;
++        /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++        onQueuedMessageRemoved?: () => void;
+     }): Promise<void>;
+     /**
+      * Clear all queued messages and return them.
+diff -ruN a/dist/core/agent-session.js b/dist/core/agent-session.js
+--- a/dist/core/agent-session.js	2026-09-29 22:03:31.443856711 +1000
++++ b/dist/core/agent-session.js	2026-09-29 22:04:07.898839031 +1000
+@@ -87,6 +87,8 @@
+     _resolveIdleWait;
+     /** Tracks pending steering messages for UI display. Removed when delivered. */
+     _steeringMessages = [];
++    // Object identity, not text/UI snapshots: consumed messages must never be cancelled.
++    _queuedMessageRemovalCallbacks = new WeakMap();
+     /** Tracks pending follow-up messages for UI display. Removed when delivered. */
+     _followUpMessages = [];
+     /** Messages queued to be included with the next user prompt as context ("asides"). */
+@@ -863,10 +865,10 @@
+                     throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+                 }
+                 if (options.streamingBehavior === "followUp") {
+-                    await this._queueFollowUp(expandedText, currentImages);
++                    await this._queueFollowUp(expandedText, currentImages, options?.onQueuedMessageRemoved);
+                 }
+                 else {
+-                    await this._queueSteer(expandedText, currentImages);
++                    await this._queueSteer(expandedText, currentImages, options?.onQueuedMessageRemoved);
+                 }
+                 preflightResult?.(true);
+                 return;
+@@ -1044,34 +1046,30 @@
+     /**
+      * Internal: Queue a steering message (already expanded, no extension command check).
+      */
+-    async _queueSteer(text, images) {
++    async _queueSteer(text, images, onQueuedMessageRemoved) {
+         this._steeringMessages.push(text);
+         this._emitQueueUpdate();
+         const content = [{ type: "text", text }];
+         if (images) {
+             content.push(...images);
+         }
+-        this.agent.steer({
+-            role: "user",
+-            content,
+-            timestamp: Date.now(),
+-        });
++        const message = { role: "user", content, timestamp: Date.now() };
++        if (onQueuedMessageRemoved) this._queuedMessageRemovalCallbacks.set(message, onQueuedMessageRemoved);
++        this.agent.steer(message);
+     }
+     /**
+      * Internal: Queue a follow-up message (already expanded, no extension command check).
+      */
+-    async _queueFollowUp(text, images) {
++    async _queueFollowUp(text, images, onQueuedMessageRemoved) {
+         this._followUpMessages.push(text);
+         this._emitQueueUpdate();
+         const content = [{ type: "text", text }];
+         if (images) {
+             content.push(...images);
+         }
+-        this.agent.followUp({
+-            role: "user",
+-            content,
+-            timestamp: Date.now(),
+-        });
++        const message = { role: "user", content, timestamp: Date.now() };
++        if (onQueuedMessageRemoved) this._queuedMessageRemovalCallbacks.set(message, onQueuedMessageRemoved);
++        this.agent.followUp(message);
+     }
+     /**
+      * Throw an error if the text is an extension command.
+@@ -1184,6 +1182,7 @@
+         await this.prompt(text, {
+             expandPromptTemplates: options?.expandPromptTemplates ?? false,
+             onPromptExpanded: options?.onPromptExpanded,
++            onQueuedMessageRemoved: options?.onQueuedMessageRemoved,
+             streamingBehavior: options?.deliverAs,
+             images,
+             source: "extension",
+@@ -1199,7 +1198,14 @@
+         const followUp = [...this._followUpMessages];
+         this._steeringMessages = [];
+         this._followUpMessages = [];
+-        this.agent.clearAllQueues();
++        const removed = this.agent.clearAllQueues();
++        // Run synchronously after detaching the queues, before any successor can arrive.
++        // Do not cancel drained messages whose message_start event has not run yet.
++        for (const message of removed) {
++            const callback = this._queuedMessageRemovalCallbacks.get(message);
++            this._queuedMessageRemovalCallbacks.delete(message);
++            callback?.();
++        }
+         this._emitQueueUpdate();
+         return { steering, followUp };
+     }
+diff -ruN a/dist/core/extensions/types.d.ts b/dist/core/extensions/types.d.ts
+--- a/dist/core/extensions/types.d.ts	2026-09-29 22:03:31.444856711 +1000
++++ b/dist/core/extensions/types.d.ts	2026-09-29 22:04:25.598496328 +1000
+@@ -303,6 +303,8 @@
+         deliverAs?: "steer" | "followUp";
+         expandPromptTemplates?: boolean;
+         onPromptExpanded?: (text: string) => void;
++        /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++        onQueuedMessageRemoved?: () => void;
+     }): Promise<void>;
+ }
+ /** Rendering options for tool results */
+@@ -982,6 +984,8 @@
+         deliverAs?: "steer" | "followUp";
+         expandPromptTemplates?: boolean;
+         onPromptExpanded?: (text: string) => void;
++        /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++        onQueuedMessageRemoved?: () => void;
+     }): void;
+     /** Append a custom entry to the session for state persistence (not sent to LLM). */
+     appendEntry<T = unknown>(customType: string, data?: T): void;
+@@ -1192,6 +1196,8 @@
+     deliverAs?: "steer" | "followUp";
+     expandPromptTemplates?: boolean;
+     onPromptExpanded?: (text: string) => void;
++    /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++    onQueuedMessageRemoved?: () => void;
+ }) => void;
+ export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
+ export type SetSessionNameHandler = (name: string) => void;
+diff -ruN a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts b/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts	2026-09-29 22:03:31.445856710 +1000
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts	2026-09-29 22:04:07.899839031 +1000
+@@ -85,11 +85,11 @@
+     /** Queue a message to run only after the agent would otherwise stop. */
+     followUp(message: AgentMessage): void;
+     /** Remove all queued steering messages. */
+-    clearSteeringQueue(): void;
++    clearSteeringQueue(): AgentMessage[];
+     /** Remove all queued follow-up messages. */
+-    clearFollowUpQueue(): void;
++    clearFollowUpQueue(): AgentMessage[];
+     /** Remove all queued steering and follow-up messages. */
+-    clearAllQueues(): void;
++    clearAllQueues(): AgentMessage[];
+     /** Returns true when either queue still contains pending messages. */
+     hasQueuedMessages(): boolean;
+     /** Active abort signal for the current run, if any. */
+diff -ruN a/node_modules/@earendil-works/pi-agent-core/dist/agent.js b/node_modules/@earendil-works/pi-agent-core/dist/agent.js
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent.js	2026-09-29 22:03:31.445856710 +1000
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent.js	2026-09-29 22:04:07.898839031 +1000
+@@ -74,7 +74,9 @@
+         return [first];
+     }
+     clear() {
++        const removed = this.messages;
+         this.messages = [];
++        return removed;
+     }
+ }
+ /**
+@@ -179,16 +181,15 @@
+     }
+     /** Remove all queued steering messages. */
+     clearSteeringQueue() {
+-        this.steeringQueue.clear();
++        return this.steeringQueue.clear();
+     }
+     /** Remove all queued follow-up messages. */
+     clearFollowUpQueue() {
+-        this.followUpQueue.clear();
++        return this.followUpQueue.clear();
+     }
+     /** Remove all queued steering and follow-up messages. */
+     clearAllQueues() {
+-        this.clearSteeringQueue();
+-        this.clearFollowUpQueue();
++        return [...this.clearSteeringQueue(), ...this.clearFollowUpQueue()];
+     }
+     /** Returns true when either queue still contains pending messages. */
+     hasQueuedMessages() {

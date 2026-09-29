@@ -201,6 +201,10 @@ function deliveredUserEntries(entries: readonly unknown[]): Map<string, string> 
 		if (typeof candidate.id !== "string") continue;
 		parents.set(candidate.id, candidate.parentId ?? null);
 		const marker = customData(entry, DELIVERY_ENTRY_TYPE);
+		if (marker?.data.status === "cancelled" && typeof marker.data.deliveryId === "string") {
+			// A withdrawn expansion cannot claim a later identical terminal/Matrix input.
+			pending.delete(marker.data.deliveryId);
+		}
 		if (marker && typeof marker.data.deliveryId === "string" && typeof marker.data.expandedText === "string" &&
 			(marker.data.status === "expanded" || marker.data.status === "reinjecting") && !matched.has(marker.data.deliveryId)) {
 			const media = marker.data.media as { sha256?: string } | undefined;

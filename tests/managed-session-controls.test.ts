@@ -89,6 +89,29 @@ test("delivery waits for persistence and terminal receipts prevent replay into a
 	assert.equal(unexpected, false, "cancelled entries never re-enter the adapter");
 });
 
+test("delivery-specific withdrawal releases the next input and cancellation survives reload", async (t) => {
+	const { root, registry, manifest } = await fixture();
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "withdrawal-ipc") });
+	await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const matrix = new ManagedMatrixClient(config, async () => Response.json({}), [manifest.roomId]);
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => undefined);
+	const id = manifest.conversationId;
+	for (const eventId of ["$withdrawn", "$next"]) await registry.recordAcceptedInput(id, {
+		deliveryId: deriveDeliveryId(id, eventId), matrixEventId: eventId, kind: "steer", body: "identical", status: "accepted",
+	});
+	const first = readMany(socket, 1); await router.attachmentReady(id); await first;
+	assert.deepEqual(registry.pendingInputs(id).map((input) => input.status), ["delivered", "accepted"]);
+	await registry.acknowledgeInput(id, deriveDeliveryId(id, "$withdrawn"), "cancelled");
+	await registry.acknowledgeInput(id, deriveDeliveryId(id, "$withdrawn"), "cancelled");
+	const second = readMany(socket, 1); await router.attachmentReady(id);
+	assert.equal((await second)[0]?.payload.deliveryId, deriveDeliveryId(id, "$next"));
+	assert.deepEqual(registry.pendingInputs(id).map((input) => input.status), ["cancelled", "delivered"]);
+	const reopened = new RelayRegistry("controls-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests")));
+	await reopened.load();
+	assert.deepEqual(reopened.pendingInputs(id).map((input) => input.status), ["cancelled", "delivered"]);
+});
+
 test("stop accepted during slash feedback prevents subsequent native command dispatch", async (t) => {
 	const { root, registry, manifest } = await fixture();
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "feedback-race") });

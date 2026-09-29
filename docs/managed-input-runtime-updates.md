@@ -31,6 +31,29 @@ accepted text stays queued for the new generation. A rejected reset cancels
 nothing and releases the gate. Replayed controls do not move the cutoff.
 Cancellation never promises rollback of external effects already performed.
 
+## Local queue withdrawal (#102)
+
+Pi queues busy Matrix input as native steering. Escape (abort and restore) or
+Alt+Up (retrieve for editing) removes queued input and restores its text to the
+terminal editor. That withdrawal now cancels each affected Matrix delivery;
+merely clearing an unrelated editor draft does not cancel anything. Resubmitting
+restored or edited text creates a new terminal-origin input. Other accepted
+Matrix deliveries remain queued and can proceed after the cancellation receipt.
+
+The packaged Pi patch provides a per-input `onQueuedMessageRemoved` callback.
+It uses the actual objects removed from the agent's steering/follow-up queues,
+not text matching or UI queue snapshots: already-drained messages are not
+cancelled even if their user-entry event has not fired. The adapter writes a
+local terminal cancellation marker synchronously before acknowledging the relay,
+removes only that delivery's pending bookkeeping, and replays the receipt on
+reconnect. Cancelled expansion markers cannot claim later identical user entries.
+
+This does not retrospectively cancel ambiguous historical input. If the process
+exits before recording cancellation, existing conservative recovery still holds
+it for operator action. Deploy the patched Pi and adapter together; running Pi
+processes need the normal approved idle refresh. No state migration or live-queue
+repair is performed by this fix.
+
 ## Automatic project runtime updates
 
 The managed project launcher hashes its immutable executable path. Attachments
@@ -81,6 +104,8 @@ cutover are operator-authorized deployment steps, not performed by tests.
 | Acceptance | Evidence |
 | --- | --- |
 | Queued and identical user correlation; wrong branch/text rejected | `managed-session-delivery-order.test.ts` |
+| Real Pi editor restoration cancels only withdrawn input; successor delivery, reconnect, persisted cancellation and drained/identical queue race | `managed-session-adapter.test.ts` real Pi withdrawal regression |
+| Withdrawn expansion cannot claim later identical input | `managed-session-delivery-order.test.ts` |
 | One unpersisted input; cancellation never redelivered | `managed-session-controls.test.ts` ordered delivery regression |
 | Reset cutoff survives restart; later input retained; late receipts rejected | `managed-session-relay-registry.test.ts` cutoff regression |
 | Ambiguous expansion stays held; relay cancellation prevents local resume | `managed-session-adapter.test.ts` recovery cases |
@@ -95,6 +120,9 @@ cutover are operator-authorized deployment steps, not performed by tests.
 | --- | --- |
 | Input queued, before injection | Stable event/delivery ID remains pending; no second identity on sync replay |
 | Socket dispatch before user persistence | One delivered input gates successors; uncertain expansion is held, not guessed |
+| Native queue removal before local cancellation marker | Synchronous callback minimizes the window; interruption remains ambiguous and held, never auto-replayed |
+| Local cancellation marker before relay receipt | Reconnect replays terminal cancellation by delivery ID; duplicate receipts are idempotent |
+| Cancellation receipt before successor dispatch | Registry retains cancellation across reload; only the next eligible input is dispatched |
 | User persisted before relay receipt | Explicit local receipt is replayed; relay terminal state wins |
 | Stop accepted before shutdown | Control and cancellation share registry mutation; late persisted/completed acknowledgements cannot regress cancellation |
 | Reset queued before authorization | Frozen cutoff survives restart; rejected reset does not cancel |

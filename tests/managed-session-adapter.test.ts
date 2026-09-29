@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { pathToFileURL } from "node:url";
 import test from "node:test";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
@@ -51,6 +52,113 @@ import {
 	publishAloopLifecycleEvent,
 	registerManagedAloopAbortDelegate,
 } from "../config/agent/extensions/managed-sessions/aloop-lifecycle.js";
+
+test("real Pi queue withdrawal cancels managed delivery and releases successor without replay", { timeout: 15_000 }, async (t) => {
+	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI;
+	if (!piPath) return t.skip("packaged Pi SDK unavailable");
+	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
+	const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
+	const ai = await import(pathToFileURL(join(sdkRoot, "node_modules/@earendil-works/pi-ai/dist/index.js")).href);
+	const relay = await FakeRelay.start();
+	let cleanupSession: (() => Promise<void>) | undefined;
+	t.after(async () => { try { await cleanupSession?.(); } finally { await relay.close(); } });
+	const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(relay.root, "auth.json"), modelsPath: join(relay.root, "models.json"), modelsStorePath: join(relay.root, "models-store.json") });
+	await modelRuntime.setRuntimeApiKey("anthropic", "test-key");
+	// Managed launches start from a relay-created durable session file, not Pi's
+	// lazy new-session buffer (which defers its first write until an assistant turn).
+	const sessionFile = join(relay.root, "session.jsonl");
+	await writeFile(sessionFile, JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: relay.root, timestamp: new Date().toISOString() }) + "\n");
+	const sm = sdk.SessionManager.open(sessionFile);
+	const boundary = sm.appendCustomEntry(BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION });
+	sm.appendCustomEntry(BINDING_ENTRY_TYPE, { ...binding, sessionId: sm.getSessionId(), bindingBoundaryEntryId: deriveTranscriptEntryId(sm.getSessionId(), boundary) });
+	const loader = new sdk.DefaultResourceLoader({ cwd: relay.root, agentDir: relay.root, settingsManager,
+		noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+		extensionFactories: [createManagedSessionAdapterExtension("ordinary_adapter", {
+			PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce,
+		})],
+	});
+	await loader.reload();
+	const { session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader,
+		settingsManager, sessionManager: sm, modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: [] });
+	const errors: unknown[] = [];
+	await session.bindExtensions({ onError: (error: unknown) => errors.push(error) });
+	let release: (() => void) | undefined;
+	let calls = 0;
+	session.agent.streamFunction = (model: any) => {
+		const stream = ai.createAssistantMessageEventStream();
+		const finish = () => {
+			const message = { role: "assistant", content: [{ type: "text", text: "answer" }], api: model.api, provider: model.provider, model: model.id,
+				usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: "stop", timestamp: Date.now() };
+			stream.push({ type: "done", reason: "stop", message }); stream.end();
+		};
+		if (++calls === 1) release = finish; else queueMicrotask(finish);
+		return stream;
+	};
+	cleanupSession = async () => { release?.(); await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); };
+	const wait = async (predicate: () => boolean, description: string) => {
+		for (let i = 0; i < 200 && !predicate(); i++) await new Promise((resolve) => setTimeout(resolve, 5));
+		assert.ok(predicate(), `${description}; errors=${JSON.stringify(errors)}`);
+	};
+	const run = session.prompt("terminal work");
+	await wait(() => Boolean(release), "fake model is busy");
+	const firstId = deriveDeliveryId(conversationId, "$withdrawn");
+	const secondId = deriveDeliveryId(conversationId, "$successor");
+	const deliver = (id: string, body: string) => relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `send-${id.slice(1)}`, conversationId, role: "relay", type: "input.deliver",
+		payload: { deliveryId: deriveDeliveryId(conversationId, id), matrixEventId: id, kind: "prompt", body } });
+	deliver("$withdrawn", "discard this Matrix question");
+	await wait(() => session.getSteeringMessages().length === 1, "Matrix input is queued in real Pi");
+	// Lose the transport before withdrawal: the durable cancellation must replay.
+	relay.disconnect();
+	// Exercise Pi's actual Alt+Up/Escape restoration method without starting a terminal.
+	const editor = { text: "", getText() { return this.text; }, setText(text: string) { this.text = text; } };
+	const ui = { session, agent: session.agent, editor, compactionQueuedMessages: [], updatePendingMessagesDisplay() {},
+		clearAllQueues() { return sdk.InteractiveMode.prototype.clearAllQueues.call(this); } };
+	assert.equal(sdk.InteractiveMode.prototype.restoreQueuedMessagesToEditor.call(ui), 1);
+	assert.equal(editor.text, "discard this Matrix question");
+	editor.setText("");
+	await wait(() => relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === firstId && frame.payload.status === "cancelled"), "withdrawal must acknowledge cancellation instead of stranding successors");
+	assert.equal(restoreDeliveries(sm.getBranch()).get(firstId)?.status, "cancelled");
+	assert.equal(restoreDeliveries(sdk.SessionManager.open(sm.getSessionFile()).getBranch()).get(firstId)?.status, "cancelled", "cancellation survives reopening persisted Pi history");
+	// The relay releases its ordered successor only after a terminal receipt.
+	deliver("$successor", "next Matrix question");
+	await wait(() => session.getSteeringMessages().includes("next Matrix question"), "successor reaches Pi");
+	release!(); release = undefined; await run;
+	await wait(() => relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === secondId && frame.payload.status === "persisted"), "successor persisted");
+	const users = () => sm.getBranch().filter((entry: any) => entry.type === "message" && entry.message.role === "user").map((entry: any) => entry.message.content);
+	assert.doesNotMatch(JSON.stringify(users()), /discard this Matrix question/);
+	assert.deepEqual(session.clearQueue(), { steering: [], followUp: [] });
+	assert.notEqual(restoreDeliveries(sm.getBranch()).get(secondId)?.status, "cancelled", "consumed input is not withdrawn");
+	await session.prompt("edited terminal replacement");
+	assert.match(JSON.stringify(users()), /edited terminal replacement/);
+	const attaches = () => relay.frames.filter((frame) => frame.type === "attachment.attach").length;
+	const before = attaches(); relay.disconnect();
+	await wait(() => attaches() > before, "reconnect");
+	deliver("$withdrawn", "discard this Matrix question");
+	await wait(() => relay.frames.filter((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === firstId && frame.payload.status === "cancelled").length >= 2, "cancelled receipt replays");
+	assert.doesNotMatch(JSON.stringify(users()), /discard this Matrix question/);
+	assert.equal(session.pendingMessageCount, 0);
+	// Drain two identical steering inputs together, then withdraw a follow-up while
+	// the second message_start has not fired. Only the still-queued object is cancelled.
+	calls = 0; session.agent.steeringMode = "all";
+	const raceRun = session.prompt("another terminal turn");
+	await wait(() => Boolean(release), "second fake model run is busy");
+	const removed: string[] = [];
+	await session.sendUserMessage("same", { deliverAs: "steer", onQueuedMessageRemoved: () => removed.push("steer-1") });
+	await session.sendUserMessage("same", { deliverAs: "steer", onQueuedMessageRemoved: () => removed.push("steer-2") });
+	await session.sendUserMessage("same", { deliverAs: "followUp", onQueuedMessageRemoved: () => removed.push("follow-up") });
+	let restored = false;
+	const unsubscribe = session.subscribe((event: any) => {
+		if (!restored && event.type === "message_start" && event.message.role === "user") {
+			restored = true;
+			sdk.InteractiveMode.prototype.restoreQueuedMessagesToEditor.call(ui);
+		}
+	});
+	release!(); release = undefined; await raceRun; unsubscribe();
+	assert.deepEqual(removed, ["follow-up"]);
+	session.clearQueue(); assert.deepEqual(removed, ["follow-up"], "withdrawal callback is once-only");
+	assert.deepEqual(errors, []);
+});
 
 const conversationId = deriveConversationId("host", "work");
 const sessionId = "session-work";

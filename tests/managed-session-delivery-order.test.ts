@@ -34,6 +34,14 @@ test("identical captions do not conflate different images", () => {
  assert.equal(findDeliveredUserEntry(entries, "second"), "u2");
 });
 
+test("withdrawn expansion cannot steal a later identical input receipt", () => {
+ const first = marker("a", "withdrawn", "same");
+ const cancelled = { ...first, id: "cancel", parentId: "a", data: { ...first.data, status: "cancelled" } };
+ const entries = [first, cancelled, marker("b", "next", "same", "cancel"), user("u", "b", "same")];
+ assert.equal(findDeliveredUserEntry(entries, "withdrawn"), undefined);
+ assert.equal(findDeliveredUserEntry(entries, "next"), "u");
+});
+
 test("unrelated branches and mismatched text are never persistence evidence", () => {
  assert.equal(findDeliveredUserEntry([marker("a", "first", "HLS?"), user("u", "elsewhere", "HLS?")], "first"), undefined);
  assert.equal(findDeliveredUserEntry([marker("a", "first", "HLS?"), user("u", "a", "other")], "first"), undefined);

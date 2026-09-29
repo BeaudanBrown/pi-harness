@@ -580,6 +580,27 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			return key;
 		}
 
+		function queuedRemovalCallback(ctx: ExtensionContext, deliveryId: string): () => void {
+			const deliveryBinding = binding;
+			return () => {
+				// A callback belongs to exactly one live binding, never a replacement session.
+				if (!deliveryBinding || binding !== deliveryBinding) return;
+				const marker = deliveries.get(deliveryId);
+				if (!marker || !["expanded", "reinjecting"].includes(marker.status)) return;
+				// Pi reports an actual queue withdrawal, not an abort or a missing-text guess.
+				const cancelled: DeliveryMarker = { ...marker, status: "cancelled" };
+				recordDelivery(ctx, cancelled);
+				for (let i = pendingUserPersistence.length - 1; i >= 0; i--) {
+					if (pendingUserPersistence[i].deliveryId === deliveryId) pendingUserPersistence.splice(i, 1);
+				}
+				inFlightDeliveries.delete(deliveryId);
+				expandedRecoveryPending.delete(deliveryId);
+				acknowledge(cancelled);
+				setCheckpointActive(Boolean(client?.connected && (activeDeliveries.size || pendingUserPersistence.length)));
+				notify(ctx, "Queued Matrix input withdrawn locally; its delivery was cancelled. Resubmitting the editor text creates a new terminal input.", "info");
+			};
+		}
+
 		function persistExpanded(ctx: ExtensionContext, expanded: DeliveryMarker, piEntryKey: string): DeliveryMarker {
 			const persisted: DeliveryMarker = {
 				...expanded, status: "persisted", piEntryId: persistedEntryId(binding!.sessionId, piEntryKey),
@@ -783,6 +804,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			try {
 				pi.sendUserMessage([{ type: "text", text: attributedCaption }, { type: "image", data: image.data.toString("base64"), mimeType: image.mimeType }], {
 					...(ctx.isIdle() ? {} : { deliverAs: "steer" as const }), expandPromptTemplates: false, onPromptExpanded: recordExpanded,
+					onQueuedMessageRemoved: queuedRemovalCallback(ctx, image.deliveryId),
 				});
 			} catch (error) { inFlightDeliveries.delete(image.deliveryId); throw error; }
 		}
@@ -860,6 +882,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					...(deliverAs ? { deliverAs } : {}),
 					expandPromptTemplates: true,
 					onPromptExpanded: recordExpanded,
+					onQueuedMessageRemoved: queuedRemovalCallback(ctx, accepted.deliveryId),
 				});
 			} catch (error) {
 				inFlightDeliveries.delete(accepted.deliveryId);

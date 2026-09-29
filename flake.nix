@@ -52,6 +52,10 @@
         upstreamPiPackage = nix-ai-tools.packages.${system}.pi;
         piPackage = upstreamPiPackage.overrideAttrs (old: {
           patches = (old.patches or [ ]) ++ [ ./nix/patches/pi-prompt-expanded-hook.patch ];
+          # Apply after npm dependencies exist, before Bun embeds the CLI modules.
+          preInstall = ''
+            patch -p1 < ${./nix/patches/pi-queued-message-removal.patch}
+          '' + (old.preInstall or "");
           postInstall = (old.postInstall or "") + ''
             sdk_root="$out/lib/node_modules/@earendil-works/pi-coding-agent"
             mkdir -p "$sdk_root"
