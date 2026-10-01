@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { isAbsolute } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
+import { HostActionSchema, HostResultSchemas, parseHostAction, parseHostResponse } from "./live-workspace-contracts.js";
+import { HostRunWitnessSchema, parseHostRunWitness } from "./host-run-contracts.js";
 import { ConversationIdSchema, GenerationIdSchema, DeliveryIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 export { ConversationIdSchema, GenerationIdSchema, DeliveryIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 
@@ -143,7 +145,7 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
-export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1"] as const;
+export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1"] as const;
 export type ManagedSessionCapability = typeof MANAGED_SESSION_CAPABILITIES[number];
 const managedCapabilities = Type.Array(Type.Union(MANAGED_SESSION_CAPABILITIES.map((value) => Type.Literal(value))), { maxItems: MANAGED_SESSION_CAPABILITIES.length, uniqueItems: true });
 const matrixBindingState = Type.Union([Type.Literal("pending"), Type.Literal("bound")]);
@@ -249,6 +251,17 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			})),
 		})),
 	}),
+	clientEnvelope(adapterRole, "host.request", { requestId: identifier, generationId: GenerationIdSchema, runId: identifier, toolCallId: identifier, action: HostActionSchema }),
+	clientEnvelope(adapterRole, "host.run.observe", { witness: HostRunWitnessSchema }),
+	relayEnvelope("host.run.check", { checkId: identifier }),
+	clientEnvelope(adapterRole, "host.run.confirm", { checkId: identifier, witness: nullable(HostRunWitnessSchema) }),
+	relayEnvelope("host.approval.show", { approvalId: stableId("approval"), generationId: GenerationIdSchema, runId: identifier, toolCallId: identifier,
+		question: boundedString(4096), expiresAt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }) }),
+	relayEnvelope("host.approval.close", { approvalId: stableId("approval") }),
+	clientEnvelope(adapterRole, "host.approval.answer", { approvalId: stableId("approval"), generationId: GenerationIdSchema, runId: identifier, toolCallId: identifier,
+		choice: Type.Union([Type.Literal("approve"), Type.Literal("deny")]) }),
+	relayEnvelope("host.acknowledge", {}),
+	relayEnvelope("host.result", { operation: boundedString(64), response: Type.Unknown() }),
 	clientEnvelope(adapterRole, "recovery.confirm", {
 		requestId: identifier,
 		ready: Type.Boolean(),
@@ -801,6 +814,13 @@ function assertInputBody(kind: string, body: string | undefined): void {
 }
 
 function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
+	if (envelope.type === "host.request") parseHostAction(envelope.payload.action);
+	if (envelope.type === "host.run.observe" || envelope.type === "host.run.confirm" && envelope.payload.witness !== null) parseHostRunWitness(envelope.payload.witness);
+	if (envelope.type === "host.result") {
+		const operation = envelope.payload.operation;
+		if (typeof operation !== "string" || !Object.hasOwn(HostResultSchemas, operation)) throw new ManagedSessionContractError("malformed", "Unknown host result operation");
+		parseHostResponse(operation as keyof typeof HostResultSchemas, envelope.payload.response);
+	}
 	if (envelope.type === "media.chunk" || envelope.type === "artifact.chunk") {
 		const payload = envelope.payload as { data: string; sha256: string };
 		const decoded = Buffer.from(payload.data, "base64");

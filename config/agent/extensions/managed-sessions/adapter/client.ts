@@ -11,6 +11,8 @@ import {
 	parseNdjsonEnvelope,
 } from "../contracts.js";
 import type { AdapterRole, SessionBinding } from "./state.js";
+import { APPROVAL_LIFETIME_MS, HOST_CONTROL_VERSION, parseHostAction, parseHostResponse, type HostAction, type HostResponse } from "../live-workspace-contracts.js";
+import { parseHostRunWitness, type HostRunWitness } from "../host-run-contracts.js";
 import { artifactChunks, type WorkspaceArtifact } from "./artifact-export.js";
 
 export const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
@@ -52,6 +54,10 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 		case "artifact.chunk": return { type: "artifact.acknowledge", fields: [["uploadId", String(payload.uploadId)]] };
 		case "media.reject": return { type: "media.result", fields: [["deliveryId", String(payload.deliveryId)], ["blobId", String(payload.blobId)], ["status", "rejected"]] };
 		case "transcript.offer": return { type: "transcript.acknowledge", fields: [["entryId", String(payload.entryId)], ["status", "projected"]] };
+		case "host.request": return { type: "host.result", fields: [["operation", String((payload.action as Record<string, unknown>).operation)]] };
+		case "host.run.observe":
+		case "host.run.confirm":
+		case "host.approval.answer": return { type: "host.acknowledge", fields: [] };
 		case "recovery.confirm": return { type: "recovery.acknowledge", fields: [["requestId", String(payload.requestId)]] };
 		case "checkpoint.offer": return { type: "checkpoint.acknowledge", fields: [["checkpointId", String(payload.checkpointId)], ["status", "projected"]] };
 		case "aloop.notice": return { type: "aloop.acknowledge", fields: [["lifecycleId", String(payload.lifecycleId)], ["status", "projected"]] };
@@ -346,13 +352,45 @@ export class BoundAdapterClient {
 		await waitForClose(socket, 1_000);
 	}
 
+	/** No reconnect or execution replay. A lost reply is deliberately an uncertain outcome. */
+	async requestHostAction(input: { requestId: string; generationId: string; runId: string; toolCallId: string; action: HostAction }): Promise<HostResponse> {
+		input = structuredClone(input); parseHostAction(input.action);
+		if (!this.supports("approval-v1")) return { version: HOST_CONTROL_VERSION, requestId: input.requestId, ok: false,
+			error: { code: "upgrade_required", message: "Host approval capability is unavailable", retryable: false } };
+		try {
+			const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("host-request"),
+				conversationId: this.options.binding.conversationId, role: this.options.role, type: "host.request", payload: structuredClone(input) }, APPROVAL_LIFETIME_MS + 30_000);
+			if (result.type !== "host.result" || result.payload.operation !== input.action.operation) throw new ManagedAdapterError("Host response operation is invalid");
+			const response = parseHostResponse(input.action.operation, result.payload.response);
+			if (response.requestId !== input.requestId) throw new ManagedAdapterError("Host response correlation is invalid");
+			return response;
+		} catch { return { version: HOST_CONTROL_VERSION, requestId: input.requestId, ok: false,
+			error: { code: "failed", message: "Host action outcome is unknown; inspect state before explicitly trying again", retryable: false } }; }
+	}
+
+	async observeHostRun(witness: HostRunWitness): Promise<void> {
+		await this.hostMessage("host.run.observe", { witness: parseHostRunWitness(witness) });
+	}
+	async confirmHostRun(checkId: string, witness: HostRunWitness | null): Promise<void> {
+		await this.hostMessage("host.run.confirm", { checkId, witness: witness === null ? null : parseHostRunWitness(witness) });
+	}
+	async answerHostApproval(input: { approvalId: string; generationId: string; runId: string; toolCallId: string; choice: "approve" | "deny" }): Promise<void> {
+		await this.hostMessage("host.approval.answer", structuredClone(input));
+	}
+	private async hostMessage(type: string, payload: Record<string, unknown>): Promise<void> {
+		if (!this.supports("approval-v1")) throw new ManagedAdapterError("Host approval capability was not negotiated");
+		const response = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId(type),
+			conversationId: this.options.binding.conversationId, role: this.options.role, type, payload });
+		if (response.type !== "host.acknowledge") throw new ManagedAdapterError("Host acknowledgement is invalid");
+	}
+
 	protected request(envelope: ManagedSessionEnvelope, timeoutMs?: number): Promise<ManagedSessionEnvelope> {
 		const effectiveTimeoutMs = timeoutMs === RELAY_SIDE_EFFECT_TIMEOUT_MS
 			? this.options.timeouts?.relaySideEffectMs ?? timeoutMs
 			: timeoutMs ?? this.options.timeouts?.requestMs ?? REQUEST_TIMEOUT_MS;
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return Promise.reject(new ManagedAdapterError("Relay connection is unavailable"));
-		if (this.#matrixBindingPending && !["attachment.attach", "self.status", "control.result", "refresh.result"].includes(envelope.type)) {
+		if (this.#matrixBindingPending && !["attachment.attach", "self.status", "control.result", "refresh.result", "host.request", "host.run.observe", "host.run.confirm", "host.approval.answer"].includes(envelope.type)) {
 			return Promise.reject(new ManagedAdapterError("Local conversation is active; Matrix binding is pending", "matrix_unavailable"));
 		}
 		if (this.#pending.size >= MAX_PENDING_REQUESTS) return Promise.reject(new ManagedAdapterError("Relay request capacity was reached", "capacity_reached"));

@@ -424,3 +424,21 @@ execution-response loss without retry, consumed-consent recovery without
 execution, and admitted self-stop/caller-loss completion. These use controlled
 presenters/executors and the real private store; they do not yet prove native
 Pi dialogs, Matrix poll integration or deployed approval execution.
+
+A subsequent presentation/transport slice adds exact Approve/Deny polls using
+the existing Matrix client, bot-owned question/option verification, current joined
+operator or exact configured bridge voting, late-vote suppression and silent poll
+closure. Private preconditions are never rendered; the entire 100-conversation
+bulk-delete target set fits the poll question, and oversized unsupported displays
+fail rather than silently truncate. Local presentation delegates to a nonce-bound
+native-dialog callback; this is not yet the actual Pi UI integration.
+
+Strict adapter messages carry run/tool/generation references and typed actions,
+not model-supplied sender or room authority. The `approval-v1` capability is withheld
+unless explicitly enabled by the host; production does not enable it yet. A host
+request may await approval without blocking the same socket's fresh-run proof,
+vote or run-end messages. Such work is bounded per attachment and drained on close.
+Unknown peer UID now fails closed. Adapter disconnect returns an uncertain,
+non-retryable outcome and reconnect never resends the host mutation. Focused
+protocol/real-socket fixtures prove the fresh-proof exchange remains responsive
+while a host call is pending and its disconnected requester does not replay it.

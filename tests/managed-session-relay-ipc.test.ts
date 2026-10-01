@@ -20,6 +20,8 @@ import { ConversationManifestStore } from "../config/agent/extensions/managed-se
 import { peerUidFromHelper } from "../config/agent/extensions/managed-sessions/relay/peer-uid.js";
 import { RelayRegistry, RelayRegistryError } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { hostRelayLockPath, HostRelayLock } from "../config/agent/extensions/managed-sessions/relay/relay-lock.js";
+import { BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { deriveGenerationId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 
 const hostId = "ipc-host";
 const nonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
@@ -80,7 +82,7 @@ function waitForClose(socket: Socket): Promise<void> {
 	return new Promise((resolve) => socket.once("close", () => resolve()));
 }
 
-async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[]; registry: RelayRegistry }> {
+async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler, hostApprovalsEnabled = false): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[]; registry: RelayRegistry }> {
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-ipc-"));
 	const values = [manifest("one"), manifest("two")];
 	const store = new ConversationManifestStore(join(root, "manifests"));
@@ -93,11 +95,44 @@ async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHan
 		runtimeDirectory: join(root, "run"),
 		expectedUid: process.getuid?.(),
 		peerUid: peerUidOverride ?? (peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : () => process.getuid?.()),
-		onEnvelope,
+		onEnvelope, hostApprovalsEnabled,
 	});
 	await server.start();
 	return { root, server, values, registry };
 }
+
+test("host approval wait permits fresh proofs on the same socket and a disconnected client never replays the mutation", { timeout: 10_000 }, async (t) => {
+	let proof!: () => void; const proofArrived = new Promise<void>((resolve) => { proof = resolve; });
+	let release!: () => void; const effect = new Promise<void>((resolve) => { release = resolve; }); let attempts = 0;
+	const running = await setup(undefined, async (envelope, attachment) => {
+		const response = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay" as const, messageId: `reply-${envelope.messageId}`, conversationId: attachment.conversationId, inReplyTo: envelope.messageId };
+		if (envelope.type === "host.run.confirm") { assert.equal(envelope.payload.checkId, "fresh-check"); proof(); return { ...response, type: "host.acknowledge", payload: {} }; }
+		assert.equal(envelope.type, "host.request"); attempts++;
+		running.server.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay", messageId: "fresh-proof", conversationId: attachment.conversationId, type: "host.run.check", payload: { checkId: "fresh-check" } });
+		await proofArrived; await effect;
+		return { ...response, type: "host.result", payload: { operation: "conversation.stop", response: { version: "1.0.0", requestId: "request-1", ok: true, data: { conversationId: attachment.conversationId, runtimeState: "stopped" } } } };
+	}, true);
+	const value = running.values[0];
+	const binding = { version: MANAGED_SESSION_STATE_VERSION, role: "ordinary_adapter" as const, conversationId: value.conversationId, concept: value.concept, sessionId: value.piSessionId, bindingBoundaryEntryId: value.bindingBoundaryEntryId };
+	let client: BoundAdapterClient;
+	const makeClient = () => new BoundAdapterClient({ socketPath: running.server.socketPath, binding, role: "ordinary_adapter", attachmentNonce: nonce, requestedCapabilities: ["approval-v1"],
+		onEnvelope: async (envelope) => { await client.confirmHostRun(String(envelope.payload.checkId), { generationId: deriveGenerationId(value.conversationId, 1), runId: "run-1", phase: "active", sources: [{ kind: "local" }], toolCallIds: ["tool-1"] }); } });
+	client = makeClient(); t.after(async () => { release(); await client.close(); await running.server.close(); await rm(running.root, { recursive: true, force: true }); });
+	await client.connect(); assert.equal(client.supports("approval-v1"), true);
+	const result = client.requestHostAction({ requestId: "request-1", generationId: deriveGenerationId(value.conversationId, 1), runId: "run-1", toolCallId: "tool-1", action: { operation: "conversation.stop", conversationId: value.conversationId } });
+	await proofArrived; await client.close(); const unknown = await result;
+	assert.ok(!unknown.ok); assert.match(unknown.error.message, /outcome is unknown/); assert.equal(unknown.error.retryable, false);
+	release(); client = makeClient(); await client.connect(); assert.equal(attempts, 1);
+});
+
+test("approval capability is absent until explicitly enabled and unknown peer UID fails closed", async (t) => {
+	const running = await setup(); t.after(async () => { await running.server.close(); await rm(running.root, { recursive: true, force: true }); });
+	const socket = await openSocket(running.server.socketPath); const reply = readEnvelope(socket); const hello = attach(running.values[0], "capability-staged");
+	hello.payload.requestedCapabilities = ["approval-v1"]; socket.write(encodeNdjsonEnvelope(hello));
+	assert.deepEqual((await reply).payload.capabilities, []); socket.destroy();
+	const unknown = await setup(() => undefined); t.after(async () => { await unknown.server.close(); await rm(unknown.root, { recursive: true, force: true }); });
+	const rejected = await openSocket(unknown.server.socketPath); await waitForClose(rejected);
+});
 
 test("IPC shutdown drains disconnect writes before releasing ownership", async (t) => {
 	const { root, server, values, registry } = await setup();

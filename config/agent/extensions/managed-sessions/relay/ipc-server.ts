@@ -28,6 +28,7 @@ interface ConnectionState {
 	closed: boolean;
 	detachReason?: "shutdown" | "session_change" | "stop" | "bridge_delete";
 	work: Promise<void>;
+	hostRequests: number;
 }
 
 function relayError(conversationId: string, inReplyTo: string, error: unknown): ManagedSessionEnvelope {
@@ -68,12 +69,15 @@ export class ManagedSessionIpcServer {
 			socketPath?: string;
 			expectedUid?: number;
 			peerUid?: PeerUidResolver;
+			hostApprovalsEnabled?: boolean;
 			onEnvelope?: EnvelopeHandler;
 			onUnboundEnvelope?: UnboundEnvelopeHandler;
 			onAttachment?: AttachmentHandler;
 			onAttachmentDisconnect?: AttachmentDisconnectHandler;
 		},
 	) {
+		if (options.hostApprovalsEnabled && (!options.peerUid || options.expectedUid === undefined)) throw new Error("Host approvals require OS peer verification");
+		this.hostApprovalsEnabled = options.hostApprovalsEnabled ?? false;
 		this.runtimeDirectory = resolve(options.runtimeDirectory);
 		this.socketPath = resolve(options.socketPath ?? `${this.runtimeDirectory}/relay.sock`);
 		if (dirname(this.socketPath) !== this.runtimeDirectory) throw new Error("Relay socket must be directly inside the private runtime directory");
@@ -85,6 +89,7 @@ export class ManagedSessionIpcServer {
 		this.onAttachmentDisconnect = options.onAttachmentDisconnect;
 	}
 
+	private readonly hostApprovalsEnabled: boolean;
 	private readonly expectedUid?: number;
 	private readonly peerUid?: PeerUidResolver;
 	private readonly onEnvelope?: EnvelopeHandler;
@@ -155,7 +160,7 @@ export class ManagedSessionIpcServer {
 		if (this.peerUid) {
 			try {
 				const uid = await this.peerUid(socket);
-				if (uid !== undefined && this.expectedUid !== undefined && uid !== this.expectedUid) {
+				if (uid === undefined || this.expectedUid === undefined || uid !== this.expectedUid) {
 					socket.destroy();
 					return;
 				}
@@ -166,7 +171,7 @@ export class ManagedSessionIpcServer {
 		}
 		if (this.closing || socket.destroyed) return;
 		const state: ConnectionState = {
-			id: randomUUID(), buffer: Buffer.alloc(0), messageIds: new Set(), closed: false, work: Promise.resolve(),
+			id: randomUUID(), buffer: Buffer.alloc(0), messageIds: new Set(), closed: false, work: Promise.resolve(), hostRequests: 0,
 		};
 		socket.on("data", (chunk) => {
 			socket.pause();
@@ -188,6 +193,16 @@ export class ManagedSessionIpcServer {
 			}
 		});
 		socket.resume();
+	}
+
+	private async hostRequest(socket: Socket, state: ConnectionState, envelope: ManagedSessionEnvelope): Promise<void> {
+		const attachment = state.attachment!;
+		try {
+			const response = await this.onEnvelope?.(envelope, attachment);
+			if (!response || response.role !== "relay" || response.type !== "host.result" || response.conversationId !== attachment.conversationId || response.inReplyTo !== envelope.messageId)
+				throw new RelayRegistryError("invalid_state", "Host request returned no correlated result");
+			if (!state.closed) this.send(socket, response);
+		} catch (error) { if (!state.closed) this.send(socket, relayError(attachment.conversationId, envelope.messageId, error)); }
 	}
 
 	private async consume(socket: Socket, state: ConnectionState, chunk: Buffer): Promise<void> {
@@ -232,7 +247,7 @@ export class ManagedSessionIpcServer {
 						if (!this.preserveAttachmentsOnClose) await this.registry.detach(state.id, state.attachment);
 						return;
 					}
-					state.capabilities = envelope.payload.requestedCapabilities as string[] | undefined;
+					state.capabilities = (envelope.payload.requestedCapabilities as string[] | undefined)?.filter((capability) => capability !== "approval-v1" || this.hostApprovalsEnabled);
 					this.attachedSockets.set(state.attachment.conversationId, socket);
 					this.attachedCapabilities.set(state.attachment.conversationId, state.capabilities ?? []);
 					this.send(socket, {
@@ -251,6 +266,14 @@ export class ManagedSessionIpcServer {
 					continue;
 				}
 				this.registry.assertAuthorized(envelope, state.id, state.attachment);
+				if (envelope.type.startsWith("host.") && !state.capabilities?.includes("approval-v1")) throw new RelayRegistryError("permission_denied", "Host approval capability was not negotiated");
+				if (envelope.type === "host.request") {
+					if (state.hostRequests >= 8) throw new RelayRegistryError("capacity_reached", "Too many active host requests on this attachment");
+					state.hostRequests++;
+					// Approval waits must not block this socket's fresh-run proofs, votes or run-end events.
+					void this.track(this.hostRequest(socket, state, envelope).finally(() => { state.hostRequests--; }));
+					continue;
+				}
 				if (envelope.type === "recovery.confirm" && !state.capabilities?.includes("recovery-attention-v1")) {
 					throw new RelayRegistryError("permission_denied", "Recovery capability was not negotiated");
 				}
