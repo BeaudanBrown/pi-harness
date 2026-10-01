@@ -3,6 +3,8 @@ import { isDeepStrictEqual } from "node:util";
 import { isAbsolute } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
+import { ConversationIdSchema, GenerationIdSchema, DeliveryIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
+export { ConversationIdSchema, GenerationIdSchema, DeliveryIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 
 export const MANAGED_SESSION_PROTOCOL_VERSION = "1.0.0" as const;
 export const MANAGED_SESSION_STATE_VERSION = "1.0.0" as const;
@@ -25,17 +27,13 @@ const stableId = (prefix: string) => Type.String({ pattern: `^${prefix}_[a-f0-9]
 const timestamp = Type.String({ minLength: 20, maxLength: 35 });
 const nullable = <T extends TSchema>(schema: T) => Type.Union([schema, Type.Null()]);
 
-export const ConversationIdSchema = stableId("conv");
 const ReconciliationKeySchema = Type.String({ pattern: "^reconcile_[a-f0-9]{32}$" });
 const WorktreeKeySchema = Type.String({ pattern: "^worktree_[a-f0-9]{32}$" });
 const WorktreeRemovalKeySchema = Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" });
 const GitRefSchema = Type.String({ minLength: 1, maxLength: 255, pattern: "^[A-Za-z0-9][A-Za-z0-9._/@+/-]*$" });
-export const DeliveryIdSchema = stableId("delivery");
 export const TranscriptEntryIdSchema = stableId("entry");
 export const ChunkIdSchema = stableId("chunk");
 export const MatrixTransactionIdSchema = Type.String({ pattern: "^pi_[a-f0-9]{48}$" });
-export const MatrixUserIdSchema = Type.String({ maxLength: 512, pattern: "^@[^\\s:]{1,255}:[^\\s]{1,255}$" });
-export const GenerationIdSchema = stableId("generation");
 export const TransitionIdSchema = stableId("transition");
 const BlobIdSchema = stableId("blob");
 const UploadIdSchema = stableId("upload");
@@ -49,12 +47,6 @@ const mediaDescriptor = {
 	width: Type.Integer({ minimum: 1 }), height: Type.Integer({ minimum: 1 }),
 	chunkCount: Type.Integer({ minimum: 1 }),
 };
-
-export const WorkspaceIdentitySchema = strictObject({
-	rootKey: identifier,
-	workspace: boundedString(128),
-	relativeCwd: Type.String({ minLength: 0, maxLength: 512 }),
-});
 
 const requestedCodeFields = {
 	codeOrDiffRequested: Type.Optional(Type.Literal(true)),

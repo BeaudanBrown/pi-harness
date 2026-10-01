@@ -386,3 +386,16 @@ not imported by production startup and does not enable model mutation execution.
 Trusted origin/run tracking, owner-specific execution/reconciliation, retention
 lifecycle, Matrix/native presentation, authenticated votes, public dispatcher
 fault fixtures and #111 recovery integration remain #108 work.
+
+The next foundation separates shared identity-schema leaves (preserving existing
+exports) so adapter envelopes can later reference host action contracts without
+an import cycle. A bounded run witness contains only generation/run/tool IDs and
+local or accepted-delivery references: no sender, room or authority claims.
+`resolveHostRunActor` resolves Matrix provenance from relay-owned accepted input,
+rejects stale tools/generations, missing/cancelled/unpersisted input and mixed
+local/Matrix origins, and keeps every resulting actor a model. Multiple Matrix
+participants in the same conversation never inherit operator mutation authority.
+Five focused origin fixtures and existing live-workspace contract fixtures pass.
+The helper explicitly requires fresh nonce-authenticated attachment evidence from
+its caller; the fresh IPC exchange and native run tracker are not implemented by
+these pure fixtures and remain necessary before production exposure.

@@ -3,7 +3,7 @@
 import { createHash } from "node:crypto";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
-import { ConversationIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./contracts.js";
+import { ConversationIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 
 export const HOST_CONTROL_VERSION = "1.0.0" as const;
 export const HOST_CONTROL_FRAME_BYTES = 64 * 1024;
