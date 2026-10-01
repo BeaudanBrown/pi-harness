@@ -1328,7 +1328,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		pi.on("before_agent_start", () => setCheckpointActive(Boolean(binding && client?.connected)));
 		pi.on("agent_start", async (_event, ctx) => {
-			if (binding && client?.supports("approval-v1")) hostRun.begin(deriveGenerationId(binding.conversationId, client.generation));
+			if (binding && client?.supports("approval-v1")) hostRun.begin(deriveGenerationId(binding.conversationId, client.generation), ctx.signal);
 			if (role !== "ordinary_adapter" || !binding || activity) return;
 			// Bound feedback retention during prolonged outages, not model execution.
 			if (closingActivities.size >= maxClosingActivities) return;

@@ -9,6 +9,7 @@ type Dialog = { controller: AbortController; toolCallId: string };
 export class NativeHostRun {
 	private run?: { generationId: string; runId: string; tools: Map<string, string>; users: number; overflow: boolean };
 	private inherited: Sources = [];
+	private detachAbort?: () => void;
 	private readonly dialogs = new Map<string, Dialog>();
 	private dialogWork: Promise<void> = Promise.resolve();
 	private queued?: HostRunWitness;
@@ -19,8 +20,11 @@ export class NativeHostRun {
 		confirm(question: string, signal: AbortSignal, timeout: number): Promise<boolean>;
 	}) {}
 
-	begin(generationId: string): void {
-		this.end(); this.run = { generationId, runId: `run-${randomUUID()}`, tools: new Map(), users: 0, overflow: false }; this.publish();
+	begin(generationId: string, signal?: AbortSignal): void {
+		this.end(); this.run = { generationId, runId: `run-${randomUUID()}`, tools: new Map(), users: 0, overflow: false };
+		if (signal?.aborted) { this.end(); return; }
+		if (signal) { const abort = () => this.end(); signal.addEventListener("abort", abort, { once: true }); this.detachAbort = () => signal.removeEventListener("abort", abort); }
+		this.publish();
 	}
 	userMessage(): void { if (this.run) this.run.users++; }
 	toolStart(toolCallId: string): void {
@@ -34,6 +38,7 @@ export class NativeHostRun {
 		this.publish();
 	}
 	end(): void {
+		this.detachAbort?.(); this.detachAbort = undefined;
 		const witness = this.snapshot(); if (witness) { this.inherited = witness.sources; this.enqueue({ ...witness, phase: "ended", toolCallIds: [] }); }
 		this.run = undefined; for (const dialog of this.dialogs.values()) dialog.controller.abort();
 	}

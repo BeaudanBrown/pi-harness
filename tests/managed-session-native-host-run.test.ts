@@ -37,6 +37,14 @@ test("native run/tool end aborts only its pending dialogs and cannot send a late
 	f.run.end(); assert.equal(f.run.snapshot(), null); await tick(); assert.equal(f.observations.at(-1)?.phase, "ended");
 });
 
+test("native abort revokes liveness before a waiting tool has returned", async () => {
+	let signal!: AbortSignal; let finish!: (value: boolean) => void;
+	const f = fixture(async (_question, value) => { signal = value; return new Promise<boolean>((resolve) => { finish = resolve; }); });
+	const abort = new AbortController(); f.run.begin(generationId, abort.signal); f.run.userMessage(); f.run.toolStart("native-tool-id");
+	await f.run.receive(f.show()); await tick(); abort.abort();
+	assert.equal(f.run.snapshot(), null); assert.equal(signal.aborted, true); finish(true); await tick(); assert.deepEqual(f.answers, []); f.run.reset();
+});
+
 test("Matrix/mixed origin cannot display a local approval and run identity never survives reset", async () => {
 	let dialogs = 0; const f = fixture(async () => { dialogs++; return true; });
 	const previous = f.run.identity("native-tool-id");

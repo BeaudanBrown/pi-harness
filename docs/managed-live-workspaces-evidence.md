@@ -457,6 +457,7 @@ relay before launching this adapter against a pre-capability strict-schema relay
 A composed native/frontend/public-dispatcher fixture proves denial, fresh consent,
 exact requester revalidation and run-end cancellation. A real packaged Pi session
 against a fake relay proves actual native tool/run event ordering, local provenance,
-headless unavailability and absence of liveness after settlement. This is not live
+headless unavailability, immediate loss of liveness on Pi's native abort signal
+while the tool is still awaiting IPC, and absence of liveness after settlement. This is not live
 Matrix delivery or interactive TUI acceptance. The initial real-Pi fixture omitted
 its tool from the SDK allowlist; correcting that fixture made the focused check pass.

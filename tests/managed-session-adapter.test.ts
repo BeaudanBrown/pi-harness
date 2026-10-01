@@ -80,7 +80,12 @@ test("real Pi native events attest a current tool and headless approval fails pr
 				assert.ok(witness); assert.deepEqual(witness.sources, [{ kind: "local" }]); assert.equal(witness.toolCallIds.length, 1);
 				push("host.approval.show", { approvalId: `approval_${"a".repeat(32)}`, generationId: witness.generationId, runId: witness.runId, toolCallId: witness.toolCallIds[0], question: "Exact test effect?", expiresAt: Date.now() + 10000 }, "native-dialog");
 				await wait(() => relay.frames.some((frame) => frame.type === "host.approval.answer"));
-				assert.equal(relay.frames.find((frame) => frame.type === "host.approval.answer")!.payload.choice, "unavailable"); probed = true;
+				assert.equal(relay.frames.find((frame) => frame.type === "host.approval.answer")!.payload.choice, "unavailable");
+				void session.abort().catch((error: unknown) => errors.push(error));
+				push("host.run.check", { checkId: "native-aborted" }, "check-aborted");
+				await wait(() => relay.frames.some((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-aborted"));
+				assert.equal(relay.frames.find((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-aborted")!.payload.witness, null);
+				probed = true;
 				return { content: [{ type: "text", text: "probed" }], details: {} };
 			} })] });
 	await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []); ({ session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader, settingsManager, sessionManager: sm, modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: ["approval_probe"] }));
