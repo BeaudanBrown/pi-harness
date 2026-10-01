@@ -359,3 +359,30 @@ completion-based expiry, error replay/recovery with a new request ID, and Nix
 negative delete/apply overrides. The canonical `nix run .#verify` gate passed
 again after these remediations. No additional subjective re-review was needed:
 the existing bounded replay/policy seams were corrected without a new design.
+
+## #108 private approval record/store foundation (not activated)
+
+`host-approval-record.ts` freezes a model mutation's request, independently
+identified run/tool call, exact enumerated effects, private owner preconditions
+and original 15-minute expiry. Private JSON structure/bytes are bounded, including
+reserved capacity for the eventual result. Strict phase transitions cannot skip
+consent, replace presentation/decision receipts, or revoke an accepted operation.
+Matrix/local receipt shape validation is **not** sender or live-run authorization.
+
+`host-approval-store.ts` persists private per-approval records with atomic fsync
+writes under the existing host ownership contract. Restart validates complete
+primary state; partial temporary files are never promoted. Admission is bounded
+by count and aggregate bytes and fails closed without evicting durable identities.
+Writes serialize only persistence, not approval waits. Close drains admitted writes
+and initialization; an uncertain write poisons further access until ownership-safe
+recovery instead of proceeding from potentially stale memory.
+
+Ten focused record/store fixtures and the TypeScript build pass: immutable input,
+phase/receipt invariants, independent call identity, fixed hash vector, original
+expiry, reserved result space, restart, write/close ordering, corruption, privacy,
+symlink and capacity rejection, and uncertain-write fail-closed behavior. The
+initial record slice also passed the managed-session suite. This foundation is
+not imported by production startup and does not enable model mutation execution.
+Trusted origin/run tracking, owner-specific execution/reconciliation, retention
+lifecycle, Matrix/native presentation, authenticated votes, public dispatcher
+fault fixtures and #111 recovery integration remain #108 work.
