@@ -500,3 +500,18 @@ Duplicate sweeps share in-flight work; shutdown aborts and drains admitted effec
 Ten focused cleanup/store/registry tests prove network failure retention, exact
 unfinished-effect recovery and shutdown without erasing terminal authority. Concrete
 ownership-checking effect executors and startup scheduling are still to be wired.
+
+The operator authorized automatic ancestor cleanup after reconnection, limited to
+originally captured IDs with fresh checks. The offline target planner now freezes
+known checkout/project Space IDs, expected provenance and both account identities;
+unresolved legacy ancestry is not guessed by alias or name. Record/registry
+validation checks the original room/ancestor chain, project/checkout identity and
+saved host parent. A read-only eligibility guard queries ownership, authority,
+children, joined members and current references on every invocation. Host Space,
+foreign children/members, changed accounts and pending/live references fail closed;
+project cleanup cannot outrun its exact child Space's completed cleanup.
+Four new fixtures plus ten retirement regressions prove frozen targets survive
+outage/reload without expansion and eligibility is checked afresh. These checks
+are not reusable approval or live cleanup evidence: the concrete effect owner must
+hold its provisioning/cleanup lock across the check and next mutation. Runtime
+cleanup assembly and live verification remain pending.

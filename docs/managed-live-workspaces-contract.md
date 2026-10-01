@@ -260,8 +260,12 @@ cleanup intent before cancelling input/approval work, stopping its exact process
 or changing active manifests. Never remove stop evidence before confirmed stop.
 A process that cannot be stopped remains visible as pending cleanup failure.
 Retirement is irreversible even during Matrix/NAS outage. Account leave/forget,
-bot leave and verified newly empty worktree/project ancestor cleanup are
-independent durable effects. Never remove host Space, foreign children or other
+bot leave and worktree/project ancestor cleanup are independent durable effects.
+Operator clarification: offline retirement freezes only the originally identified
+ancestor Space IDs and expected ownership under the original delete consent.
+After reconnection, cleanup may run automatically, but each attempt must freshly
+verify ownership, emptiness and references. Never discover or add new ancestor
+targets on retry, remove the host Space, or treat cached state as proof of emptiness. Never remove host Space, foreign children or other
 participants. Compact only confirmed cleanup into a permanent tombstone. An
 operator's verified voluntary room departure uses the same path; uncertain
 membership removal does not authorize retirement. Space departure never

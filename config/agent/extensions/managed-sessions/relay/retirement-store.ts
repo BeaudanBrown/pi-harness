@@ -19,7 +19,8 @@ export const RetirementEffectSchema = Type.Union([
 	Type.Object({ ...effectBase, kind: Type.Literal("stop"), generationId: GenerationIdSchema, attachmentId: Type.Optional(text(128)), window: Type.Optional(window) }, { additionalProperties: false }),
 	Type.Object({ ...effectBase, kind: Type.Enum(["operator_leave_forget", "bot_leave"]), roomId: room, userId: MatrixUserIdSchema }, { additionalProperties: false }),
 	Type.Object({ ...effectBase, kind: Type.Literal("ancestor"), roomId: room, childRoomId: room,
-		spaceKind: Type.Enum(["checkout_space", "project_space"]), creationKey: text(128), provenance: ManagedProvenanceSchema }, { additionalProperties: false }),
+		spaceKind: Type.Enum(["checkout_space", "project_space"]), creationKey: text(128), provenance: ManagedProvenanceSchema,
+		operatorUserId: MatrixUserIdSchema, botUserId: MatrixUserIdSchema }, { additionalProperties: false }),
 ]);
 const recordSchema = Type.Object({
 	version: Type.Literal(1), hostId: text(128), conversationId: ConversationIdSchema, creationKey: text(128),
@@ -56,6 +57,17 @@ export function parseRetirementRecord(value: unknown): RetirementRecord {
 		if (effect.kind === "ancestor" && (effect.provenance.hostId !== record.hostId || effect.provenance.creationKey !== effect.creationKey ||
 			effect.provenance.kind !== (effect.spaceKind === "checkout_space" ? "worktree_space" : "project_space"))) throw Error("Retirement ancestor ownership changed");
 		kinds.add(key);
+	}
+	const operator = record.cleanup?.find((effect) => effect.kind === "operator_leave_forget");
+	const bot = record.cleanup?.find((effect) => effect.kind === "bot_leave");
+	const checkout = record.cleanup?.find((effect) => effect.kind === "ancestor" && effect.spaceKind === "checkout_space");
+	if (operator && bot && "roomId" in operator && "roomId" in bot && operator.roomId !== bot.roomId) throw Error("Retirement room identities conflict");
+	for (const effect of record.cleanup ?? []) if (effect.kind === "ancestor") {
+		if (effect.spaceKind === "checkout_space" && (!bot || !("roomId" in bot) || effect.childRoomId !== bot.roomId) ||
+			effect.spaceKind === "project_space" && (!checkout || checkout.kind !== "ancestor" || effect.childRoomId !== checkout.roomId || !("parentRoomId" in checkout.provenance) || checkout.provenance.parentRoomId !== effect.roomId))
+			throw Error("Retirement ancestor chain changed");
+		if (!operator || !("userId" in operator) || !bot || !("userId" in bot) || effect.operatorUserId !== operator.userId || effect.botUserId !== bot.userId)
+			throw Error("Retirement ancestor account identity changed");
 	}
 	return structuredClone(record);
 }

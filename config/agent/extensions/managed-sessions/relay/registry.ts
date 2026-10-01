@@ -1220,7 +1220,11 @@ export class RelayRegistry {
 				if (target.kind === "ancestor") {
 					const checkout = hasMatrixBinding(manifest) ? manifest.checkoutSpace : manifest.verifiedBinding?.checkoutSpace;
 					const project = hasMatrixBinding(manifest) ? manifest.projectSpace : manifest.verifiedBinding?.projectSpace;
-					if (target.roomId !== (target.spaceKind === "checkout_space" ? checkout : project) || target.childRoomId !== (target.spaceKind === "checkout_space" ? roomId : checkout))
+					const hostSpace = [...this.manifests.values()].find((item) => item.kind === "coordinator")?.hostSpace;
+					if (!("projectKey" in target.provenance) || target.provenance.projectKey !== manifest.projectKey ||
+						target.spaceKind === "checkout_space" && (!("checkoutId" in target.provenance) || target.provenance.checkoutId !== manifest.checkoutId) ||
+						!("parentRoomId" in target.provenance) || target.provenance.parentRoomId !== (target.spaceKind === "checkout_space" ? project : hostSpace) ||
+						target.roomId === hostSpace || target.roomId !== (target.spaceKind === "checkout_space" ? checkout : project) || target.childRoomId !== (target.spaceKind === "checkout_space" ? roomId : checkout))
 						throw new RelayRegistryError("invalid_state", "Retirement ancestor target changed");
 				}
 			}

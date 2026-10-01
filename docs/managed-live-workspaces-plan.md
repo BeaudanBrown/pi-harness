@@ -160,6 +160,8 @@ The configured operator leaving an individual conversation via either client tri
 
 Leaving a **Space** never cascades: members may still see child rooms. Bulk close uses a frozen preview plus confirmation through any managed host-control frontend. Leaving the **coordinator** is also non-retiring: preserve its identity, do not auto-reinvite after deliberate departure, and provide explicit local recovery of membership.
 
+Operator clarification: during offline retirement, freeze only the originally identified ancestor Space IDs and expected ownership. Automatic cleanup after reconnection is authorized under the original closure consent, subject to fresh ownership, emptiness and reference checks on every attempt. Retries must never discover or expand the ancestor target set.
+
 Unexpected/foreign children, references, or permissions block ancestor cleanup rather than removing a non-empty or foreign Space. Standalone cleanup still requires confirmation. Worktree removal keeps its existing cleanliness, lock, identity, branch and confirmation rules; this plan does not authorize deleting projects or force-removing files.
 
 ## 8. Room status and naming

@@ -33,6 +33,13 @@ under current client settings, and expose a setup warning. Manual notification
 preferences take precedence over automatic repair. Matrix does not provide
 conditional push-rule writes, so exactly-once initialization is not claimed.
 
+The operator also authorized conditional ancestor cleanup after offline
+retirement: freeze only the originally identified Space IDs and ownership under
+the original closure consent, then automatically retry after reconnection with
+fresh ownership, emptiness and reference checks. This is not authority to discover
+new targets, remove the host Space, or reuse cached eligibility. Account identities
+and complete expected ancestor provenance are part of the frozen cleanup scope.
+
 ## Context
 
 The direct `remote-session` extension combines Matrix polling, Pi adaptation, and conversation state inside every attached Pi process. Managed sessions replace that arrangement with one boot-persistent, host-local relay. Before the relay and adapter can be implemented independently, they need one fail-closed language for lifecycle, IPC, identity, and persistence.

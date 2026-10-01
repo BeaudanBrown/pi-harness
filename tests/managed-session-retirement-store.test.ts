@@ -36,6 +36,8 @@ test("retry never replaces frozen targets, completion cannot regress and coordin
 	const { store } = await fixture(t); const original = record(); await store.retire(original);
 	const replacement = record(); const target: RetirementTarget = { kind: "bot_leave", roomId: "!unrelated:example.com", userId: "@bot:example.com" };
 	replacement.cleanup![2] = { ...target, phase: "pending", effectId: retirementEffectId(replacement.retirementId, target) };
+	const operatorTarget: RetirementTarget = { kind: "operator_leave_forget", roomId: target.roomId, userId: "@operator:example.com" };
+	replacement.cleanup![1] = { ...operatorTarget, phase: "pending", effectId: retirementEffectId(replacement.retirementId, operatorTarget) };
 	assert.deepEqual(await store.retire(replacement), original);
 	await store.progress(original.conversationId, original.cleanup![0].effectId, "done");
 	await assert.rejects(store.progress(original.conversationId, original.cleanup![0].effectId, "blocked"), /cannot regress/);
