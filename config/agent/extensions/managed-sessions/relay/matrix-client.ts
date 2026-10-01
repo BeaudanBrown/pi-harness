@@ -472,7 +472,7 @@ export class ManagedMatrixClient {
 		}
 	}
 	async addSpaceChild(spaceId: string, roomId: string, signal?: AbortSignal): Promise<void> {
-		this.assertManagedRoom(spaceId); this.assertManagedRoom(roomId); const roomServer = roomId.slice(roomId.lastIndexOf(":") + 1);
+		this.assertManagedRoom(spaceId); this.assertManagedRoom(roomId); const roomServer = roomId.slice(roomId.indexOf(":") + 1);
 		if (!roomServer || roomServer === roomId) throw new ManagedMatrixError("invalid_response", "Matrix room ID omitted its server name");
 		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/m.space.child/${encodeURIComponent(roomId)}`, { via: [roomServer], suggested: true }, signal);
 	}

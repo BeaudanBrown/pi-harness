@@ -610,10 +610,12 @@ export class RelayRegistry {
 			return await this.mutate(async () => {
 				const existing = [...this.manifests.values()].find((candidate) =>
 					candidate.creationKey === manifest.creationKey || candidate.conversationId === manifest.conversationId ||
-					candidate.piSessionId === manifest.piSessionId || candidate.concept === manifest.concept);
+					candidate.piSessionId === manifest.piSessionId);
 				if (existing) {
 					if (existing.creationKey === manifest.creationKey && existing.conversationId === manifest.conversationId &&
 						existing.piSessionId === manifest.piSessionId && existing.concept === manifest.concept &&
+						existing.roomId === manifest.roomId && existing.projectKey === manifest.projectKey && existing.projectSpace === manifest.projectSpace &&
+						existing.checkoutId === manifest.checkoutId && existing.checkoutSpace === manifest.checkoutSpace &&
 						existing.bindingBoundaryEntryId === manifest.bindingBoundaryEntryId &&
 						JSON.stringify(existing.placement) === JSON.stringify(manifest.placement)) {
 						const runtime = this.runtimeConversation(existing.conversationId);
@@ -1007,7 +1009,7 @@ export class RelayRegistry {
 	}
 
 	managedRoomIds(): string[] {
-		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace]
+		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace, manifest.checkoutSpace]
 			.filter((roomId): roomId is string => roomId !== undefined)))];
 	}
 

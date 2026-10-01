@@ -270,6 +270,17 @@ proof blocks provisioning. This is not startup-wide migration: do not replace
 the Space, move children, rename anything or alter notification settings. An
 uncertain write must be followed by a fresh read before another write attempt.
 
+Local hierarchy reservations precede remote effects. `hierarchy_ready` records
+completed provisioning, not current account membership or phone readiness.
+Creation attempts are durable before sending; saved room IDs outrank mutable
+aliases. If an attempted create has no saved ID and its alias is now absent,
+hold pending for explicit reconciliation: absence cannot distinguish no creation
+from accepted creation followed by alias removal. Do not broaden metadata scans
+or create a replacement automatically. Fresh coordinator bootstrap follows the
+same ownership/attempt/ID/link discipline. Existing coordinator/host bindings
+remain unchanged on startup, even when inaccessible; repair and membership
+restoration require their separately authorized operations.
+
 `room.retire` is only for a known verified conversation identity; `space.retire`
 is only for a known verified empty non-host ancestor authorized by host cleanup.
 The NAS persists suppression before leave/forget, keeping enough verified IDs to

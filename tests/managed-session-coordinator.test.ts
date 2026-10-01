@@ -18,6 +18,7 @@ import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import type { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
+import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
 
 const hostId = "coordinator-host";
 const matrixConfig = {
@@ -35,24 +36,13 @@ async function fixture() {
 }
 
 function matrixFetch(sessionFile: string, state: { rooms: string[]; createCalls: number; inaccessibleRoom?: string }): typeof fetch {
-	return async (input) => {
-		const url = new URL(String(input));
-		if (url.pathname.endsWith("/createRoom")) {
-			assert.ok((await readFile(sessionFile, "utf8")).startsWith('{"type":"session"'), "Pi session must exist before Matrix binding");
-			state.createCalls += 1;
-			const roomId = state.rooms.shift();
-			if (!roomId) throw new Error("unexpected room creation");
-			return Response.json({ room_id: roomId });
-		}
-		if (url.pathname.includes("/state/m.room.create/")) {
-			if (state.inaccessibleRoom && url.pathname.includes(encodeURIComponent(state.inaccessibleRoom))) return new Response("forbidden", { status: 403 });
-			return Response.json({ creator: matrixConfig.botUserId });
-		}
-		return Response.json({});
-	};
+	const provision = provisioningFixture(matrixConfig.botUserId, state, async () => {
+		assert.ok((await readFile(sessionFile, "utf8")).startsWith('{"type":"session"'), "Pi session must exist before Matrix binding");
+	});
+	return async (input, init) => await provision(input, init) ?? Response.json({});
 }
 
-test("coordinator bootstrap persists Pi first, creates its private Space/room, and self-heals only the room", async () => {
+test("coordinator bootstrap persists Pi first and never replaces or reparents existing identities on startup", async () => {
 	const value = await fixture();
 	const state = { rooms: ["!space:example.com", "!coordinator:example.com"], createCalls: 0, inaccessibleRoom: undefined as string | undefined };
 	const matrix = new ManagedMatrixClient(matrixConfig, matrixFetch(value.sessionFile, state));
@@ -81,7 +71,8 @@ test("coordinator bootstrap persists Pi first, creates its private Space/room, a
 	const healed = await bootstrapCoordinator(hostId, {
 		workspaceDirectory: value.workspaceDirectory, sessionFile: value.sessionFile, concept: "host coordinator",
 	}, restarted, matrix);
-	assert.equal(healed.manifest.roomId, "!replacement:example.com");
+	assert.equal(healed.manifest.roomId, first.manifest.roomId, "inaccessibility does not authorize replacing a protected identity");
+	assert.equal(state.createCalls, 2);
 	assert.equal(healed.manifest.piSessionId, first.manifest.piSessionId);
 	assert.equal(healed.manifest.hostSpace, first.manifest.hostSpace);
 	assert.equal(await readFile(value.sessionFile, "utf8"), originalSession);
@@ -104,6 +95,40 @@ test("coordinator bootstrap persists Pi first, creates its private Space/room, a
 	await assert.rejects(() => bootstrapCoordinator(hostId, {
 		workspaceDirectory: foreign.workspaceDirectory, sessionFile: foreign.sessionFile, concept: "host coordinator",
 	}, foreign.registry, new ManagedMatrixClient(matrixConfig, matrixFetch(foreign.sessionFile, { rooms: [], createCalls: 0 }))), /bootstrap identity/);
+});
+
+test("fresh coordinator provisioning preserves host/room identities across response loss and manifest failure", async () => {
+	for (const point of ["host-response", "room-response", "link-response", "manifest"] as const) {
+		const value = await fixture();
+		const state = { rooms: ["!space:example.com", "!coordinator:example.com"], createCalls: 0 };
+		const base = matrixFetch(value.sessionFile, state); let injected = false; const writes: Array<{ path: string; body: string }> = [];
+		const transport: typeof fetch = async (input, init) => {
+			const path = new URL(String(input)).pathname;
+			if (init?.method !== "GET") writes.push({ path, body: String(init?.body) });
+			const response = await base(input, init);
+			if (!injected && ((point === "host-response" && path.endsWith("/createRoom") && state.createCalls === 1) ||
+				(point === "room-response" && path.endsWith("/createRoom") && state.createCalls === 2) ||
+				(point === "link-response" && path.includes("/state/m.space.child/")))) {
+				injected = true; throw Error("accepted before response lost");
+			}
+			return response;
+		};
+		const save = value.store.write.bind(value.store);
+		if (point === "manifest") value.store.write = async () => { injected = true; throw Error("manifest interrupted"); };
+		const config = { workspaceDirectory: value.workspaceDirectory, sessionFile: value.sessionFile, concept: "host coordinator" };
+		try { await bootstrapCoordinator(hostId, config, value.registry, new ManagedMatrixClient(matrixConfig, transport, [], { maxAttempts: 1 })); }
+		catch (error) { assert.match(String(error), /Matrix PUT .* failed|manifest interrupted/); }
+		assert.equal(injected, true, point); value.store.write = save;
+		const restarted = new RelayRegistry(hostId, join(value.root, "runtime"), value.store); await restarted.load();
+		const recovered = await bootstrapCoordinator(hostId, config, restarted, new ManagedMatrixClient(matrixConfig, transport, [], { maxAttempts: 1 }));
+		assert.equal(state.createCalls, 2, point); assert.equal(recovered.manifest.roomId, "!coordinator:example.com");
+		assert.equal(recovered.manifest.hostSpace, "!space:example.com");
+		assert.equal(writes.some((item) => item.path.endsWith("/leave")), false, "uncertainty never triggers compensating departure");
+		if (point === "link-response") {
+			const links = writes.filter((item) => item.path.includes("/state/m.space.child/")); assert.equal(links.length, 2); assert.deepEqual(links[0], links[1]);
+		}
+		await rm(value.root, { recursive: true, force: true });
+	}
 });
 
 test("coordinator launcher receives only fixed host configuration and records exact default window IDs", async () => {
@@ -279,17 +304,14 @@ export default function (pi) {
 	const tmuxSocket = `pi43-${process.pid}-${Date.now()}`;
 	let running: Awaited<ReturnType<typeof startManagedSessionRelay>> | undefined;
 	const originalFetch = globalThis.fetch;
-	let createCount = 0;
+	const bootstrapTransport = matrixFetch(join(root, "sessions", "coordinator.jsonl"), { rooms: ["!space:example.com", "!coordinator:example.com"], createCalls: 0 });
 	let syncCount = 0;
 	let resolveFinal!: () => void;
 	const finalProjected = new Promise<void>((resolve) => { resolveFinal = resolve; });
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(String(input));
 		if (url.pathname.endsWith("/whoami")) return Response.json({ user_id: matrixConfig.botUserId });
-		if (url.pathname.endsWith("/createRoom")) {
-			createCount += 1;
-			return Response.json({ room_id: createCount === 1 ? "!space:example.com" : "!coordinator:example.com" });
-		}
+		if (url.pathname.endsWith("/createRoom") || url.pathname.includes("/directory/room/") || url.pathname.includes("/state")) return bootstrapTransport(input, init);
 		if (url.pathname.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 if (url.pathname.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (url.pathname.endsWith("/sync")) {

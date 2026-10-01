@@ -17,6 +17,7 @@ import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { ProjectReconciler } from "./project-reconciliation.js";
 import { ProjectSpaces } from "./project-spaces.js";
+import { LiveHierarchy } from "./live-hierarchy.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 export const PROJECT_ATTACHMENT_TIMEOUT_MS = 60_000;
@@ -101,6 +102,9 @@ export function parseProjectWindow(result: Record<string, unknown>, manifest: Co
 	};
 }
 
+interface MatrixConversationBinding { roomId: string; projectSpace: string; checkoutId?: string; checkoutSpace?: string }
+type ProvisionedProject = MatrixConversationBinding & Pick<ResolvedWorkspace, "projectKey" | "projectDisplayName" | "checkoutDisplayName">;
+
 interface MatrixProvisioningIntent {
 	conversationId: string; concept: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string;
 	projectSpaceId?: string; hostSpaceLinked?: boolean; roomId?: string; roomLinked?: boolean;
@@ -123,6 +127,7 @@ function parseMatrixProvisioningIntent(value: unknown): MatrixProvisioningIntent
 }
 
 interface ProjectCreationIntent {
+	liveHierarchy?: true;
 	creationKey: string; rootKey: string; workspace: string; concept: string; projectSpace?: string;
 	projectKey?: string; projectDisplayName?: string; checkoutDisplayName?: string;
 	sessionPersisted: boolean; projectSpaceId?: string; hostSpaceLinked?: boolean; roomId?: string; roomLinked?: boolean;
@@ -208,9 +213,9 @@ function lifecycleDigest(domain: string, ...parts: string[]): string {
 function parseProjectCreationIntent(value: unknown): ProjectCreationIntent {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Project creation intent is malformed");
 	const item = value as Record<string, unknown>;
-	const allowed = new Set(["creationKey", "rootKey", "workspace", "concept", "projectSpace", "projectKey", "projectDisplayName", "checkoutDisplayName", "sessionPersisted", "projectSpaceId", "hostSpaceLinked", "roomId", "roomLinked"]);
+	const allowed = new Set(["liveHierarchy", "creationKey", "rootKey", "workspace", "concept", "projectSpace", "projectKey", "projectDisplayName", "checkoutDisplayName", "sessionPersisted", "projectSpaceId", "hostSpaceLinked", "roomId", "roomLinked"]);
 	if (Object.keys(item).some((key) => !allowed.has(key)) || ![item.creationKey, item.rootKey, item.workspace, item.concept].every((field) => typeof field === "string" && field.length > 0 && field.length <= 128 && !/[\u0000-\u001f\u007f]/.test(field)) ||
-		typeof item.sessionPersisted !== "boolean" || (item.projectSpace !== undefined && (typeof item.projectSpace !== "string" || item.projectSpace.length < 1 || item.projectSpace.length > 128)) ||
+		(item.liveHierarchy !== undefined && item.liveHierarchy !== true) || typeof item.sessionPersisted !== "boolean" || (item.projectSpace !== undefined && (typeof item.projectSpace !== "string" || item.projectSpace.length < 1 || item.projectSpace.length > 128)) ||
 		(item.projectKey !== undefined && (typeof item.projectKey !== "string" || !/^project_[a-f0-9]{32}$/.test(item.projectKey))) ||
 		[item.projectDisplayName, item.checkoutDisplayName].some((field) => field !== undefined && (typeof field !== "string" || field.length < 1 || field.length > 128 || /[\u0000-\u001f\u007f]/.test(field))) ||
 		[item.projectKey, item.projectDisplayName, item.checkoutDisplayName].some((field) => field !== undefined) && [item.projectKey, item.projectDisplayName, item.checkoutDisplayName].some((field) => field === undefined) ||
@@ -291,7 +296,7 @@ export class HostLifecycle {
 	private readonly launches = new Map<string, Promise<void>>();
 	private readonly creations = new Map<string, Promise<Record<string, unknown>>>();
 	private readonly worktreeOperations = new Map<string, Promise<unknown>>();
-	private readonly provisions = new Map<string, Promise<{ roomId: string; projectSpace: string }>>();
+	private readonly provisions = new Map<string, { identity: string; promise: Promise<MatrixConversationBinding> }>();
 	private readonly promotions = new Map<string, Promise<void>>();
 	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
 	private readonly refreshWaiters = new Map<string, { refreshId: string; resolve: (ready: boolean) => void }>();
@@ -327,6 +332,7 @@ export class HostLifecycle {
 		socketPath: string;
 		registry: RelayRegistry;
 		matrix: ManagedMatrixClient;
+		hierarchy?: LiveHierarchy;
 		server: ManagedSessionIpcServer;
 		environment?: NodeJS.ProcessEnv;
 		projectNotice?: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void>;
@@ -402,17 +408,29 @@ export class HostLifecycle {
 		return value as unknown as ResolvedWorkspace;
 	}
 
-	provisionConversationMatrix(conversationId: string, concept: string, resolved: ResolvedWorkspace): Promise<{ roomId: string; projectSpace: string }> {
-		const running = this.provisions.get(conversationId); if (running) return running;
-		const provision = this.provisionConversationMatrixOnce(conversationId, concept, resolved)
-			.finally(() => { if (this.provisions.get(conversationId) === provision) this.provisions.delete(conversationId); });
-		this.provisions.set(conversationId, provision); return provision;
+	provisionConversationMatrix(conversationId: string, concept: string, resolved: ResolvedWorkspace, creationKey?: string): Promise<MatrixConversationBinding> {
+		const identity = JSON.stringify([conversationId, concept, resolved.projectKey, resolved.rootKey, resolved.workspace, resolved.workspacePath, resolved.relativeCwd, creationKey]);
+		const running = this.provisions.get(conversationId);
+		if (running) {
+			if (running.identity !== identity) return Promise.reject(new RelayRegistryError("invalid_state", "Concurrent provisioning changed its target"));
+			return running.promise;
+		}
+		const provision = this.provisionConversationMatrixOnce(conversationId, concept, resolved, creationKey)
+			.finally(() => { if (this.provisions.get(conversationId)?.promise === provision) this.provisions.delete(conversationId); });
+		this.provisions.set(conversationId, { identity, promise: provision }); return provision;
 	}
 
-	private async provisionConversationMatrixOnce(conversationId: string, concept: string, resolved: ResolvedWorkspace): Promise<{ roomId: string; projectSpace: string }> {
+	private async provisionConversationMatrixOnce(conversationId: string, concept: string, resolved: ResolvedWorkspace, creationKey?: string): Promise<MatrixConversationBinding> {
 		const intentPath = join(resolve(this.options.projectSessionDirectory), conversationId, "matrix-provisioning.json");
 		const file = new AtomicJsonFile(intentPath, parseMatrixProvisioningIntent);
 		let intent = await file.read(); const retry = intent !== undefined;
+		if (this.options.hierarchy && (!intent || this.options.hierarchy.status(conversationId))) {
+			if (!creationKey || deriveConversationId(this.options.hostId, creationKey) !== conversationId) throw new RelayRegistryError("invalid_state", "Hierarchy provisioning requires its exact creation identity");
+			await this.options.hierarchy.prepare({ creationKey, projectKey: resolved.projectKey, canonicalCheckoutRoot: resolved.workspacePath,
+				projectTitle: resolved.projectDisplayName, checkoutTitle: resolved.checkoutDisplayName, conversationTitle: concept });
+			const { roomId, projectSpace, checkoutId, checkoutSpace } = await this.options.hierarchy.provision(conversationId);
+			return { roomId, projectSpace, checkoutId, checkoutSpace };
+		}
 		if (intent) {
 			const info = await lstat(intentPath); if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 ||
 				(process.getuid?.() !== undefined && info.uid !== process.getuid!())) throw new RelayRegistryError("invalid_state", "Existing Matrix provisioning intent is not a private relay-user file");
@@ -465,13 +483,14 @@ export class HostLifecycle {
 				JSON.stringify(existing.placement) !== JSON.stringify(placement)) throw new RelayRegistryError("invalid_state", "Promotion retry conflicts with the existing conversation");
 			return this.options.registry.createProjectConversation(existing, input.attachmentNonce, input.sourceSessionFile);
 		}
-		const grouped = await this.provisionConversationMatrix(conversationId, input.concept, resolved);
+		const grouped = await this.provisionConversationMatrix(conversationId, input.concept, resolved, input.creationKey);
 		const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
 		const manifest: ConversationManifest = {
 			schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", conversationId, ownerHostId: this.options.hostId,
 			creationKey: input.creationKey, concept: input.concept, piSessionId: input.sessionId, roomId: grouped.roomId,
 			placement: placement as WorkspaceIdentity, projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName,
 			checkoutDisplayName: resolved.checkoutDisplayName, projectSpace: grouped.projectSpace,
+			...(grouped.checkoutId ? { checkoutId: grouped.checkoutId, checkoutSpace: grouped.checkoutSpace } : {}),
 			bindingBoundaryEntryId: input.bindingBoundaryEntryId, createdAt, activeGenerationId: generationId,
 			generations: [{ generationId, ordinal: 1, piSessionId: input.sessionId, bindingBoundaryEntryId: input.bindingBoundaryEntryId, createdAt }],
 		};
@@ -821,9 +840,6 @@ export class HostLifecycle {
 		const existing = this.options.registry.manifestByCreationKey(request.creationKey);
 		if (existing && (existing.kind !== "project" || existing.conversationId !== conversationId || existing.concept !== request.concept ||
 			JSON.stringify(existing.placement) !== JSON.stringify(placement))) throw new RelayRegistryError("invalid_state", "Project creation retry conflicts with existing identity");
-		if (!existing && this.options.registry.listManifests().some((item) => item.concept === request.concept)) {
-			throw new RelayRegistryError("invalid_state", "Managed conversation concept already exists on this host");
-		}
 		const intentPath = join(resolve(this.options.projectSessionDirectory), conversationId, "project-creation.json");
 		const intentFile = new AtomicJsonFile(intentPath, parseProjectCreationIntent);
 		let intent = await intentFile.read(); const retry = intent !== undefined;
@@ -832,36 +848,46 @@ export class HostLifecycle {
 		const expectedIntent = { creationKey: request.creationKey, rootKey: request.rootKey, workspace: request.workspace, concept: request.concept };
 		if (intent) {
 			for (const [key, value] of Object.entries(expectedIntent)) if ((intent as unknown as Record<string, unknown>)[key] !== value) throw new RelayRegistryError("invalid_state", "Project creation retry conflicts with its durable intent");
-		} else { intent = { ...expectedIntent, sessionPersisted: false }; await intentFile.write(intent); }
+		} else { intent = { ...expectedIntent, sessionPersisted: false, ...(this.options.hierarchy ? { liveHierarchy: true as const } : {}) }; await intentFile.write(intent); }
+		if (intent.liveHierarchy && !this.options.hierarchy) throw new RelayRegistryError("invalid_state", "Live hierarchy provisioning is required to resume this creation");
 		const created = await this.invoke("project-create", { rootKey: request.rootKey, workspace: request.workspace,
 			creationKey: request.creationKey, resumeExisting: retry });
 		const expectedFields = new Set(["rootKey", "workspace", "relativeCwd", "workspacePath", "cwd", "projectKey", "projectDisplayName", "checkoutDisplayName"]);
 		if (created.rootKey !== request.rootKey || created.workspace !== request.workspace || created.relativeCwd !== "" ||
 			typeof created.workspacePath !== "string" || !isAbsolute(created.workspacePath) || created.cwd !== created.workspacePath || !hasValidProjectIdentity(created) ||
 			Object.keys(created).some((field) => !expectedFields.has(field))) throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid created workspace");
-		const creationIdentity = { projectKey: created.projectKey, projectDisplayName: created.projectDisplayName, checkoutDisplayName: created.checkoutDisplayName };
+		const creationIdentity = { projectKey: created.projectKey,
+			projectDisplayName: intent.liveHierarchy && intent.projectDisplayName ? intent.projectDisplayName : created.projectDisplayName,
+			checkoutDisplayName: intent.liveHierarchy && intent.checkoutDisplayName ? intent.checkoutDisplayName : created.checkoutDisplayName };
 		if (intent.projectKey) {
 			for (const [key, value] of Object.entries(creationIdentity)) if ((intent as unknown as Record<string, unknown>)[key] !== value) throw new RelayRegistryError("invalid_state", "Project creation retry changed its host-resolved project identity");
 		} else { intent = { ...intent, ...creationIdentity }; await intentFile.write(intent); }
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
 		await durableProjectSession(sessionFile, created.cwd, conversationId, request.creationKey, request.concept);
 		if (!intent.sessionPersisted) { intent = { ...intent, sessionPersisted: true }; await intentFile.write(intent); }
-		const roomAliasKey = conversationId.slice(5);
-		if (!intent.projectSpaceId) { intent = { ...intent, projectSpaceId: await this.projectSpaces.ensure(created.projectKey, created.projectDisplayName, retry) }; await intentFile.write(intent); }
-		else await this.projectSpaces.assertTarget(created.projectKey, intent.projectSpaceId);
-		const projectSpaceId = intent.projectSpaceId;
-		if (!projectSpaceId) throw new RelayRegistryError("invalid_state", "Project creation Space identity is unavailable");
-		const coordinator = this.options.registry.listManifests().find((item) => item.kind === "coordinator");
-		if (!intent.hostSpaceLinked) { if (coordinator?.kind === "coordinator" && coordinator.hostSpace) await this.options.matrix.addSpaceChild(coordinator.hostSpace, projectSpaceId); intent = { ...intent, hostSpaceLinked: true }; await intentFile.write(intent); }
-		if (!intent.roomId) { intent = { ...intent, roomId: await this.options.matrix.createPrivateRoomIdempotent(`pi · ${created.checkoutDisplayName} · ${request.concept}`, `pi-${roomAliasKey}-room`) }; await intentFile.write(intent); }
-		else if (await this.options.matrix.resolvePrivateRoomAlias(`pi-${roomAliasKey}-room`, false) !== intent.roomId) {
-			throw new RelayRegistryError("invalid_state", "Project creation room no longer matches its deterministic alias");
+		let matrixBinding: MatrixConversationBinding;
+		if (intent.liveHierarchy) {
+			matrixBinding = await this.provisionConversationMatrix(conversationId, request.concept, { ...created, ...creationIdentity } as unknown as ResolvedWorkspace, request.creationKey);
+		} else {
+			// Pre-upgrade interrupted operations retain their original alias namespace and layout.
+			const roomAliasKey = conversationId.slice(5);
+			if (!intent.projectSpaceId) { intent = { ...intent, projectSpaceId: await this.projectSpaces.ensure(created.projectKey, created.projectDisplayName, retry) }; await intentFile.write(intent); }
+			else await this.projectSpaces.assertTarget(created.projectKey, intent.projectSpaceId);
+			const projectSpaceId = intent.projectSpaceId;
+			if (!projectSpaceId) throw new RelayRegistryError("invalid_state", "Project creation Space identity is unavailable");
+			const coordinator = this.options.registry.listManifests().find((item) => item.kind === "coordinator");
+			if (!intent.hostSpaceLinked) { if (coordinator?.kind === "coordinator" && coordinator.hostSpace) await this.options.matrix.addSpaceChild(coordinator.hostSpace, projectSpaceId); intent = { ...intent, hostSpaceLinked: true }; await intentFile.write(intent); }
+			if (!intent.roomId) { intent = { ...intent, roomId: await this.options.matrix.createPrivateRoomIdempotent(`pi · ${created.checkoutDisplayName} · ${request.concept}`, `pi-${roomAliasKey}-room`) }; await intentFile.write(intent); }
+			else if (await this.options.matrix.resolvePrivateRoomAlias(`pi-${roomAliasKey}-room`, false) !== intent.roomId) {
+				throw new RelayRegistryError("invalid_state", "Project creation room no longer matches its deterministic alias");
+			}
+			const roomId = intent.roomId;
+			if (!roomId) throw new RelayRegistryError("invalid_state", "Project creation room identity is unavailable");
+			if (!intent.roomLinked) { await this.options.matrix.addSpaceChild(projectSpaceId, roomId); intent = { ...intent, roomLinked: true }; await intentFile.write(intent); }
+			matrixBinding = { projectSpace: projectSpaceId, roomId };
 		}
-		const roomId = intent.roomId;
-		if (!roomId) throw new RelayRegistryError("invalid_state", "Project creation room identity is unavailable");
-		if (!intent.roomLinked) { await this.options.matrix.addSpaceChild(projectSpaceId, roomId); intent = { ...intent, roomLinked: true }; await intentFile.write(intent); }
 		await this.start({ creationKey: request.creationKey, concept: request.concept, placement },
-			{ projectSpace: projectSpaceId, roomId, ...creationIdentity });
+			{ ...matrixBinding, ...creationIdentity });
 		const manifest = this.options.registry.manifestByCreationKey(request.creationKey);
 		if (!manifest || manifest.kind !== "project" || manifest.roomId.length > 255) throw new RelayRegistryError("invalid_state", "Created project conversation is unavailable");
 		const roomLink = `https://matrix.to/#/${encodeURIComponent(manifest.roomId)}`;
@@ -871,12 +897,12 @@ export class HostLifecycle {
 	}
 
 	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
-		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }): Promise<Record<string, unknown>> {
+		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
 		return this.runWorktreeOperation(this.workspaceOperationKey(request.placement), () => this.startOnce(request, provisioned));
 	}
 
 	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
-		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }): Promise<Record<string, unknown>> {
+		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
 		const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
 		const existing = this.options.registry.manifestByCreationKey(request.creationKey);
 		if (existing) {
@@ -885,13 +911,12 @@ export class HostLifecycle {
 			await this.resumeOnce(existing.conversationId);
 			return { operation: "conversation.start", targetConversationId: existing.conversationId, conversationState: this.options.registry.conversationState(existing.conversationId) };
 		}
-		if (this.options.registry.listManifests().some((item) => item.concept === request.concept)) throw new RelayRegistryError("invalid_state", "Managed conversation concept already exists on this host");
 		const resolved = await this.resolveWorkspaceIdentity(request.placement);
 		await this.invoke("root-ensure", request.placement);
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
 		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept);
 		const identity = provisioned ?? resolved;
-		const matrixBinding = provisioned ?? await this.provisionConversationMatrix(conversationId, request.concept, resolved);
+		const matrixBinding = provisioned ?? await this.provisionConversationMatrix(conversationId, request.concept, resolved, request.creationKey);
 		const { projectSpace, roomId } = matrixBinding;
 		const nonce = randomBytes(32).toString("base64url");
 		const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
@@ -899,7 +924,8 @@ export class HostLifecycle {
 			schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", conversationId, ownerHostId: this.options.hostId,
 			creationKey: request.creationKey, concept: request.concept, piSessionId: session.sessionId, roomId,
 			placement: request.placement, projectKey: identity.projectKey, projectDisplayName: identity.projectDisplayName,
-			checkoutDisplayName: identity.checkoutDisplayName, projectSpace, bindingBoundaryEntryId: session.boundaryEntryId, createdAt,
+			checkoutDisplayName: identity.checkoutDisplayName, projectSpace,
+			...(matrixBinding.checkoutId ? { checkoutId: matrixBinding.checkoutId, checkoutSpace: matrixBinding.checkoutSpace } : {}), bindingBoundaryEntryId: session.boundaryEntryId, createdAt,
 			activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: session.sessionId, bindingBoundaryEntryId: session.boundaryEntryId, createdAt }],
 		};
 		await this.options.registry.createProjectConversation(manifest, nonce);

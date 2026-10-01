@@ -61,6 +61,7 @@ export class LiveHierarchy {
 	private state: State;
 	private work: Promise<void> = Promise.resolve();
 	private readonly running = new Map<string, Promise<string>>();
+	private readonly controller = new AbortController();
 	private readonly file: AtomicJsonFile<State>;
 	constructor(private readonly directory: string, readonly hostId: string, private readonly matrix: HierarchyMatrix,
 		private readonly coordinator: () => ConversationManifest | undefined) {
@@ -73,6 +74,7 @@ export class LiveHierarchy {
 		this.state = state ?? parse(this.state);
 	}
 	async prepare(input: HierarchyPlacement): Promise<{ conversationId: string; checkoutId: string }> {
+		this.controller.signal.throwIfAborted();
 		const checkoutId = deriveCheckoutId(this.hostId, input.projectKey, input.canonicalCheckoutRoot);
 		const conversationId = deriveConversationId(this.hostId, input.creationKey);
 		const requested: Node[] = [
@@ -101,13 +103,18 @@ export class LiveHierarchy {
 		return node ? node.linked ? "hierarchy_ready" : "pending" : undefined; // Not a phone/account-ready claim.
 	}
 	async provision(conversationId: string): Promise<HierarchyBinding> {
+		this.controller.signal.throwIfAborted();
 		const reserved = this.node(conversationId);
 		if (reserved.kind !== "conversation") throw Error("Expected conversation hierarchy target");
 		if (!reserved.linked) await this.ensure(conversationId);
+		this.controller.signal.throwIfAborted();
 		const conversation = this.node(conversationId);
 		if (conversation.kind !== "conversation") throw Error("Expected conversation hierarchy target");
 		return { conversationId, checkoutId: conversation.checkoutId, roomId: conversation.roomId!,
 			checkoutSpace: this.node(conversation.checkoutId).roomId!, projectSpace: this.node(conversation.projectKey).roomId!, hostSpace: this.node("host").roomId! };
+	}
+	async close(): Promise<void> {
+		this.controller.abort(); await Promise.allSettled([...this.running.values()]); await this.work;
 	}
 	private node(key: string): Node { const node = this.state.nodes.find((item) => item.key === key); if (!node) throw Error("Hierarchy target was not reserved"); return node; }
 	private ensure(key: string): Promise<string> {
@@ -115,12 +122,13 @@ export class LiveHierarchy {
 		const run = this.ensureOnce(key).finally(() => this.running.delete(key)); this.running.set(key, run); return run;
 	}
 	private async ensureOnce(key: string): Promise<string> {
+		this.controller.signal.throwIfAborted();
 		let node = this.node(key);
 		if (node.kind === "host_space") {
 			const coordinator = this.coordinator();
 			if (!coordinator?.hostSpace) throw Error("Host Space provisioning is pending");
 			if (node.roomId && node.roomId !== coordinator.hostSpace) throw Error("Saved host Space changed; explicit migration required");
-			const roomId = await this.matrix.ensureLegacyHostProvenance(this.hostId, coordinator);
+			const roomId = await this.matrix.ensureLegacyHostProvenance(this.hostId, coordinator, this.controller.signal);
 			await this.update(key, { roomId, linked: true }); return roomId;
 		}
 		const parentRoomId = await this.ensure(node.parentKey);
@@ -129,18 +137,18 @@ export class LiveHierarchy {
 		node = this.node(key);
 		const proof = provenance(this.hostId, node);
 		let roomId = node.roomId;
-		if (roomId) await this.matrix.recoverManagedRoom(roomId, proof);
+		if (roomId) await this.matrix.recoverManagedRoom(roomId, proof, this.controller.signal);
 		else {
 			if (node.createAttempted) {
-				roomId = await this.matrix.recoverManagedAlias(proof);
+				roomId = await this.matrix.recoverManagedAlias(proof, this.controller.signal);
 				if (!roomId) throw Error("Uncertain room creation has no verifiable alias; explicit reconciliation required");
 			} else {
 				await this.update(key, { createAttempted: true });
-				roomId = await this.matrix.ensureManagedRoom(node.title, proof);
+				roomId = await this.matrix.ensureManagedRoom(node.title, proof, this.controller.signal);
 			}
 			await this.update(key, { roomId });
 		}
-		if (!node.linked) { await this.matrix.addSpaceChild(parentRoomId, roomId); await this.update(key, { linked: true }); }
+		if (!node.linked) { await this.matrix.addSpaceChild(parentRoomId, roomId, this.controller.signal); await this.update(key, { linked: true }); }
 		return roomId;
 	}
 	private update(key: string, fields: { roomId?: string; parentRoomId?: string; createAttempted?: true; linked?: boolean }): Promise<void> {

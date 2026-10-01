@@ -133,19 +133,19 @@ integration. #111 remains open; phone delivery remains deployment-only.
 
 ## #106 — hierarchy provisioning (in progress)
 
-| Acceptance | Planned change and evidence |
+| Acceptance | Implementation and evidence |
 | --- | --- |
-| Project identity shared, distinct checkout Spaces | Host/project/canonical checkout-derived IDs; relative cwd excluded; linked/root fixtures |
-| Stable aliases, uncertain creates, no foreign adoption | Durable provision records plus exact bot-authored management state; create/lost-response/concurrency fault injection |
-| Pre-join provenance | Narrow management state in initial room state, matching authenticated full hierarchy account actions (#112) |
-| Local identity while remote pending | Persist local enrollment/provisioning phases before Matrix effects; expose accurate pending/ready state to #107/#116 |
-| Safe titles, names not identity | Sanitized bounded display names and identity-derived fallback; mutable names excluded from identity derivation |
-| Legacy compatibility | Preserve existing manifests and old interrupted provisioning paths; no startup reparenting or notification changes |
+| Project identity shared, distinct checkout Spaces | Host/project/canonical checkout-derived IDs; HostLifecycle uses workspace root rather than cwd; root/linked and concurrent-conversation fixtures in `managed-session-live-hierarchy.test.ts` |
+| Stable aliases, uncertain creates, no foreign adoption | Durable phase records and exact bot-authored provenance; remote create/link and local-write interruption fixtures; real Matrix-client lost-response fixtures in `managed-session-provenance.test.ts` and `managed-session-coordinator.test.ts` |
+| Pre-join provenance | Atomic initial ownership state and verified full room state; NAS consumption remains #112 |
+| Local identity while remote pending | Durable local reservations precede Matrix effects; `pending`/`hierarchy_ready` are distinct from account readiness; real relay IPC-outage fixture in `managed-session-startup-ipc.test.ts`; frontend enrollment/window-first dispatch remain #107/#110/#116 |
+| Safe titles, names not identity | Sanitized bounded titles with immutable-ID fallback; duplicate labels accepted; canonical checkout derivation excludes relative cwd; retries retain frozen initial display values |
+| Legacy compatibility | Old manifests and interrupted creation intents retain their old route; existing coordinator startup performs no Matrix identity/link repair; optional paired checkout fields survive V1-to-V2 conversion; legacy reconciliation excludes new checkout-backed bindings |
 
 Crash boundaries: persist intent before room creation; resolve uncertain creates
 by host-scoped alias and exact provenance; save verified room IDs before linking;
-retry identical state links after lost acknowledgement; publish remote-ready only
-after every required link/proof succeeds. Root/project/checkout creation must
+retry identical state links after lost acknowledgement; publish `hierarchy_ready`
+only after every required link/proof succeeds (never infer account/phone readiness). Root/project/checkout creation must
 serialize shared identities, without holding an unrelated room behind network
 failure. Account joining/notification setup (#112), existing-room migration
 (#119), title reconciliation/ancestor cleanup and launcher dispatch are dependent
@@ -160,7 +160,7 @@ Lost-response retries resolve the same proven room; same-bot foreign-host aliase
 forged/missing proof, contradictory parents, public and encrypted targets are
 rejected without writes. Managed-session/source checks pass after adding the new
 root module to the relay's explicit packaged source list. This is a tested
-primitive, not yet wired into the hierarchy lifecycle or local-pending registry.
+primitive; subsequent chunks below wire it into the lifecycle and local-pending store.
 
 The operator approved one narrow legacy-host exception: add missing ownership
 metadata on the verified existing host Space during new conversation provisioning.
@@ -171,8 +171,8 @@ one-attempt write followed by fresh verification avoids blind transport retries
 after uncertainty. Fixtures cover acceptance-before-lost-ack and conflict after
 that acknowledgement loss. This is not bootstrap-wide migration and does not
 move or rename rooms, change IDs, invite users, or modify notification rules.
-The lifecycle call site remains to be wired as part of #106. No existing Space
-has been mutated by this implementation work.
+The lifecycle call site is now wired for new hierarchy provisioning. No existing
+Space has actually been mutated by this implementation work; verification uses fixtures.
 
 A separate durable hierarchy module now reserves local conversation/checkout
 identities before remote effects and serializes shared ancestor creation. It
@@ -182,13 +182,30 @@ with respect to Matrix. Root/linked checkout and concurrent-conversation fixture
 share the correct ancestors; saved Space IDs survive alias changes. The module
 reports `hierarchy_ready`, not account/phone readiness. Managed-session/source
 checks pass, including before/after create/link faults and lost-response recovery.
-It is not yet wired into HostLifecycle or advertised as completed #106 behavior.
+HostLifecycle now uses it for new project conversations and project creation.
+Persisted older project-creation intents deliberately continue through the old
+layout, rather than reinterpreting an interrupted operation.
 
-Fault analysis exposed another ambiguity: after an uncertain create, an absent
-alias cannot distinguish no creation from accepted creation followed by alias
-removal. The module durably records attempts and currently holds this case pending
-rather than risking a duplicate. A dedicated fixture preserves the accepted room
-without creating a replacement. Automatic read-only search of the bot's joined
-rooms for exact management provenance could recover some such cases, but widens
-the metadata-read boundary beyond saved targets and deterministic aliases; this
-choice is being raised before lifecycle integration.
+After an uncertain create, an absent alias cannot distinguish no creation from
+accepted creation followed by alias removal. Durable attempt markers hold this
+case pending for explicit reconciliation rather than risk a duplicate. This also
+covers a crash after the attempt marker but before the network request. Fixtures
+preserve accepted rooms without replacements. Broad scans of joined-room metadata
+are not implemented or implicitly authorized; explicit recovery planning belongs
+to #119.
+
+Fresh coordinator bootstrap now includes atomic ownership state for both its host
+Space and coordinator room, with durable attempt/ID/link phases. Existing bootstrap
+bindings are read-only with respect to Matrix, including inaccessible rooms/Spaces;
+there is no implicit replacement, reparenting or membership repair. Lost create or
+link responses and manifest persistence failures recover the same identities.
+The local IPC server remains available while Matrix provisioning is pending;
+malformed local state still fails closed. Hierarchy shutdown cancels and drains
+its remote work before relay ownership is released. No account notification rules
+are read or written by this provisioning code.
+
+Affected managed-session and source-contract gates pass for the lifecycle wiring,
+real-client bootstrap recovery, relay IPC availability, complete-server-name Space
+links, paired checkout persistence/migration, and cancellation fixtures. The 28 before/after local hierarchy-write fault cases also pass, and the canonical
+`nix run .#verify` passes on the lifecycle integration chunk. A committed-state
+hierarchy/compatibility audit is next before closing #106. No push, deployment, live migration or phone-delivery claim is made.

@@ -7,6 +7,7 @@ import test from "node:test";
 import { BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveMatrixTransactionId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
+import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 import type { SessionBinding } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 
@@ -182,11 +183,13 @@ test("production relay bootstraps limited history and retains its cursor when vo
 	const runtime = join(root, "runtime"); const state = join(root, "state");
 	const originalFetch = globalThis.fetch;
 	let running: Awaited<ReturnType<typeof startManagedSessionRelay>> | undefined;
-	let roomsCreated = 0; let bootstrapCount = 0; let incrementalCount = 0;
+	const provisionState = { rooms: ["!space:example.com", "!coordinator:example.com"], createCalls: 0 };
+	const provision = provisioningFixture("@bot:example.com", provisionState);
+	let bootstrapCount = 0; let incrementalCount = 0;
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(String(input));
 		if (url.pathname.endsWith("/whoami")) return Response.json({ user_id: "@bot:example.com" });
-		if (url.pathname.endsWith("/createRoom")) { roomsCreated += 1; return Response.json({ room_id: roomsCreated === 1 ? "!space:example.com" : "!coordinator:example.com" }); }
+		const provisionResponse = await provision(input, init); if (provisionResponse) return provisionResponse;
 		if (url.pathname.endsWith("/sync")) {
 			if (!url.searchParams.has("since")) {
 				bootstrapCount += 1;
@@ -218,7 +221,7 @@ test("production relay bootstraps limited history and retains its cursor when vo
 	running = await startManagedSessionRelay(env);
 	for (let i = 0; i < 100 && incrementalCount < 2; i += 1) await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.equal(incrementalCount, 2); assert.equal(bootstrapCount, 1, "reboot must never silently create a fresh cursor");
-	assert.equal(roomsCreated, 2, "neither room nor Space is recreated");
+	assert.equal(provisionState.createCalls, 2, "neither room nor Space is recreated");
 	assert.deepEqual(running.registry.snapshot(), before);
 	assert.deepEqual(running.registry.listManifests(), manifests);
 });

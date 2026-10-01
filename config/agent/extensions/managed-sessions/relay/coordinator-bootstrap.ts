@@ -10,6 +10,7 @@ import {
 import { ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
+import { provisionCoordinatorRooms } from "./coordinator-provisioning.js";
 
 const COORDINATOR_CREATION_KEY = "coordinator";
 const COORDINATOR_INSTRUCTIONS = `# Managed session coordinator\n\nThis neutral workspace belongs to the host coordinator.\n\n- Coordinate managed Pi conversations; do not treat this workspace as a project.\n- Conversation objectives arrive as ordinary operator messages, never lifecycle metadata.\n- Use only coordinator-role lifecycle tools exposed by the managed-session adapter.\n- Do not delete or unbind the coordinator conversation.\n`;
@@ -80,25 +81,14 @@ async function materializeSession(config: CoordinatorBootstrapConfig): Promise<{
 	return { sessionId, boundaryEntryId: deriveTranscriptEntryId(sessionId, boundaryKey) };
 }
 
-async function createCoordinatorRooms(matrix: ManagedMatrixClient, hostId: string, concept: string): Promise<{ roomId: string; hostSpace: string }> {
-	const hostSpace = await matrix.createPrivateSpace(`pi · ${hostId}`);
-	try {
-		const roomId = await matrix.createPrivateRoom(`pi · ${concept}`);
-		try { await matrix.addSpaceChild(hostSpace, roomId); }
-		catch (error) { await matrix.leaveRoom(roomId).catch(() => undefined); throw error; }
-		return { roomId, hostSpace };
-	} catch (error) {
-		await matrix.leaveRoom(hostSpace).catch(() => undefined);
-		throw error;
-	}
-}
-
 export async function bootstrapCoordinator(
 	hostId: string,
 	configValue: CoordinatorBootstrapConfig,
 	registry: RelayRegistry,
 	matrix: ManagedMatrixClient,
+	signal?: AbortSignal,
 ): Promise<CoordinatorIdentity> {
+	signal?.throwIfAborted();
 	const config = validateConfig(configValue);
 	const session = await materializeSession(config);
 	const conversationId = deriveConversationId(hostId, COORDINATOR_CREATION_KEY);
@@ -108,45 +98,11 @@ export async function bootstrapCoordinator(
 			existing.bindingBoundaryEntryId !== session.boundaryEntryId || existing.concept !== config.concept) {
 			throw new RelayRegistryError("invalid_state", "Coordinator session and manifest identity conflict");
 		}
-		if (await matrix.roomAccessible(existing.roomId)) {
-			let hostSpace = existing.hostSpace;
-			let createdSpace = false;
-			if (!hostSpace || !(await matrix.roomAccessible(hostSpace))) {
-				hostSpace = await matrix.createPrivateSpace(`pi · ${hostId}`);
-				createdSpace = true;
-			}
-			try {
-				await matrix.addSpaceChild(hostSpace, existing.roomId);
-				const manifest = hostSpace === existing.hostSpace ? existing : await registry.replaceCoordinatorRoom(conversationId, existing.roomId, hostSpace);
-				return { manifest, ...config };
-			} catch (error) {
-				if (createdSpace) await matrix.leaveRoom(hostSpace).catch(() => undefined);
-				throw error;
-			}
-		}
-		let hostSpace = existing.hostSpace;
-		let createdSpace = false;
-		if (!hostSpace || !(await matrix.roomAccessible(hostSpace))) {
-			hostSpace = await matrix.createPrivateSpace(`pi · ${hostId}`);
-			createdSpace = true;
-		}
-		const roomId = await matrix.createPrivateRoom(`pi · ${config.concept}`);
-		try { await matrix.addSpaceChild(hostSpace, roomId); }
-		catch (error) {
-			await matrix.leaveRoom(roomId).catch(() => undefined);
-			if (createdSpace) await matrix.leaveRoom(hostSpace).catch(() => undefined);
-			throw error;
-		}
-		try {
-			const manifest = await registry.replaceCoordinatorRoom(conversationId, roomId, hostSpace);
-			return { manifest, ...config };
-		} catch (error) {
-			await matrix.leaveRoom(roomId).catch(() => undefined);
-			if (createdSpace) await matrix.leaveRoom(hostSpace).catch(() => undefined);
-			throw error;
-		}
+		// Startup does not replace identities or repair links/membership. A saved
+		// binding is not a remote-ready claim; new provisioning verifies its root.
+		return { manifest: existing, ...config };
 	}
-	const rooms = await createCoordinatorRooms(matrix, hostId, config.concept);
+	const rooms = await provisionCoordinatorRooms(`${config.sessionFile}.matrix-provisioning.json`, hostId, config.concept, matrix, signal);
 	const manifest: ConversationManifest = {
 		schemaVersion: MANAGED_SESSION_STATE_VERSION,
 		kind: "coordinator",
@@ -160,11 +116,6 @@ export async function bootstrapCoordinator(
 		bindingBoundaryEntryId: session.boundaryEntryId,
 		createdAt: new Date().toISOString(),
 	};
-	try {
-		return { manifest: await registry.createCoordinatorConversation(manifest), ...config };
-	} catch (error) {
-		await matrix.leaveRoom(rooms.roomId).catch(() => undefined);
-		await matrix.leaveRoom(rooms.hostSpace).catch(() => undefined);
-		throw error;
-	}
+	// The provisioning intent retains exact resources if manifest persistence fails.
+	return { manifest: await registry.createCoordinatorConversation(manifest), ...config };
 }

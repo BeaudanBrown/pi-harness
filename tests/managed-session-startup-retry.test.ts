@@ -20,6 +20,17 @@ test("startup does not retry invalid credentials or malformed state", async () =
 	}
 });
 
+test("durable provisioning may wait for remote ownership repair without retrying malformed local state", async () => {
+	let calls = 0; let blocked = 0;
+	assert.equal(await retryMatrixStartup(async () => {
+		if (++calls === 1) throw new ManagedMatrixError("invalid_response", "ownership pending");
+		return "verified";
+	}, async () => { blocked++; }, undefined, async () => {}, (error) => error.code !== "cancelled"), "verified");
+	assert.equal(blocked, 1);
+	await assert.rejects(() => retryMatrixStartup(async () => { throw Error("corrupt local intent"); },
+		async () => assert.fail("local corruption is not a remote provisioning delay"), undefined, async () => {}, () => true), /corrupt local intent/);
+});
+
 test("startup retry is cancellable without waiting for the next network attempt", async () => {
 	const controller = new AbortController();
 	await assert.rejects(retryMatrixStartup(async () => { throw new ManagedMatrixError("http", "unavailable", 502, true); },

@@ -15,7 +15,7 @@ export class ProjectSpaces {
 
 	private bound(projectKey: string): string | undefined {
 		const spaces = new Set(this.registry.listManifests()
-			.filter((item) => item.kind === "project" && item.projectKey === projectKey)
+			.filter((item) => item.kind === "project" && item.projectKey === projectKey && !item.checkoutSpace)
 			.map((item) => item.projectSpace).filter((item): item is string => Boolean(item)));
 		if (spaces.size > 1) throw new RelayRegistryError("invalid_state", "Stable project identity maps to conflicting Matrix Spaces");
 		return [...spaces][0];

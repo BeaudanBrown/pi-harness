@@ -33,6 +33,7 @@ import { AtomicJsonFile } from "./atomic-json.js";
 import { retryMatrixStartup } from "./startup-retry.js";
 import { RecoveryAlerts } from "./recovery-alerts.js";
 import { RecoveryMonitor } from "./recovery-monitor.js";
+import { LiveHierarchy } from "./live-hierarchy.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -68,6 +69,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let server: ManagedSessionIpcServer | undefined;
 	let coordinatorRouter: CoordinatorRouter | undefined;
 	let recoveryMonitor: RecoveryMonitor | undefined;
+	let hierarchy: LiveHierarchy | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
@@ -335,6 +337,19 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			(message) => process.stderr.write(`pi-managed-session-relay: ${message}\n`));
 		await recoveryMonitor.health(false);
 		recoveryMonitor.start();
+		if (coordinatorValues.every((value) => value?.trim())) {
+			hierarchy = new LiveHierarchy(resolve(stateDirectory, "live-workspaces"), hostId, matrix,
+				() => registry.listManifests().find((manifest) => manifest.kind === "coordinator"));
+			await hierarchy.load();
+			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(stateDirectory, "project-sessions");
+			hostLifecycle = new HostLifecycle({
+				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
+				socketPath: server.socketPath, registry, matrix, hierarchy, server, environment,
+				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
+				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
+				endOperationFeedback: (conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId),
+			});
+		}
 		// Reattach surviving Pi processes before waiting for remote readiness.
 		await server.start();
 		const authenticatedUserId = await retryMatrixStartup(() => matrix.whoami(signal), async () => {
@@ -344,21 +359,16 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
 		// Pending publications are reconciled in independent room workers, never on the boot/intake path.
 		if (coordinatorValues.every((value) => value?.trim())) {
-			coordinator = await bootstrapCoordinator(hostId, {
+			coordinator = await retryMatrixStartup(() => bootstrapCoordinator(hostId, {
 				workspaceDirectory: coordinatorValues[0]!.trim(),
 				sessionFile: coordinatorValues[1]!.trim(),
 				concept: environment.PI_MANAGED_COORDINATOR_CONCEPT?.trim() || `${hostId} coordinator`,
-			}, registry, matrix);
+			}, registry, matrix, signal), async () => {
+				await syncHealth(false);
+				process.stderr.write("pi-managed-session-relay: coordinator provisioning remains pending; local IPC is available; unresolved ownership or creation requires explicit reconciliation\n");
+			}, signal, undefined, (error) => error.code !== "cancelled");
 		}
-		if (coordinator) {
-			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(stateDirectory, "project-sessions");
-			hostLifecycle = new HostLifecycle({
-				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
-				socketPath: server.socketPath, registry, matrix, server, environment,
-				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
-				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
-				endOperationFeedback: (conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId),
-			});
+		if (hostLifecycle) {
 			const pendingReconciliation = hostLifecycle.pendingReconciliationCount();
 			if (pendingReconciliation > 0) process.stderr.write(`pi-managed-session-relay: ${pendingReconciliation} managed project conversation(s) require explicit Space reconciliation\n`);
 		}
@@ -393,6 +403,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
 	} catch (error) {
+		await hierarchy?.close().catch(() => undefined);
 		await closeArtifactExporter().catch(() => undefined);
 		await recoveryMonitor?.close().catch(() => undefined);
 		await closeNotices().catch(() => undefined);
@@ -408,6 +419,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
+			await hierarchy?.close().catch(() => undefined);
 			await relayLock?.release().catch(() => undefined);
 			process.exitCode = 1;
 		});
@@ -433,6 +445,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle?.stopRuntimeUpdates();
 			await runtimeUpdate;
 			clearTimeout(reconciliationTimer);
+			await hierarchy?.close();
 			await closeArtifactExporter();
 			await coordinatorRouter?.stop();
 			await recoveryMonitor?.close();

@@ -465,6 +465,8 @@ const projectManifest = strictObject({
 	projectDisplayName: Type.Optional(boundedString(128)),
 	checkoutDisplayName: Type.Optional(boundedString(128)),
 	projectSpace: Type.Optional(boundedString(255)),
+	checkoutId: Type.Optional(stableId("checkout")),
+	checkoutSpace: Type.Optional(boundedString(255)),
 	selectedModel: Type.Optional(boundedString(256)),
 	selectedThinking: Type.Optional(boundedString(32)),
 	bindingBoundaryEntryId: TranscriptEntryIdSchema,
@@ -666,6 +668,8 @@ export interface ConversationManifest {
 	projectDisplayName?: string;
 	checkoutDisplayName?: string;
 	projectSpace?: string;
+	checkoutId?: string;
+	checkoutSpace?: string;
 	hostSpace?: string;
 	selectedModel?: string;
 	selectedThinking?: string;
@@ -923,6 +927,10 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 		manifest.kind === "project" && projectIdentityFields.some((field) => field !== undefined) &&
 			(projectIdentityFields.some((field) => field === undefined) || projectIdentityFields.slice(1).some((field) => /[\u0000-\u001f\u007f/]/.test(field ?? "")))) {
 		throw new ManagedSessionContractError("invalid_state", "stable project identity fields must appear together on project manifests only");
+	}
+	if ((manifest.checkoutId === undefined) !== (manifest.checkoutSpace === undefined) ||
+		(manifest.checkoutId !== undefined && (!manifest.projectKey || !manifest.projectSpace || manifest.kind !== "project"))) {
+		throw new ManagedSessionContractError("invalid_state", "checkout hierarchy fields require a complete project binding");
 	}
 	if ((manifest.activeGenerationId === undefined) !== (manifest.generations === undefined)) {
 		throw new ManagedSessionContractError("invalid_state", "active generation and generation history must appear together");

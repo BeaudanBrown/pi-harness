@@ -1,11 +1,17 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { HostLifecycle, type ResolvedWorkspace } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
+import type { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
+import type { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
+import { migrateV1Manifest } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 import { LiveHierarchy, type HierarchyPlacement } from "../config/agent/extensions/managed-sessions/relay/live-hierarchy.js";
 import { managedRoomAlias, type ManagedProvenance } from "../config/agent/extensions/managed-sessions/managed-provenance.js";
-import { deriveConversationId, deriveTranscriptEntryId, MANAGED_SESSION_STATE_VERSION, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { deriveConversationId, deriveTranscriptEntryId, MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
 
 const hostId = "hierarchy-host";
 const coordinator: ConversationManifest = { schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "coordinator", ownerHostId: hostId,
@@ -53,6 +59,67 @@ class MatrixFixture {
 	}
 }
 
+test("HostLifecycle uses canonical checkout roots, persists checkout bindings and permits duplicate display names", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "live-hierarchy-lifecycle-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const store = new ConversationManifestStore(join(root, "manifests")); await store.write(coordinator);
+	const registry = new RelayRegistry(hostId, root, store); await registry.load();
+	const matrix = new MatrixFixture(); const hierarchy = new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator); await hierarchy.load();
+	const lifecycle = new HostLifecycle({ hostId, launcher: "/never-invoked", projectSessionDirectory: join(root, "sessions"), socketPath: "/unused",
+		registry, matrix: matrix as unknown as ManagedMatrixClient, hierarchy, server: {} as ManagedSessionIpcServer });
+	const resolved: ResolvedWorkspace = { rootKey: "projects", workspace: "repository", relativeCwd: "src", cwd: "/projects/repository/src",
+		workspacePath: placement.canonicalCheckoutRoot, projectKey: placement.projectKey, projectDisplayName: "Project", checkoutDisplayName: "Main" };
+	const firstId = deriveConversationId(hostId, "one");
+	const first = lifecycle.provisionConversationMatrix(firstId, "Same title", resolved, "one");
+	await assert.rejects(() => lifecycle.provisionConversationMatrix(firstId, "Same title", { ...resolved, relativeCwd: "other" }, "one"), /Concurrent provisioning/);
+	const [a, b] = await Promise.all([first, lifecycle.provisionConversationMatrix(deriveConversationId(hostId, "two"), "Same title", { ...resolved, relativeCwd: "", cwd: resolved.workspacePath }, "two")]);
+	assert.equal(a.checkoutId, b.checkoutId); assert.equal(a.checkoutSpace, b.checkoutSpace); assert.notEqual(a.roomId, b.roomId);
+	for (const [key, grouped] of [["one", a], ["two", b]] as const) {
+		const session = `session-${key}`;
+		const manifest: ConversationManifest = { schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "project", ownerHostId: hostId,
+			conversationId: deriveConversationId(hostId, key), creationKey: key, concept: "Same title", piSessionId: session,
+			bindingBoundaryEntryId: deriveTranscriptEntryId(session, "boundary"), createdAt: "2026-10-01T00:00:00.000Z",
+			placement: { rootKey: resolved.rootKey, workspace: resolved.workspace, relativeCwd: "" }, projectKey: resolved.projectKey,
+			projectDisplayName: "Project", checkoutDisplayName: "Main", ...grouped };
+		await registry.createProjectConversation(manifest, "a".repeat(32));
+		const migrated = migrateV1Manifest(manifest); assert.equal(migrated.checkoutId, grouped.checkoutId); assert.equal(migrated.checkoutSpace, grouped.checkoutSpace);
+		await assert.rejects(() => registry.createProjectConversation({ ...manifest, checkoutSpace: "!foreign:test" }, "a".repeat(32)), /identity already exists/);
+	}
+	assert.equal(registry.listManifests().filter((item) => item.concept === "Same title").length, 2);
+	assert.ok(registry.managedRoomIds().includes(a.checkoutSpace!));
+	const loaded = new RelayRegistry(hostId, root, store); await loaded.load(); assert.equal(loaded.manifestByConversationId(firstId)?.checkoutSpace, a.checkoutSpace);
+});
+
+test("new project-creation retries retain the hierarchy route and frozen display values", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "live-project-create-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const store = new ConversationManifestStore(join(root, "manifests")); await store.write(coordinator);
+	const registry = new RelayRegistry(hostId, root, store); await registry.load();
+	const matrix = new MatrixFixture({ point: "link:worktree_space", timing: "after" });
+	const hierarchy = new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator); await hierarchy.load();
+	const sessions = join(root, "sessions");
+	const lifecycle = new HostLifecycle({ hostId, launcher: "/never-invoked", projectSessionDirectory: sessions, socketPath: "/unused",
+		registry, matrix: matrix as unknown as ManagedMatrixClient, hierarchy, server: {} as ManagedSessionIpcServer });
+	let attempts = 0; let launches = 0;
+	const resolved: ResolvedWorkspace = { rootKey: "projects", workspace: "new-project", relativeCwd: "", workspacePath: join(root, "project"),
+		cwd: join(root, "project"), projectKey: placement.projectKey, projectDisplayName: "Project", checkoutDisplayName: "Main" };
+	await mkdir(resolved.cwd);
+	(lifecycle as unknown as { invoke: (operation: string, args: Record<string, unknown>) => Promise<Record<string, unknown>> }).invoke = async (operation, args) => {
+		if (operation === "project-create") { assert.equal(args.resumeExisting, attempts > 0); attempts++; }
+		else assert.ok(["workspace-resolve", "root-ensure"].includes(operation), operation);
+		return { ...resolved, checkoutDisplayName: attempts > 1 ? "Renamed display" : "Main" };
+	};
+	(lifecycle as unknown as { launchProject: () => Promise<void> }).launchProject = async () => { launches++; };
+	const request = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "coordinator_adapter" as const, type: "lifecycle.request" as const,
+		conversationId: coordinator.conversationId, messageId: "create-project", payload: { request: { operation: "project.create", creationKey: "new-project",
+			rootKey: resolved.rootKey, workspace: resolved.workspace, concept: "Project conversation" } } };
+	await assert.rejects(() => lifecycle.request(request), /injected/);
+	const id = deriveConversationId(hostId, "new-project");
+	assert.equal(JSON.parse(await readFile(join(sessions, id, "project-creation.json"), "utf8")).liveHierarchy, true);
+	await lifecycle.request(request);
+	const manifest = registry.manifestByConversationId(id)!;
+	assert.ok(manifest.checkoutId); assert.ok(manifest.checkoutSpace); assert.equal(manifest.checkoutDisplayName, "Main");
+	assert.equal(matrix.rooms.size, 4); assert.equal(launches, 1); assert.equal(attempts, 2);
+});
+
 test("local reservation survives outage and root/linked checkouts share project but not checkout Spaces", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "live-hierarchy-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const matrix = new MatrixFixture(); let available = false;
@@ -97,6 +164,32 @@ test("create/link interruptions recover verified effects and hold unprovable cre
 	}
 });
 
+test("every local hierarchy write boundary either recovers or holds an unprovable create safely", async (t) => {
+	for (let failure = 1; failure <= 14; failure++) for (const timing of ["before", "after"] as const) {
+		const root = await mkdtemp(join(tmpdir(), "live-hierarchy-write-")); t.after(() => rm(root, { recursive: true, force: true }));
+		const matrix = new MatrixFixture(); const first = new LiveHierarchy(root, hostId, matrix, () => coordinator); await first.load();
+		// Fault only this instance's durability seam, not global filesystem behavior.
+		const file = (first as unknown as { file: { write: (state: unknown) => Promise<void> } }).file;
+		const save = file.write.bind(file); let writes = 0; let injected = false;
+		file.write = async (state) => {
+			const fail = ++writes === failure;
+			if (fail && timing === "before") { injected = true; throw Error("local-write interruption"); }
+			await save(state);
+			if (fail && timing === "after") { injected = true; throw Error("local-write interruption"); }
+		};
+		await assert.rejects(async () => { const target = await first.prepare(placement); await first.provision(target.conversationId); }, /local-write/);
+		assert.equal(injected, true, `${failure}/${timing}`);
+		const recovered = new LiveHierarchy(root, hostId, matrix, () => coordinator); await recovered.load(); const target = await recovered.prepare(placement);
+		if (timing === "after" && [4, 8, 12].includes(failure)) {
+			const rooms = matrix.rooms.size;
+			await assert.rejects(() => recovered.provision(target.conversationId), /Uncertain room creation/);
+			assert.equal(matrix.rooms.size, rooms); assert.equal(recovered.status(target.conversationId), "pending");
+		} else {
+			await recovered.provision(target.conversationId); assert.equal(matrix.rooms.size, 4); assert.equal(matrix.links.size, 3);
+		}
+	}
+});
+
 test("lost create response followed by alias removal stays pending rather than duplicating the accepted room", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "live-hierarchy-uncertain-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const matrix = new MatrixFixture({ point: "create:project_space", timing: "after" });
@@ -106,6 +199,25 @@ test("lost create response followed by alias removal stays pending rather than d
 	await assert.rejects(() => restarted.provision(target.conversationId), /explicit reconciliation/);
 	assert.equal(matrix.rooms.size, 2, "accepted project Space is not duplicated under a now-free alias");
 	assert.equal(restarted.status(target.conversationId), "pending");
+});
+
+test("hierarchy shutdown cancels remote work before releasing ownership", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "live-hierarchy-stop-")); t.after(() => rm(root, { recursive: true, force: true }));
+	let began!: () => void; const blocked = new Promise<void>((resolve) => { began = resolve; });
+	const matrix: ConstructorParameters<typeof LiveHierarchy>[2] = {
+		ensureLegacyHostProvenance: async (_host, _coordinator, signal) => {
+			began(); return new Promise<string>((_resolve, reject) => signal!.addEventListener("abort", () => reject(signal!.reason), { once: true }));
+		},
+		ensureManagedRoom: async () => assert.fail("no child creation after shutdown"),
+		recoverManagedAlias: async () => assert.fail("no recovery after shutdown"),
+		recoverManagedRoom: async () => assert.fail("no recovery after shutdown"),
+		addSpaceChild: async () => assert.fail("no links after shutdown"),
+	};
+	const hierarchy = new LiveHierarchy(root, hostId, matrix, () => coordinator); await hierarchy.load(); const target = await hierarchy.prepare(placement);
+	const stopped = assert.rejects(() => hierarchy.provision(target.conversationId), { name: "AbortError" });
+	await blocked; await hierarchy.close(); await stopped;
+	assert.equal(hierarchy.status(target.conversationId), "pending");
+	await assert.rejects(() => hierarchy.prepare(placement), { name: "AbortError" });
 });
 
 test("saved Space IDs survive alias removal and cannot be moved to a replacement host root", async (t) => {

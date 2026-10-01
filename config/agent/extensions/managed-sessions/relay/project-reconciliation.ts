@@ -104,7 +104,7 @@ export class ProjectReconciler {
 	private async previewOnce(): Promise<ReconciliationPreview> {
 		const existing = await this.readIntent(); if (existing) return this.summary(existing);
 		const stableSpaces = new Map<string, string>();
-		for (const manifest of this.options.registry.listManifests()) if (manifest.kind === "project" && manifest.projectKey && manifest.projectSpace) {
+		for (const manifest of this.options.registry.listManifests()) if (manifest.kind === "project" && manifest.projectKey && manifest.projectSpace && !manifest.checkoutSpace) {
 			const prior = stableSpaces.get(manifest.projectKey); if (prior && prior !== manifest.projectSpace) throw new RelayRegistryError("invalid_state", "Stable project identity maps to conflicting Matrix Spaces");
 			stableSpaces.set(manifest.projectKey, manifest.projectSpace);
 		}
@@ -137,7 +137,7 @@ export class ProjectReconciler {
 		if (!intent) {
 			const preview = await this.previewOnce(); if (preview.reconciliationKey !== reconciliationKey) throw new RelayRegistryError("invalid_state", "Reconciliation preview changed before apply");
 			const stableSpaces = new Map<string, string>();
-			for (const manifest of this.options.registry.listManifests()) if (manifest.kind === "project" && manifest.projectKey && manifest.projectSpace) stableSpaces.set(manifest.projectKey, manifest.projectSpace);
+			for (const manifest of this.options.registry.listManifests()) if (manifest.kind === "project" && manifest.projectKey && manifest.projectSpace && !manifest.checkoutSpace) stableSpaces.set(manifest.projectKey, manifest.projectSpace);
 			const items: ReconciliationItem[] = [];
 			for (const shown of preview.items) {
 				const manifest = this.options.registry.manifestByConversationId(shown.conversationId); if (!manifest || manifest.kind !== "project" || !manifest.placement) throw new RelayRegistryError("invalid_state", "Reconciliation source manifest disappeared");

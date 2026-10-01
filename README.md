@@ -256,24 +256,28 @@ The relay atomically creates the private neutral coordinator workspace and Pi
 session before creating the host Space and coordinator room. Authorized room
 text is persisted before the trusted `tmux_project managed
 coordinator-ensure` hook recreates `default/coordinator`. The coordinator
-session and binding survive restart; an inaccessible coordinator room is
-replaced against that same session and host Space.
+session, room and host Space IDs survive restart. Startup never replaces an
+inaccessible identity or repairs existing Space links. Fresh bootstrap uses
+atomic ownership metadata and durable provisioning phases; uncertain creation
+without a recoverable alias stays pending for explicit reconciliation.
 
 The coordinator-only profile exposes typed workspace, local-project creation,
 and conversation list/status/start/resume/stop/delete tools, plus explicit project-room reconciliation preview/apply and obsolete-Space cleanup tools. Project creation
-accepts only a configured root, safe absent immediate-child name, and immutable
-concept. The trusted launcher creates no
+accepts only a configured root, safe absent immediate-child name, and creation
+label. The trusted launcher creates no
 scaffold or remote: it initializes local Git on `main`, records a durable retry
 identity, and preserves partial repositories for explicit retry. Stable private
 Matrix aliases and durable provisioning phases prevent uncertain retries from
 duplicating project Spaces or rooms. Starting a
 project conversation accepts only a named root, immediate-child workspace, safe
-relative cwd, and immutable concept. A harness-owned authority wrapper enriches the configured tmux launcher’s canonical workspace result and resolves Git common-directory
+relative cwd, and creation label. Labels may duplicate; identities do not depend on them. A harness-owned authority wrapper enriches the configured tmux launcher’s canonical workspace result and resolves Git common-directory
 identity so a main checkout and its linked worktrees share one deterministic private
-project Space on that host while retaining distinct checkout room names; non-Git
-workspaces use a stable immediate-child fallback. New project Space aliases include
-the stable host ID as well as the project key, so synchronized same-named workspaces
-on different hosts do not collide across bot accounts. Existing Space bindings and
+project Space on that host. New conversations live beneath a distinct checkout
+Space (shared by conversations in that checkout); relative cwd does not create a
+new checkout identity. Non-Git workspaces use a stable immediate-child fallback.
+Host-scoped aliases require exact bot-authored ownership proof before adoption.
+Local hierarchy reservations remain pending during provisioning failures; completed
+hierarchy provisioning alone does not establish operator-account or phone readiness. Existing Space bindings and
 checkpointed provisioning IDs are preserved; see [shared-workspace recovery](docs/managed-matrix-sessions.md#shared-workspaces-across-hosts). Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. The coordinator can preview a bounded host-resolved plan, explicitly apply its stable reconciliation key without replacing rooms or sessions, and separately confirm cleanup of obsolete Spaces. Cleanup refuses referenced, non-empty, inaccessible, or foreign Spaces and removes the operator only from verified obsolete empty Spaces before the bot leaves. The relay resolves placement
 through the fixed launcher, durably creates the Pi session and binding boundary
 before Matrix rooms, and launches the ordinary adapter through the trusted

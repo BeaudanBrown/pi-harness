@@ -74,6 +74,13 @@ test("legacy stamping requires the exact saved coordinator, private ownership an
 	assert.equal(fixture.writes.length, 0);
 });
 
+test("hierarchy links preserve the complete Matrix server name including its port", async () => {
+	let content: unknown;
+	const client = new ManagedMatrixClient(config, async (_input, init) => { content = JSON.parse(String(init?.body)); return Response.json({}); }, ["!space:server:8448", "!child:server:8448"]);
+	await client.addSpaceChild("!space:server:8448", "!child:server:8448");
+	assert.deepEqual(content, { via: ["server:8448"], suggested: true });
+});
+
 test("checkout and alias identities exclude mutable display and parent attributes", () => {
 	assert.notEqual(deriveCheckoutId("host-a", projectKey, "/projects/repository"), deriveCheckoutId("host-a", projectKey, "/projects/repository-feature"));
 	assert.notEqual(deriveCheckoutId("host-a", projectKey, "/projects/repository"), deriveCheckoutId("host-b", projectKey, "/projects/repository"));
