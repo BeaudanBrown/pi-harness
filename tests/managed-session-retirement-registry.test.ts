@@ -24,7 +24,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
 		payload: { sessionId: first.piSessionId, attachmentNonce: nonce, bindingBoundaryEntryId: first.bindingBoundaryEntryId } };
 	const attachment = await registry.attach(packet, "socket");
 	const targets: RetirementTarget[] = [{ kind: "stop", generationId: deriveGenerationId(first.conversationId, 1), attachmentId: attachment.attachmentId },
-		{ kind: "operator_leave_forget", roomId: first.roomId }, { kind: "bot_leave", roomId: first.roomId }];
+		{ kind: "operator_leave_forget", roomId: first.roomId, userId: "@operator:example.com" }, { kind: "bot_leave", roomId: first.roomId, userId: "@bot:example.com" }];
 	return { root, runtime, manifests, first, other, registry, targets, packet, attachment };
 }
 

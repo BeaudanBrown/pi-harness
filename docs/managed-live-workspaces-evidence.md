@@ -472,7 +472,9 @@ replace frozen targets, coordinator retirement is rejected, and uncertain writes
 make authority unavailable rather than accepting stale in-memory state. Reads are
 private, no-follow, nonblocking, fatal-UTF-8 and bounded; interrupted temporary
 files never substitute for primary authority. The store has a 100,000-entry safety
-bound and fails closed at capacity rather than pruning terminal authority.
+bound, 4,096 pending-cleanup limit and 128 MiB aggregate bound, and fails closed
+at capacity rather than pruning terminal authority. Account effects freeze the
+exact user ID; ancestor targets freeze complete expected ownership provenance.
 
 The registry loads terminal authority before reconciling public manifests and
 runtime state. It removes retired identities from ordinary discovery and rejects
@@ -490,3 +492,11 @@ backup. Packaged managed-session and source-contract gates passed. This is **not
 the complete #109 cutover: ownership-checked cleanup execution, lifecycle/legacy
 alias routing, departure handling and account integration remain. No existing
 conversation has been retired or migrated by these tests.
+
+A bounded cleanup scheduler now retries only unfinished exact effects, not model
+calls or conversation creation. Up to four independent effects can progress, so a
+stalled account request cannot hold up stop/bot cleanup for the same conversation.
+Duplicate sweeps share in-flight work; shutdown aborts and drains admitted effects.
+Ten focused cleanup/store/registry tests prove network failure retention, exact
+unfinished-effect recovery and shutdown without erasing terminal authority. Concrete
+ownership-checking effect executors and startup scheduling are still to be wired.

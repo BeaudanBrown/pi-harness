@@ -4,7 +4,8 @@ import { open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
-import { ConversationIdSchema, GenerationIdSchema } from "../identity-contracts.js";
+import { ConversationIdSchema, GenerationIdSchema, MatrixUserIdSchema } from "../identity-contracts.js";
+import { ManagedProvenanceSchema } from "../managed-provenance.js";
 import { deriveConversationId } from "../contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 
@@ -16,9 +17,9 @@ const window = Type.Object({ sessionName: text(128), windowId: text(64), paneId:
 	serverId: Type.Optional(text(255)) }, { additionalProperties: false });
 export const RetirementEffectSchema = Type.Union([
 	Type.Object({ ...effectBase, kind: Type.Literal("stop"), generationId: GenerationIdSchema, attachmentId: Type.Optional(text(128)), window: Type.Optional(window) }, { additionalProperties: false }),
-	Type.Object({ ...effectBase, kind: Type.Enum(["operator_leave_forget", "bot_leave"]), roomId: room }, { additionalProperties: false }),
+	Type.Object({ ...effectBase, kind: Type.Enum(["operator_leave_forget", "bot_leave"]), roomId: room, userId: MatrixUserIdSchema }, { additionalProperties: false }),
 	Type.Object({ ...effectBase, kind: Type.Literal("ancestor"), roomId: room, childRoomId: room,
-		spaceKind: Type.Enum(["checkout_space", "project_space"]), creationKey: text(128) }, { additionalProperties: false }),
+		spaceKind: Type.Enum(["checkout_space", "project_space"]), creationKey: text(128), provenance: ManagedProvenanceSchema }, { additionalProperties: false }),
 ]);
 const recordSchema = Type.Object({
 	version: Type.Literal(1), hostId: text(128), conversationId: ConversationIdSchema, creationKey: text(128),
@@ -52,6 +53,8 @@ export function parseRetirementRecord(value: unknown): RetirementRecord {
 		if (effectId !== retirementEffectId(record.retirementId, target)) throw Error("Retirement cleanup identity changed");
 		const key = effect.kind === "ancestor" ? `${effect.kind}:${effect.spaceKind}` : effect.kind;
 		if (kinds.has(key) || effect.kind === "ancestor" && effect.roomId === effect.childRoomId) throw Error("Conflicting retirement cleanup targets");
+		if (effect.kind === "ancestor" && (effect.provenance.hostId !== record.hostId || effect.provenance.creationKey !== effect.creationKey ||
+			effect.provenance.kind !== (effect.spaceKind === "checkout_space" ? "worktree_space" : "project_space"))) throw Error("Retirement ancestor ownership changed");
 		kinds.add(key);
 	}
 	return structuredClone(record);
@@ -61,6 +64,9 @@ export function parseRetirementRecord(value: unknown): RetirementRecord {
 export class RetirementStore {
 	private readonly records = new Map<string, RetirementRecord>();
 	private readonly creationKeys = new Map<string, string>();
+	private readonly sizes = new Map<string, number>();
+	private totalBytes = 0;
+	private pendingCount = 0;
 	private work: Promise<void> = Promise.resolve();
 	private loaded = false;
 	private loading?: Promise<void>;
@@ -84,11 +90,14 @@ export class RetirementStore {
 			try {
 				const info = await file.stat();
 				if (!info.isFile() || info.size > 16384 || (info.mode & 0o077) !== 0 || process.getuid?.() !== undefined && info.uid !== process.getuid!()) throw Error("Retirement file is not private bounded state");
+				if (this.totalBytes + info.size > 128 * 1024 * 1024) throw Error("Retirement storage exceeds aggregate bound");
 				const bytes = Buffer.alloc(16385); let size = 0;
 				while (size < bytes.length) { const result = await file.read(bytes, size, bytes.length - size, null); if (!result.bytesRead) break; size += result.bytesRead; }
-				if (size > 16384) throw Error("Retirement file exceeds bounds");
+				if (size > 16384 || this.totalBytes + size > 128 * 1024 * 1024) throw Error("Retirement file exceeds bounds");
 				const record = parseRetirementRecord(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, size))));
 				if (record.hostId !== this.hostId || name !== `${record.conversationId}.json` || this.creationKeys.has(record.creationKey)) throw Error("Retirement owner or creation identity conflicts");
+				if (record.cleanup && ++this.pendingCount > 4096) throw Error("Pending retirement capacity exceeded");
+				this.sizes.set(record.conversationId, size); this.totalBytes += size;
 				this.records.set(record.conversationId, record); this.creationKeys.set(record.creationKey, record.conversationId);
 			} finally { await file.close(); }
 		}
@@ -109,7 +118,7 @@ export class RetirementStore {
 				return structuredClone(saved); // Never replace frozen cleanup with newer caller observations.
 			}
 			if (this.creationKeys.has(record.creationKey)) throw Error("Retired creation key cannot be reassigned");
-			if (this.records.size >= 100000) throw Error("Retirement capacity reached");
+			if (this.records.size >= 100000 || this.pendingCount >= 4096) throw Error("Retirement capacity reached");
 			if (!record.cleanup || record.cleanup.some((effect) => effect.phase !== "pending")) throw Error("New retirement cleanup must be pending");
 			await this.persist(record); return structuredClone(record);
 		});
@@ -132,8 +141,13 @@ export class RetirementStore {
 		const result = this.work.then(() => { this.assertReady(); return operation(); }); this.work = result.then(() => undefined, () => undefined); return result;
 	}
 	private async persist(record: RetirementRecord): Promise<void> {
+		const size = Buffer.byteLength(`${JSON.stringify(record, null, 2)}\n`);
+		const bytes = this.totalBytes - (this.sizes.get(record.conversationId) ?? 0) + size;
+		if (size > 16384 || bytes > 128 * 1024 * 1024) throw Error("Retirement storage capacity reached");
 		try { await new AtomicJsonFile(join(this.directory, `${record.conversationId}.json`), parseRetirementRecord).write(record); }
 		catch (error) { this.poisoned = true; throw error; }
+		this.pendingCount += Number(Boolean(record.cleanup)) - Number(Boolean(this.records.get(record.conversationId)?.cleanup));
+		this.sizes.set(record.conversationId, size); this.totalBytes = bytes;
 		this.records.set(record.conversationId, structuredClone(record)); this.creationKeys.set(record.creationKey, record.conversationId);
 	}
 }
