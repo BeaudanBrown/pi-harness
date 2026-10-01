@@ -83,7 +83,7 @@ const readOperations = new Set<HostAction["operation"]>([
 	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "conversation.delete.preview",
 	"space.reconcile.preview", "space.cleanup.preview",
 ]);
-export function isHostMutation(action: HostAction): boolean { return !readOperations.has(action.operation); }
+export function isHostMutation(action: Pick<HostAction, "operation">): boolean { return !readOperations.has(action.operation); }
 export function requiresModelApproval(action: HostAction): boolean { return isHostMutation(action); }
 
 // protectedConversationId is resolved by the host, never supplied by the model.

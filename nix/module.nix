@@ -70,6 +70,12 @@ let
   engineeringProfile = profileDocument.profiles."engineering-full" or { extensions = [ ]; skills = [ ]; prompts = [ ]; themes = [ ]; };
   localProfile = profileDocument.profiles."pi-local" or { tools = [ ]; };
   managedLocalModelTools = builtins.toJSON localProfile.tools;
+  hostActionDefaults = builtins.fromJSON (builtins.readFile ../config/agent/managed-host-policy.json);
+  hostActionPolicy = pkgs.writeText "pi-managed-host-action-policy.json" (builtins.toJSON {
+    inherit (hostActionDefaults) version;
+    actions = lib.mapAttrs (name: policy: policy // (lib.filterAttrs (_: value: value != null)
+      (cfg.managedSessions.actionPolicyOverrides.${name} or { }))) hostActionDefaults.actions;
+  });
   managedVariant = profileDocument.variants."managed-project" or { excludeExtensions = [ ]; excludeSkills = [ ]; excludePrompts = [ ]; };
   fragments = import ./launcher-fragments.nix { inherit lib; };
   without = values: excluded: builtins.filter (name: !(builtins.elem name excluded)) values;
@@ -521,6 +527,16 @@ in
         description = "Exact Matrix service-account MXIDs ignored for managed-session input; the relay bot is always ignored separately.";
       };
       hostId = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
+      actionPolicyOverrides = lib.mkOption {
+        type = lib.types.attrsOf (lib.types.submodule {
+          options = {
+            human = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "direct" "confirmed" "approval" "deny" ]); default = null; };
+            model = lib.mkOption { type = lib.types.nullOr (lib.types.enum [ "direct" "approval" "deny" ]); default = null; };
+          };
+        });
+        default = { };
+        description = "Deployment-time policy overrides for known host actions. Model mutations always require approval (or denial); protocol confirmation and coordinator protection cannot be removed. No runtime policy editor.";
+      };
       botIsAdmin = lib.mkOption {
         type = lib.types.bool;
         default = false;
@@ -654,6 +670,14 @@ in
         message = "services.pi-harness.managedSessions.enable requires user, relayPackage, environmentFile, Matrix identities, hostId, launcherPackage, named workspaceRoots, managed adapter/model-policy extensions, and a non-empty pi-local tool profile.";
       }
       {
+        assertion = !managedSessionsEnabled || lib.all (name:
+          builtins.hasAttr name hostActionDefaults.actions
+          && (cfg.managedSessions.actionPolicyOverrides.${name}.model != "direct" || hostActionDefaults.actions.${name}.model == "direct")
+          && (cfg.managedSessions.actionPolicyOverrides.${name}.human != "confirmed" || hostActionDefaults.actions.${name}.human == "confirmed")
+        ) (builtins.attrNames cfg.managedSessions.actionPolicyOverrides);
+        message = "Managed host policy overrides must name known actions and cannot bypass model approval or invent confirmation fields.";
+      }
+      {
         assertion = !managedSessionsEnabled || !cfg.managedSessions.botIsAdmin;
         message = "services.pi-harness managed-session bots must be non-admin.";
       }
@@ -691,6 +715,7 @@ in
         PI_MANAGED_RELAY_BUILD = toString managedRelayPackage;
         PI_MANAGED_PROJECT_RUNTIME_ID = builtins.hashString "sha256" "${managedPiDispatch}/bin/pi";
         PI_MANAGED_SESSIONS_HOST_ID = nonNullString cfg.managedSessions.hostId;
+        PI_MANAGED_HOST_ACTION_POLICY = toString hostActionPolicy;
         PI_MANAGED_SESSIONS_WORKSPACE_ROOTS = builtins.toJSON cfg.managedSessions.workspaceRoots;
         PI_MANAGED_COORDINATOR_CONCEPT = cfg.managedSessions.coordinator.concept;
         PI_MANAGED_COORDINATOR_LAUNCHER = "${managedLauncherPackage}/bin/tmux_project";

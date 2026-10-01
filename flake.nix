@@ -362,8 +362,21 @@
         managedSessionPiWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 0;
         managedSessionStatusWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 1;
         managedSessionCoordinatorPi = builtins.elemAt managedSessionService.path 1;
+        managedPolicyTest = overrides: managedSessionModuleTest.extendModules {
+          modules = [ { services.pi-harness.managedSessions.actionPolicyOverrides = overrides; } ];
+        };
+        restrictivePolicyTest = managedPolicyTest { "conversation.stop" = { human = "deny"; model = "deny"; }; };
         managedSessionModuleReport = pkgs.writeText "pi-harness-managed-session-module-test.json" (builtins.toJSON {
           assertions = map (item: item.assertion) managedSessionModuleTest.config.assertions;
+          policyOverrideAssertions = lib.mapAttrs (_: overrides:
+            lib.all (item: item.assertion) (managedPolicyTest overrides).config.assertions
+          ) {
+            restrictive = { "conversation.stop" = { human = "deny"; model = "deny"; }; };
+            modelBypass = { "conversation.open".model = "direct"; };
+            unknown = { "unknown.action".human = "deny"; };
+            invalidConfirmation = { "host.status".human = "confirmed"; };
+          };
+          restrictivePolicyFile = restrictivePolicyTest.config.systemd.user.services.pi-managed-session-relay.environment.PI_MANAGED_HOST_ACTION_POLICY;
           relayUserLingers = managedSessionModuleTest.config.users.users.operator.linger;
           relayRestartIfChanged = managedSessionService.restartIfChanged;
           relayStopIfChanged = managedSessionService.stopIfChanged;

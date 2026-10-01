@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { readFileSync } from "node:fs";
+import { HostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
 import {
 	APPROVAL_LIFETIME_MS, HOST_ERROR_EXITS, HostActionSchema, HostResultSchemas,
 	parseHostAction, parseHostRequest, parseAccountAction, parseAccountAck,
@@ -47,6 +49,36 @@ test("every specified operation has an exact fixture and model mutation classifi
 	}
 	assert.equal(APPROVAL_LIFETIME_MS, 900_000);
 	assert.equal(HOST_ERROR_EXITS.upgrade_required, 7);
+});
+
+test("packaged host policy classifies all actions without weakening model approval or coordinator protection", () => {
+	const document = JSON.parse(readFileSync("config/agent/managed-host-policy.json", "utf8"));
+	assert.deepEqual(Object.keys(document.actions).sort(), Object.keys(HostResultSchemas).sort());
+	const policy = new HostPolicy(document); const protectedId = `conv_${"b".repeat(32)}`;
+	for (const [action, approval] of fixtures) {
+		assert.equal(policy.decide({ version: "1.0.0", action, actor: { kind: "human_local", requestId: "human-1" } }, protectedId), "direct");
+		assert.equal(policy.decide({ version: "1.0.0", action, actor: { kind: "model", requestId: "model-1", conversationId,
+			generationId: id("generation"), runId: "run-1", toolCallId: "call-1", presentation: "local_dialog" } }, protectedId), approval ? "approval" : "direct");
+	}
+	const stop = { version: "1.0.0", action: { operation: "conversation.stop", conversationId }, actor: { kind: "human_local", requestId: "stop" } };
+	assert.equal(policy.decide(stop, conversationId), "forbidden");
+	document.actions["conversation.stop"].human = "deny";
+	assert.equal(policy.decide(stop, protectedId), "direct", "policy is immutable after construction");
+	assert.equal(new HostPolicy(document).decide(stop, protectedId), "forbidden");
+	delete document.actions["conversation.stop"];
+	assert.equal(new HostPolicy(document).decide(stop, protectedId), "approval", "missing classification cannot grant a valid mutation");
+	assert.throws(() => policy.decide({ ...stop, action: { operation: "conversation.arbitrary" } }, protectedId));
+});
+
+test("deployment policy rejects unknown fields/actions and model mutation bypasses", () => {
+	for (const value of [
+		{ version: "2.0.0", actions: {} },
+		{ version: "1.0.0", actions: {}, runtimeEditor: true },
+		{ version: "1.0.0", actions: { arbitrary: { human: "direct", model: "direct" } } },
+		{ version: "1.0.0", actions: { "conversation.open": { human: "direct", model: "direct" } } },
+		{ version: "1.0.0", actions: { "host.status": { human: "confirmed", model: "direct" } } },
+		{ version: "1.0.0", actions: { "host.status": { human: "direct", model: "direct", argv: [] } } },
+	]) assert.throws(() => new HostPolicy(value));
 });
 
 test("unknown operations, ambiguous IDs, forged actor fields, bounds and paths fail closed", () => {

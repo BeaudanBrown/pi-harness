@@ -19,6 +19,7 @@ stdenv.mkDerivation {
     runHook preBuild
     mkdir -p source/managed-sessions
     cp config/agent/extensions/managed-sessions/contracts.ts source/managed-sessions/contracts.ts
+    cp config/agent/extensions/managed-sessions/live-workspace-contracts.ts source/managed-sessions/live-workspace-contracts.ts
     cp config/agent/extensions/managed-sessions/managed-provenance.ts source/managed-sessions/managed-provenance.ts
     cp config/agent/extensions/managed-sessions/v2-contracts.ts source/managed-sessions/v2-contracts.ts
     cp config/agent/extensions/managed-sessions/checkpoint.ts source/managed-sessions/checkpoint.ts
@@ -56,7 +57,8 @@ stdenv.mkDerivation {
 
   installPhase = ''
     runHook preInstall
-    mkdir -p "$out/lib/node_modules" "$out/libexec" "$out/bin"
+    mkdir -p "$out/lib/node_modules" "$out/libexec" "$out/bin" "$out/share/pi-harness"
+    cp config/agent/managed-host-policy.json "$out/share/pi-harness/managed-host-policy.json"
     cp -R lib/managed-sessions "$out/lib/managed-sessions"
     cp -R lib/matrix-shared "$out/lib/matrix-shared"
     cp -R ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$out/lib/node_modules/typebox"

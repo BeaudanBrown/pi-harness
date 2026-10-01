@@ -257,3 +257,22 @@ schema URL still emit unrelated editor diagnostics. Account readiness, actual
 phone delivery and the remaining epic frontends are not claimed here.
 
 No push, deployment, live migration or phone-delivery claim is made.
+
+## #107 — host controls (in progress)
+
+The first chunk packages the complete action policy in
+`config/agent/managed-host-policy.json`, adds immutable typed policy evaluation,
+and generates deployment-time Nix overrides. Both Nix assertions and runtime
+validation reject unknown actions, model mutation approval bypasses and invented
+confirmation fields. Protected coordinator operations remain forbidden; valid
+unclassified actions require approval, while invalid requests remain invalid.
+Protocol confirmation fields cannot be removed by policy overrides.
+
+All declared operations have policy fixtures. Mutation, override, immutability,
+unknown-action and coordinator-protection cases pass, along with actual Nix
+positive/negative override assertions and generated policy-file checks.
+`managed-session-tests`, `module-contracts` and `source-contracts` pass; affected
+LSP diagnostics are clean. This chunk has no external effects or runtime policy
+editor. It does not yet activate a dispatcher, control socket or CLI; their
+integration, durable execution dependencies and full issue verification remain
+open. Policy configuration is a startup snapshot, not hot reload.

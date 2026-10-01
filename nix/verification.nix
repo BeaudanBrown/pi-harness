@@ -311,6 +311,7 @@ let
     ${prepareSource}
     python3 -m unittest discover -s tests -p test_runtime_pin.py -v
     jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4
+      and .policyOverrideAssertions == {"restrictive":true,"modelBypass":false,"unknown":false,"invalidConfirmation":false}
       and (.hasGeneralEnvironmentFile | not) and (.hasPrivateTmp | not)
       and (.relayRestartIfChanged | not) and (.relayStopIfChanged | not)
       and (.rolloutAfter | index("pi-managed-session-relay.service") != null)
@@ -318,6 +319,9 @@ let
       and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"
       and (.serviceEnvironment.PI_MATRIX_IGNORED_SENDER_USER_IDS | fromjson) == ["@signalbot:example.com", "@facebookbot:example.com"]' \
       ${managedSessionModuleReport} >/dev/null
+    policy_file=$(jq -r .restrictivePolicyFile ${managedSessionModuleReport})
+    jq -e '.version == "1.0.0" and .actions["conversation.stop"] == {"human":"deny","model":"deny"}
+      and .actions["conversation.open"].model == "approval" and .actions["host.status"].human == "direct"' "$policy_file" >/dev/null
     test -x ${managedSessionPiWrapper}/bin/pi
     test -x ${managedSessionStatusWrapper}/bin/pi-managed-session-status
     test -x ${managedSessionCoordinatorPi}/bin/pi
