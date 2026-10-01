@@ -778,9 +778,10 @@ test("checkpoint and notice projection retry stable Matrix transactions without 
 	const deliveryId = deriveDeliveryId(manifest.conversationId, "$origin");
 	await registry.recordAcceptedInput(manifest.conversationId, { deliveryId, matrixEventId: "$origin", kind: "prompt", body: "question", status: "accepted" });
 	await registry.acknowledgeInput(manifest.conversationId, deliveryId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "origin-user"));
-	const transactions: string[] = []; let failAfterAcceptance = true;
-	const matrix = new ManagedMatrixClient(config, async (input) => {
+	const transactions: string[] = []; const contents: any[] = []; let failAfterAcceptance = true;
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname; if (!path.includes("/send/m.room.message/")) return Response.json({ event_id: "$ok" });
+		contents.push(JSON.parse(String(init?.body)));
 		transactions.push(path.split("/").at(-1)!); if (failAfterAcceptance) { failAfterAcceptance = false; throw new Error("acceptance crash"); }
 		return Response.json({ event_id: "$sent" });
 	}, [manifest.roomId], { maxAttempts: 1 });
@@ -799,4 +800,13 @@ test("checkpoint and notice projection retry stable Matrix transactions without 
 	const entryId = deriveTranscriptEntryId(manifest.piSessionId, `checkpoint:checkpoint-${"a".repeat(32)}`);
 	assert.equal(registry.snapshot().conversations[0]?.projection.find((item) => item.entryId === entryId)?.status, "projected");
 	assert.equal(registry.pendingInputs(manifest.conversationId)[0]?.status, "completed", "checkpoint completion is durable before adapter acknowledgement");
+	assert.deepEqual(contents[0], contents[1], "lost checkpoint acknowledgement retains exact notification payload");
+	assert.deepEqual(contents[0]["m.mentions"], { room: true });
+	await projector.projectNotice(manifest.conversationId, "housekeeping", "Status refreshed");
+	assert.deepEqual(contents.at(-1)["lol.bepis.pi.notification"], { version: 1, disposition: "silent" });
+	await projector.projectNotice(manifest.conversationId, "terminal-failure", "Operator intervention required", "notify");
+	assert.deepEqual(contents.at(-1)["m.mentions"], { room: true });
+	const sentCount = contents.length;
+	await projector.projectNotice(manifest.conversationId, "terminal-failure", "Operator intervention required", "silent");
+	assert.equal(contents.length, sentCount, "a later retry cannot reinterpret a frozen attention event");
 });

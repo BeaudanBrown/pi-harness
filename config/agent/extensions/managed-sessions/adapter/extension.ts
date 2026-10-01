@@ -32,6 +32,8 @@ import {
 	DELIVERY_ENTRY_TYPE,
 	PROJECTION_DIAGNOSTIC_ENTRY_TYPE,
 	PROJECTION_ENTRY_TYPE,
+	PROJECTION_RECOVERY_ENTRY_TYPE,
+	historicalTranscriptKeys,
 	UNBOUND_ENTRY_TYPE,
 	type AdapterRole,
 	type DeliveryMarker,
@@ -263,6 +265,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let projectionRequestedContext: ExtensionContext | undefined;
 		let projectionRetryTimer: NodeJS.Timeout | undefined;
 		let projectionRetryAttempt = 0;
+		let projectionRecovering = false;
 		const aloopLifecycleEvents = new Map<string, AloopLifecycleEvent>();
 		const projectedAloopLifecycle = new Set<string>();
 		let aloopProjectionWork: Promise<void> = Promise.resolve();
@@ -665,12 +668,24 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			});
 		});
 
+		function recordProjectionRecovery(ctx: ExtensionContext): void {
+			if (!binding || !client?.supports("notification-disposition-v1") || ctx.sessionManager.getSessionId() !== binding.sessionId) return;
+			const branch = ctx.sessionManager.getBranch();
+			const historical = historicalTranscriptKeys(branch, binding);
+			const pending = planTranscriptBackfill(branch, binding, deliveries, projections, client.supports("commentary-v1")).entries;
+			const last = pending.filter((entry) => !projections.has(entry.entryId) && !historical.has(entry.sourcePiEntryKey ?? entry.piEntryKey)).at(-1);
+			if (!last) return;
+			appendMarker(pi, ctx, PROJECTION_RECOVERY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION,
+				sessionId: binding.sessionId, bindingBoundaryEntryId: binding.bindingBoundaryEntryId, cutoffEntryKey: last.sourcePiEntryKey ?? last.piEntryKey });
+		}
+
 		async function projectEligibleEntries(ctx: ExtensionContext, beforeFinalOnly = false): Promise<void> {
 			if (!binding || !client?.connected) return;
 			const projectionBinding = binding;
 			const projectionClient = client;
 			const branch = ctx.sessionManager.getBranch();
 			const privateAloopEntries = aloopPrivateAssistantEntryKeys(branch);
+			const historical = historicalTranscriptKeys(branch, projectionBinding);
 			const plan = planTranscriptBackfill(branch, projectionBinding, deliveries, projections, projectionClient.supports("commentary-v1"));
 			if (plan.excessiveCount !== undefined) {
 				if (!hasBackfillDiagnostic(ctx.sessionManager.getBranch(), projectionBinding, plan.excessiveCount)) {
@@ -691,7 +706,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (entry.kind === "assistant_final" && (beforeFinalOnly || closingActivities.size)) break;
 				if (!projectionClient.connected || binding !== projectionBinding || client !== projectionClient) return;
 				let marker = projections.get(entry.entryId);
-				if (!transcriptOfferWithinFrame(entry, projectionBinding)) {
+				if (!transcriptOfferWithinFrame({ ...entry, ...(projectionClient.supports("notification-disposition-v1") ? { disposition: "notify" as const } : {}) }, projectionBinding)) {
 					marker = { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
 						kind: entry.kind, status: "blocked", reason: "oversized" };
 					recordProjectionMarker(ctx, marker);
@@ -700,12 +715,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}
 				if (!marker) {
 					marker = { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
-						kind: entry.kind, status: "offered" };
+						kind: entry.kind, status: "offered",
+						...(projectionClient.supports("notification-disposition-v1") ? {
+							disposition: entry.kind === "assistant_final" && !historical.has(entry.sourcePiEntryKey ?? entry.piEntryKey) ? "notify" as const : "silent" as const,
+						} : {}) };
 					recordProjectionMarker(ctx, marker);
 				}
 				try {
 					await projectionClient.offerTranscript({ entryId: entry.entryId, piEntryKey: entry.piEntryKey,
-						kind: entry.kind, body: entry.body, piSessionId: projectionBinding.sessionId });
+						kind: entry.kind, body: entry.body, piSessionId: projectionBinding.sessionId,
+						...(marker.disposition === undefined ? {} : { disposition: marker.disposition }) });
 				} catch (error) {
 					if (error instanceof ManagedAdapterError && error.code === "capacity_reached") {
 						const blocked: ProjectionMarker = { ...marker, status: "blocked", reason: "backfill_limit" };
@@ -738,6 +757,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				throw new ManagedAdapterError("Projection retry delay must be a positive bounded integer");
 			}
 			projectionRetryAttempt += 1;
+			projectionRecovering = true;
 			projectionRetryTimer = setTimeout(() => {
 				projectionRetryTimer = undefined;
 				queueProjection(ctx);
@@ -753,12 +773,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					const requestedContext = projectionRequestedContext;
 					projectionRequestedContext = undefined;
 					try {
+						if (projectionRecovering) recordProjectionRecovery(requestedContext);
 						// A slow/failed lifecycle notice must not hold a newly persisted
 						// manual user prompt behind unrelated Matrix work.
 						await projectEligibleEntries(requestedContext, true);
 						await projectAloopLifecycle(requestedContext);
 						await finishFinalizations([...closingActivities]);
 						await projectEligibleEntries(requestedContext);
+						if (!projectionRetryTimer) projectionRecovering = false;
 					}
 					catch (error) { notify(requestedContext, error instanceof Error ? error.message : "Managed transcript projection failed", "error"); scheduleProjectionRetry(requestedContext); }
 				}
@@ -1079,7 +1101,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
-				requestedCapabilities: ["commentary-v1"],
+				requestedCapabilities: ["commentary-v1", "notification-disposition-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				onEnvelope: handleEnvelope, onMedia: (image) => handleMedia(image, ctx),
 				onDisconnect: () => {
@@ -1110,6 +1132,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			// Attachment establishes transport ownership. Recovery failures below are
 			// application-state failures and must not create reconnect storms.
 			if (next.placement) config.placement = next.placement;
+			projectionRecovering = true;
+			recordProjectionRecovery(ctx);
+			projectionRecovering = false;
 			setCheckpointActive(true);
 			reconnectAttempt = 0;
 			try {

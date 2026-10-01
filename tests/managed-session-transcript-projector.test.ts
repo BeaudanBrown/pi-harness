@@ -115,6 +115,29 @@ test("commentary requests silence and retries identical chunk payloads after a l
 	assert.equal(sends.length, count);
 });
 
+test("final notification disposition is frozen before send and only its first chunk notifies", async () => {
+	const { root, store, registry } = await registryFixture();
+	const sends: Array<{ url: string; body: string }> = [];
+	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
+		sends.push({ url: String(input), body: String(init?.body) });
+		return Response.json({ event_id: `$final-${sends.length}` });
+	}, [roomId]);
+	registry.markProjectionChunkSent = async () => { throw new Error("lost final ack"); };
+	const entry = offer("final-notification", "Final answer. ".repeat(900));
+	entry.payload.disposition = "notify";
+	await assert.rejects(() => new TranscriptProjector(registry, matrix).project(entry), /lost final ack/);
+	const restarted = new RelayRegistry(hostId, join(root, "runtime"), store);
+	await restarted.load();
+	await new TranscriptProjector(restarted, matrix).project(entry);
+	assert.deepEqual(sends[0], sends[1], "accepted send is not silenced on retry");
+	assert.deepEqual(JSON.parse(sends[0]!.body)["m.mentions"], { room: true });
+	assert.ok(sends.slice(2).every((item) => JSON.parse(item.body)["lol.bepis.pi.notification"].disposition === "silent"));
+	assert.equal(restarted.snapshot().conversations[0]!.projection[0]!.disposition, "notify");
+	await assert.rejects(() => new TranscriptProjector(restarted, matrix).project({ ...entry, payload: { ...entry.payload, disposition: "silent" } }), /Conflicting transcript projection/);
+	const local = offer("local-notification", "local text", "local_user"); local.payload.disposition = "notify";
+	await assert.rejects(() => new TranscriptProjector(restarted, matrix).project(local), /Only final/);
+});
+
 test("Matrix-origin persisted users map to their operator event without a bot projection", async () => {
 	const { registry } = await registryFixture();
 	const deliveryId = deriveDeliveryId(conversationId, "$operator-event");

@@ -51,12 +51,12 @@ test("notice outbox freezes content and generation identity across failed sends 
 	const path = join(root, "outbox.json"); let attempts = 0;
 	const first = new NoticeOutbox(path, async () => { attempts++; throw Error("429"); }, () => {});
 	await first.load();
-	const notice = { conversationId: "room", sourceId: "reset:completed", piSessionId: "generation-1", roomId: "!room:test", body: "original result" };
+	const notice = { conversationId: "room", sourceId: "reset:completed", piSessionId: "generation-1", roomId: "!room:test", body: "original result", disposition: "notify" as const };
 	await first.enqueue(notice); await until(() => attempts > 0); await first.close();
 	const sent: unknown[] = [];
 	const second = new NoticeOutbox(path, async (value) => { sent.push(value); }, () => {});
 	await second.load();
-	await second.enqueue({ ...notice, piSessionId: "generation-2", body: "changed result" });
+	await second.enqueue({ ...notice, piSessionId: "generation-2", body: "changed result", disposition: "silent" });
 	await until(() => sent.length === 1); await second.close();
 	assert.deepEqual(sent, [{ ...notice, sent: false }]);
 	const third = new NoticeOutbox(path, async () => { throw Error("must not resend completed notice"); }, () => {});

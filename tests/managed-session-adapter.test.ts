@@ -186,6 +186,7 @@ class FakeRelay {
 	beforeActivityAck?: (socket: Socket, envelope: ManagedSessionEnvelope) => Promise<void>;
 	checkpointError?: { code: string; message: string };
 	enableCommentary = false;
+	enableDisposition = false;
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
@@ -254,7 +255,7 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.enableCommentary && envelope.payload.requestedCapabilities ? { capabilities: ["commentary-v1"] } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.enableCommentary && envelope.payload.requestedCapabilities ? { capabilities: ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : [])] } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
 			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
@@ -1051,7 +1052,7 @@ test("closing backlog bounds feedback only and drains without losing frozen fina
 });
 
 test("manual user and completed commentary reach Matrix before settling without input echo or tool leakage", async (t) => {
-	const relay = await FakeRelay.start(); relay.enableCommentary = true; t.after(() => relay.close());
+	const relay = await FakeRelay.start(); relay.enableCommentary = true; relay.enableDisposition = true; t.after(() => relay.close());
 	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
 	let leaf = "binding"; let sequence = 0;
 	const handlers = new Map<string, (...args: any[]) => any>();
@@ -1086,12 +1087,21 @@ test("manual user and completed commentary reach Matrix before settling without 
 	const commentary = relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "assistant_commentary");
 	assert.deepEqual(commentary.map((frame) => frame.payload.body), ["Inspecting now.", "Found the cause."]);
 	assert.doesNotMatch(JSON.stringify(commentary), /private|reasoning|arguments/);
+	assert.ok(commentary.every((frame) => frame.payload.disposition === "silent"));
 	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "matrix-prompt", conversationId,
 		role: "relay", type: "input.deliver", payload: { deliveryId: deriveDeliveryId(conversationId, "$matrix-early"), matrixEventId: "$matrix-early", kind: "prompt", body: "/matrix-note" } });
 	await activityWait(() => relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "persisted"));
 	assert.equal(relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "local_user").length, 1,
 		"Matrix-origin prompt is not echoed by early projection");
+	branch.push({ type: "message", id: "live-final", parentId: leaf, message: { role: "assistant", stopReason: "stop", content: "Live final" } }); leaf = "live-final";
 	await handlers.get("agent_settled")!({}, ctx);
+	await activityWait(() => relay.frames.some((frame) => frame.type === "transcript.offer" && frame.payload.body === "Live final"));
+	assert.equal(relay.frames.find((frame) => frame.type === "transcript.offer" && frame.payload.body === "Live final")!.payload.disposition, "notify");
+	branch.push({ type: "message", id: "historical-final", parentId: leaf, message: { role: "assistant", stopReason: "stop", content: "Historical final" } }); leaf = "historical-final";
+	relay.disconnect();
+	await activityWait(() => relay.frames.some((frame) => frame.type === "transcript.offer" && frame.payload.body === "Historical final"));
+	assert.equal(relay.frames.find((frame) => frame.type === "transcript.offer" && frame.payload.body === "Historical final")!.payload.disposition, "silent");
+	assert.ok(branch.some((entry) => entry.customType === "managed-session.projection-recovery" && entry.data.cutoffEntryKey === "historical-final"), "catch-up cutoff is durable before offering recovered content");
 	assert.equal(relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "local_user").length, 1);
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });

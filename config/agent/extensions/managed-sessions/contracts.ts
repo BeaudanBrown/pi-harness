@@ -150,7 +150,8 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
-const projectionCapabilities = Type.Array(Type.Literal("commentary-v1"), { maxItems: 1, uniqueItems: true });
+const projectionCapabilities = Type.Array(Type.Union([Type.Literal("commentary-v1"), Type.Literal("notification-disposition-v1")]), { maxItems: 2, uniqueItems: true });
+const notificationDisposition = Type.Union([Type.Literal("silent"), Type.Literal("notify")]);
 const attachmentFields = {
 	requestedCapabilities: Type.Optional(projectionCapabilities),
 	runtimeId: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
@@ -211,6 +212,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		piSessionId: identifier,
 		piEntryKey: identifier,
 		kind: Type.Union([Type.Literal("local_user"), Type.Literal("assistant_final"), Type.Literal("assistant_commentary")]),
+		disposition: Type.Optional(notificationDisposition),
 		body: boundedString(MAX_TRANSCRIPT_TEXT_LENGTH),
 	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "activity.update", {
@@ -560,6 +562,7 @@ const artifactExport = strictObject({
 });
 const projectionEntry = strictObject({
 	entryId: TranscriptEntryIdSchema,
+	disposition: Type.Optional(notificationDisposition),
 	kind: Type.Union([
 		Type.Literal("matrix_user"),
 		Type.Literal("local_user"),
@@ -699,6 +702,7 @@ export interface HostRuntimeState {
 			kind: string;
 			status: string;
 			contentHash?: string;
+			disposition?: "silent" | "notify";
 			originDeliveryId?: string;
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;

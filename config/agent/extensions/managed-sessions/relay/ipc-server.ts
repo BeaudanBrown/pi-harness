@@ -224,6 +224,9 @@ export class ManagedSessionIpcServer {
 				if (envelope.type === "transcript.offer" && envelope.payload.kind === "assistant_commentary" && !state.capabilities?.includes("commentary-v1")) {
 					throw new RelayRegistryError("permission_denied", "Commentary projection was not negotiated");
 				}
+				if (envelope.type === "transcript.offer" && envelope.payload.disposition !== undefined && !state.capabilities?.includes("notification-disposition-v1")) {
+					throw new RelayRegistryError("permission_denied", "Notification disposition was not negotiated");
+				}
 				if (envelope.type === "attachment.detach") {
 					const payload = envelope.payload as { attachmentId: string; reason: "shutdown" | "session_change" | "stop" | "bridge_delete" };
 					state.detachReason = payload.reason;

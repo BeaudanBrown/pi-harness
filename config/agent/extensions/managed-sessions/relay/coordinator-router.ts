@@ -184,7 +184,7 @@ export class CoordinatorRouter {
 		private readonly matrix: ManagedMatrixClient,
 		private readonly server: ManagedSessionIpcServer,
 		private readonly launch: (manifest: ConversationManifest) => Promise<void>,
-		private readonly notifyLaunchFailure: (sourceId: string, manifest: ConversationManifest) => Promise<void> = async () => undefined,
+		private readonly notifyLaunchFailure: (sourceId: string, manifest: ConversationManifest, error: unknown) => Promise<void> = async () => undefined,
 		private readonly projectNotice: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void> = async () => undefined,
 		private readonly diagnostic: (message: string) => void = () => undefined,
 		private readonly reconcileControlPollPublications: (conversationId?: string) => Promise<void> = async () => undefined,
@@ -550,7 +550,7 @@ export class CoordinatorRouter {
 					if (queuedAbort) {
 						await this.registry.cancelPendingInputs(manifest.conversationId);
 						await this.projectNotice(queuedAbort.matrixEventId, manifest, "No active run to abort; managed conversation remains dormant.").catch(() => undefined);
-					} else await this.notifyLaunchFailure(pending.deliveryId, manifest).catch(() => undefined);
+					} else await this.notifyLaunchFailure(pending.deliveryId, manifest, error).catch(() => undefined);
 				}
 			})().finally(() => { this.launching.delete(manifest.conversationId); });
 			this.launching.set(manifest.conversationId, launch);

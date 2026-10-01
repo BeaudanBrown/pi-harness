@@ -407,7 +407,7 @@ export class RelayRegistry {
 			const existing = conversation.projection.find((candidate) => candidate.entryId === projection.entryId);
 			if (existing) {
 				if (existing.kind !== projection.kind || existing.contentHash !== projection.contentHash || existing.originDeliveryId !== projection.originDeliveryId ||
-					existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
+					existing.disposition !== projection.disposition || existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
 						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId)) {
 					throw new RelayRegistryError("invalid_state", "Conflicting transcript projection content");
 				}

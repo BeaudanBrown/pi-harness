@@ -349,7 +349,7 @@ The new relay accepts the established baseline attach envelope unchanged. A new
 adapter explicitly requests a bounded subset of implemented live-workspace
 capabilities in its attach request; only a requesting adapter receives the
 corresponding accepted-capabilities field or new messages. The first implemented
-capability is `commentary-v1`. Legacy attach requests and responses remain
+capabilities are `commentary-v1` and `notification-disposition-v1`. Legacy attach requests and responses remain
 unchanged. New adapters require relay-first deployment; an older strict relay
 cannot accept their new request fields.
 Legacy attachments keep input/receipts/final projection and existing process

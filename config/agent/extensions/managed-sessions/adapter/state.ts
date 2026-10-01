@@ -14,6 +14,7 @@ export const BINDING_BOUNDARY_ENTRY_TYPE = "managed-session.binding-boundary";
 export const UNBOUND_ENTRY_TYPE = "managed-session.unbound";
 export const DELIVERY_ENTRY_TYPE = "managed-session.delivery";
 export const PROJECTION_ENTRY_TYPE = "managed-session.projection";
+export const PROJECTION_RECOVERY_ENTRY_TYPE = "managed-session.projection-recovery";
 export const PROJECTION_DIAGNOSTIC_ENTRY_TYPE = "managed-session.projection-diagnostic";
 export const CHECKPOINT_ENTRY_TYPE = "managed-session.checkpoint";
 
@@ -42,6 +43,7 @@ export interface ProjectionMarker {
 	piEntryKey: string;
 	kind: "local_user" | "assistant_final" | "assistant_commentary";
 	status: "offered" | "projected" | "blocked";
+	disposition?: "silent" | "notify";
 	reason?: "oversized" | "backfill_limit" | "aloop_private";
 }
 
@@ -262,16 +264,31 @@ export function restoreProjections(entries: readonly unknown[]): Map<string, Pro
 			!/^entry_[a-f0-9]{32}$/.test(value.entryId) || typeof value.piEntryKey !== "string" ||
 			(value.kind !== "local_user" && value.kind !== "assistant_final" && value.kind !== "assistant_commentary") ||
 			!(["offered", "projected", "blocked"] as unknown[]).includes(value.status) ||
+			(value.disposition !== undefined && value.disposition !== "silent" && value.disposition !== "notify") ||
 			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit" && value.reason !== "aloop_private")) continue;
 		const marker = value as unknown as ProjectionMarker;
 		const previous = projections.get(marker.entryId);
-		if (previous && (previous.piEntryKey !== marker.piEntryKey || previous.kind !== marker.kind ||
+		if (previous && (previous.piEntryKey !== marker.piEntryKey || previous.kind !== marker.kind || previous.disposition !== marker.disposition ||
 			(previous.status === "projected" && marker.status !== "projected"))) {
 			throw new Error(`Conflicting managed-session projection history ${marker.entryId}`);
 		}
 		projections.set(marker.entryId, marker);
 	}
 	return projections;
+}
+
+/** Durable catch-up cutoff, scoped to this exact binding and current branch. */
+export function historicalTranscriptKeys(entries: readonly unknown[], binding: SessionBinding): Set<string> {
+	let cutoff = -1;
+	for (let index = 0; index < entries.length; index += 1) {
+		const marker = customData(entries[index], PROJECTION_RECOVERY_ENTRY_TYPE)?.data;
+		if (!marker || marker.sessionId !== binding.sessionId || marker.bindingBoundaryEntryId !== binding.bindingBoundaryEntryId) continue;
+		if (marker.version !== MANAGED_SESSION_STATE_VERSION || typeof marker.cutoffEntryKey !== "string") throw new Error("Malformed projection recovery watermark");
+		const target = entries.findIndex((entry) => typeof entry === "object" && entry !== null && (entry as { id?: unknown }).id === marker.cutoffEntryKey);
+		if (target < 0 || target >= index) throw new Error("Projection recovery watermark is outside its prior branch");
+		cutoff = Math.max(cutoff, target);
+	}
+	return new Set(entries.slice(0, cutoff + 1).flatMap((entry) => typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string" ? [(entry as { id: string }).id] : []));
 }
 
 function textContent(content: unknown, allowThinking: boolean): string | undefined {
@@ -379,14 +396,15 @@ export function hasProjectionCapacityDiagnostic(entries: readonly unknown[], bin
 	});
 }
 
-export function transcriptOfferWithinFrame(entry: EligibleTranscriptEntry, binding: SessionBinding): boolean {
+export function transcriptOfferWithinFrame(entry: EligibleTranscriptEntry & { disposition?: "silent" | "notify" }, binding: SessionBinding): boolean {
 	const envelope = {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: "transcript-00000000-0000-4000-8000-000000000000",
 		conversationId: binding.conversationId,
 		role: binding.role,
 		type: "transcript.offer",
-		payload: { entryId: entry.entryId, piEntryKey: entry.piEntryKey, kind: entry.kind, body: entry.body, piSessionId: binding.sessionId },
+		payload: { entryId: entry.entryId, piEntryKey: entry.piEntryKey, kind: entry.kind, body: entry.body, piSessionId: binding.sessionId,
+			...(entry.disposition === undefined ? {} : { disposition: entry.disposition }) },
 	};
 	return Buffer.byteLength(`${JSON.stringify(envelope)}\n`, "utf8") <= MAX_NDJSON_FRAME_BYTES;
 }

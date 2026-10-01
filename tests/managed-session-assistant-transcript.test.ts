@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { deriveTranscriptEntryId, MANAGED_SESSION_STATE_VERSION } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { planTranscriptBackfill, type SessionBinding, type ProjectionMarker } from "../config/agent/extensions/managed-sessions/adapter/state.js";
+import { historicalTranscriptKeys, PROJECTION_RECOVERY_ENTRY_TYPE, restoreProjections, PROJECTION_ENTRY_TYPE, planTranscriptBackfill, type SessionBinding, type ProjectionMarker } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 import { assistantTranscriptParts, assistantTranscriptSourceKey } from "../config/agent/extensions/managed-sessions/adapter/assistant-transcript.js";
 
 const text = (body: string, phase?: string) => ({ type: "text", text: body, ...(phase ? { textSignature: JSON.stringify({ v: 1, id: "msg_1", phase }) } : {}) });
@@ -52,6 +52,18 @@ test("capable planner splits new text but preserves offered legacy payloads and 
 		[{ entryId: legacy.entryId, piEntryKey: "mixed", kind: "assistant_final", body: "ProgressDone" }]);
 	assert.deepEqual(planTranscriptBackfill(branch, binding, new Map(), new Map([[legacy.entryId, { ...legacy, status: "projected" }]]), true).entries, []);
 	assert.deepEqual(planTranscriptBackfill(branch, binding, new Map(), new Map(), false).entries.map((entry) => entry.body), ["ProgressDone"]);
+});
+
+test("recovery cutoff survives restart and frozen offer disposition cannot change", () => {
+	const binding: SessionBinding = { version: MANAGED_SESSION_STATE_VERSION, conversationId: `conv_${"a".repeat(32)}`, sessionId: "session", concept: "concept", role: "ordinary_adapter", bindingBoundaryEntryId: deriveTranscriptEntryId("session", "boundary") };
+	const watermark = { type: "custom", id: "watermark", customType: PROJECTION_RECOVERY_ENTRY_TYPE, data: { version: MANAGED_SESSION_STATE_VERSION, sessionId: "session", bindingBoundaryEntryId: binding.bindingBoundaryEntryId, cutoffEntryKey: "old-final" } };
+	const branch = [{ id: "boundary" }, { id: "old-final" }, watermark, { id: "new-final" }];
+	assert.deepEqual([...historicalTranscriptKeys(JSON.parse(JSON.stringify(branch)), binding)], ["boundary", "old-final"]);
+	assert.throws(() => historicalTranscriptKeys([watermark, { id: "old-final" }], binding), /outside its prior branch/);
+	const marker = { version: MANAGED_SESSION_STATE_VERSION, entryId: deriveTranscriptEntryId("session", "old-final"), piEntryKey: "old-final", kind: "assistant_final", status: "offered", disposition: "notify" };
+	const entry = { type: "custom", id: "offer", customType: PROJECTION_ENTRY_TYPE, data: marker };
+	assert.equal(restoreProjections([entry]).get(marker.entryId)?.disposition, "notify");
+	assert.throws(() => restoreProjections([entry, { ...entry, id: "rewrite", data: { ...marker, disposition: "silent" } }]), /Conflicting/);
 });
 
 test("partial/failed responses, tool results, internal and unknown content never project", () => {

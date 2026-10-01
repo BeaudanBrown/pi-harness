@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { MatrixError } from "../../matrix-shared/http.js";
 import { resolve } from "node:path";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
@@ -87,7 +88,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await media.initialize(registry.liveMediaBlobIds());
 		const artifactExporter = new ManagedArtifactExporter(spool, registry, matrix, {
 			notice: async (conversationId, uploadId) => eventProjector.projectNotice(conversationId, `${uploadId}:failed`,
-				"Artifact export failed permanently at the media service. Resolve the service error and request a new export; conversation history is preserved."),
+				"Artifact export failed permanently at the media service. Resolve the service error and request a new export; conversation history is preserved.", "notify"),
 		});
 		closeArtifactExporter = () => artifactExporter.close();
 		const controlPollPublisher = new ControlPollPublisher(registry, matrix);
@@ -362,9 +363,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						error instanceof Error ? error.message : "Managed conversation launch failed");
 					throw error;
 				}
-			}, async (sourceId, manifest) => {
-				await eventProjector.projectNotice(manifest.conversationId, `${sourceId}:launch-failed`,
-					"Managed conversation wake failed; queued input remains available for retry.");
+			}, async (sourceId, manifest, error) => {
+				const transient = error instanceof MatrixError && error.retryable;
+				await eventProjector.projectNotice(manifest.conversationId, `${sourceId}:launch-${transient ? "retry" : "failed"}`,
+					"Managed conversation wake failed; queued input remains available for retry.", transient ? "silent" : "notify");
 			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
 			(conversationId) => controlPollPublisher.reconcile(conversationId), (conversationId) => eventProjector!.checkpointPollPublisher.reconcile(conversationId), media,

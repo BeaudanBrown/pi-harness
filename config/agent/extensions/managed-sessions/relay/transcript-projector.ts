@@ -13,6 +13,7 @@ interface TranscriptOffer {
 	piSessionId: string;
 	piEntryKey: string;
 	kind: "local_user" | "assistant_final" | "assistant_commentary";
+	disposition?: "silent" | "notify";
 	body: string;
 }
 
@@ -29,11 +30,13 @@ export class TranscriptProjector {
 			payload.entryId !== deriveTranscriptEntryId(payload.piSessionId, payload.piEntryKey)) {
 			throw new RelayRegistryError("permission_denied", "Transcript entry does not belong to the bound Pi session");
 		}
+		if (payload.kind !== "assistant_final" && payload.disposition === "notify") throw new RelayRegistryError("invalid_state", "Only final transcript text may request attention");
 		const rendered = renderTranscript(payload.kind, payload.body);
 		if (rendered.length === 0) throw new RelayRegistryError("invalid_state", "Empty transcript entries are not projectable");
 		const projection = await this.registry.beginProjection(manifest.conversationId, {
 			entryId: payload.entryId,
 			kind: payload.kind,
+			...(payload.disposition === undefined ? {} : { disposition: payload.disposition }),
 			status: "projecting",
 			contentHash: transcriptContentHash(payload.kind, payload.body),
 			chunks: rendered.map((_chunk, index) => ({
@@ -48,7 +51,8 @@ export class TranscriptProjector {
 			const chunk = rendered[index];
 			if (!chunk) throw new RelayRegistryError("invalid_state", "Transcript chunk plan changed during recovery");
 			await this.matrix.sendText(manifest.roomId, chunkState.transactionId, chunk.body, chunk.formattedBody, undefined,
-				payload.kind === "assistant_commentary" ? "silent" : undefined);
+				projection.disposition === "notify" ? (index === 0 ? "notify" : "silent") :
+					projection.disposition ?? (payload.kind === "assistant_commentary" ? "silent" : undefined));
 			await this.registry.markProjectionChunkSent(manifest.conversationId, payload.entryId, chunkState.chunkId);
 		}
 	}

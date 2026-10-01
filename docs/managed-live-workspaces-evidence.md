@@ -89,3 +89,15 @@ local tool execution on Matrix. Managed-session and source checks pass; the
 expanded adapter fixture additionally checks early commentary and no tool or
 thinking leakage. Final/attention classification and outage recovery remain
 unfinished within #111.
+
+The following chunk freezes transcript disposition in both Pi offer markers and
+the relay projection record. New live finals notify on their first chunk only;
+local text/commentary are silent. Reconnect/retry captures a durable current-
+branch cutoff before offering previously unoffered historical finals silently.
+Already offered bodies and dispositions never change. New checkpoints notify;
+new housekeeping notices are silent and typed permanent-failure callers can
+request one notification. Notice outbox retries retain their first disposition,
+including legacy records without metadata. Focused managed tests cover actual
+adapter reconnect classification, persisted watermarks, mixed-content order,
+chunking, and acceptance-before-ack retries. The bounded actionable recovery
+alert and approval integration remain to finish #111.

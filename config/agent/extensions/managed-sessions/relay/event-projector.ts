@@ -21,7 +21,7 @@ export class RelayEventProjector {
 	async startNoticeOutbox(path: string, diagnostic: (message: string) => void): Promise<void> {
 		this.notices = new NoticeOutbox(path, async (notice) => {
 			if (!this.registry.manifestByConversationId(notice.conversationId)) return;
-			await this.project(notice.conversationId, notice.piSessionId, notice.roomId, `notice:${notice.sourceId}`, "notice", notice.body);
+			await this.project(notice.conversationId, notice.piSessionId, notice.roomId, `notice:${notice.sourceId}`, "notice", notice.body, undefined, notice.disposition);
 		}, diagnostic);
 		await this.notices.load(); this.notices.start();
 	}
@@ -70,25 +70,30 @@ export class RelayEventProjector {
 			}
 		} else {
 			await this.project(manifest.conversationId, manifest.piSessionId, manifest.roomId,
-				sourceKey, "checkpoint", renderRemoteCheckpoint(checkpoint), payload.originDeliveryId);
+				sourceKey, "checkpoint", renderRemoteCheckpoint(checkpoint), payload.originDeliveryId, "notify");
 		}
 		await this.registry.acknowledgeInput(manifest.conversationId, payload.originDeliveryId, "completed", origin.piEntryId);
 	}
 
-	async projectNotice(conversationId: string, sourceId: string, body: string): Promise<void> {
+	async projectNotice(conversationId: string, sourceId: string, body: string, disposition: "silent" | "notify" = "silent"): Promise<void> {
 		const manifest = this.registry.manifestByConversationId(conversationId);
 		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 		if (this.notices) {
-			await this.notices.enqueue({ conversationId, sourceId, piSessionId: manifest.piSessionId, roomId: manifest.roomId, body });
-		} else await this.project(conversationId, manifest.piSessionId, manifest.roomId, `notice:${sourceId}`, "notice", body);
+			await this.notices.enqueue({ conversationId, sourceId, piSessionId: manifest.piSessionId, roomId: manifest.roomId, body, disposition });
+		} else await this.project(conversationId, manifest.piSessionId, manifest.roomId, `notice:${sourceId}`, "notice", body, undefined, disposition);
 	}
 
 	private async project(conversationId: string, piSessionId: string, roomId: string, sourceKey: string,
-		kind: "checkpoint" | "notice", body: string, originDeliveryId?: string): Promise<void> {
+		kind: "checkpoint" | "notice", body: string, originDeliveryId?: string, disposition?: "silent" | "notify"): Promise<void> {
 		const entryId = deriveTranscriptEntryId(piSessionId, sourceKey);
 		const rendered = renderTranscript("assistant_final", body);
 		if (kind === "checkpoint" && rendered.length !== 1) throw new RelayRegistryError("invalid_state", "Checkpoint must fit one Matrix event");
+		// Existing records, including records without metadata, are already frozen.
+		// Never change an uncertain pre-upgrade PUT into a notification-bearing one.
+		const existing = this.registry.snapshot().conversations.find((item) => item.conversationId === conversationId)?.projection.find((item) => item.entryId === entryId);
+		const frozenDisposition = existing ? existing.disposition : disposition;
 		const projection = await this.registry.beginProjection(conversationId, {
+			...(frozenDisposition === undefined ? {} : { disposition: frozenDisposition }),
 			entryId, kind, status: "projecting", contentHash: createHash("sha256").update(`managed-${kind}\0`).update(body).digest("hex"),
 			...(originDeliveryId ? { originDeliveryId } : {}),
 			chunks: rendered.map((_chunk, index) => ({ chunkId: deriveChunkId(entryId, index),
@@ -99,7 +104,8 @@ export class RelayEventProjector {
 			if (chunkState.status === "sent") continue;
 			const chunk = rendered[index];
 			if (!chunk) throw new RelayRegistryError("invalid_state", "Relay event chunk plan changed during recovery");
-			await this.matrix.sendText(roomId, chunkState.transactionId, chunk.body, chunk.formattedBody);
+			await this.matrix.sendText(roomId, chunkState.transactionId, chunk.body, chunk.formattedBody, undefined,
+				projection.disposition === "notify" && index > 0 ? "silent" : projection.disposition);
 			await this.registry.markProjectionChunkSent(conversationId, entryId, chunkState.chunkId);
 		}
 	}
