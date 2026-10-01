@@ -294,4 +294,23 @@ boundaries, immutable responses, requester mismatch, invalid fields, model
 approval, protected targets, staged mutation exclusion and malformed output.
 Legacy rows never synthesize checkout IDs; logical placement rejects host paths.
 These are deterministic component fixtures, not a live control-socket or CLI
-claim. Transport, registry read models and runtime integration remain open.
+claim. Registry read models and runtime integration remain open.
+
+The next component chunk implements the separate private `control.sock` server
+and client plus packaged `pi-managed-session` CLI. UID lookup failure rejects;
+only local-human actors are admitted on this transport. Socket/directory modes,
+strict UTF-8 single frames, byte bounds, version/correlation checks, malformed
+responses, private-field rejection, startup cancellation and admitted-work/peer
+check shutdown drains have deterministic tests. A real packaged OS peer helper
+also authenticates a fixture connection. Reply sockets have bounded drain time.
+
+The schema-derived CLI covers every declared operation, exact conversation-ID
+positionals, comma-separated bulk IDs, strict flags, logical placement defaults,
+retained request IDs and generated bounded help. Real packaged subprocess tests
+verify one versioned JSON result and distinct read/unavailable/forbidden/upgrade
+exits. Disabled/missing endpoints fail unavailable without reading registry or
+Pi transcripts. Human diagnostics and invalid server output do not expose paths
+or raw errors. Managed-session, module and source gates pass; affected LSP checks
+are clean. These are local component fixtures, not production relay integration:
+startup wiring, cheap registry metadata projection and compatibility wrapper
+integration still remain open. No deployment or live acceptance is claimed.

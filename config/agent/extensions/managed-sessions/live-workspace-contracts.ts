@@ -6,6 +6,7 @@ import { Check } from "typebox/value";
 import { ConversationIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./contracts.js";
 
 export const HOST_CONTROL_VERSION = "1.0.0" as const;
+export const HOST_CONTROL_FRAME_BYTES = 64 * 1024;
 export const ACCOUNT_ACTION_VERSION = "1.0.0" as const;
 export const APPROVAL_LIFETIME_MS = 15 * 60_000;
 export const HOST_INVENTORY_PAGE_SIZE = 50;
@@ -171,7 +172,7 @@ export function parseHostResponse<O extends HostAction["operation"]>(operation: 
 }
 
 function validate<T>(schema: TSchema, value: unknown): T {
-	if (Buffer.byteLength(`${JSON.stringify(value)}\n`, "utf8") > 64 * 1024) throw new Error("Live-workspace frame exceeds 64 KiB");
+	if (Buffer.byteLength(`${JSON.stringify(value)}\n`, "utf8") > HOST_CONTROL_FRAME_BYTES) throw new Error("Live-workspace frame exceeds 64 KiB");
 	if (!Check(schema, value)) throw new Error("Invalid live-workspace contract");
 	return value as T;
 }

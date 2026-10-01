@@ -171,6 +171,7 @@ let
       export PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary}
       export PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator}
       export PI_MANAGED_ADAPTER_MODEL_POLICY_EXTENSION=${piHarnessResources.managedSessionExtensions.modelPolicy}
+      export PI_MANAGED_SESSIONS_TEST_HOST_CLI=${managedSessionRelay}/bin/pi-managed-session
       export PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid
       export PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock
       export PI_MANAGED_SESSIONS_TEST_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}

@@ -71,7 +71,11 @@ stdenv.mkDerivation {
     export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER="${lib.getExe imagemagick}"
     exec ${lib.getExe nodejs} "$out/lib/managed-sessions/relay/main.js" "\$@"
     EOF
-    chmod +x "$out/bin/pi-managed-session-relay"
+    cat > "$out/bin/pi-managed-session" <<EOF
+    #!${runtimeShell}
+    exec ${lib.getExe nodejs} "$out/lib/managed-sessions/relay/host-cli.js" "\$@"
+    EOF
+    chmod +x "$out/bin/pi-managed-session-relay" "$out/bin/pi-managed-session"
     runHook postInstall
   '';
 
