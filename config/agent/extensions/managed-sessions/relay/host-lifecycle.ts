@@ -9,9 +9,13 @@ import {
 	deriveGenerationId,
 	deriveTranscriptEntryId,
 	type ConversationManifest,
+	type PendingLocalConversation,
+	type RegisteredConversation,
+	hasMatrixBinding,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
+import { deriveCheckoutId } from "../managed-provenance.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
@@ -67,6 +71,11 @@ export interface ResolvedWorkspace extends WorkspaceIdentity {
 	projectKey: string;
 	projectDisplayName: string;
 	checkoutDisplayName: string;
+}
+
+export interface TerminalBindingInput {
+	creationKey: string; concept: string; sessionId: string; attachmentNonce: string;
+	bindingBoundaryEntryId: string; sourceCwd: string; sourceSessionFile: string;
 }
 
 function hasValidProjectIdentity(value: Record<string, unknown>): value is Record<string, unknown> & Pick<ResolvedWorkspace, "projectKey" | "projectDisplayName" | "checkoutDisplayName"> {
@@ -460,10 +469,8 @@ export class HostLifecycle {
 		return { roomId, projectSpace };
 	}
 
-	async prepareTerminalPromotion(input: {
-		creationKey: string; concept: string; sessionId: string; attachmentNonce: string;
-		bindingBoundaryEntryId: string; sourceCwd: string; sourceSessionFile: string;
-	}): Promise<ConversationManifest> {
+	private async inspectTerminalSource(input: TerminalBindingInput) {
+		if (input.creationKey === "coordinator") throw new RelayRegistryError("permission_denied", "Coordinator identity is protected");
 		const identified = await this.invoke("workspace-identify", { cwd: input.sourceCwd });
 		const placement = { rootKey: identified.rootKey, workspace: identified.workspace, relativeCwd: identified.relativeCwd };
 		if (![placement.rootKey, placement.workspace, placement.relativeCwd].every((value) => typeof value === "string") ||
@@ -476,6 +483,53 @@ export class HostLifecycle {
 		if (session.sessionId !== input.sessionId || session.boundaryEntryId !== input.bindingBoundaryEntryId) {
 			throw new RelayRegistryError("invalid_state", "Terminal Pi session differs from its durable promotion boundary");
 		}
+		return { conversationId, resolved, placement: placement as WorkspaceIdentity };
+	}
+
+	async prepareLocalTerminalEnrollment(input: TerminalBindingInput): Promise<RegisteredConversation> {
+		if (!this.options.hierarchy) throw new RelayRegistryError("invalid_state", "Local enrollment is unavailable");
+		const { conversationId, resolved, placement } = await this.inspectTerminalSource(input);
+		const existing = this.options.registry.registeredConversation(conversationId);
+		if (existing) {
+			if (existing.kind !== "project" || existing.creationKey !== input.creationKey || existing.concept !== input.concept ||
+				existing.piSessionId !== input.sessionId || existing.bindingBoundaryEntryId !== input.bindingBoundaryEntryId ||
+				JSON.stringify(existing.placement) !== JSON.stringify(placement)) throw new RelayRegistryError("invalid_state", "Local enrollment retry changed its source identity");
+			if (hasMatrixBinding(existing)) return this.options.registry.createProjectConversation(existing, input.attachmentNonce, input.sourceSessionFile);
+			if (existing.projectKey !== resolved.projectKey || existing.checkoutId !== deriveCheckoutId(this.options.hostId, resolved.projectKey, resolved.workspacePath)) {
+				throw new RelayRegistryError("invalid_state", "Local checkout identity changed during enrollment");
+			}
+			return this.options.registry.registerLocalConversation(existing, input.attachmentNonce, input.sourceSessionFile);
+		}
+		const reserved = await this.options.hierarchy.prepare({ creationKey: input.creationKey, projectKey: resolved.projectKey,
+			canonicalCheckoutRoot: resolved.workspacePath, projectTitle: resolved.projectDisplayName, checkoutTitle: resolved.checkoutDisplayName, conversationTitle: input.concept });
+		const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
+		const local: PendingLocalConversation = { version: 1, kind: "project", conversationId, ownerHostId: this.options.hostId,
+			creationKey: input.creationKey, concept: input.concept, piSessionId: input.sessionId, placement,
+			projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName, checkoutDisplayName: resolved.checkoutDisplayName,
+			checkoutId: reserved.checkoutId, bindingBoundaryEntryId: input.bindingBoundaryEntryId, createdAt, activeGenerationId: generationId,
+			generations: [{ generationId, ordinal: 1, piSessionId: input.sessionId, bindingBoundaryEntryId: input.bindingBoundaryEntryId, createdAt }] };
+		return this.options.registry.registerLocalConversation(local, input.attachmentNonce, input.sourceSessionFile);
+	}
+
+	/** No Pi session reads, launches or promotion are needed to finish a local binding. */
+	async completeLocalEnrollment(conversationId: string, signal?: AbortSignal): Promise<ConversationManifest> {
+		signal?.throwIfAborted();
+		const local = this.options.registry.registeredConversation(conversationId);
+		if (!local) throw new RelayRegistryError("not_found", "Local enrollment is unavailable");
+		if (hasMatrixBinding(local)) return local;
+		if (!this.options.hierarchy) throw new RelayRegistryError("invalid_state", "Local enrollment is unavailable");
+		const resolved = await this.resolveWorkspaceIdentity(local.placement);
+		if (resolved.projectKey !== local.projectKey || deriveCheckoutId(this.options.hostId, resolved.projectKey, resolved.workspacePath) !== local.checkoutId) {
+			throw new RelayRegistryError("invalid_state", "Local checkout identity changed during provisioning");
+		}
+		signal?.throwIfAborted();
+		const binding = await this.options.hierarchy.provision(conversationId);
+		signal?.throwIfAborted();
+		return this.options.registry.completeLocalBinding(conversationId, binding);
+	}
+
+	async prepareTerminalPromotion(input: TerminalBindingInput): Promise<ConversationManifest> {
+		const { conversationId, resolved, placement } = await this.inspectTerminalSource(input);
 		const existing = this.options.registry.manifestByCreationKey(input.creationKey);
 		if (existing) {
 			if (existing.kind !== "project" || existing.conversationId !== conversationId || existing.concept !== input.concept ||

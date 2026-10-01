@@ -4,6 +4,7 @@ import { MatrixError } from "../../matrix-shared/http.js";
 import { resolve } from "node:path";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
+	hasMatrixBinding,
 	type ManagedAdapterLiveStatus,
 	type ManagedSessionEnvelope,
 } from "../contracts.js";
@@ -34,6 +35,7 @@ import { retryMatrixStartup } from "./startup-retry.js";
 import { RecoveryAlerts } from "./recovery-alerts.js";
 import { RecoveryMonitor } from "./recovery-monitor.js";
 import { LiveHierarchy } from "./live-hierarchy.js";
+import { LocalEnrollmentReconciler } from "./local-enrollment-reconciler.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -70,6 +72,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let coordinatorRouter: CoordinatorRouter | undefined;
 	let recoveryMonitor: RecoveryMonitor | undefined;
 	let hierarchy: LiveHierarchy | undefined;
+	let localEnrollments: LocalEnrollmentReconciler | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
@@ -132,6 +135,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			expectedUid,
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
 			onAttachment: async (attachment) => {
+				// Admission is local; Matrix replay and overlays wait for a real binding.
+				if (!registry.manifestByConversationId(attachment.conversationId)) return;
 				await activityProjector?.attachmentConnected(attachment.conversationId);
 				if (registry.promotion(attachment.conversationId)?.phase === "shutdown_requested") {
 					server!.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-promotion-${randomUUID()}`,
@@ -159,15 +164,20 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				if (envelope.type !== "self.bind" || envelope.role !== "ordinary_adapter") return undefined;
 				const payload = envelope.payload as {
 					creationKey: string; concept: string; sessionId: string; attachmentNonce: string;
-					bindingBoundaryEntryId: string; sourceCwd: string; sourceSessionFile: string;
+					bindingBoundaryEntryId: string; sourceCwd: string; sourceSessionFile: string; requestedCapabilities?: string[];
 				};
 				if (!hostLifecycle) throw new RelayRegistryError("invalid_state", "Terminal-session promotion is unavailable");
-				const manifest = await hostLifecycle.prepareTerminalPromotion(payload);
+				const local = payload.requestedCapabilities?.includes("local-enrollment-v1");
+				const manifest = local ? await hostLifecycle.prepareLocalTerminalEnrollment(payload) : await hostLifecycle.prepareTerminalPromotion(payload);
 				return response(manifest.conversationId, envelope.messageId, "self.result", {
 					operation: "self.bind", status: "ok", boundConversationId: manifest.conversationId,
+					...(local ? { matrixBinding: hasMatrixBinding(manifest) ? "bound" : "pending" } : {}),
 				});
 			},
 			onEnvelope: async (envelope, attachment) => {
+				if (!registry.manifestByConversationId(attachment.conversationId) && !["self.status", "control.result", "refresh.result"].includes(envelope.type)) {
+					throw new RelayRegistryError("matrix_unavailable", "Local conversation is active; Matrix binding is pending");
+				}
 				if (envelope.type === "recovery.confirm") {
 					recoveryMonitor?.confirm(envelope, attachment);
 					return response(attachment.conversationId, envelope.messageId, "recovery.acknowledge", { requestId: envelope.payload.requestId });
@@ -402,8 +412,23 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await hostLifecycle!.reconcileGenerationTransitions();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
+		if (hostLifecycle && hierarchy && server) {
+			const lifecycle = hostLifecycle; const ipc = server;
+			localEnrollments = new LocalEnrollmentReconciler(() => registry.localConversations().map((item) => item.conversationId), async (conversationId, signal) => {
+				await lifecycle.completeLocalEnrollment(conversationId, signal); signal.throwIfAborted();
+				if (ipc.supports(conversationId, "local-enrollment-v1")) ipc.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+					messageId: `relay-binding-${randomUUID()}`, conversationId, role: "relay", type: "binding.status", payload: { matrixBinding: "bound" } });
+				if (registry.isActiveGenerationAttached(conversationId)) {
+					await activityProjector?.attachmentConnected(conversationId);
+					await coordinatorRouter?.attachmentReady(conversationId);
+				}
+			}, (conversationId, error) => process.stderr.write(`pi-managed-session-relay: local Matrix binding pending (${conversationId}): ${redactManagedValue(error instanceof Error ? error.message : "unavailable", environment).slice(0, 800)}\n`));
+			localEnrollments.start();
+		}
 	} catch (error) {
+		const enrollmentClosing = localEnrollments?.close();
 		await hierarchy?.close().catch(() => undefined);
+		await enrollmentClosing;
 		await closeArtifactExporter().catch(() => undefined);
 		await recoveryMonitor?.close().catch(() => undefined);
 		await closeNotices().catch(() => undefined);
@@ -419,7 +444,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
+			const enrollmentClosing = localEnrollments?.close();
 			await hierarchy?.close().catch(() => undefined);
+			await enrollmentClosing;
 			await relayLock?.release().catch(() => undefined);
 			process.exitCode = 1;
 		});
@@ -445,7 +472,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle?.stopRuntimeUpdates();
 			await runtimeUpdate;
 			clearTimeout(reconciliationTimer);
+			const enrollmentClosing = localEnrollments?.close();
 			await hierarchy?.close();
+			await enrollmentClosing;
 			await closeArtifactExporter();
 			await coordinatorRouter?.stop();
 			await recoveryMonitor?.close();

@@ -228,7 +228,12 @@ IDs or changing the attached local session. An unrelated public file cannot
 complete enrollment without the matching receipt. V2 bundle migration preserves
 pending records. Focused managed-session/source gates pass (one stale diagnostic-
 text assertion was updated to assert the unchanged typed conflict code).
-HostLifecycle, background completion and frontend no-shutdown wiring remain to be
-done before the high Spec finding is resolved.
+HostLifecycle now admits those local registrations before coordinator bootstrap
+or Matrix availability. A bounded background reconciler finishes only the Matrix
+binding, without reopening Pi transcripts or launching/promoting a process. Unit
+fixtures preserve the active attachment through outage/retry and isolate a stalled
+conversation from other completions; affected gates pass. Frontend capability
+opt-in, accurate pending presentation, and no-shutdown integration remain before
+the high Spec finding is resolved.
 
 No push, deployment, live migration or phone-delivery claim is made.
