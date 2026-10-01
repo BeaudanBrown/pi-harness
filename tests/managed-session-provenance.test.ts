@@ -74,6 +74,17 @@ test("legacy stamping requires the exact saved coordinator, private ownership an
 	assert.equal(fixture.writes.length, 0);
 });
 
+test("new identity derivation uses the pinned live-v1 domain and fallback titles extend on collision", () => {
+	assert.equal(deriveCheckoutId("host", `project_${"a".repeat(32)}`, "/work/project"), "checkout_34ec3bf360e92b747b6668f5cdc39557");
+	assert.equal(managedRoomAlias({ version: 1, hostId: "host", kind: "host_space", creationKey: "host" }), "pi-live-v1-64f7de10ad843eb0066eeb5ed28e795a");
+	const identity = `conv_${"a".repeat(32)}`;
+	const occupied = new Set([`conversation-${"a".repeat(8)}`, `conversation-${"a".repeat(12)}`]);
+	assert.equal(safeManagedTitle("", identity, "conversation", occupied), `conversation-${"a".repeat(16)}`);
+	for (let length = 16; length <= 32; length += 4) occupied.add(`conversation-${"a".repeat(length)}`);
+	assert.equal(safeManagedTitle("", identity, "conversation", occupied), `conversation-${"a".repeat(32)}-1`);
+	assert.equal(safeManagedTitle("same name", identity, "conversation", new Set(["same name"])), "same name", "ordinary duplicate titles remain permitted");
+});
+
 test("hierarchy links preserve the complete Matrix server name including its port", async () => {
 	let content: unknown;
 	const client = new ManagedMatrixClient(config, async (_input, init) => { content = JSON.parse(String(init?.body)); return Response.json({}); }, ["!space:server:8448", "!child:server:8448"]);
@@ -90,7 +101,7 @@ test("checkout and alias identities exclude mutable display and parent attribute
 	assert.throws(() => deriveCheckoutId("host-a", projectKey, "/projects/repository/"), /canonical/);
 	assert.throws(() => parseManagedProvenance({ ...proof, accessToken: "no" }), /provenance/);
 	assert.throws(() => parseManagedProvenance({ ...proof, workspacePath: "/private/path" }), /provenance/);
-	assert.equal(safeManagedTitle("\u202e\u0000", proof.checkoutId), `conversation ${proof.checkoutId.slice(-32)}`);
+	assert.equal(safeManagedTitle("\u202e\u0000", proof.checkoutId), `conversation-${proof.checkoutId.slice(-32, -24)}`);
 	assert.equal(safeManagedTitle("  Safe\n\u202e title  ", proof.checkoutId), "Safe title");
 	assert.equal(Array.from(safeManagedTitle("😀".repeat(150), proof.checkoutId)).length, 80);
 });

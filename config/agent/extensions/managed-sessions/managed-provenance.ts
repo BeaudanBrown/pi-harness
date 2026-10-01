@@ -22,7 +22,7 @@ export function parseManagedProvenance(value: unknown): ManagedProvenance {
 	return value;
 }
 function digest(domain: string, parts: string[]): string {
-	const hash = createHash("sha256").update(`pi-managed-live:${domain}:v1\0`);
+	const hash = createHash("sha256").update(`pi-managed-sessions:${domain}:live-v1\0`);
 	for (const part of parts) hash.update(`${Buffer.byteLength(part)}:`).update(part);
 	return hash.digest("hex").slice(0, 32);
 }
@@ -36,12 +36,23 @@ export function deriveCheckoutId(hostId: string, projectKey: string, canonicalRo
 /** Parent IDs and mutable names deliberately do not participate in object identity. */
 export function managedRoomAlias(provenance: ManagedProvenance): string {
 	const value = parseManagedProvenance(provenance);
-	return `pi-live-v1-${digest("room", [value.hostId, value.kind, value.creationKey,
+	return `pi-live-v1-${digest("room-alias", [value.hostId, value.kind, value.creationKey,
 		"projectKey" in value ? value.projectKey : "", "checkoutId" in value ? value.checkoutId : "",
 		"conversationId" in value ? value.conversationId : ""])}`;
 }
-export function safeManagedTitle(title: string, identity: string, fallback: "conversation" | "project" | "worktree" | "host" | "coordinator" = "conversation"): string {
+export function safeManagedTitle(title: string, identity: string, fallback: "conversation" | "project" | "worktree" | "host" | "coordinator" = "conversation", occupied: ReadonlySet<string> = new Set()): string {
 	if (!Check(identifier, identity)) throw new Error("Invalid title fallback identity");
 	const cleaned = title.normalize("NFC").replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, "").replace(/\s+/gu, " ").trim();
-	return cleaned ? Array.from(cleaned).slice(0, 80).join("") : `${fallback} ${identity.slice(-32)}`;
+	if (cleaned) return Array.from(cleaned).slice(0, 80).join("");
+	const suffix = /_([a-f0-9]{32})$/.exec(identity)?.[1] ?? digest("title", [identity]);
+	for (let length = 8; length <= suffix.length; length += 4) {
+		const candidate = `${fallback}-${suffix.slice(0, length)}`;
+		if (!occupied.has(candidate)) return candidate;
+	}
+	// A named conversation may deliberately use even the complete fallback ID.
+	for (let ordinal = 1; ordinal <= occupied.size + 1; ordinal++) {
+		const candidate = `${fallback}-${suffix}-${ordinal}`;
+		if (!occupied.has(candidate)) return candidate;
+	}
+	throw Error("Could not allocate a unique fallback title");
 }

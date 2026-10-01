@@ -78,15 +78,19 @@ export class LiveHierarchy {
 		const checkoutId = deriveCheckoutId(this.hostId, input.projectKey, input.canonicalCheckoutRoot);
 		const conversationId = deriveConversationId(this.hostId, input.creationKey);
 		const requested: Node[] = [
-			{ key: "host", creationKey: "host", kind: "host_space", title: safeManagedTitle(this.hostId, this.hostId, "host"), linked: false },
-			{ key: input.projectKey, creationKey: input.projectKey, kind: "project_space", projectKey: input.projectKey, parentKey: "host", title: safeManagedTitle(input.projectTitle, input.projectKey, "project"), linked: false },
-			{ key: checkoutId, creationKey: checkoutId, kind: "worktree_space", projectKey: input.projectKey, checkoutId, parentKey: input.projectKey, title: safeManagedTitle(input.checkoutTitle, checkoutId, "worktree"), linked: false },
-			{ key: conversationId, creationKey: input.creationKey, kind: "conversation", projectKey: input.projectKey, checkoutId, conversationId, parentKey: checkoutId, title: safeManagedTitle(input.conversationTitle, conversationId), linked: false },
+			{ key: "host", creationKey: "host", kind: "host_space", title: this.hostId, linked: false },
+			{ key: input.projectKey, creationKey: input.projectKey, kind: "project_space", projectKey: input.projectKey, parentKey: "host", title: input.projectTitle, linked: false },
+			{ key: checkoutId, creationKey: checkoutId, kind: "worktree_space", projectKey: input.projectKey, checkoutId, parentKey: input.projectKey, title: input.checkoutTitle, linked: false },
+			{ key: conversationId, creationKey: input.creationKey, kind: "conversation", projectKey: input.projectKey, checkoutId, conversationId, parentKey: checkoutId, title: input.conversationTitle, linked: false },
 		];
 		await this.mutate((state) => {
 			for (const wanted of requested) {
 				const existing = state.nodes.find((item) => item.key === wanted.key);
-				if (!existing) { state.nodes.push(wanted); continue; }
+				if (!existing) {
+					const fallback = ({ host_space: "host", project_space: "project", worktree_space: "worktree", conversation: "conversation" } as const)[wanted.kind];
+					wanted.title = safeManagedTitle(wanted.title, wanted.kind === "host_space" ? this.hostId : wanted.key, fallback, new Set(state.nodes.map((item) => item.title)));
+					state.nodes.push(wanted); continue;
+				}
 				for (const key of Object.keys(wanted).filter((key) => !["title", "linked"].includes(key))) {
 					if ((existing as Record<string, unknown>)[key] !== (wanted as Record<string, unknown>)[key]) throw Error("Hierarchy reservation changed immutable identity");
 				}

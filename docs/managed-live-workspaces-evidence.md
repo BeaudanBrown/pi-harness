@@ -207,5 +207,17 @@ are read or written by this provisioning code.
 Affected managed-session and source-contract gates pass for the lifecycle wiring,
 real-client bootstrap recovery, relay IPC availability, complete-server-name Space
 links, paired checkout persistence/migration, and cancellation fixtures. The 28 before/after local hierarchy-write fault cases also pass, and the canonical
-`nix run .#verify` passes on the lifecycle integration chunk. A committed-state
-hierarchy/compatibility audit is next before closing #106. No push, deployment, live migration or phone-delivery claim is made.
+`nix run .#verify` passes on the lifecycle integration chunk. The committed-state audit at `0cc46c0` found:
+
+- Standards: high — hash-domain mismatch; low — fallback title shape/collisions.
+  Both are corrected with fixed checkout/alias vectors and serialized fallback
+  allocation (`conversation-<short ID>`, extending on collision). Affected gates
+  pass; no released/live identities were migrated.
+- Spec: high — a reservation alone is not fresh local management: `self.bind`
+  still waits for Matrix before producing an attachable local conversation.
+  This remains current-issue remediation, not a deferral to frontend leaves.
+  The duplicate low title finding is addressed by the same correction.
+
+The local binding must survive and remain usable independently of remote effects,
+without placeholder room IDs or terminating the foreground Pi during the outage.
+No push, deployment, live migration or phone-delivery claim is made.

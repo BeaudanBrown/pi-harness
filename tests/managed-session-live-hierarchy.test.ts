@@ -201,6 +201,18 @@ test("lost create response followed by alias removal stays pending rather than d
 	assert.equal(restarted.status(target.conversationId), "pending");
 });
 
+test("fallback allocation is serialized with concurrent local reservations", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "live-hierarchy-titles-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const hierarchy = new LiveHierarchy(root, hostId, new MatrixFixture(), () => coordinator); await hierarchy.load();
+	const unnamed = { ...placement, creationKey: "unnamed", conversationTitle: "" };
+	const suffix = deriveConversationId(hostId, unnamed.creationKey).slice(-32);
+	await Promise.all([
+		hierarchy.prepare({ ...placement, creationKey: "named", conversationTitle: `conversation-${suffix.slice(0, 8)}` }),
+		hierarchy.prepare(unnamed),
+	]);
+	assert.equal(hierarchy.listConversations().find((item) => item.conversationId === deriveConversationId(hostId, "unnamed"))?.title, `conversation-${suffix.slice(0, 12)}`);
+});
+
 test("hierarchy shutdown cancels remote work before releasing ownership", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "live-hierarchy-stop-")); t.after(() => rm(root, { recursive: true, force: true }));
 	let began!: () => void; const blocked = new Promise<void>((resolve) => { began = resolve; });
