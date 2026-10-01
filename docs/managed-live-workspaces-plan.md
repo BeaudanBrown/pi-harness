@@ -8,6 +8,11 @@ This plan consolidates the complete design interview with `managed-host-controls
 
 Publication is scoped to `BeaudanBrown/pi-harness`. Work owned by `nix-dotfiles` is represented by explicit cross-repository handoff issues here, not by moving its implementation into the harness or silently publishing in another repository.
 
+Implementation was authorised in the epic conversation on 2026-10-01, with
+logical commits and no push/deployment authorisation. The planning-only limits
+above describe the original approval boundary. The target implementation seams
+are pinned in [the foundation contract](managed-live-workspaces-contract.md).
+
 ## 1. Product model and scope
 
 - Matrix is the phone/desktop interface to **current live work**, not an archive of every historical session.
@@ -87,6 +92,7 @@ The token has broad account authority; application room restrictions are not a s
 
 - Configure explicit trusted host bot MXIDs and stable host identities. Verify management provenance/hierarchy as well as inviter identity; room names alone never establish authority. Freeze authenticated machine-readable host/account action and acknowledgment contracts in the foundation task; no arbitrary endpoints or caller-provided authority strings.
 - Handle existing pending and new invitations for verified managed rooms and Spaces, leave unrelated invitations alone, and initialize new-room notification rules before ordinary projected traffic can create unwanted default alerts where feasible. Make setup state observable and design retry without overwriting later manual settings.
+- Notification setup uncertainty amendment (operator-approved 2026-10-01): persist each initialization attempt before its first rule mutation. After an uncertain result, reconcile read-only and never automatically repeat a potentially applied rule write that could overwrite a later manual choice. Continue synchronization using current client settings and display a setup warning; do not block local work or transcript projection on this uncertainty.
 - Persist intentional departure/retirement state so auto-join cannot undo deliberate leave/close. Reopening a retired conversation uses a genuinely new identity/room.
 - For confirmed cleanup, leave and forget the operator's room and acknowledge progress durably. Bot departure and account departure are independent effects; retain enough verified identity to finish even if the other actor already left. No model calls are involved.
 - NAS failure delays account setup/cleanup, not existing host session execution. Per-host bot relays continue owning local processes, identities, and status.

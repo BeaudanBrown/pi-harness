@@ -5,6 +5,34 @@
 - **Issue:** [#38](https://github.com/BeaudanBrown/pi-harness/issues/38)
 - **Epic:** [#37](https://github.com/BeaudanBrown/pi-harness/issues/37)
 
+## Live-workspace target amendment (#103/#104)
+
+The approved target is now pinned in
+[Live-workspace contract v1](../../managed-live-workspaces-contract.md), with
+executable syntax/policy fixtures in `live-workspace-contracts.ts`. It supersedes
+conflicting **target** statements below: the target hierarchy adds checkout
+Spaces; titles are mutable and non-authoritative; multiple independent
+conversations share checkout files; new/fork retain the room through generation
+transitions; all model host mutations require per-call approval; lifecycle
+commands/approval are operator-only; close/delete is irreversible retirement
+that stops the exact process and preserves local history. Completed commentary
+is projected silently, with durable explicit notification dispositions.
+
+The body below remains the **baseline implementation record**, not evidence that
+the target is already shipped. In particular the current old adapter can unbind
+on new/fork and the old relay performs bridge-only deletion. Dependent leaves
+must implement the target and its capability gates before claiming acceptance.
+The amendment does not activate the pending #63 V2 migration or restart existing
+Pi processes. The linked contract specifies staged capabilities, unsupported
+downgrades, retirement precedence over synchronized manifests, the separate
+host socket, and the narrow authenticated NAS account protocol.
+
+The operator resolved uncertain initial push-rule writes on 2026-10-01: never
+automatically repeat a potentially applied rule mutation, continue synchronization
+under current client settings, and expose a setup warning. Manual notification
+preferences take precedence over automatic repair. Matrix does not provide
+conditional push-rule writes, so exactly-once initialization is not claimed.
+
 ## Context
 
 The direct `remote-session` extension combines Matrix polling, Pi adaptation, and conversation state inside every attached Pi process. Managed sessions replace that arrangement with one boot-persistent, host-local relay. Before the relay and adapter can be implemented independently, they need one fail-closed language for lifecycle, IPC, identity, and persistence.
