@@ -262,6 +262,14 @@ An unavailable proof remains pending. Existing verified pending invites are
 eligible; unrelated invites are untouched. Encrypted targets fail explicitly,
 never silently downgrade. Migration requests use notificationSetup=preserve.
 
+Operator-approved legacy-host exception: during **new conversation provisioning**,
+the relay may add a missing ownership marker to the existing host Space identified
+by its saved coordinator binding, after verifying bot ownership, private state
+and authority. Existing matching proof is read-only; contradictory or foreign
+proof blocks provisioning. This is not startup-wide migration: do not replace
+the Space, move children, rename anything or alter notification settings. An
+uncertain write must be followed by a fresh read before another write attempt.
+
 `room.retire` is only for a known verified conversation identity; `space.retire`
 is only for a known verified empty non-host ancestor authorized by host cleanup.
 The NAS persists suppression before leave/forget, keeping enough verified IDs to

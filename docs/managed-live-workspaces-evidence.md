@@ -162,10 +162,14 @@ rejected without writes. Managed-session/source checks pass after adding the new
 root module to the relay's explicit packaged source list. This is a tested
 primitive, not yet wired into the hierarchy lifecycle or local-pending registry.
 
-An upgrade boundary remains to resolve before wiring: existing host Spaces were
-created without management provenance. The saved coordinator manifest can identify
-the existing host Space, but new exact NAS hierarchy proof requires a management
-marker. Adding only that marker during new provisioning would preserve all old
-room IDs/parentage/titles/notifications; requiring explicit migration first would
-instead keep new remote provisioning pending on legacy hosts. No existing Space
+The operator approved one narrow legacy-host exception: add missing ownership
+metadata on the verified existing host Space during new conversation provisioning.
+The primitive checks the exact saved coordinator/host binding, private and
+non-federated state, bot ownership/membership and management-event power. An
+existing matching proof is read-only; conflicting proof is never replaced. A
+one-attempt write followed by fresh verification avoids blind transport retries
+after uncertainty. Fixtures cover acceptance-before-lost-ack and conflict after
+that acknowledgement loss. This is not bootstrap-wide migration and does not
+move or rename rooms, change IDs, invite users, or modify notification rules.
+The lifecycle call site remains to be wired as part of #106. No existing Space
 has been mutated by this implementation work.

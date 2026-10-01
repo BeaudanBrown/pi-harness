@@ -1,4 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
+import { deriveConversationId, type ConversationManifest } from "../contracts.js";
 import { MANAGED_PROVENANCE_EVENT, managedRoomAlias, parseManagedProvenance, safeManagedTitle, type ManagedProvenance } from "../managed-provenance.js";
 import { MAX_BLOB_BYTES } from "../v2-contracts.js";
 import { MatrixError as ManagedMatrixError, MatrixHttp, MAX_MATRIX_RESPONSE_BYTES, type MatrixRetryOptions } from "../../matrix-shared/http.js";
@@ -321,23 +322,53 @@ export class ManagedMatrixClient {
 		} catch (error) { if (roomId) this.#managedRoomIds.delete(roomId); throw error; }
 	}
 
+	/** Only new provisioning may invoke this additive legacy-host upgrade; never bootstrap. */
+	async ensureLegacyHostProvenance(hostId: string, coordinator: ConversationManifest, signal?: AbortSignal): Promise<string> {
+		if (coordinator.kind !== "coordinator" || coordinator.ownerHostId !== hostId || coordinator.creationKey !== "coordinator" ||
+			coordinator.conversationId !== deriveConversationId(hostId, "coordinator") || !coordinator.hostSpace) {
+			throw new ManagedMatrixError("invalid_response", "Legacy host Space lacks its saved coordinator binding");
+		}
+		const roomId = coordinator.hostSpace;
+		const expected = parseManagedProvenance({ version: 1, hostId, kind: "host_space", creationKey: "host" });
+		const events = await this.privateManagedState(roomId, true, signal);
+		const proofs = events.filter((event) => event.type === MANAGED_PROVENANCE_EVENT && event.state_key === "");
+		if (proofs.length) {
+			this.assertProof(events, expected);
+			return roomId;
+		}
+		// State PUT has no CAS. Do not blindly retry an uncertain write: the next
+		// provisioning attempt must read and verify the current proof again.
+		if (this.#http.retry.maxAttempts !== 1) throw new Error("Legacy ownership stamping requires one-attempt transport");
+		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${MANAGED_PROVENANCE_EVENT}/`, expected, signal);
+		await this.assertManagedProvenance(roomId, expected, signal);
+		return roomId;
+	}
+
 	/** Saved room IDs remain authoritative when mutable aliases or names change. */
 	async assertManagedProvenance(roomId: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<void> {
 		const expected = parseManagedProvenance(provenance);
-		await this.assertRoomAuthority(roomId, expected.kind.endsWith("_space"), signal, { spaceChild: expected.kind.endsWith("_space") });
+		this.assertProof(await this.privateManagedState(roomId, expected.kind.endsWith("_space"), signal), expected);
+	}
+	private assertProof(events: JsonObject[], expected: ManagedProvenance): void {
+		const proofs = events.filter((event) => event.type === MANAGED_PROVENANCE_EVENT && event.state_key === "");
+		if (proofs.length !== 1 || proofs[0]!.sender !== this.botUserId || !isDeepStrictEqual(proofs[0]!.content, expected)) {
+			throw new ManagedMatrixError("invalid_response", "Managed room proof is foreign, contradictory, or encrypted");
+		}
+	}
+	private async privateManagedState(roomId: string, space: boolean, signal?: AbortSignal): Promise<JsonObject[]> {
+		await this.assertRoomAuthority(roomId, space, signal, { spaceChild: space, management: true });
 		const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, undefined, signal);
 		if (!Array.isArray(state) || state.length > 4096) throw new ManagedMatrixError("invalid_response", "Managed room state is unavailable or oversized");
 		const events = state.filter((event): event is JsonObject => typeof event === "object" && event !== null && !Array.isArray(event));
-		const proofs = events.filter((event) => event.type === MANAGED_PROVENANCE_EVENT && event.state_key === "");
 		const creates = events.filter((event) => event.type === "m.room.create" && event.state_key === "");
 		const joins = events.filter((event) => event.type === "m.room.join_rules" && event.state_key === "");
 		const creation = creates[0]?.content as JsonObject | undefined;
 		const joinRules = joins[0]?.content as JsonObject | undefined;
 		if (joins.length !== 1 || joinRules?.join_rule !== "invite" || creation?.["m.federate"] !== false || events.length !== state.length || events.some((event) => event.type === "m.room.encryption") ||
-			creates.length !== 1 || creates[0]!.sender !== this.botUserId || proofs.length !== 1 || proofs[0]!.sender !== this.botUserId ||
-			!isDeepStrictEqual(proofs[0]!.content, expected)) {
+			creates.length !== 1 || creates[0]!.sender !== this.botUserId) {
 			throw new ManagedMatrixError("invalid_response", "Managed room proof is foreign, contradictory, or encrypted");
 		}
+		return events;
 	}
 
 	private async createRoom(name: string, space: boolean, signal?: AbortSignal, aliasLocalpart?: string, provenance?: ManagedProvenance): Promise<string> {
@@ -407,7 +438,7 @@ export class ManagedMatrixClient {
 		catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
 		return roomId;
 	}
-	async assertRoomAuthority(roomId: string, space: boolean, signal?: AbortSignal, required: { spaceChild?: boolean; kick?: boolean } = {}): Promise<void> {
+	async assertRoomAuthority(roomId: string, space: boolean, signal?: AbortSignal, required: { spaceChild?: boolean; kick?: boolean; management?: boolean } = {}): Promise<void> {
 		this.assertManagedRoom(roomId);
 		const create = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.create/`, undefined, signal);
 		const powers = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.power_levels/`, undefined, signal);
@@ -419,7 +450,7 @@ export class ManagedMatrixClient {
 		const value = powers as JsonObject; const users = typeof value.users === "object" && value.users !== null && !Array.isArray(value.users) ? value.users as JsonObject : {};
 		const events = typeof value.events === "object" && value.events !== null && !Array.isArray(value.events) ? value.events as JsonObject : {};
 		const bot = Number(users[this.botUserId] ?? value.users_default ?? 0); const stateDefault = Number(value.state_default ?? 50);
-		const thresholds = [stateDefault, ...(required.spaceChild ? [Number(events["m.space.child"] ?? stateDefault)] : []), ...(required.kick ? [Number(value.kick ?? 50)] : [])];
+		const thresholds = [stateDefault, ...(required.management ? [Number(events[MANAGED_PROVENANCE_EVENT] ?? stateDefault)] : []), ...(required.spaceChild ? [Number(events["m.space.child"] ?? stateDefault)] : []), ...(required.kick ? [Number(value.kick ?? 50)] : [])];
 		if (!Number.isFinite(bot) || thresholds.some((threshold) => !Number.isFinite(threshold) || bot < threshold)) {
 			throw new ManagedMatrixError("invalid_response", "Matrix bot lacks authority over required room operations");
 		}
