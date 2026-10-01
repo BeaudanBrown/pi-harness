@@ -111,7 +111,11 @@ Space apply uses existing #68 reconciliation intents extended to checkout Spaces
 A conversation summary contains only conversationId, kind, title, checkoutId
 (project only), projectKey (project only), runtimeState, launchState, setupState,
 activeGenerationId, optional exact marked window, optional bounded error code,
-and capabilities. Window means sessionName, windowId, paneId and conversationId
+and capabilities. Project summaries may include logical placement (rootKey,
+workspace, relativeCwd), never an absolute cwd. Legacy project rows without a
+verified checkout identity instead carry `reconciliationRequired: true`, omit
+checkoutId, and include projectKey only when already known. Inventory reads do
+not invent identities or perform migration. Window means sessionName, windowId, paneId and conversationId
 observed by the trusted launcher; only the local picker may use it to switch.
 No nonce, token, prompt, host path, raw exception or tool output is returned.
 `runtimeState` is running/stopped/unknown; `launchState` is none/prepared/

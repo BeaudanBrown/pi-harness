@@ -78,11 +78,14 @@ export const HOST_ERROR_EXITS = {
 	pending: 8, failed: 9,
 } as const;
 
-const readOperations = new Set<HostAction["operation"]>([
+const readOperationNames = [
 	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status",
 	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "conversation.delete.preview",
 	"space.reconcile.preview", "space.cleanup.preview",
-]);
+] as const satisfies readonly HostAction["operation"][];
+const readOperations = new Set<HostAction["operation"]>(readOperationNames);
+export type HostReadAction = Extract<HostAction, { operation: typeof readOperationNames[number] }>;
+export function isHostReadAction(action: HostAction): action is HostReadAction { return readOperations.has(action.operation); }
 export function isHostMutation(action: Pick<HostAction, "operation">): boolean { return !readOperations.has(action.operation); }
 export function requiresModelApproval(action: HostAction): boolean { return isHostMutation(action); }
 
@@ -95,7 +98,7 @@ export function hostActionPolicy(action: HostAction, actor: HostActor, protected
 	return actor.kind === "model" && isHostMutation(action) ? "approval" : "direct";
 }
 
-const enumeration = <T extends string>(values: T[]) => Type.Union(values.map((value) => Type.Literal(value)));
+const enumeration = <T extends string>(values: T[]) => Type.Enum(values);
 const runtimeState = enumeration(["running", "stopped", "unknown"]);
 const launchState = enumeration(["none", "prepared", "window_created", "attached", "failed"]);
 const setupState = enumeration(["pending", "ready", "disconnected", "notification_setup_uncertain"]);
@@ -106,10 +109,12 @@ const windowSchema = strict({ sessionName: text(128), windowId: Type.String({ pa
 const summaryFields = { conversationId: ConversationIdSchema, title: text(128), runtimeState, launchState, setupState, activeGenerationId: stable("generation"), window: Type.Optional(windowSchema), errorCode: Type.Optional(errorCode), capabilities };
 const summary = Type.Union([
 	strict({ ...summaryFields, kind: Type.Literal("coordinator") }),
-	strict({ ...summaryFields, kind: Type.Literal("project"), checkoutId: stable("checkout"), projectKey: stable("project") }),
+	strict({ ...summaryFields, kind: Type.Literal("project"), checkoutId: stable("checkout"), projectKey: stable("project"), placement: Type.Optional(WorkspaceIdentitySchema) }),
+	strict({ ...summaryFields, kind: Type.Literal("project"), reconciliationRequired: Type.Literal(true), projectKey: Type.Optional(stable("project")), placement: Type.Optional(WorkspaceIdentitySchema) }),
 ]);
+export type HostConversationSummary = Static<typeof summary>;
 const availability = enumeration(["available", "unavailable"]);
-const listResult = (item: TSchema) => strict({ items: Type.Array(item, { maxItems: HOST_INVENTORY_MAX_PAGE_SIZE }), nextCursor: Type.Union([text(256), Type.Null()]) });
+const listResult = <T extends TSchema>(item: T) => strict({ items: Type.Array(item, { maxItems: HOST_INVENTORY_MAX_PAGE_SIZE }), nextCursor: Type.Union([text(256), Type.Null()]) });
 const created = strict({ conversationId: ConversationIdSchema, launchId: stable("launch"), setupState });
 const launched = strict({ conversationId: ConversationIdSchema, launchId: stable("launch"), launchState });
 const cleanup = strict({ operationId: stable("operation"), cleanupState });
@@ -150,8 +155,19 @@ export const HostResultSchemas = {
 } satisfies Record<HostAction["operation"], TSchema>;
 const responseBase = { version: Type.Literal(HOST_CONTROL_VERSION), requestId: identifier };
 export const HostErrorResponseSchema = strict({ ...responseBase, ok: Type.Literal(false), error: strict({ code: errorCode, message: text(512), retryable: Type.Boolean() }) });
-export function parseHostResponse(operation: HostAction["operation"], value: unknown): unknown {
-	return validate(Type.Union([strict({ ...responseBase, ok: Type.Literal(true), data: HostResultSchemas[operation] }), HostErrorResponseSchema]), value);
+export type HostErrorCode = keyof typeof HOST_ERROR_EXITS;
+export type HostResult<O extends HostAction["operation"]> = Static<(typeof HostResultSchemas)[O]>;
+export type HostErrorResponse = Static<typeof HostErrorResponseSchema>;
+export type HostResponse<O extends HostAction["operation"] = HostAction["operation"]> = HostErrorResponse | {
+	version: typeof HOST_CONTROL_VERSION; requestId: string; ok: true; data: HostResult<O>;
+};
+export function parseHostResponse<O extends HostAction["operation"]>(operation: O, value: unknown): HostResponse<O> {
+	const response = validate<HostResponse<O>>(Type.Union([strict({ ...responseBase, ok: Type.Literal(true), data: HostResultSchemas[operation] }), HostErrorResponseSchema]), value);
+	if (response.ok && (operation === "conversation.status" || operation === "conversation.list")) {
+		const summaries = operation === "conversation.status" ? [response.data as HostConversationSummary] : (response.data as HostResult<"conversation.list">).items;
+		for (const item of summaries) if (item.kind === "project" && item.placement) validatePlacement(item.placement);
+	}
+	return response;
 }
 
 function validate<T>(schema: TSchema, value: unknown): T {
@@ -159,12 +175,16 @@ function validate<T>(schema: TSchema, value: unknown): T {
 	if (!Check(schema, value)) throw new Error("Invalid live-workspace contract");
 	return value as T;
 }
+function validatePlacement(placement: { rootKey: string; workspace: string; relativeCwd?: string }): void {
+	if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(placement.rootKey)) throw new Error("Invalid workspace root key");
+	if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(placement.workspace) || placement.workspace === "." || placement.workspace === "..") throw new Error("Invalid workspace name");
+	if (placement.relativeCwd !== undefined && placement.relativeCwd !== "" &&
+		(placement.relativeCwd.startsWith("/") || placement.relativeCwd.split("/").some((part) => !part || part === "." || part === "..") || /[\\\u0000-\u001f\u007f]/.test(placement.relativeCwd))) throw new Error("Invalid relative cwd");
+}
 export function parseHostAction(value: unknown): HostAction {
 	const result = validate<HostAction>(HostActionSchema, value);
 	const placement = "placement" in result ? result.placement : "workspace" in result ? result : undefined;
-	if (placement && (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(placement.workspace) || placement.workspace === "." || placement.workspace === "..")) throw new Error("Invalid workspace name");
-	if (placement && "relativeCwd" in placement && placement.relativeCwd !== "" &&
-		(placement.relativeCwd.startsWith("/") || placement.relativeCwd.split("/").some((part) => !part || part === "." || part === "..") || /[\\\u0000-\u001f\u007f]/.test(placement.relativeCwd))) throw new Error("Invalid relative cwd");
+	if (placement) validatePlacement(placement);
 	if ("title" in result && /[\u0000-\u001f\u007f]/.test(result.title)) throw new Error("Invalid title");
 	return result;
 }

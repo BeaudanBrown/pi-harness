@@ -276,3 +276,22 @@ LSP diagnostics are clean. This chunk has no external effects or runtime policy
 editor. It does not yet activate a dispatcher, control socket or CLI; their
 integration, durable execution dependencies and full issue verification remain
 open. Policy configuration is a startup snapshot, not hot reload.
+
+The next chunk adds the authenticated-front-end dispatcher seam, typed response
+results, explicit unresolved legacy summaries and bounded disposable inventory
+pages. Requests and results are validated; unknown diagnostics are redacted.
+Coordinator protection and per-model mutation gating precede backend reads;
+human mutation routes remain explicitly unavailable until their durable owners
+are integrated, never forwarded to old bypassing implementations. The bounded
+60-second request fingerprint guard rejects changed retained identities and
+fails closed at capacity; it is not a durable mutation execution journal.
+
+Snapshot cursors are authenticated and bound to host, operation/filter and the
+current metadata revision. Expiry, restart, eviction, revision changes and
+forgery fail stale. Pages are count/byte bounded, with at most eight snapshots,
+4,096 rows per snapshot, 8 MiB per snapshot and 16 MiB total. Tests cover these
+boundaries, immutable responses, requester mismatch, invalid fields, model
+approval, protected targets, staged mutation exclusion and malformed output.
+Legacy rows never synthesize checkout IDs; logical placement rejects host paths.
+These are deterministic component fixtures, not a live control-socket or CLI
+claim. Transport, registry read models and runtime integration remain open.
