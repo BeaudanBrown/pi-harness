@@ -4,6 +4,8 @@ import { HostApprovalStore } from "./host-approval-store.js";
 import { HostControlError, hostErrorResponse } from "./host-control-error.js";
 import { HostPolicy } from "./host-policy.js";
 
+import type { HostRunWitness } from "../host-run-contracts.js";
+
 type Decision = NonNullable<HostApprovalRecord["decision"]>;
 export interface HostApprovalPresentation {
 	receipt: NonNullable<HostApprovalRecord["presentation"]>;
@@ -61,6 +63,16 @@ export class HostApprovals {
 	cancelRun(conversationId: string, runId?: string): void {
 		for (const entry of this.active.values()) if (!entry.executing && entry.request.actor.conversationId === conversationId && (!runId || entry.request.actor.runId === runId)) {
 			entry.cancelled = "cancelled"; entry.cancel();
+		}
+	}
+
+	/** Observations can revoke consent, but only a fresh challenge can establish liveness. */
+	observeRun(conversationId: string, witness: HostRunWitness): void {
+		for (const entry of this.active.values()) {
+			const actor = entry.request.actor;
+			if (!entry.executing && actor.conversationId === conversationId && (witness.phase === "ended"
+				? witness.generationId === actor.generationId && witness.runId === actor.runId
+				: witness.generationId !== actor.generationId || witness.runId !== actor.runId || !witness.toolCallIds.includes(actor.toolCallId))) { entry.cancelled = "cancelled"; entry.cancel(); }
 		}
 	}
 

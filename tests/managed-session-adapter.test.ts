@@ -44,6 +44,7 @@ import {
 	type SessionBinding,
 } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { Type } from "typebox";
 import {
 	ALOOP_LIFECYCLE_ENTRY_TYPE,
 	ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE,
@@ -52,6 +53,48 @@ import {
 	publishAloopLifecycleEvent,
 	registerManagedAloopAbortDelegate,
 } from "../config/agent/extensions/managed-sessions/aloop-lifecycle.js";
+
+test("real Pi native events attest a current tool and headless approval fails promptly without invented consent", { timeout: 15000 }, async (t) => {
+	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
+	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
+	const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
+	const ai = await import(pathToFileURL(join(sdkRoot, "node_modules/@earendil-works/pi-ai/dist/index.js")).href);
+	const relay = await FakeRelay.start(); relay.enableApprovals = true;
+	let session: any; const errors: unknown[] = [];
+	t.after(async () => { try { if (session) { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); } } finally { await relay.close(); } });
+	const wait = async (predicate: () => boolean) => { for (let i = 0; i < 500 && !predicate(); i++) await new Promise((resolve) => setTimeout(resolve, 5)); assert.ok(predicate(), JSON.stringify(errors)); };
+	const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(relay.root, "auth.json"), modelsPath: join(relay.root, "models.json"), modelsStorePath: join(relay.root, "store.json") });
+	await modelRuntime.setRuntimeApiKey("anthropic", "fixture-key");
+	const path = join(relay.root, "native.jsonl"); await writeFile(path, JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: relay.root, timestamp: new Date().toISOString() }) + "\n");
+	const sm = sdk.SessionManager.open(path); const boundary = sm.appendCustomEntry(BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION });
+	sm.appendCustomEntry(BINDING_ENTRY_TYPE, { ...binding, sessionId: sm.getSessionId(), bindingBoundaryEntryId: deriveTranscriptEntryId(sm.getSessionId(), boundary) });
+	let probed = false;
+	const push = (type: string, payload: Record<string, unknown>, messageId: string) => relay.send({ protocolVersion: "1.0.0", role: "relay", conversationId, type, payload, messageId });
+	const loader = new sdk.DefaultResourceLoader({ cwd: relay.root, agentDir: relay.root, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+		extensionFactories: [createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce }),
+			(pi: ExtensionAPI) => pi.registerTool({ name: "approval_probe", label: "Probe", description: "Test native liveness", parameters: Type.Object({}), execute: async () => {
+				push("host.run.check", { checkId: "native-live" }, "check-native");
+				await wait(() => relay.frames.some((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-live"));
+				const witness = relay.frames.find((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-live")!.payload.witness as { generationId: string; runId: string; toolCallIds: string[]; sources: unknown[] };
+				assert.ok(witness); assert.deepEqual(witness.sources, [{ kind: "local" }]); assert.equal(witness.toolCallIds.length, 1);
+				push("host.approval.show", { approvalId: `approval_${"a".repeat(32)}`, generationId: witness.generationId, runId: witness.runId, toolCallId: witness.toolCallIds[0], question: "Exact test effect?", expiresAt: Date.now() + 10000 }, "native-dialog");
+				await wait(() => relay.frames.some((frame) => frame.type === "host.approval.answer"));
+				assert.equal(relay.frames.find((frame) => frame.type === "host.approval.answer")!.payload.choice, "unavailable"); probed = true;
+				return { content: [{ type: "text", text: "probed" }], details: {} };
+			} })] });
+	await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []); ({ session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader, settingsManager, sessionManager: sm, modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: ["approval_probe"] }));
+	await session.bindExtensions({ onError: (error: unknown) => errors.push(error) }); session.setActiveToolsByName(["approval_probe"]); assert.ok(session.getAllTools().some((tool: { name: string }) => tool.name === "approval_probe"), JSON.stringify(loader.getExtensions().errors)); assert.deepEqual(session.getActiveToolNames(), ["approval_probe"]); let calls = 0;
+	session.agent.streamFunction = (model: any) => {
+		const stream = ai.createAssistantMessageEventStream(); const tool = calls++ === 0;
+		queueMicrotask(() => { const reason = tool ? "toolUse" : "stop"; const message = { role: "assistant", content: tool ? [{ type: "toolCall", id: "native-live-tool", name: "approval_probe", arguments: {} }] : [{ type: "text", text: "done" }], api: model.api, provider: model.provider, model: model.id,
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: reason, timestamp: Date.now() };
+			stream.push({ type: "done", reason, message }); stream.end(); }); return stream;
+	};
+	await session.prompt("Probe native host liveness"); assert.equal(probed, true, JSON.stringify(session.agent.state.messages.filter((message: { role: string }) => message.role === "toolResult"))); assert.deepEqual(errors, []);
+	push("host.run.check", { checkId: "native-ended" }, "check-ended"); await wait(() => relay.frames.some((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-ended"));
+	assert.equal(relay.frames.find((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-ended")!.payload.witness, null);
+});
 
 test("real Pi queue withdrawal cancels managed delivery and releases successor without replay", { timeout: 15_000 }, async (t) => {
 	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI;
@@ -188,6 +231,7 @@ class FakeRelay {
 	enableCommentary = false;
 	enableDisposition = false;
 	enableRecovery = false;
+	enableApprovals = false;
 	enableLocal = false;
 	matrixPending = false;
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
@@ -260,10 +304,12 @@ class FakeRelay {
 				...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}) } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : [])];
+				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : []), ...(this.enableApprovals ? ["approval-v1"] : [])];
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active",
 					...(capabilities.length ? { capabilities } : {}), ...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
+		} else if (["host.run.observe", "host.run.confirm", "host.approval.answer"].includes(envelope.type)) {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "host.acknowledge", payload: {} }));
 		} else if (envelope.type === "input.acknowledge") {
 			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
 				socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "invalid_state", message: "Managed delivery acknowledgement regressed", retryable: false } }));

@@ -445,4 +445,18 @@ while a host call is pending and its disconnected requester does not replay it.
 The bounded fresh-proof helper additionally rejects unsolicited challenges, stale
 replies, replacement attachments and wrong generations; legacy/absent peers,
 timeout and shutdown supply no proof. Its seven focused proof/origin tests pass.
-This helper is not yet production-wired or evidence of native Pi run tracking.
+The helper alone is not production-wired evidence.
+
+Native Pi tracking now captures ephemeral low-level run IDs, hashed active tool
+IDs and persisted user-entry provenance. Mixed/local/Matrix sources do not inherit
+operator authority; run/tool end aborts pending dialogs. Native dialogs serialize
+only presentation, never fresh-proof intake, and headless UI returns unavailable
+rather than inventing a denial or consent. The adapter requests `approval-v1`, but
+the relay still withholds it until the runtime owners are assembled. Upgrade the
+relay before launching this adapter against a pre-capability strict-schema relay.
+A composed native/frontend/public-dispatcher fixture proves denial, fresh consent,
+exact requester revalidation and run-end cancellation. A real packaged Pi session
+against a fake relay proves actual native tool/run event ordering, local provenance,
+headless unavailability and absence of liveness after settlement. This is not live
+Matrix delivery or interactive TUI acceptance. The initial real-Pi fixture omitted
+its tool from the SDK allowlist; correcting that fixture made the focused check pass.

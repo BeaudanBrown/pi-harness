@@ -259,7 +259,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		question: boundedString(4096), expiresAt: Type.Integer({ minimum: 0, maximum: Number.MAX_SAFE_INTEGER }) }),
 	relayEnvelope("host.approval.close", { approvalId: stableId("approval") }),
 	clientEnvelope(adapterRole, "host.approval.answer", { approvalId: stableId("approval"), generationId: GenerationIdSchema, runId: identifier, toolCallId: identifier,
-		choice: Type.Union([Type.Literal("approve"), Type.Literal("deny")]) }),
+		choice: Type.Union([Type.Literal("approve"), Type.Literal("deny"), Type.Literal("unavailable")]) }),
 	relayEnvelope("host.acknowledge", {}),
 	relayEnvelope("host.result", { operation: boundedString(64), response: Type.Unknown() }),
 	clientEnvelope(adapterRole, "recovery.confirm", {

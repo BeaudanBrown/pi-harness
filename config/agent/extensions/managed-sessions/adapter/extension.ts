@@ -15,6 +15,7 @@ import {
 } from "../aloop-lifecycle.js";
 import { RemoteCheckpointSchema, renderRemoteCheckpoint, validateRemoteCheckpoint } from "../checkpoint.js";
 import { deriveActivityId, deriveGenerationId } from "../v2-contracts.js";
+import { NativeHostRun } from "./host-run.js";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_PROJECTION_ENTRIES,
@@ -276,6 +277,27 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const inFlightDeliveries = new Set<string>();
 		const persistedRecoveryPending = new Set<string>();
 		const expandedRecoveryPending = new Set<string>();
+		const hostRun = new NativeHostRun({
+			client: () => client,
+			sources: (count) => {
+				if (!binding || !currentContext || pendingUserPersistence.length) return [];
+				const users = currentContext.sessionManager.getBranch().filter((entry) => entry.type === "message" && entry.message.role === "user").slice(-count);
+				if (users.length !== count) return [];
+				const sources = users.map((entry) => {
+					const id = persistedEntryId(binding!.sessionId, entry.id);
+					const origins = [...deliveries.values()].filter((marker) => marker.piEntryId === id);
+					if (!origins.length) return { kind: "local" as const };
+					if (origins.length !== 1 || origins[0].status !== "persisted") return undefined;
+					return { kind: "matrix" as const, deliveryId: origins[0].deliveryId };
+				});
+				if (sources.some((source) => !source)) return [];
+				return [...new Map(sources.map((source) => [source!.kind === "local" ? "local" : source!.deliveryId, source!])).values()];
+			},
+			confirm: async (question, signal, timeout) => {
+				if (!currentContext?.hasUI) throw new Error("Native approval UI is unavailable");
+				return currentContext.ui.confirm("Approve host action?", question, { signal, timeout });
+			},
+		});
 		let activity: BusyActivity | undefined;
 		const closingActivities = new Set<ClosingActivity>();
 		let selectedModel: string | undefined;
@@ -1027,6 +1049,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		async function handleEnvelope(envelope: ManagedSessionEnvelope): Promise<void> {
+			if (await hostRun.receive(envelope)) return;
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
 			if (envelope.type === "binding.status") {
@@ -1117,7 +1140,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
-				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1"],
+				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				beforeMatrixBindingReady: () => {
 					if (client !== next || bindingEpoch !== epoch) return;
@@ -1305,6 +1328,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		pi.on("before_agent_start", () => setCheckpointActive(Boolean(binding && client?.connected)));
 		pi.on("agent_start", async (_event, ctx) => {
+			if (binding && client?.supports("approval-v1")) hostRun.begin(deriveGenerationId(binding.conversationId, client.generation));
 			if (role !== "ordinary_adapter" || !binding || activity) return;
 			// Bound feedback retention during prolonged outages, not model execution.
 			if (closingActivities.size >= maxClosingActivities) return;
@@ -1332,12 +1356,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("tool_call", (_event, ctx) => {
 			if (binding && client?.connected) queueProjection(ctx);
 		});
+		pi.on("agent_end", () => hostRun.end());
 		pi.on("tool_execution_start", (event) => {
+			hostRun.toolStart(event.toolCallId);
 			if (!activity) return;
 			const name = isAloopLifecycleActive(currentContext?.sessionManager.getSessionId() ?? "") ? "aloop" : boundedToolName(activity, event.toolName); activity.activeTools.set(event.toolCallId, name); activity.toolTotal += 1;
 			activity.toolCounts.set(name, (activity.toolCounts.get(name) ?? 0) + 1); sendActivityUpdate(activity);
 		});
 		pi.on("tool_execution_end", (event) => {
+			hostRun.toolEnd(event.toolCallId);
 			if (!activity) return;
 			const name = activity.activeTools.get(event.toolCallId) ?? (isAloopLifecycleActive(currentContext?.sessionManager.getSessionId() ?? "") ? "aloop" : boundedToolName(activity, event.toolName)); activity.activeTools.delete(event.toolCallId);
 			if (event.isError) { activity.toolErrors += 1; activity.failedTools.add(name); } sendActivityUpdate(activity);
@@ -1350,6 +1377,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		// potentially long agent run. Explicit receipts remain restart authority.
 		pi.on("message_end", (event, ctx) => {
 			if (event.message.role !== "user") return;
+			hostRun.userMessage();
 			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
 				const marker = pendingUserPersistence[index]!;
 				const key = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
@@ -1362,6 +1390,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		});
 
 		pi.on("agent_settled", async (_event, ctx) => {
+			hostRun.reset();
 			const finalizations = captureFinalizations(ctx);
 			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
 				const marker = pendingUserPersistence[index]!;
@@ -1392,6 +1421,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		});
 
 		pi.on("session_shutdown", async (event, ctx) => {
+			hostRun.reset();
 			stopped = true;
 			bindingEpoch += 1;
 			unsubscribeAloopLifecycle();

@@ -374,7 +374,7 @@ export class BoundAdapterClient {
 	async confirmHostRun(checkId: string, witness: HostRunWitness | null): Promise<void> {
 		await this.hostMessage("host.run.confirm", { checkId, witness: witness === null ? null : parseHostRunWitness(witness) });
 	}
-	async answerHostApproval(input: { approvalId: string; generationId: string; runId: string; toolCallId: string; choice: "approve" | "deny" }): Promise<void> {
+	async answerHostApproval(input: { approvalId: string; generationId: string; runId: string; toolCallId: string; choice: "approve" | "deny" | "unavailable" }): Promise<void> {
 		await this.hostMessage("host.approval.answer", structuredClone(input));
 	}
 	private async hostMessage(type: string, payload: Record<string, unknown>): Promise<void> {
