@@ -173,3 +173,22 @@ that acknowledgement loss. This is not bootstrap-wide migration and does not
 move or rename rooms, change IDs, invite users, or modify notification rules.
 The lifecycle call site remains to be wired as part of #106. No existing Space
 has been mutated by this implementation work.
+
+A separate durable hierarchy module now reserves local conversation/checkout
+identities before remote effects and serializes shared ancestor creation. It
+invokes the approved host-only additive marker primitive only while provisioning
+a reserved, incomplete conversation. Loading and completed retries are read-only
+with respect to Matrix. Root/linked checkout and concurrent-conversation fixtures
+share the correct ancestors; saved Space IDs survive alias changes. The module
+reports `hierarchy_ready`, not account/phone readiness. Managed-session/source
+checks pass, including before/after create/link faults and lost-response recovery.
+It is not yet wired into HostLifecycle or advertised as completed #106 behavior.
+
+Fault analysis exposed another ambiguity: after an uncertain create, an absent
+alias cannot distinguish no creation from accepted creation followed by alias
+removal. The module durably records attempts and currently holds this case pending
+rather than risking a duplicate. A dedicated fixture preserves the accepted room
+without creating a replacement. Automatic read-only search of the bot's joined
+rooms for exact management provenance could recover some such cases, but widens
+the metadata-read boundary beyond saved targets and deterministic aliases; this
+choice is being raised before lifecycle integration.

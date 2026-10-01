@@ -322,6 +322,22 @@ export class ManagedMatrixClient {
 		} catch (error) { if (roomId) this.#managedRoomIds.delete(roomId); throw error; }
 	}
 
+	/** Recovery after an uncertain create is read-only; absence is not proof that no room was created. */
+	async recoverManagedAlias(provenance: ManagedProvenance, signal?: AbortSignal): Promise<string | undefined> {
+		const expected = parseManagedProvenance(provenance);
+		const roomId = await this.lookupPrivateRoomAlias(managedRoomAlias(expected), signal);
+		if (roomId) await this.recoverManagedRoom(roomId, expected, signal);
+		return roomId;
+	}
+
+	/** Read-only recovery from a saved host-owned ID; alias/name changes cannot retarget it. */
+	async recoverManagedRoom(roomId: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<void> {
+		if (!/^![^\s:]{1,200}:[^\s]{1,200}$/.test(roomId) || roomId.length > 255) throw new Error("Invalid saved managed room ID");
+		this.#managedRoomIds.add(roomId);
+		try { await this.assertManagedProvenance(roomId, provenance, signal); }
+		catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
+	}
+
 	/** Only new provisioning may invoke this additive legacy-host upgrade; never bootstrap. */
 	async ensureLegacyHostProvenance(hostId: string, coordinator: ConversationManifest, signal?: AbortSignal): Promise<string> {
 		if (coordinator.kind !== "coordinator" || coordinator.ownerHostId !== hostId || coordinator.creationKey !== "coordinator" ||
