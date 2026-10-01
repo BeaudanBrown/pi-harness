@@ -43,6 +43,7 @@ export class HostPolicy {
 			// The source schema, not an override, determines whether an operation is a read.
 			if (policy.model === "direct" && isHostMutation({ operation: schema.properties.operation.const })) throw Error("Model mutations cannot bypass approval");
 			if (policy.human === "confirmed" && !("confirmed" in schema.properties)) throw Error("Action has no explicit confirmation contract");
+			if ("confirmed" in schema.properties && policy.human !== "confirmed" && policy.human !== "deny") throw Error("Human confirmation policy cannot be weakened or replaced");
 		}
 		this.actions = structuredClone(actions);
 	}

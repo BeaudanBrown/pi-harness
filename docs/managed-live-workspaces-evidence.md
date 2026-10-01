@@ -283,8 +283,9 @@ pages. Requests and results are validated; unknown diagnostics are redacted.
 Coordinator protection and per-model mutation gating precede backend reads;
 human mutation routes remain explicitly unavailable until their durable owners
 are integrated, never forwarded to old bypassing implementations. The bounded
-60-second request fingerprint guard rejects changed retained identities and
-fails closed at capacity; it is not a durable mutation execution journal.
+request replay guard rejects changed retained identities, joins in-flight work,
+and replays detached validated results/errors for 60 seconds after completion.
+It fails closed at capacity and is not a durable mutation execution journal.
 
 Snapshot cursors are authenticated and bound to host, operation/filter and the
 current metadata revision. Expiry, restart, eviction, revision changes and
@@ -340,4 +341,21 @@ gates. No current source LSP errors. Approval execution (#108), retirement/froze
 previews (#109), window-first open (#110), frontend rewiring and durable picker
 cache ownership remain dependent work. The metadata discovery cache is disposable
 and cannot authorize operations. Account readiness and actual phone delivery
-remain explicitly unclaimed. Final issue review follows the committed integration.
+remain explicitly unclaimed.
+
+The intentional pinned-HEAD audit at `f291986` reported one Standards medium
+finding (read retry result stability) and one Spec high finding (confirmation
+policy override floor). Both were addressed in one remediation batch: in-flight
+read retries share execution, validated results and sanitized errors are detached
+and replayed for 60 seconds after completion, and capacity fails closed rather
+than evicting retained or in-flight identities. The cache remains process-local
+and disposable, not a durable mutation journal. Nix and runtime policy loading now
+reject changing confirmation-required human entries to `direct` or replacing
+them with another approval classification; `deny` remains a valid restriction.
+The request schema already required explicit confirmation independently; no
+bypassing mutation execution was available during this staged rollout.
+Regression fixtures cover concurrent/lost-reply retries, caller/backend mutation,
+completion-based expiry, error replay/recovery with a new request ID, and Nix
+negative delete/apply overrides. The canonical `nix run .#verify` gate passed
+again after these remediations. No additional subjective re-review was needed:
+the existing bounded replay/policy seams were corrected without a new design.

@@ -375,6 +375,9 @@
             modelBypass = { "conversation.open".model = "direct"; };
             unknown = { "unknown.action".human = "deny"; };
             invalidConfirmation = { "host.status".human = "confirmed"; };
+            deleteConfirmationBypass = { "conversation.delete".human = "direct"; };
+            applyConfirmationBypass = { "space.reconcile.apply".human = "direct"; };
+            destructiveDeny = { "conversation.delete".human = "deny"; };
           };
           restrictivePolicyFile = restrictivePolicyTest.config.systemd.user.services.pi-managed-session-relay.environment.PI_MANAGED_HOST_ACTION_POLICY;
           hostControlExecutable = "${builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 2}/bin/pi-managed-session";

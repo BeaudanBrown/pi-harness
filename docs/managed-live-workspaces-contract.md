@@ -149,6 +149,12 @@ error strings. With `--json`, stdout contains exactly one result and diagnostics
 use stderr. A pending result is success-shaped with its durable operation ID,
 but exit 8 distinguishes it from completed effects. Lost replies are recovered
 by repeating the same requestId; changing payload under that ID is a conflict.
+The staged read-only dispatcher joins in-flight retries and retains validated
+responses/errors in memory for 60 seconds after completion (1,024 entries by
+default, at most 4,096). It never evicts in-flight or unexpired identities to admit
+new work. Use a new request ID for a fresh observation; restart/expiry discards
+this read cache. It is not the durable mutation execution journal required by
+the dependent approval/retirement/open owners.
 
 Compatibility wrappers: `pi-managed-session-status` calls host status when the
 control endpoint is present, retaining its established health output/exit behavior

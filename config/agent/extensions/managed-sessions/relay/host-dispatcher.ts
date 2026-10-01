@@ -22,7 +22,7 @@ export interface HostReadRequest { version: typeof HOST_CONTROL_VERSION; actor: 
 
 /** One validated/policy-governed seam; frontend authentication is mandatory and separate. */
 export class HostDispatcher {
-	private readonly requests = new Map<string, { digest: string; expiresAt: number }>();
+	private readonly requests = new Map<string, { digest: string; expiresAt: number; response: Promise<HostResponse> }>();
 	private readonly now: () => number;
 	private readonly capacity: number;
 	constructor(private readonly options: {
@@ -53,18 +53,27 @@ export class HostDispatcher {
 			const digest = createHash("sha256").update(canonical([this.options.hostId, request])).digest("hex");
 			const retained = this.requests.get(id);
 			if (retained && retained.digest !== digest) throw new HostControlError("conflict", "Retained request identity has different arguments or requester context");
-			if (!retained) {
-				if (this.requests.size >= this.capacity) throw new HostControlError("unavailable", "Host request capacity reached; retry later", true);
-				this.requests.set(id, { digest, expiresAt: now + 60_000 });
-			}
+			if (retained) return structuredClone(await retained.response);
+			if (this.requests.size >= this.capacity) throw new HostControlError("unavailable", "Host request capacity reached; retry later", true);
+			// Publish the shared promise before execution; never expire in-flight work.
+			const entry = { digest, expiresAt: Infinity, response: Promise.resolve().then(() => this.execute(request)) };
+			entry.response = entry.response.then((response) => { entry.expiresAt = this.now() + 60_000; return response; });
+			this.requests.set(id, entry);
+			return structuredClone(await entry.response);
+		} catch (error) { return hostErrorResponse(id, error); }
+	}
+
+	private async execute(request: ReturnType<typeof parseHostRequest>): Promise<HostResponse> {
+		const id = request.actor.requestId;
+		try {
 			const decision = this.options.policy.decide(request, this.options.protectedConversationId);
 			if (decision === "forbidden") throw new HostControlError("forbidden", "Host action is forbidden");
 			if (decision === "approval") throw new HostControlError("approval_required", "This action requires its own host approval");
 			// Mutation execution joins through the durable approval/retirement/open owners.
-			// This volatile collision guard must never substitute for their execution journal.
+			// This volatile read-replay cache must never substitute for their execution journal.
 			if (!isHostReadAction(request.action)) throw new HostControlError("upgrade_required", "This relay does not yet support this mutation through host controls");
 			const data = await this.options.read({ version: request.version, actor: request.actor, action: request.action });
-			return parseHostResponse(request.action.operation, { version: HOST_CONTROL_VERSION, requestId: id, ok: true, data });
+			return structuredClone(parseHostResponse(request.action.operation, { version: HOST_CONTROL_VERSION, requestId: id, ok: true, data }));
 		} catch (error) { return hostErrorResponse(id, error); }
 	}
 }

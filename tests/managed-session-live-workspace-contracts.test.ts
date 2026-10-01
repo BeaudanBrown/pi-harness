@@ -79,6 +79,10 @@ test("deployment policy rejects unknown fields/actions and model mutation bypass
 		{ version: "1.0.0", actions: { "host.status": { human: "confirmed", model: "direct" } } },
 		{ version: "1.0.0", actions: { "host.status": { human: "direct", model: "direct", argv: [] } } },
 	]) assert.throws(() => new HostPolicy(value));
+	for (const action of fixtures.map(([value]) => parseHostAction(value))) if ("confirmed" in action) {
+		assert.throws(() => new HostPolicy({ version: "1.0.0", actions: { [action.operation]: { human: "direct", model: "approval" } } }), /confirmation policy/);
+		assert.doesNotThrow(() => new HostPolicy({ version: "1.0.0", actions: { [action.operation]: { human: "deny", model: "approval" } } }));
+	}
 });
 
 test("unknown operations, ambiguous IDs, forged actor fields, bounds and paths fail closed", () => {

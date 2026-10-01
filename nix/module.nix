@@ -691,8 +691,9 @@ in
           builtins.hasAttr name hostActionDefaults.actions
           && (cfg.managedSessions.actionPolicyOverrides.${name}.model != "direct" || hostActionDefaults.actions.${name}.model == "direct")
           && (cfg.managedSessions.actionPolicyOverrides.${name}.human != "confirmed" || hostActionDefaults.actions.${name}.human == "confirmed")
+          && (hostActionDefaults.actions.${name}.human != "confirmed" || builtins.elem cfg.managedSessions.actionPolicyOverrides.${name}.human [ null "confirmed" "deny" ])
         ) (builtins.attrNames cfg.managedSessions.actionPolicyOverrides);
-        message = "Managed host policy overrides must name known actions and cannot bypass model approval or invent confirmation fields.";
+        message = "Managed host policy overrides must name known actions and cannot bypass model approval or alter protocol confirmation requirements.";
       }
       {
         assertion = !managedSessionsEnabled || !cfg.managedSessions.botIsAdmin;

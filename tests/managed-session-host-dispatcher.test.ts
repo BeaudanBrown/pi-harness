@@ -12,11 +12,11 @@ const model: HostActor = { kind: "model", requestId: "model-1", conversationId: 
 const status = { hostId: "host", relayState: "ready", capabilities: ["host-control-v1"], accountState: "unavailable" };
 const request = (action: unknown = { operation: "host.status" }, actor = human()) => ({ version: "1.0.0", action, actor });
 function code(response: HostResponse): string { if (response.ok) assert.fail("Expected failure"); return response.error.code; }
-function harness(options: { now?: () => number; requestCapacity?: number; data?: unknown } = {}) {
+function harness(options: { now?: () => number; requestCapacity?: number; data?: unknown; load?: () => Promise<unknown> } = {}) {
 	let reads = 0;
 	const dispatcher = new HostDispatcher({ hostId: "host", protectedConversationId,
 		policy: new HostPolicy(JSON.parse(readFileSync("config/agent/managed-host-policy.json", "utf8"))),
-		read: async () => { reads++; return options.data ?? status; }, ...options });
+		read: async () => { reads++; return options.load ? options.load() : options.data ?? status; }, ...options });
 	return { dispatcher, reads: () => reads };
 }
 
@@ -53,7 +53,32 @@ test("retained identity rejects changed arguments and requester context without 
 	assert.equal(code(await dispatcher.dispatch(request({ operation: "workspace.list" }), human())), "conflict");
 	const actor = { ...model, requestId: "request-1" };
 	assert.equal(code(await dispatcher.dispatch(request(undefined, actor), actor)), "conflict");
-	assert.equal(reads(), 2, "unchanged reads may observe current metadata; this is not an execution journal");
+	assert.equal(reads(), 1, "retained exact retries replay the validated read result");
+});
+
+test("read retries join in-flight work and replay detached results for 60 seconds after completion", async () => {
+	let now = 0; let release!: (data: unknown) => void;
+	const gate = new Promise<unknown>((resolve) => { release = resolve; });
+	const { dispatcher, reads } = harness({ now: () => now, requestCapacity: 1, load: () => gate });
+	const first = dispatcher.dispatch(request(), human()); const second = dispatcher.dispatch(request(), human());
+	await Promise.resolve(); assert.equal(reads(), 1);
+	now = 120_000; const third = dispatcher.dispatch(request(), human());
+	const other = human("other"); assert.equal(code(await dispatcher.dispatch(request(undefined, other), other)), "unavailable");
+	const backend = structuredClone(status); release(backend);
+	const results = await Promise.all([first, second, third]); assert.deepEqual(results[0], results[1]); assert.deepEqual(results[0], results[2]);
+	const expected = structuredClone(results[0]); backend.hostId = "backend-changed";
+	assert.ok(results[0].ok); (results[0].data as typeof status).hostId = "caller-changed";
+	now = 179_999; assert.deepEqual(await dispatcher.dispatch(request(), human()), expected); assert.equal(reads(), 1);
+	now = 180_000; assert.notDeepEqual(await dispatcher.dispatch(request(), human()), expected); assert.equal(reads(), 2);
+});
+
+test("retained sanitized errors are frozen too; a new request ID can observe recovery", async () => {
+	let fail = true;
+	const { dispatcher, reads } = harness({ load: async () => { if (fail) throw Error("private backend details"); return status; } });
+	const failed = await dispatcher.dispatch(request(), human()); assert.equal(code(failed), "failed");
+	fail = false; assert.deepEqual(await dispatcher.dispatch(request(), human()), failed); assert.equal(reads(), 1);
+	assert.ok(!JSON.stringify(failed).includes("private backend"));
+	const next = human("recovered"); assert.equal((await dispatcher.dispatch(request(undefined, next), next)).ok, true); assert.equal(reads(), 2);
 });
 
 test("collision guard fails closed at capacity rather than forgetting retained identities", async () => {

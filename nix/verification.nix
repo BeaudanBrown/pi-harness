@@ -312,7 +312,7 @@ let
     ${prepareSource}
     python3 -m unittest discover -s tests -p test_runtime_pin.py -v
     jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4
-      and .policyOverrideAssertions == {"restrictive":true,"modelBypass":false,"unknown":false,"invalidConfirmation":false}
+      and .policyOverrideAssertions == {"restrictive":true,"modelBypass":false,"unknown":false,"invalidConfirmation":false,"deleteConfirmationBypass":false,"applyConfirmationBypass":false,"destructiveDeny":true}
       and .disabledHostHasNoService and .disabledHostHasNoControlCommand
       and (.hasGeneralEnvironmentFile | not) and (.hasPrivateTmp | not)
       and (.relayRestartIfChanged | not) and (.relayStopIfChanged | not)
