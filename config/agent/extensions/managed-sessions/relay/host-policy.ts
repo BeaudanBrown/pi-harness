@@ -1,3 +1,6 @@
+import { constants } from "node:fs";
+import { open } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 import { Type } from "typebox";
 import { Check } from "typebox/value";
 import {
@@ -10,6 +13,23 @@ const entry = Type.Object({
 }, { additionalProperties: false });
 const policySchema = Type.Object({ version: Type.Literal(HOST_CONTROL_VERSION), actions: Type.Record(Type.String(), entry) }, { additionalProperties: false });
 export type HostPolicyDecision = "direct" | "approval" | "forbidden";
+
+export async function readHostPolicy(path: string): Promise<HostPolicy> {
+	if (!isAbsolute(path)) throw Error("Managed host policy path must be absolute");
+	const file = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+	try {
+		const info = await file.stat();
+		if (!info.isFile() || info.size > 64 * 1024) throw Error("Invalid managed host policy file");
+		const buffer = Buffer.alloc(64 * 1024 + 1); let bytesRead = 0;
+		while (bytesRead < buffer.length) {
+			const chunk = await file.read(buffer, bytesRead, buffer.length - bytesRead, bytesRead);
+			if (!chunk.bytesRead) break;
+			bytesRead += chunk.bytesRead;
+		}
+		if (bytesRead > 64 * 1024) throw Error("Invalid managed host policy file");
+		return new HostPolicy(JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, bytesRead))));
+	} finally { await file.close(); }
+}
 
 /** Immutable deployment policy. Requester authentication belongs to the calling frontend. */
 export class HostPolicy {

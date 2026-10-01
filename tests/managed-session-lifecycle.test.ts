@@ -134,6 +134,19 @@ test("packaged worktree launcher creates, inventories, safely removes, and separ
 	assert.deepEqual(invoke("worktree-create-apply", { ...plan, resumeExisting: true }), created, "completed creation retries reuse only the exact registered worktree");
 	const inventory = invoke("worktree-list", { rootKey: "projects", workspace: "project" }) as { worktrees: Array<Record<string, unknown>> };
 	assert.equal(inventory.worktrees.length, 2); assert.equal(inventory.worktrees.find((item) => item.workspace === plan.targetWorkspace)?.clean, true);
+	const trace = join(root, "metadata-git-trace");
+	const metadata = JSON.parse(execFileSync(launcher, ["managed", "worktree-inventory"], {
+		input: JSON.stringify({ rootKey: "projects", workspace: "project" }), encoding: "utf8", env: { ...env, GIT_TRACE: trace },
+	})) as { projectKey: string; worktrees: Array<Record<string, unknown>> };
+	const resolved = invoke("workspace-resolve", { rootKey: "projects", workspace: "project", relativeCwd: "" });
+	assert.equal(metadata.projectKey, resolved.projectKey, "metadata uses the existing project identity hash domain");
+	assert.equal(metadata.worktrees.length, 2); assert.equal(metadata.worktrees.find((item) => item.workspace === plan.targetWorkspace)?.workspacePath, linked);
+	assert.ok(metadata.worktrees.every((item) => !("clean" in item)), "metadata does not invent clean/dirty observations");
+	assert.ok(!(await readFile(trace, "utf8")).includes("status --porcelain"), "no per-row Git status on metadata inventory");
+	const detached = join(workspaceRoot, "detached"); execFileSync("git", ["-C", main, "worktree", "add", "--detach", detached, "HEAD"]);
+	const detachedInventory = invoke("worktree-inventory", { rootKey: "projects", workspace: "project" }) as { worktrees: Array<Record<string, unknown>> };
+	assert.equal(detachedInventory.worktrees.find((item) => item.workspace === "detached")?.branch, undefined);
+	execFileSync("git", ["-C", main, "worktree", "remove", detached]);
 
 	await writeFile(join(linked, ".gitignore"), "ignored\n"); execFileSync("git", ["-C", linked, "add", ".gitignore"]); execFileSync("git", ["-C", linked, "commit", "-m", "ignore"]);
 	await writeFile(join(linked, "ignored"), "must not be silently deleted");
@@ -196,6 +209,11 @@ test("host lifecycle persists idempotent worktree creation and confirmation-boun
 	const listed = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.list", rootKey: "projects", workspace: "project" }));
 	assert.equal((listed.worktrees as Array<Record<string, unknown>>).some((item) => item.workspace === targetWorkspace && item.clean === true), true);
 	assert.deepEqual(listed.intents, [{ kind: "creation", key: created.worktreeKey, workspace: targetWorkspace, branch: "feature/host", phase: "created" }]);
+	const metadataRows = await lifecycle.worktreeInventory("projects", "project");
+	assert.equal(metadataRows.length, 2); assert.ok(metadataRows.every((row) => /^checkout_[a-f0-9]{32}$/.test(row.checkoutId)));
+	assert.ok(!JSON.stringify(metadataRows).includes(root), "public worktree metadata never returns canonical host paths");
+	assert.ok(metadataRows.every((row) => !("clean" in row) && !("head" in row)));
+	assert.deepEqual(await readdir(join(sessions, "worktrees")), intentFiles, "metadata reads do not create lifecycle intents");
 	const preview = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.preview", rootKey: "projects", workspace: targetWorkspace, mergeTarget: "main" }));
 	assert.equal(preview.merged, true); assert.match(String(preview.removalKey), /^worktree_remove_[a-f0-9]{32}$/);
 	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.apply", removalKey: preview.removalKey, confirmed: false })), /explicit confirmation/);

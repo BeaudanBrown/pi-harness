@@ -313,4 +313,31 @@ Pi transcripts. Human diagnostics and invalid server output do not expose paths
 or raw errors. Managed-session, module and source gates pass; affected LSP checks
 are clean. These are local component fixtures, not production relay integration:
 startup wiring, cheap registry metadata projection and compatibility wrapper
-integration still remain open. No deployment or live acceptance is claimed.
+integration were the remaining work at that component boundary. No deployment
+or live acceptance is claimed.
+
+Production integration now starts controls before Matrix authentication/bootstrap,
+only with an explicitly configured, bounded startup policy. Adapter/control path
+collisions fail before ownership or filesystem effects. All shutdown paths drain
+controls before releasing ownership; repeated relay stop calls share completion.
+The registry projection copies only logical metadata and matching live-attachment
+observations, not queues, nonce material, physical paths or generation histories.
+Unattached rows remain unknown rather than asserting a stopped Pi.
+
+| #107 acceptance | Implementation/evidence |
+| --- | --- |
+| Separate private authenticated transport | `HostControlServer`, real OS peer helper, malformed/oversized/version/actor tests, startup/close race and drain fixtures |
+| Public CLI and bounded machine output | Every catalog operation parses; packaged subprocess read/error tests; client validates full frame/schema/correlation/privacy |
+| Central immutable policy | Nix positive/negative override assertions, startup file validation, per-model mutation floor and protected coordinator fixtures |
+| Cheap canonical/display/placement inventory | Dedicated registry projection; cached bounded workspace/worktree discovery; real Git fixture checks existing project-key domain and absence of per-row status; detached branch absence is explicit |
+| Early/local availability without false Matrix readiness | Production relay plus packaged CLI lists an attached roomless Pi while fake Matrix authentication is blocked, survives restart, and does not launch Pi or modify its transcript |
+| Disabled-host absence and compatibility | Nix disabled service/command assertions; production no-policy socket absence; configured CLI ignores stale runtime overrides; health wrapper preserves pre-control rollout behavior |
+| Safe staged exposure | Full typed catalog; previews/mutations lacking durable owners return upgrade/approval errors, never call legacy coordinator-role mutation wrappers |
+
+The full `nix run .#verify` gate passed after integration, including managed-session,
+module/package/source/schema, TypeScript, unit, bridge/chat, Pi-R and evaluator
+gates. No current source LSP errors. Approval execution (#108), retirement/frozen
+previews (#109), window-first open (#110), frontend rewiring and durable picker
+cache ownership remain dependent work. The metadata discovery cache is disposable
+and cannot authorize operations. Account readiness and actual phone delivery
+remain explicitly unclaimed. Final issue review follows the committed integration.

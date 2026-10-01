@@ -112,7 +112,8 @@ A conversation summary contains only conversationId, kind, title, checkoutId
 (project only), projectKey (project only), runtimeState, launchState, setupState,
 activeGenerationId, optional exact marked window, optional bounded error code,
 and capabilities. Project summaries may include logical placement (rootKey,
-workspace, relativeCwd), never an absolute cwd. Legacy project rows without a
+workspace, relativeCwd) and project/checkout display names, never an absolute cwd.
+Legacy project rows without a
 verified checkout identity instead carry `reconciliationRequired: true`, omit
 checkoutId, and include projectKey only when already known. Inventory reads do
 not invent identities or perform migration. Window means sessionName, windowId, paneId and conversationId
@@ -122,6 +123,11 @@ No nonce, token, prompt, host path, raw exception or tool output is returned.
 window_created/attached/failed; `setupState` is pending/ready/disconnected/
 notification_setup_uncertain; `cleanupState` is pending/complete/failed.
 `relayState` is ready/disconnected; `accountState` is ready/pending/unavailable.
+Workspace rows likewise use `reconciliationRequired: true` instead of inventing
+missing or contradictory checkout identities, and may include display names.
+Detached worktrees omit `branch`; metadata inventory does not imply a clean Git
+working tree. Workspace/worktree discovery is bounded and cached for 30 seconds;
+these last-known display observations never authorize mutations.
 
 Each JSON response is exactly `{version, requestId, ok, data}` or
 `{version, requestId, ok, error:{code,message,retryable}}`, with literal version
@@ -144,8 +150,10 @@ use stderr. A pending result is success-shaped with its durable operation ID,
 but exit 8 distinguishes it from completed effects. Lost replies are recovered
 by repeating the same requestId; changing payload under that ID is a conflict.
 
-Compatibility wrappers: `pi-managed-session-status` calls host status, retaining
-its established health output/exit behavior for existing scripts. Legacy
+Compatibility wrappers: `pi-managed-session-status` calls host status when the
+control endpoint is present, retaining its established health output/exit behavior
+for existing scripts. During guarded rollout of pre-control relays, it retains
+the legacy read-only health fallback; it is not the picker inventory interface. Legacy
 `conversation.start` maps to create, `project.reconcile.*` to `space.reconcile.*`,
 `project.space.cleanup` to frozen cleanup apply. Legacy `/remote delete` and all
 close/delete aliases map to retirement, never the previous bridge-only deletion.

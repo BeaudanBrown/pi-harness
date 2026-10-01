@@ -68,7 +68,7 @@ if [[ "$operation" == worktree-* ]]; then
   }
 
   case "$operation" in
-    worktree-list)
+    worktree-list|worktree-inventory)
       workspace=$(field '.workspace')
       resolve_project "$workspace"
       entries='[]'
@@ -83,13 +83,20 @@ if [[ "$operation" == worktree-* ]]; then
         listed_branch=$(awk '/^branch refs\/heads\// { print substr($0,19); exit }' <<<"$block" || true)
         listed_locked=false; grep -Eq '^locked( |$)' <<<"$block" && listed_locked=true
         listed_clean=false
-        if worktree_is_clean "$listed_canonical"; then listed_clean=true; fi
+        if [[ "$operation" == worktree-list ]] && worktree_is_clean "$listed_canonical"; then listed_clean=true; fi
         item=$(jq -nce --arg workspace "$listed_workspace" --arg head "$listed_head" --arg branch "$listed_branch" --argjson isMain "$([[ "$listed_path" == "$main_path" ]] && echo true || echo false)" \
-          --argjson locked "$listed_locked" --argjson clean "$listed_clean" '{workspace:$workspace,head:$head,isMain:$isMain,locked:$locked,clean:$clean} + (if $branch == "" then {} else {branch:$branch} end)')
+          --argjson locked "$listed_locked" --argjson clean "$listed_clean" --arg operation "$operation" --arg workspacePath "$listed_canonical" \
+          '{workspace:$workspace,head:$head,isMain:$isMain,locked:$locked} + (if $operation == "worktree-list" then {clean:$clean} else {workspacePath:$workspacePath} end) + (if $branch == "" then {} else {branch:$branch} end)')
         entries=$(jq -c --argjson item "$item" '. + [$item]' <<<"$entries")
       done < <(printf '%s\n' "$worktrees" | awk 'BEGIN { RS=""; ORS="\0" } { print }')
-      jq -nce --arg rootKey "$root_key" --arg projectWorkspace "$project_workspace" --arg commonDir "$common" --argjson worktrees "$entries" \
-        '{rootKey:$rootKey,projectWorkspace:$projectWorkspace,commonDir:$commonDir,worktrees:$worktrees}'
+      if [[ "$operation" == worktree-inventory ]]; then
+        project_key="project_$(derive_project_key project-git "$root_key" "$common")"
+        jq -nce --arg rootKey "$root_key" --arg projectWorkspace "$project_workspace" --arg projectKey "$project_key" --argjson worktrees "$entries" \
+          '{rootKey:$rootKey,projectWorkspace:$projectWorkspace,projectKey:$projectKey,worktrees:$worktrees}'
+      else
+        jq -nce --arg rootKey "$root_key" --arg projectWorkspace "$project_workspace" --arg commonDir "$common" --argjson worktrees "$entries" \
+          '{rootKey:$rootKey,projectWorkspace:$projectWorkspace,commonDir:$commonDir,worktrees:$worktrees}'
+      fi
       ;;
     worktree-create-preview)
       workspace=$(field '.workspace'); base_ref=$(field '.baseRef'); branch=$(field '.branch')

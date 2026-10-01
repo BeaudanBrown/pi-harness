@@ -369,6 +369,15 @@ let
     exec ${pkgs.direnv}/bin/direnv "$@"
   '';
 
+  managedControl = pkgs.writeShellScriptBin "pi-managed-session" ''
+    if [[ -n "''${XDG_RUNTIME_DIR:-}" ]]; then
+      export PI_MANAGED_SESSIONS_RUNTIME_DIR="$XDG_RUNTIME_DIR/pi-managed-sessions"
+    else
+      unset PI_MANAGED_SESSIONS_RUNTIME_DIR
+    fi
+    exec ${managedRelayPackage}/bin/pi-managed-session "$@"
+  '';
+
   managedStatus = pkgs.writeShellScriptBin "pi-managed-session-status" ''
     set -euo pipefail
     runtime="''${XDG_RUNTIME_DIR:?XDG_RUNTIME_DIR is required}/pi-managed-sessions"
@@ -379,6 +388,14 @@ let
     if ! test -S "$runtime/relay.sock"; then
       printf '%s\n' '{"service":"active","socket":"unavailable","sync":{"ready":false}}'
       exit 3
+    fi
+    # Preserve the legacy health report during guarded rollout of pre-control relays.
+    # Once the control endpoint exists, respect its policy before reading that report.
+    if test -S "$runtime/control.sock"; then
+      if ! PI_MANAGED_SESSIONS_RUNTIME_DIR="$runtime" ${managedRelayPackage}/bin/pi-managed-session host status --json >/dev/null; then
+        printf '%s\n' '{"service":"active","socket":"unavailable","sync":{"ready":false}}'
+        exit 3
+      fi
     fi
     state_dir=${lib.escapeShellArg cfg.managedSessions.stateDirectory}
     state_dir="''${state_dir//%h/$HOME}"
@@ -762,6 +779,7 @@ in
     environment.systemPackages =
       [ piWithRuntime ]
       ++ lib.optional managedSessionsEnabled managedStatus
+      ++ lib.optional managedSessionsEnabled managedControl
       ++ lib.optional (cfg.package.hasAloopDriver or false) headlessAloop;
   };
 }

@@ -108,10 +108,12 @@ const errorCode = enumeration(Object.keys(HOST_ERROR_EXITS) as Array<keyof typeo
 const capabilities = Type.Array(enumeration([...LIVE_WORKSPACE_CAPABILITIES]), { maxItems: LIVE_WORKSPACE_CAPABILITIES.length, uniqueItems: true });
 const windowSchema = strict({ sessionName: text(128), windowId: Type.String({ pattern: "^@[0-9]+$" }), paneId: Type.String({ pattern: "^%[0-9]+$" }), conversationId: ConversationIdSchema });
 const summaryFields = { conversationId: ConversationIdSchema, title: text(128), runtimeState, launchState, setupState, activeGenerationId: stable("generation"), window: Type.Optional(windowSchema), errorCode: Type.Optional(errorCode), capabilities };
+const displayFields = { projectDisplayName: Type.Optional(text(128)), checkoutDisplayName: Type.Optional(text(128)) };
+const projectSummaryFields = { placement: Type.Optional(WorkspaceIdentitySchema), ...displayFields };
 const summary = Type.Union([
 	strict({ ...summaryFields, kind: Type.Literal("coordinator") }),
-	strict({ ...summaryFields, kind: Type.Literal("project"), checkoutId: stable("checkout"), projectKey: stable("project"), placement: Type.Optional(WorkspaceIdentitySchema) }),
-	strict({ ...summaryFields, kind: Type.Literal("project"), reconciliationRequired: Type.Literal(true), projectKey: Type.Optional(stable("project")), placement: Type.Optional(WorkspaceIdentitySchema) }),
+	strict({ ...summaryFields, kind: Type.Literal("project"), checkoutId: stable("checkout"), projectKey: stable("project"), ...projectSummaryFields }),
+	strict({ ...summaryFields, kind: Type.Literal("project"), reconciliationRequired: Type.Literal(true), projectKey: Type.Optional(stable("project")), ...projectSummaryFields }),
 ]);
 export type HostConversationSummary = Static<typeof summary>;
 const availability = enumeration(["available", "unavailable"]);
@@ -128,9 +130,12 @@ const previewTarget = Type.Union([
 const previewResult = strict({ previewId: stable("preview"), expiresAt: Type.String({ format: "date-time" }), targets: Type.Array(previewTarget, { maxItems: 100 }), activeRuns: Type.Array(strict({ conversationId: ConversationIdSchema, runId: identifier }), { maxItems: 100 }), blockers: Type.Array(text(512), { maxItems: 100 }) });
 export const HostResultSchemas = {
 	"host.status": strict({ hostId: identifier, relayState: enumeration(["ready", "disconnected"]), capabilities, accountState: enumeration(["ready", "pending", "unavailable"]) }),
-	"workspace.list": listResult(strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout"), projectKey: stable("project"), availability })),
+	"workspace.list": listResult(Type.Union([
+		strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout"), projectKey: stable("project"), availability, ...displayFields }),
+		strict({ rootKey: identifier, workspace: text(128), reconciliationRequired: Type.Literal(true), projectKey: Type.Optional(stable("project")), availability, ...displayFields }),
+	])),
 	"project.create": created,
-	"worktree.list": listResult(strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout"), branch: gitRef, locked: Type.Boolean(), availability })),
+	"worktree.list": listResult(strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout"), branch: Type.Optional(gitRef), locked: Type.Boolean(), availability })),
 	"worktree.create": strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout") }),
 	"worktree.conversation.create": created,
 	"worktree.remove.preview": previewResult,
@@ -167,6 +172,9 @@ export function parseHostResponse<O extends HostAction["operation"]>(operation: 
 	if (response.ok && (operation === "conversation.status" || operation === "conversation.list")) {
 		const summaries = operation === "conversation.status" ? [response.data as HostConversationSummary] : (response.data as HostResult<"conversation.list">).items;
 		for (const item of summaries) if (item.kind === "project" && item.placement) validatePlacement(item.placement);
+	}
+	if (response.ok && (operation === "workspace.list" || operation === "worktree.list")) {
+		for (const item of (response.data as HostResult<"workspace.list"> | HostResult<"worktree.list">).items) validatePlacement(item);
 	}
 	return response;
 }

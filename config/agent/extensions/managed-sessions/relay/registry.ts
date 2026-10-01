@@ -13,6 +13,7 @@ import {
 	type ConversationManifest,
 	type PendingLocalConversation,
 	type RegisteredConversation,
+	type WorkspaceIdentity,
 	hasMatrixBinding,
 	parsePendingLocalConversation,
 	parseConversationManifest,
@@ -58,6 +59,12 @@ export interface DeletedConversation {
 	manifest: ConversationManifest;
 	runtime: RuntimeConversation;
 	connectionId?: string;
+}
+
+export interface RegistryConversationMetadata {
+	conversationId: string; kind: "project" | "coordinator"; title: string; activeGenerationId: string;
+	attached: boolean; matrixBound: boolean; placement?: WorkspaceIdentity; projectKey?: string; checkoutId?: string;
+	projectDisplayName?: string; checkoutDisplayName?: string;
 }
 
 export interface AcceptedAttachment {
@@ -459,6 +466,25 @@ export class RelayRegistry {
 	}
 
 	localConversations(): PendingLocalConversation[] { return structuredClone(this.state.localConversations ?? []); }
+
+	/** Cheap read projection: no queues, credentials, transcripts, paths or history clones. */
+	conversationMetadata(): RegistryConversationMetadata[] {
+		const runtime = new Map(this.state.conversations.map((item) => [item.conversationId, item]));
+		return [...this.manifests.values()].map((manifest) => {
+			const state = runtime.get(manifest.conversationId);
+			return {
+				conversationId: manifest.conversationId, kind: manifest.kind, title: manifest.concept,
+				activeGenerationId: this.activeGeneration(manifest).generationId,
+				attached: Boolean(this.liveConnections.has(manifest.conversationId) && state?.state === "active" && state.attachment?.sessionId === manifest.piSessionId),
+				matrixBound: hasMatrixBinding(manifest),
+				...(manifest.kind === "project" ? { ...(manifest.placement ? { placement: { ...manifest.placement } } : {}),
+					...(manifest.projectKey ? { projectKey: manifest.projectKey } : {}), ...(manifest.checkoutId ? { checkoutId: manifest.checkoutId } : {}),
+					...(manifest.projectDisplayName ? { projectDisplayName: manifest.projectDisplayName } : {}),
+					...(manifest.checkoutDisplayName ? { checkoutDisplayName: manifest.checkoutDisplayName } : {}),
+				} : {}),
+			};
+		});
+	}
 
 	conversationState(conversationId: string): "starting" | "active" | "dormant" {
 		return this.runtimeConversation(conversationId).state;

@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import test from "node:test";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
 import { BoundAdapterClient, requestLocalBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { requestHostControl } from "../config/agent/extensions/managed-sessions/relay/host-control-client.js";
 
 test("production relay opens local IPC before remote authentication finishes", { timeout: 10_000 }, async (t) => {
 	const peer = process.env.PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER;
@@ -32,6 +35,7 @@ test("production relay opens local IPC before remote authentication finishes", {
 	});
 	await began;
 	assert.ok((await stat(join(root, "runtime", "relay.sock"))).isSocket());
+	await assert.rejects(stat(join(root, "runtime", "control.sock")), { code: "ENOENT" });
 	release(); relay = await starting;
 });
 
@@ -98,12 +102,16 @@ process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.
 		{ type: "custom", id: "boundary", parentId: null, customType: "managed-session.binding-boundary", data: { version: "1.0.0", creationKey, concept, sessionId } }]
 		.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
 	await writeFile(sourceSessionFile, sourceBytes, { mode: 0o600 });
-	const environment = { PI_MANAGED_SESSIONS_RUNTIME_DIR: join(root, "runtime"), PI_MANAGED_SESSIONS_STATE_DIR: join(root, "state"),
+	const policyPath = join(root, "host-policy.json");
+	await writeFile(policyPath, await readFile(resolve("config/agent/managed-host-policy.json")));
+	const environment = { PI_MANAGED_HOST_ACTION_POLICY: policyPath, PI_MANAGED_SESSIONS_RUNTIME_DIR: join(root, "runtime"), PI_MANAGED_SESSIONS_STATE_DIR: join(root, "state"),
 		PI_MANAGED_SESSIONS_MANIFEST_DIR: join(root, "manifests"), PI_MANAGED_SESSIONS_HOST_ID: `test-${randomUUID()}`,
 		PI_MANAGED_SESSIONS_PEER_UID_HELPER: peer, PI_MANAGED_SESSIONS_RELAY_LOCK_HELPER: lock,
 		PI_MANAGED_COORDINATOR_WORKSPACE_DIR: join(root, "neutral"), PI_MANAGED_COORDINATOR_SESSION_FILE: join(root, "sessions", "coordinator.jsonl"),
 		PI_MANAGED_COORDINATOR_LAUNCHER: launcher, PI_MATRIX_HOMESERVER: "https://matrix.example.com", PI_MATRIX_ACCESS_TOKEN: "test-token",
 		PI_MATRIX_BOT_USER_ID: "@bot:example.com", PI_MATRIX_OPERATOR_USER_ID: "@operator:example.com" };
+	await assert.rejects(startManagedSessionRelay({ ...environment, PI_MANAGED_SESSIONS_SOCKET: join(root, "runtime", "control.sock") }), /separate socket paths/);
+	await assert.rejects(stat(join(root, "runtime")), { code: "ENOENT" });
 	const originalFetch = globalThis.fetch;
 	let signal = new AbortController(); let starting: ReturnType<typeof startManagedSessionRelay> | undefined;
 	let relay: Awaited<ReturnType<typeof startManagedSessionRelay>> | undefined; let client: BoundAdapterClient | undefined;
@@ -132,6 +140,10 @@ process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.
 		return Response.json({});
 	};
 	starting = startManagedSessionRelay(environment, signal.signal); void starting.catch(() => undefined); await authenticating;
+	const controlPath = join(root, "runtime", "control.sock");
+	const hostStatus = await requestHostControl({ socketPath: controlPath, action: { operation: "host.status" }, requestId: "startup-status" });
+	assert.equal(hostStatus.ok, true); if (!hostStatus.ok) assert.fail();
+	assert.equal(hostStatus.data.relayState, "disconnected"); assert.equal(hostStatus.data.accountState, "unavailable");
 	const socketPath = join(root, "runtime", "relay.sock"); const attachmentNonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
 	const result = await requestLocalBind({ socketPath, role: "ordinary_adapter", creationKey, concept, sessionId, attachmentNonce,
 		bindingBoundaryEntryId, sourceCwd: cwd, sourceSessionFile });
@@ -140,13 +152,29 @@ process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.
 		binding: { version: "1.0.0" as const, conversationId: result.conversationId, concept, sessionId, bindingBoundaryEntryId, role: "ordinary_adapter" as const }, onEnvelope: () => undefined };
 	client = new BoundAdapterClient(options); await client.connect();
 	assert.equal((await client.selfStatus()).payload.conversationState, "active"); assert.equal(client.matrixBindingPending, true);
+	const inventory = await requestHostControl({ socketPath: controlPath, action: { operation: "conversation.list" }, requestId: "pending-inventory" });
+	assert.equal(inventory.ok, true); if (!inventory.ok) assert.fail();
+	assert.equal(inventory.data.items.length, 1); assert.equal(inventory.data.items[0].runtimeState, "running");
+	assert.equal(inventory.data.items[0].setupState, "pending");
+	for (const secret of [attachmentNonce, sessionId, cwd, sourceSessionFile, "test-token"]) assert.ok(!JSON.stringify(inventory).includes(secret));
+	const cli = process.env.PI_MANAGED_SESSIONS_TEST_HOST_CLI;
+	if (cli) {
+		const { stdout, stderr } = await promisify(execFile)(cli, ["conversation", "list", "--json"], {
+			env: { ...process.env, PI_MANAGED_SESSIONS_RUNTIME_DIR: environment.PI_MANAGED_SESSIONS_RUNTIME_DIR }, timeout: 5_000,
+		});
+		assert.equal(stderr, ""); assert.deepEqual(JSON.parse(stdout).data, inventory.data);
+	}
 	await assert.rejects(() => client!.promoteTerminalSession(), { code: "matrix_unavailable" });
 	signal.abort(); await assert.rejects(starting); await client.close("shutdown");
+	await assert.rejects(stat(controlPath), { code: "ENOENT" });
 	signal = new AbortController(); authenticating = new Promise<void>((resolve) => { began = resolve; });
 	starting = startManagedSessionRelay(environment, signal.signal); void starting.catch(() => undefined); await authenticating;
 	client = new BoundAdapterClient(options); await client.connect();
 	assert.equal(client.matrixBindingPending, true); assert.equal((await client.selfStatus()).payload.conversationState, "active");
 	assert.equal(state.createCalls, 0, "restart restores local authority without Matrix access");
+	const restored = await requestHostControl({ socketPath: controlPath, action: { operation: "conversation.status", conversationId: result.conversationId }, requestId: "restored-status" });
+	assert.equal(restored.ok, true); if (!restored.ok) assert.fail();
+	assert.equal(restored.data.runtimeState, "running"); assert.equal(restored.data.setupState, "pending");
 	blocked = false; release(); relay = await starting;
 	for (let attempt = 0; attempt < 300 && !client.matrixBound; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.equal(client.matrixBound, true); assert.equal((await client.selfStatus()).payload.conversationState, "active");

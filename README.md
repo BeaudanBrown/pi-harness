@@ -207,6 +207,36 @@ runtime state under the host lock without merging or deleting the old store.
 The coordinator uses a separate raw-Pi profile and never inherits
 `PI_MATRIX_*` credentials.
 
+Enabled hosts also install `pi-managed-session`, backed by a separate private
+`$XDG_RUNTIME_DIR/pi-managed-sessions/control.sock`:
+
+```sh
+pi-managed-session host status --json
+pi-managed-session conversation list --json
+pi-managed-session workspace list --json
+pi-managed-session --help
+```
+
+Use exact conversation IDs from inventory, never titles or abbreviated IDs.
+Inventory is bounded and paginated; `--request-id ID` supports explicit retries.
+`--json` emits one versioned result, with diagnostics on stderr and distinct
+[documented exit categories](docs/managed-live-workspaces-contract.md).
+Metadata includes roomless local work and explicit unresolved legacy identities,
+without reading saved Pi transcripts or waking sessions. It is last-known display
+metadata, not proof of filesystem authority or Matrix/account/phone readiness.
+Workspace/worktree discovery is cached for 30 seconds; conversation metadata is
+projected directly from the relay's in-memory registration/attachment state.
+
+The new API is currently read-only: approval, retirement and window-first mutation
+execution are staged dependent work and return typed errors rather than invoking
+legacy bypasses. `managedSessions.actionPolicyOverrides` is a validated Nix-only
+startup policy; model mutation approval and coordinator protection cannot be
+removed. Changes require a guarded relay rollout, not a runtime policy editor.
+For direct relay development, `PI_MANAGED_HOST_ACTION_POLICY` explicitly selects
+the policy file and enables this surface; without it no control socket is created.
+The status compatibility wrapper retains its legacy health report during guarded
+rollout and consults host status when the new endpoint is present.
+
 The resource package also exposes separate ordinary and coordinator adapter
 entry points through `passthru.managedSessionExtensions`. They speak only the
 private relay protocol, persist binding/delivery provenance in Pi session

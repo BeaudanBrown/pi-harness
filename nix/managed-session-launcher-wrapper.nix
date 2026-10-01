@@ -11,6 +11,12 @@ pkgs.writeShellApplication {
     [[ "''${1-}" == managed ]]
     operation="''${2-}"
     request=$(cat)
+    derive_project_key() {
+      local domain="$1" first="$2" second="$3"
+      { printf 'pi-managed-sessions:%s:v1\0' "$domain"
+        for part in "$first" "$second"; do printf '%s:' "$(printf '%s' "$part" | wc -c)"; printf '%s' "$part"; done
+      } | sha256sum | cut -c1-32
+    }
     ${builtins.readFile ./managed-worktree-lifecycle.sh}
 
     if [[ "$operation" == workspace-identify ]]; then
@@ -60,13 +66,6 @@ pkgs.writeShellApplication {
     workspace_path=$(jq -er '.workspacePath | select(type == "string" and length > 0)' <<<"$result")
     workspace_path=$(realpath -e "$workspace_path")
     [[ -d "$configured_root" && -d "$workspace_path" && ! -L "$workspace_path" && $(dirname "$workspace_path") == "$configured_root" && $(basename "$workspace_path") == "$workspace" && $(stat -c %u "$workspace_path") == $(id -u) ]]
-
-    derive_project_key() {
-      local domain="$1" first="$2" second="$3"
-      { printf 'pi-managed-sessions:%s:v1\0' "$domain"
-        for part in "$first" "$second"; do printf '%s:' "$(printf '%s' "$part" | wc -c)"; printf '%s' "$part"; done
-      } | sha256sum | cut -c1-32
-    }
 
     checkout_display="$workspace"
     marker="$workspace_path/.git"

@@ -313,6 +313,7 @@ let
     python3 -m unittest discover -s tests -p test_runtime_pin.py -v
     jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4
       and .policyOverrideAssertions == {"restrictive":true,"modelBypass":false,"unknown":false,"invalidConfirmation":false}
+      and .disabledHostHasNoService and .disabledHostHasNoControlCommand
       and (.hasGeneralEnvironmentFile | not) and (.hasPrivateTmp | not)
       and (.relayRestartIfChanged | not) and (.relayStopIfChanged | not)
       and (.rolloutAfter | index("pi-managed-session-relay.service") != null)
@@ -320,6 +321,15 @@ let
       and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"
       and (.serviceEnvironment.PI_MATRIX_IGNORED_SENDER_USER_IDS | fromjson) == ["@signalbot:example.com", "@facebookbot:example.com"]' \
       ${managedSessionModuleReport} >/dev/null
+    host_control=$(jq -r .hostControlExecutable ${managedSessionModuleReport})
+    test -x "$host_control"
+    env -u XDG_RUNTIME_DIR PI_MANAGED_SESSIONS_RUNTIME_DIR=/stale-runtime "$host_control" --help | grep -F 'Usage: pi-managed-session' >/dev/null
+    set +e
+    env -u XDG_RUNTIME_DIR PI_MANAGED_SESSIONS_RUNTIME_DIR=/stale-runtime "$host_control" host status --json > host-control-disabled.json 2> host-control-disabled.stderr
+    control_status=$?
+    set -e
+    test "$control_status" -eq 3
+    jq -e '.version == "1.0.0" and .ok == false and .error.code == "unavailable"' host-control-disabled.json >/dev/null
     policy_file=$(jq -r .restrictivePolicyFile ${managedSessionModuleReport})
     jq -e '.version == "1.0.0" and .actions["conversation.stop"] == {"human":"deny","model":"deny"}
       and .actions["conversation.open"].model == "approval" and .actions["host.status"].human == "direct"' "$policy_file" >/dev/null

@@ -4,6 +4,7 @@ import { MatrixError } from "../../matrix-shared/http.js";
 import { resolve } from "node:path";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
+	deriveConversationId,
 	hasMatrixBinding,
 	type ManagedAdapterLiveStatus,
 	type ManagedSessionEnvelope,
@@ -36,6 +37,10 @@ import { RecoveryAlerts } from "./recovery-alerts.js";
 import { RecoveryMonitor } from "./recovery-monitor.js";
 import { LiveHierarchy } from "./live-hierarchy.js";
 import { LocalEnrollmentReconciler } from "./local-enrollment-reconciler.js";
+import { readHostPolicy } from "./host-policy.js";
+import { HostDispatcher } from "./host-dispatcher.js";
+import { HostReadModel } from "./host-read-model.js";
+import { HostControlServer } from "./host-control-server.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -64,11 +69,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	if (expectedUid !== undefined && ["linux", "darwin", "freebsd", "openbsd", "netbsd"].includes(process.platform) && (!peerUidHelper || !relayLockHelper)) {
 		throw new Error("Packaged peer-UID and relay-lock helpers are required on this platform");
 	}
+	const policyPath = environment.PI_MANAGED_HOST_ACTION_POLICY?.trim();
+	if (policyPath && (expectedUid === undefined || !peerUidHelper)) throw new Error("Host controls require OS peer verification");
+	if (policyPath && resolve(environment.PI_MANAGED_SESSIONS_SOCKET ?? resolve(runtimeDirectory, "relay.sock")) === resolve(runtimeDirectory, "control.sock"))
+		throw new Error("Host controls and adapter IPC require separate socket paths");
+	const hostPolicy = policyPath ? await readHostPolicy(policyPath) : undefined;
 	const relayLock = relayLockHelper ? new HostRelayLock(relayLockHelper, await hostRelayLockPath(hostId, expectedUid)) : undefined;
 	await relayLock?.acquire();
 	const manifestStore = new ConversationManifestStore(manifestDirectory);
 	const registry = new RelayRegistry(hostId, stateDirectory, manifestStore);
 	let server: ManagedSessionIpcServer | undefined;
+	let controlServer: HostControlServer | undefined;
 	let coordinatorRouter: CoordinatorRouter | undefined;
 	let recoveryMonitor: RecoveryMonitor | undefined;
 	let hierarchy: LiveHierarchy | undefined;
@@ -82,11 +93,13 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await registry.load();
 		// Ephemeral observation, never a recovery source. No tokens or error text.
 		let lastSuccessfulSyncAt: string | null = null;
+		let matrixHealthy = false;
 		const runtimeBuild = environment.PI_MANAGED_RELAY_BUILD ?? "unknown";
 		const healthFile = new AtomicJsonFile<{ status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string }>(
 			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string });
 		await healthFile.write({ status: "starting", lastSuccessfulSyncAt, runtimeBuild });
 		const syncHealth = async (healthy: boolean): Promise<void> => {
+			matrixHealthy = healthy;
 			await recoveryMonitor?.health(healthy);
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
 			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt, runtimeBuild });
@@ -362,6 +375,15 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		}
 		// Reattach surviving Pi processes before waiting for remote readiness.
 		await server.start();
+		if (hostPolicy) {
+			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, matrixReady: () => {
+				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
+				return matrixHealthy && age >= 0 && age < 120_000;
+			} });
+			const dispatcher = new HostDispatcher({ hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy, read: (request) => reads.read(request) });
+			controlServer = new HostControlServer({ runtimeDirectory, expectedUid: expectedUid!, peerUid: (socket) => peerUidFromHelper(peerUidHelper!, socket), dispatcher });
+			await controlServer.start();
+		}
 		const authenticatedUserId = await retryMatrixStartup(() => matrix.whoami(signal), async () => {
 			await syncHealth(false);
 			process.stderr.write("pi-managed-session-relay: waiting for Matrix startup connectivity; local IPC remains available\n");
@@ -426,6 +448,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			localEnrollments.start();
 		}
 	} catch (error) {
+		await controlServer?.close().catch(() => undefined);
 		const enrollmentClosing = localEnrollments?.close();
 		await hierarchy?.close().catch(() => undefined);
 		await enrollmentClosing;
@@ -443,6 +466,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			.then(() => hostLifecycle?.recoverTerminalPromotions())
 			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
+			await controlServer?.close().catch(() => undefined);
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
 			const enrollmentClosing = localEnrollments?.close();
 			await hierarchy?.close().catch(() => undefined);
@@ -453,6 +477,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	}, graceMilliseconds);
 	reconciliationTimer.unref();
 	let stopped = false;
+	let stopWork: Promise<void> | undefined;
 	let runtimeUpdate: Promise<void> | undefined;
 	const desiredRuntime = environment.PI_MANAGED_PROJECT_RUNTIME_ID;
 	const runtimeUpdateTimer = desiredRuntime && /^[a-f0-9]{64}$/.test(desiredRuntime) ? setInterval(() => {
@@ -465,9 +490,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	return {
 		registry,
 		server,
-		async stop() {
-			if (stopped) return;
+		stop() { return stopWork ??= (async () => {
 			stopped = true;
+			const controlClosing = controlServer?.close();
 			if (runtimeUpdateTimer) clearInterval(runtimeUpdateTimer);
 			hostLifecycle?.stopRuntimeUpdates();
 			await runtimeUpdate;
@@ -481,8 +506,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await closeNotices();
 			await activityProjector?.close();
 			await server.close({ preserveAttachments: true });
+			await controlClosing;
 			await relayLock?.release();
-		},
+		})(); },
 	};
 }
 

@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { chmod, copyFile, lstat, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
@@ -16,6 +16,7 @@ import {
 	type WorkspaceIdentity,
 } from "../contracts.js";
 import { deriveCheckoutId } from "../managed-provenance.js";
+import { parseHostAction, type HostResult } from "../live-workspace-contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
@@ -698,13 +699,42 @@ export class HostLifecycle {
 		}
 	}
 
-	private async workspaceList(): Promise<Array<{ rootKey: string; workspace: string }>> {
+	async workspaceList(): Promise<Array<{ rootKey: string; workspace: string }>> {
 		const result = await this.invoke("workspace-list", {});
-		if (!Array.isArray(result.workspaces) || result.workspaces.some((item) => typeof item !== "object" || item === null ||
+		if (!Array.isArray(result.workspaces) || result.workspaces.length > 4_096 || result.workspaces.some((item) => typeof item !== "object" || item === null ||
 			typeof (item as Record<string, unknown>).rootKey !== "string" || typeof (item as Record<string, unknown>).workspace !== "string")) {
 			throw new RelayRegistryError("launch_failed", "Workspace launcher returned an invalid list");
 		}
-		return result.workspaces as Array<{ rootKey: string; workspace: string }>;
+		const rows = result.workspaces as Array<{ rootKey: string; workspace: string }>;
+		for (const row of rows) parseHostAction({ operation: "worktree.list", rootKey: row.rootKey, workspace: row.workspace });
+		return rows.map(({ rootKey, workspace }) => ({ rootKey, workspace }));
+	}
+
+	/** Metadata-only Git inventory: never runs per-row status or reads lifecycle intent files. */
+	async worktreeInventory(rootKey: string, workspace: string): Promise<HostResult<"worktree.list">["items"]> {
+		parseHostAction({ operation: "worktree.list", rootKey, workspace });
+		const result = await this.invoke("worktree-inventory", { rootKey, workspace });
+		if (result.rootKey !== rootKey || typeof result.projectKey !== "string" || !/^project_[a-f0-9]{32}$/.test(result.projectKey) ||
+			typeof result.projectWorkspace !== "string" || !Array.isArray(result.worktrees) || result.worktrees.length > 256 ||
+			Object.keys(result).some((field) => !["rootKey", "projectWorkspace", "projectKey", "worktrees"].includes(field)))
+			throw new RelayRegistryError("launch_failed", "Worktree metadata inventory is invalid");
+		parseHostAction({ operation: "worktree.list", rootKey, workspace: result.projectWorkspace });
+		const projectKey = result.projectKey;
+		const rows = result.worktrees.map((value): HostResult<"worktree.list">["items"][number] => {
+			if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("launch_failed", "Worktree metadata item is invalid");
+			const item = value as Record<string, unknown>;
+			if (typeof item.workspace !== "string" || typeof item.workspacePath !== "string" || item.workspacePath.length > 4_096 || !isAbsolute(item.workspacePath) ||
+				resolve(item.workspacePath) !== item.workspacePath || basename(item.workspacePath) !== item.workspace || /[\u0000-\u001f\u007f]/.test(item.workspacePath) ||
+				typeof item.locked !== "boolean" || typeof item.isMain !== "boolean" || typeof item.head !== "string" || !/^[a-f0-9]{40,64}$/.test(item.head) ||
+				(item.branch !== undefined && (typeof item.branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/@+/-]{0,254}$/.test(item.branch))) ||
+				Object.keys(item).some((field) => !["workspace", "workspacePath", "locked", "isMain", "head", "branch"].includes(field)))
+				throw new RelayRegistryError("launch_failed", "Worktree metadata item is invalid");
+			parseHostAction({ operation: "worktree.list", rootKey, workspace: item.workspace });
+			return { rootKey, workspace: item.workspace, checkoutId: deriveCheckoutId(this.options.hostId, projectKey, item.workspacePath),
+				...(typeof item.branch === "string" ? { branch: item.branch } : {}), locked: item.locked, availability: "available" };
+		});
+		if (new Set(rows.map((row) => row.checkoutId)).size !== rows.length) throw new RelayRegistryError("launch_failed", "Duplicate worktree metadata identity");
+		return rows;
 	}
 
 	private workspaceOperationKey(placement: WorkspaceIdentity): string { return `workspace:${placement.rootKey}:${placement.workspace}`; }
