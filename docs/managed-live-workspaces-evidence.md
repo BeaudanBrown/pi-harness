@@ -442,3 +442,7 @@ Unknown peer UID now fails closed. Adapter disconnect returns an uncertain,
 non-retryable outcome and reconnect never resends the host mutation. Focused
 protocol/real-socket fixtures prove the fresh-proof exchange remains responsive
 while a host call is pending and its disconnected requester does not replay it.
+The bounded fresh-proof helper additionally rejects unsolicited challenges, stale
+replies, replacement attachments and wrong generations; legacy/absent peers,
+timeout and shutdown supply no proof. Its seven focused proof/origin tests pass.
+This helper is not yet production-wired or evidence of native Pi run tracking.
