@@ -56,3 +56,26 @@ leaves, not schema validation. Post-remediation `nix run .#verify` passed all
 deterministic checks on 2026-10-01; workspace LSP diagnostics are clean. This is
 contract-only work, so no separate runtime production build or live activation
 is applicable. The gate includes the production package contract build.
+
+## #111 — transcript and notification implementation
+
+| Acceptance | Planned implementation/evidence |
+| --- | --- |
+| Commentary without tool/thinking leakage | Persisted assistant text segmentation using Pi phase metadata; mixed-content/stop-reason fixtures |
+| Silent commentary/local input and notifying finals/attention | Capability-gated transcript metadata and frozen relay delivery disposition; Matrix payload tests |
+| Stable order, identities and retries | Existing projection ledger plus segment source keys and persisted offer metadata; lost-ack/chunk/generation tests |
+| Catch-up silence and one actionable recovery alert | Durable recovery epoch and live attention revalidation; outage/stale-approval fixtures |
+| NAS event contract, no notification controls | Narrow metadata consumed by #112; no client settings mutation in projector |
+
+Scope: #111 owns projection and attention classification. #112 owns account push
+rules, #108 owns approval execution, and #114 owns generation/branch controls.
+Existing in-flight frozen payloads cannot be rewritten during migration. The
+first implementation chunk isolates persisted-message classification; wiring and
+outbox recovery are subsequent chunks of the same issue, not yet complete.
+The segmentation chunk passes the full managed-session test suite. It uses the
+pinned Pi text-signature v1 phase format (confirmed against provider source),
+keeps unsplit-final source identity, and excludes tool results, thinking,
+incomplete messages and unknown phases. Focused source LSP is clean; inspecting
+the vendored Pi declaration exposed a cached missing pi-telemetry declaration,
+while the repository TypeScript build passes.
+
