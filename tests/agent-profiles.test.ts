@@ -22,6 +22,15 @@ test("the declarative registry contains exactly the supported personas", () => {
 	for (const name of AGENT_PROFILE_NAMES) assert.equal(resolveAgentProfile(name, document).name, name);
 });
 
+test("normal and inherited profiles advertise no experimental resources", () => {
+	for (const name of [...AGENT_PROFILE_NAMES.filter((name) => name !== "pi-local"), "managed-project"] as const) {
+		const profile = resolveAgentProfile(name);
+		for (const resources of [profile.extensions, profile.skills, profile.prompts]) {
+			assert.equal(resources.some((name) => /^(pi-r|agentgraph)/.test(name)), false);
+		}
+	}
+});
+
 test("narrow worker profiles enforce explicit capability allowlists", () => {
 	const review = resolveAgentProfile("review-worker");
 	const diagnostic = resolveAgentProfile("diagnostic-worker");

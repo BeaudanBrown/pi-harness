@@ -189,7 +189,7 @@ let
   } ''
     PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
       PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
-      node --test ${source}/tests/pi-r-integration.test.mjs
+      node --test ${source}/tests/pi-r-integration.test.mjs ${source}/tests/experiment-defaults.test.mjs
     touch "$out"
   '';
 

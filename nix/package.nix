@@ -95,10 +95,21 @@ else
   ${lspCleanup}
 fi
 ''}
-${fragments.piREnvironment piRPackage piPackage}
+# Development resource paths never opt an experiment in implicitly.
+for experiment_flag in PI_HARNESS_ENABLE_PI_R PI_HARNESS_ENABLE_AGENTGRAPH; do
+  case "\''${!experiment_flag:-0}" in
+    0|1) ;;
+    *) echo "pi-harness: \$experiment_flag must be 0 or 1" >&2; exit 2 ;;
+  esac
+done
+if [[ "\''${PI_HARNESS_ENABLE_PI_R:-0}" == 1 ]]; then
+  ${fragments.piREnvironment piRPackage piPackage}
+fi
 export PI_HARNESS_AGENT_PROFILE="\''${PI_HARNESS_AGENT_PROFILE:-engineering-full}"
-${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
-${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
+if [[ "\''${PI_HARNESS_ENABLE_AGENTGRAPH:-0}" == 1 ]]; then
+  ${lib.optionalString (agentgraphPackage != null) ''export AGENTGRAPH_CLI="\''${AGENTGRAPH_CLI:-${agentgraphPackage}/bin/ag}"''}
+  ${lib.optionalString (agentgraphPostgresPackage != null) ''export AGENTGRAPH_POSTGRES="\''${AGENTGRAPH_POSTGRES:-${agentgraphPostgresPackage}/bin/agentgraph-postgres}"''}
+fi
 ${lib.optionalString (fzf != null) ''export PI_HARNESS_FZF="\''${PI_HARNESS_FZF:-${fzf}/bin/fzf}"''}
 ${lib.optionalString (tmux != null) ''export PI_HARNESS_TMUX="\''${PI_HARNESS_TMUX:-${tmux}/bin/tmux}"''}
 ${lib.optionalString (d2 != null) ''export PI_HARNESS_D2="\''${PI_HARNESS_D2:-${d2}/bin/d2}"''}
@@ -115,10 +126,13 @@ case "\''${1-}" in
 esac
 
 resource_args=(
-  --extension "${piRPackage.resourcePaths.extension}"
   ${engineeringResourceArgs}
 )
-${lib.optionalString (agentgraphPiResources != null) ''agentgraph_root="\''${PI_HARNESS_AGENTGRAPH_ROOT:-\''${AGENTGRAPH_PI_RESOURCES:-${agentgraphPiResources}/share/agentgraph-pi}}"
+if [[ "\''${PI_HARNESS_ENABLE_PI_R:-0}" == 1 ]]; then
+  resource_args+=(--extension "${piRPackage.resourcePaths.extension}")
+fi
+${lib.optionalString (agentgraphPiResources != null) ''if [[ "\''${PI_HARNESS_ENABLE_AGENTGRAPH:-0}" == 1 ]]; then
+agentgraph_root="\''${PI_HARNESS_AGENTGRAPH_ROOT:-\''${AGENTGRAPH_PI_RESOURCES:-${agentgraphPiResources}/share/agentgraph-pi}}"
 agentgraph_extensions_dir="\''${PI_HARNESS_AGENTGRAPH_EXTENSIONS_DIR:-\$agentgraph_root/extensions}"
 agentgraph_skills_dir="\''${PI_HARNESS_AGENTGRAPH_SKILLS_DIR:-\$agentgraph_root/skills}"
 agentgraph_prompts_dir="\''${PI_HARNESS_AGENTGRAPH_PROMPTS_DIR:-\$agentgraph_root/prompts}"
@@ -140,7 +154,8 @@ resource_args+=(
   --extension "\$agentgraph_extensions_dir/agentgraph/index.ts"
   --skill "\$agentgraph_skills_dir"
   --prompt-template "\$agentgraph_prompts_dir"
-)''}
+)
+fi''}
 
 exec "${lib.getExe piPackage}" "\''${resource_args[@]}" "\$@"
 EOF

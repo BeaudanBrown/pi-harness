@@ -3,7 +3,6 @@
   "profiles": {
     "engineering-full": {
       "extensions": [
-        "pi-r",
         "web-search",
         "github-issues",
         "aloop",
@@ -15,11 +14,10 @@
         "codex-fast",
         "tmux-cursor-focus",
         "sesh",
-        "agentgraph",
         "agent-profiles"
       ],
-      "skills": ["harness", "matt-pocock", "agentgraph"],
-      "prompts": ["harness", "agentgraph"],
+      "skills": ["harness", "matt-pocock"],
+      "prompts": ["harness"],
       "themes": ["harness"],
       "contextFiles": true,
       "builtinTools": true,

@@ -42,9 +42,9 @@ layout remains external and uses regular tmux through fixed host-owned actions.
 
 The packaged `pi-harness` binary wraps upstream `pi` and passes explicit local
 resource paths from the Nix store with `--extension`, `--skill`,
-`--prompt-template`, and `--theme`. It also loads the packaged pi-r extension in
-its inactive state: ordinary sessions gain only `/r`, with no R tools, skill,
-or prompt guidance until the user activates a workbench. It does not depend on
+`--prompt-template`, and `--theme`. Pi-R and AgentGraph resources are disabled
+by default: ordinary sessions have neither experimental commands nor tools,
+skills or prompts. Their packages remain available for deliberate opt-in. It does not depend on
 mutable `pi install` state or on copying generated settings into `~/.pi/agent`.
 
 Harness-owned resources are packaged separately as `pi-harness-resources` and
@@ -318,8 +318,22 @@ transcript policy, troubleshooting, and deferred scope.
 
 ## AgentGraph Mode
 
-The AgentGraph extension is sourced from the `agentgraph` flake input and wired
-into the packaged Pi wrapper. It exposes `/ag on`, `/ag off`, `/ag status`,
+The AgentGraph extension is sourced from the `agentgraph` flake input and is
+**disabled by default**, as is Pi-R in ordinary engineering sessions. On NixOS,
+explicitly set `services.pi-harness.experiments.agentgraph.enable = true` or
+`services.pi-harness.experiments.piR.enable = true`. The module's settings win
+over inherited environment switches. Disabled AgentGraph does not source its
+optional credential environment file.
+
+For the standalone package, opt in with `PI_HARNESS_ENABLE_AGENTGRAPH=1` or
+`PI_HARNESS_ENABLE_PI_R=1`; only `0` and `1` are valid. Development resource-path
+overrides alone never enable either experiment. Managed sessions and workers
+remain experiment-free even when ordinary launches opt in. Dedicated
+`pi-r-local` remains unchanged; it is not the local-only engineering launcher.
+These switches govern harness-provided resources, not a sandbox preventing a
+user from explicitly loading their own extension through Pi discovery or `-e`.
+
+When enabled, AgentGraph exposes `/ag on`, `/ag off`, `/ag status`,
 `/ag init`, and `/ag db`.
 
 `/ag on` switches the current Pi session into graph mode: direct `edit`,
@@ -337,6 +351,7 @@ extension iteration, a launcher can set these environment variables before
 executing the normal `pi` wrapper:
 
 ```bash
+export PI_HARNESS_ENABLE_AGENTGRAPH=1
 export AG_DEV_ROOT="$PWD"
 export AGENTGRAPH_CLI="agentgraph-dev-ag"
 export AGENTGRAPH_POSTGRES="agentgraph-dev-postgres"

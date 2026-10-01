@@ -93,6 +93,8 @@ export default function (pi) {
       ...process.env,
       HOME: join(root, "home"),
       PI_R_PROBE: resultPath,
+      PI_HARNESS_ENABLE_PI_R: "1",
+      PI_HARNESS_ENABLE_AGENTGRAPH: "0",
       PI_R_RESOURCE_ROOT: "/stale/pi-r-resources",
       PI_R_TREE_SITTER: "/stale/tree-sitter",
       PI_R_RSCRIPT: "/stale/Rscript",
@@ -131,7 +133,7 @@ export default function (pi) {
   }
 }
 
-test("normal Pi keeps pi-r inactive and restores its full tool surface", { timeout: 40_000 }, async () => {
+test("explicitly opted-in normal Pi keeps pi-r inactive and restores its full tool surface", { timeout: 40_000 }, async () => {
   await probe(normalPi, "normal");
 });
 

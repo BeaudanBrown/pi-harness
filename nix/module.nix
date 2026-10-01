@@ -52,7 +52,6 @@ let
   ++ lib.optionals (cfg.playwright.enable && cfg.playwright.package != null) [
     cfg.playwright.package
   ];
-  runtimeFeaturesEnabled = cfg.lsp.enable || cfg.diagrams.enable || cfg.playwright.enable;
   sessionDirectoryEnabled = cfg.sessionDirectory != null;
   managedSessionsEnabled = cfg.managedSessions.enable;
   nonNullString = value: if value == null then "" else value;
@@ -86,7 +85,11 @@ let
   coordinatorProfile = profileDocument.profiles."managed-coordinator" or { tools = [ ]; };
   coordinatorTools = lib.concatStringsSep "," coordinatorProfile.tools;
   managedRawPi = cfg.package.pi or cfg.package;
-  runtimeEnvironmentFiles = lib.filter (path: path != null) [ cfg.agentgraph.environmentFile ];
+  runtimeEnvironmentFiles = lib.filter (path: path != null) (lib.optional cfg.experiments.agentgraph.enable cfg.agentgraph.environmentFile);
+  experimentEnvironment = ''
+    export PI_HARNESS_ENABLE_PI_R=${if cfg.experiments.piR.enable then "1" else "0"}
+    export PI_HARNESS_ENABLE_AGENTGRAPH=${if cfg.experiments.agentgraph.enable then "1" else "0"}
+  '';
   runtimeEnvironmentSetup = lib.optionalString (runtimeEnvironmentFiles != [ ]) ''
     set -a
     ${lib.concatMapStringsSep "\n" (path: ''
@@ -133,6 +136,7 @@ let
   piWithRuntime = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
     ${pinRuntime}
+    ${experimentEnvironment}
     ${runtimeEnvironmentSetup}
     ${sessionDirectoryEnvironment}
     ${managedSessionEnvironment}
@@ -456,6 +460,11 @@ in
       '';
     };
 
+    experiments = {
+      piR.enable = lib.mkEnableOption "Pi-R resources in ordinary engineering launches (not managed sessions)";
+      agentgraph.enable = lib.mkEnableOption "AgentGraph resources in ordinary engineering launches (not managed sessions)";
+    };
+
     agentgraph.environmentFile = lib.mkOption {
       type = lib.types.nullOr lib.types.str;
       default = null;
@@ -726,11 +735,8 @@ in
     };
 
     environment.systemPackages =
-      (if runtimeEnvironmentFiles != [ ] || runtimeFeaturesEnabled || sessionDirectoryEnabled || managedSessionsEnabled then
-        [ piWithRuntime ]
-      else
-        [ cfg.package ])
+      [ piWithRuntime ]
       ++ lib.optional managedSessionsEnabled managedStatus
-      ++ lib.optional ((cfg.package.hasAloopDriver or false) && (runtimeEnvironmentFiles != [ ] || runtimeFeaturesEnabled || sessionDirectoryEnabled || managedSessionsEnabled)) headlessAloop;
+      ++ lib.optional (cfg.package.hasAloopDriver or false) headlessAloop;
   };
 }
