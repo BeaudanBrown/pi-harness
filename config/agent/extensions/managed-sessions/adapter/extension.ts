@@ -23,7 +23,7 @@ import {
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
-import { BoundAdapterClient, CoordinatorAdapterClient, MAX_NODE_TIMER_DELAY_MS, ManagedAdapterError, requestSelfBind, type ReceivedImage } from "./client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, MAX_NODE_TIMER_DELAY_MS, ManagedAdapterError, requestLocalBind, type ReceivedImage } from "./client.js";
 import { resolveWorkspaceArtifact } from "./artifact-export.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
@@ -256,6 +256,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let currentContext: ExtensionContext | undefined;
 		let reconnectTimer: NodeJS.Timeout | undefined;
 		let connectWork: Promise<void> | undefined;
+		let bindingRecovery: { client: BoundAdapterClient; work: Promise<void> } | undefined;
 		let bindingEpoch = 0;
 		let reconnectAttempt = 0;
 		let stopped = false;
@@ -283,6 +284,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const controlExecutions = new Map<string, ControlExecution>();
 		const recoveredControlExecutions = new Set<string>();
 		const setCheckpointActive = (active: boolean): void => {
+			active = active && Boolean(client?.matrixBound);
 			if (role !== "ordinary_adapter" || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") return;
 			const managed = ["remote_checkpoint", "remote_artifact_export"];
 			const names = pi.getActiveTools().filter((name) => !managed.includes(name));
@@ -326,7 +328,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}));
 		const publishActivity = async (span: BusyActivity, payload: Record<string, unknown>): Promise<void> => {
 			const target = client;
-			if (!target?.connected || !binding) return;
+			if (!target?.matrixBound || !binding) return;
 			const send = () => target.updateActivity({ ...payload, activityId: span.activityId, revision: ++span.revision });
 			try { await send(); }
 			catch (error) {
@@ -342,11 +344,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (activity !== span || role !== "ordinary_adapter") return;
 			const send = () => {
 				span.timer = undefined;
-				if (activity !== span || !client?.connected) return;
+				if (activity !== span || !client?.matrixBound) return;
 				if (span.updateQueued) { span.updateDirty = true; return; }
 				span.updateQueued = true;
 				span.work = span.work.then(async () => {
-					if (activity !== span || !client?.connected) return;
+					if (activity !== span || !client?.matrixBound) return;
 					const tools = activityTools(span);
 					await publishActivity(span, { state: stateOverride ?? (tools.length ? "tool" : "busy"), ...(!stateOverride && tools.length ? { tools } : {}) });
 				}).catch(() => undefined).finally(() => {
@@ -385,7 +387,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const run = (async () => {
 				await closing.span.work;
 				const target = client;
-				if (!target?.connected) return; // Reconnect will drain the same closing records.
+				if (!target?.matrixBound) return; // Binding/reconnect will drain the same closing records.
 				if (!binding || binding.conversationId !== closing.conversationId || (target.generation ?? 1) !== closing.generation) {
 					throw new ManagedAdapterError("Activity finalization binding changed", "invalid_state");
 				}
@@ -509,7 +511,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		const executeRemoteCheckpoint = async (toolCallId: string, params: unknown, ctx: ExtensionContext) => {
-			if (!binding || !client?.connected) throw new ManagedAdapterError("remote_checkpoint requires an active managed Matrix conversation");
+			if (!binding || !client?.matrixBound) throw new ManagedAdapterError("remote_checkpoint requires an active managed Matrix conversation");
 			for (const pending of [...pendingUserPersistence]) {
 				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), pending.deliveryId);
 				if (piEntryKey) {
@@ -549,7 +551,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				parameters: Type.Object({ path: Type.String({ minLength: 1, maxLength: 512, description: "Path relative to the managed workspace root" }) }, { additionalProperties: false }),
 				execute: async (toolCallId, params) => {
 					if (!binding) throw new ManagedAdapterError("Artifact export unavailable: no managed binding");
-					if (!client?.connected) throw new ManagedAdapterError("Artifact export unavailable: relay disconnected");
+					if (!client?.matrixBound) throw new ManagedAdapterError("Artifact export unavailable: relay disconnected or Matrix binding pending");
 					if (!config.placement || !config.workspacePath) throw new ManagedAdapterError("Artifact export unavailable: incomplete host placement; refresh this project conversation after updating the host configuration");
 					const artifact = await resolveWorkspaceArtifact({ requestedPath: params.path, cwd: process.cwd(), workspacePath: config.workspacePath, placement: config.placement,
 						conversationId: binding.conversationId, toolCallId });
@@ -575,7 +577,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		function setStatus(ctx: ExtensionContext): void {
 			if (!ctx.hasUI) return;
-			ctx.ui.setStatus("managed-session", binding ? `${client?.connected ? "remote" : "remote offline"}: ${binding.concept}` : undefined);
+			ctx.ui.setStatus("managed-session", binding ? `${!client?.connected ? "managed · relay offline" : client.matrixBindingPending ? "managed · Matrix pending" : "managed"}: ${binding.concept}` : undefined);
 		}
 
 		function recordDelivery(ctx: ExtensionContext, marker: DeliveryMarker): string {
@@ -644,7 +646,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		async function projectAloopLifecycle(ctx: ExtensionContext): Promise<void> {
-			if (role !== "ordinary_adapter" || !binding || !client?.connected) return;
+			if (role !== "ordinary_adapter" || !binding || !client?.matrixBound) return;
 			const projectionClient = client;
 			for (const event of aloopLifecycleEvents.values()) {
 				if (projectedAloopLifecycle.has(event.lifecycleId) || !aloopLifecycleIsDurable(ctx, event)) continue;
@@ -681,7 +683,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		async function projectEligibleEntries(ctx: ExtensionContext, beforeFinalOnly = false): Promise<void> {
-			if (!binding || !client?.connected) return;
+			if (!binding || !client?.matrixBound) return;
 			const projectionBinding = binding;
 			const projectionClient = client;
 			const branch = ctx.sessionManager.getBranch();
@@ -1027,6 +1029,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		async function handleEnvelope(envelope: ManagedSessionEnvelope): Promise<void> {
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
+			if (envelope.type === "binding.status") {
+				if (client) void recoverBoundConnection(ctx, client, bindingEpoch).catch((error) => notify(ctx, String(error), "warning"));
+				return;
+			}
 			if (envelope.type === "recovery.check") {
 				if (!client?.supports("recovery-attention-v1")) throw new ManagedAdapterError("Recovery capability was not negotiated");
 				const ready = !connectWork && !projectionRun && !projectionRetryTimer && !activity && !closingActivities.size &&
@@ -1037,14 +1043,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			if (envelope.type === "promotion.shutdown") {
-				if (role !== "ordinary_adapter") throw new ManagedAdapterError("Terminal-session promotion requires an ordinary adapter");
+				if (role !== "ordinary_adapter" || !client?.matrixBound) throw new ManagedAdapterError("Terminal-session promotion requires a Matrix-bound ordinary adapter");
 				ctx.shutdown();
 				return;
 			}
 			if (envelope.type === "refresh.request") {
 				const idle = () => ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !closingActivities.size && !inFlightDeliveries.size && !pendingUserPersistence.length;
 				if (role !== "ordinary_adapter" || !client) throw new ManagedAdapterError("Refresh requires a managed project");
-				const ready = idle();
+				const ready = client.matrixBound && idle();
 				await client.refreshResult(String(envelope.payload.refreshId), ready ? "ready" : "busy");
 				// Never abort: if work raced the acknowledgment, the host times out
 				// unchanged rather than killing it. Shutdown runs native cleanup.
@@ -1111,9 +1117,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
-				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1"],
+				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
-				onEnvelope: handleEnvelope, onMedia: (image) => handleMedia(image, ctx),
+				beforeMatrixBindingReady: () => {
+					if (client !== next || bindingEpoch !== epoch) return;
+					projectionRecovering = true; recordProjectionRecovery(ctx); projectionRecovering = false;
+				},
+				onEnvelope: (envelope) => { if (client === next && bindingEpoch === epoch) return handleEnvelope(envelope); },
+				onMedia: (image) => handleMedia(image, ctx),
 				onDisconnect: () => {
 					if (client !== next || bindingEpoch !== epoch) return;
 					client = undefined;
@@ -1139,14 +1150,23 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				await next.close("shutdown").catch(() => undefined);
 				return;
 			}
-			// Attachment establishes transport ownership. Recovery failures below are
-			// application-state failures and must not create reconnect storms.
 			if (next.placement) config.placement = next.placement;
-			projectionRecovering = true;
-			recordProjectionRecovery(ctx);
-			projectionRecovering = false;
-			setCheckpointActive(true);
 			reconnectAttempt = 0;
+			setStatus(ctx);
+			if (next.matrixBindingPending) { setCheckpointActive(false); return; }
+			await recoverBoundConnection(ctx, next, epoch);
+		}
+
+		function recoverBoundConnection(ctx: ExtensionContext, next: BoundAdapterClient, epoch: number): Promise<void> {
+			if (bindingRecovery?.client === next) return bindingRecovery.work;
+			const work = Promise.resolve().then(() => recoverBoundConnectionOnce(ctx, next, epoch));
+			bindingRecovery = { client: next, work }; return work;
+		}
+
+		async function recoverBoundConnectionOnce(ctx: ExtensionContext, next: BoundAdapterClient, epoch: number): Promise<void> {
+			if (stopped || client !== next || bindingEpoch !== epoch || !next.matrixBound || binding?.sessionId !== ctx.sessionManager.getSessionId()) return;
+			// A binding transition is not a process-handoff authorization.
+			setCheckpointActive(true);
 			try {
 				if (activity) sendActivityUpdate(activity, true);
 				await finishFinalizations([...closingActivities]);
@@ -1436,7 +1456,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					try {
 						config.attachmentNonce ??= randomBytes(32).toString("base64url");
 						environment.PI_MANAGED_SESSION_ATTACHMENT_NONCE = config.attachmentNonce;
-						const conversationId = await requestSelfBind({
+						const { conversationId } = await requestLocalBind({
 							socketPath: config.socketPath, role: "ordinary_adapter", creationKey, concept, sessionId,
 							attachmentNonce: config.attachmentNonce, bindingBoundaryEntryId, sourceCwd: ctx.cwd, sourceSessionFile,
 						});
@@ -1449,10 +1469,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 						}
 						deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
 						await connectBinding(ctx);
-						if (!client?.connected) throw new ManagedAdapterError("Managed conversation could not attach before promotion");
-						await client.promoteTerminalSession();
-						notify(ctx, `Promoted ${concept}; relaunching this session as managed`);
-						ctx.shutdown();
+						if (!client?.connected) throw new ManagedAdapterError("Local enrollment was saved; relay attachment will retry");
+						notify(ctx, `Managed locally: ${concept}${client.matrixBindingPending ? "; Matrix binding pending" : ""}`);
 					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed binding failed", "error"); }
 					return;
 				}

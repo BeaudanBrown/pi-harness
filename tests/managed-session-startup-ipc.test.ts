@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, readFile, rm, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
+import { BoundAdapterClient, requestLocalBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 
 test("production relay opens local IPC before remote authentication finishes", { timeout: 10_000 }, async (t) => {
 	const peer = process.env.PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER;
@@ -76,4 +78,78 @@ test("production relay keeps IPC alive while fresh coordinator provisioning is p
 	assert.equal(health, "blocked", "pending bootstrap does not claim remote readiness");
 	blocked = false; relay = await starting;
 	assert.equal(state.createCalls, 2, "uncertain host create is recovered instead of duplicated");
+});
+
+test("production IPC admits and restores a roomless source before authentication, then binds without launching", { timeout: 25_000 }, async (t) => {
+	const peer = process.env.PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER; const lock = process.env.PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER;
+	if (!peer || !lock) return t.skip("packaged security helpers unavailable");
+	const root = await mkdtemp(join(tmpdir(), "relay-local-enrollment-")); const cwd = join(root, "project"); await mkdir(cwd);
+	const launcher = join(root, "metadata-launcher"); const operations = join(root, "operations.jsonl");
+	const placement = { rootKey: "projects", workspace: "project", relativeCwd: "" };
+	await writeFile(launcher, `#!${process.execPath}\nconst fs = require('node:fs');
+const operation = process.argv[3]; fs.appendFileSync(${JSON.stringify(operations)}, JSON.stringify(operation) + '\\n');
+if (!['workspace-identify','workspace-resolve'].includes(operation)) process.exit(99);
+process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.stringify(operation === 'workspace-identify' ? ${JSON.stringify({ ...placement, cwd })} : ${JSON.stringify({ ...placement, cwd, workspacePath: cwd,
+		projectKey: `project_${"a".repeat(32)}`, projectDisplayName: "Project", checkoutDisplayName: "main" })})));
+`, { mode: 0o700 });
+	const sessionId = "local-source"; const creationKey = "local-enrollment"; const concept = "Local work";
+	const sourceSessionFile = join(root, "source.jsonl"); const bindingBoundaryEntryId = deriveTranscriptEntryId(sessionId, "boundary");
+	const sourceBytes = [{ type: "session", version: 3, id: sessionId, cwd, timestamp: new Date().toISOString() },
+		{ type: "custom", id: "boundary", parentId: null, customType: "managed-session.binding-boundary", data: { version: "1.0.0", creationKey, concept, sessionId } }]
+		.map((entry) => JSON.stringify(entry)).join("\n") + "\n";
+	await writeFile(sourceSessionFile, sourceBytes, { mode: 0o600 });
+	const environment = { PI_MANAGED_SESSIONS_RUNTIME_DIR: join(root, "runtime"), PI_MANAGED_SESSIONS_STATE_DIR: join(root, "state"),
+		PI_MANAGED_SESSIONS_MANIFEST_DIR: join(root, "manifests"), PI_MANAGED_SESSIONS_HOST_ID: `test-${randomUUID()}`,
+		PI_MANAGED_SESSIONS_PEER_UID_HELPER: peer, PI_MANAGED_SESSIONS_RELAY_LOCK_HELPER: lock,
+		PI_MANAGED_COORDINATOR_WORKSPACE_DIR: join(root, "neutral"), PI_MANAGED_COORDINATOR_SESSION_FILE: join(root, "sessions", "coordinator.jsonl"),
+		PI_MANAGED_COORDINATOR_LAUNCHER: launcher, PI_MATRIX_HOMESERVER: "https://matrix.example.com", PI_MATRIX_ACCESS_TOKEN: "test-token",
+		PI_MATRIX_BOT_USER_ID: "@bot:example.com", PI_MATRIX_OPERATOR_USER_ID: "@operator:example.com" };
+	const originalFetch = globalThis.fetch;
+	let signal = new AbortController(); let starting: ReturnType<typeof startManagedSessionRelay> | undefined;
+	let relay: Awaited<ReturnType<typeof startManagedSessionRelay>> | undefined; let client: BoundAdapterClient | undefined;
+	let began!: () => void; let release!: () => void; let blocked = true;
+	const gate = new Promise<void>((resolve) => { release = resolve; });
+	let authenticating = new Promise<void>((resolve) => { began = resolve; });
+	const state = { rooms: ["!host:example.com", "!coordinator:example.com", "!project:example.com", "!checkout:example.com", "!conversation:example.com"], createCalls: 0 };
+	const provision = provisioningFixture("@bot:example.com", state);
+	t.after(async () => { signal.abort(); release(); await client?.close("shutdown"); await starting?.catch(() => undefined); await relay?.stop(); globalThis.fetch = originalFetch; await rm(root, { recursive: true, force: true }); });
+	globalThis.fetch = async (input, init) => {
+		const url = new URL(String(input));
+		if (url.pathname.endsWith("/whoami")) {
+			began();
+			if (blocked) await Promise.race([gate, new Promise<never>((_resolve, reject) => {
+				if (init?.signal?.aborted) reject(init.signal.reason);
+				else init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+			})]);
+			return Response.json({ user_id: "@bot:example.com" });
+		}
+		const response = await provision(input, init); if (response) return response;
+		if (url.pathname.endsWith("/sync")) {
+			if (!url.searchParams.has("since")) return Response.json({ next_batch: "ready", rooms: { join: {} } });
+			if (!init?.signal?.aborted) await new Promise<void>((resolve) => init?.signal?.addEventListener("abort", () => resolve(), { once: true }));
+			throw Object.assign(Error("cancelled"), { name: "AbortError" });
+		}
+		return Response.json({});
+	};
+	starting = startManagedSessionRelay(environment, signal.signal); void starting.catch(() => undefined); await authenticating;
+	const socketPath = join(root, "runtime", "relay.sock"); const attachmentNonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
+	const result = await requestLocalBind({ socketPath, role: "ordinary_adapter", creationKey, concept, sessionId, attachmentNonce,
+		bindingBoundaryEntryId, sourceCwd: cwd, sourceSessionFile });
+	assert.equal(result.matrixBinding, "pending"); assert.equal(state.createCalls, 0);
+	const options = { socketPath, role: "ordinary_adapter" as const, attachmentNonce, requestedCapabilities: ["local-enrollment-v1" as const],
+		binding: { version: "1.0.0" as const, conversationId: result.conversationId, concept, sessionId, bindingBoundaryEntryId, role: "ordinary_adapter" as const }, onEnvelope: () => undefined };
+	client = new BoundAdapterClient(options); await client.connect();
+	assert.equal((await client.selfStatus()).payload.conversationState, "active"); assert.equal(client.matrixBindingPending, true);
+	await assert.rejects(() => client!.promoteTerminalSession(), { code: "matrix_unavailable" });
+	signal.abort(); await assert.rejects(starting); await client.close("shutdown");
+	signal = new AbortController(); authenticating = new Promise<void>((resolve) => { began = resolve; });
+	starting = startManagedSessionRelay(environment, signal.signal); void starting.catch(() => undefined); await authenticating;
+	client = new BoundAdapterClient(options); await client.connect();
+	assert.equal(client.matrixBindingPending, true); assert.equal((await client.selfStatus()).payload.conversationState, "active");
+	assert.equal(state.createCalls, 0, "restart restores local authority without Matrix access");
+	blocked = false; release(); relay = await starting;
+	for (let attempt = 0; attempt < 300 && !client.matrixBound; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+	assert.equal(client.matrixBound, true); assert.equal((await client.selfStatus()).payload.conversationState, "active");
+	assert.equal(state.createCalls, 5); assert.equal(await readFile(sourceSessionFile, "utf8"), sourceBytes);
+	assert.deepEqual(new Set((await readFile(operations, "utf8")).trim().split("\n").map((line) => JSON.parse(line))), new Set(["workspace-identify", "workspace-resolve"]));
 });

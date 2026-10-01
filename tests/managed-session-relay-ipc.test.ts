@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdtemp, rm, stat } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -80,7 +80,7 @@ function waitForClose(socket: Socket): Promise<void> {
 	return new Promise((resolve) => socket.once("close", () => resolve()));
 }
 
-async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[] }> {
+async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[]; registry: RelayRegistry }> {
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-ipc-"));
 	const values = [manifest("one"), manifest("two")];
 	const store = new ConversationManifestStore(join(root, "manifests"));
@@ -96,8 +96,25 @@ async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHan
 		onEnvelope,
 	});
 	await server.start();
-	return { root, server, values };
+	return { root, server, values, registry };
 }
+
+test("IPC shutdown drains disconnect writes before releasing ownership", async (t) => {
+	const { root, server, values, registry } = await setup();
+	let release!: () => void; const gate = new Promise<void>((resolve) => { release = resolve; });
+	let began!: () => void; const detaching = new Promise<void>((resolve) => { began = resolve; });
+	t.after(async () => { release(); await server.close(); await rm(root, { recursive: true, force: true }); });
+	const socket = await openSocket(server.socketPath); const accepted = readEnvelope(socket);
+	socket.write(encodeNdjsonEnvelope(attach(values[0]!, "attach-drain"))); await accepted;
+	const detach = registry.detach.bind(registry);
+	registry.detach = async (...args) => { began(); await gate; await detach(...args); };
+	socket.destroy(); await detaching;
+	let closed = false; const closing = server.close().then(() => { closed = true; });
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(closed, false, "socket closure alone is not a durable ownership-release boundary");
+	release(); await closing;
+	assert.equal(registry.conversationState(values[0]!.conversationId), "dormant");
+});
 
 test("commentary is capability-gated and legacy attachment responses remain unchanged", async (t) => {
 	let projected = 0;

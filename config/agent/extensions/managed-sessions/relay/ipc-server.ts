@@ -100,7 +100,16 @@ export class ManagedSessionIpcServer {
 		return true;
 	}
 
+	private closing = false;
+	private readonly pendingWork = new Set<Promise<unknown>>();
+	private track<T>(work: Promise<T>): Promise<T> {
+		this.pendingWork.add(work);
+		void work.finally(() => this.pendingWork.delete(work)).catch(() => undefined);
+		return work;
+	}
+
 	async start(): Promise<void> {
+		this.closing = false;
 		if (this.server) throw new Error("Managed-session IPC server is already running");
 		await ensurePrivateDirectory(this.runtimeDirectory);
 		try {
@@ -111,7 +120,7 @@ export class ManagedSessionIpcServer {
 		} catch (error) {
 			if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
 		}
-		this.server = createServer((socket) => void this.accept(socket));
+		this.server = createServer((socket) => { void this.track(this.accept(socket)); });
 		await new Promise<void>((resolveListen, reject) => {
 			this.server!.once("error", reject);
 			this.server!.listen(this.socketPath, () => {
@@ -123,18 +132,26 @@ export class ManagedSessionIpcServer {
 	}
 
 	async close(options: { preserveAttachments?: boolean } = {}): Promise<void> {
+		this.closing = true;
 		this.preserveAttachmentsOnClose = options.preserveAttachments ?? false;
+		const closed = [...this.sockets].map((socket) => socket.closed ? Promise.resolve() : new Promise<void>((resolveClose) => socket.once("close", resolveClose)));
 		for (const socket of this.sockets) socket.destroy();
 		if (this.server) {
 			await new Promise<void>((resolveClose) => this.server!.close(() => resolveClose()));
 			this.server = undefined;
 		}
+		await Promise.all(closed);
+		// Socket close can enqueue detach writes; drain them before releasing host ownership.
+		while (this.pendingWork.size) await Promise.allSettled([...this.pendingWork]);
 		await rm(this.socketPath, { force: true });
 	}
 
 	private async accept(socket: Socket): Promise<void> {
 		socket.pause();
 		this.sockets.add(socket);
+		socket.on("error", () => undefined);
+		socket.once("close", () => this.sockets.delete(socket));
+		if (this.closing) { socket.destroy(); return; }
 		if (this.peerUid) {
 			try {
 				const uid = await this.peerUid(socket);
@@ -147,6 +164,7 @@ export class ManagedSessionIpcServer {
 				return;
 			}
 		}
+		if (this.closing || socket.destroyed) return;
 		const state: ConnectionState = {
 			id: randomUUID(), buffer: Buffer.alloc(0), messageIds: new Set(), closed: false, work: Promise.resolve(),
 		};
@@ -156,8 +174,8 @@ export class ManagedSessionIpcServer {
 				.then(() => this.consume(socket, state, chunk))
 				.catch(() => { socket.destroy(); })
 				.finally(() => { socket.resume(); });
+			this.track(state.work);
 		});
-		socket.on("error", () => undefined);
 		socket.on("close", () => {
 			state.closed = true;
 			this.sockets.delete(socket);
@@ -166,7 +184,7 @@ export class ManagedSessionIpcServer {
 				this.attachedCapabilities.delete(state.attachment.conversationId);
 			}
 			if (state.attachment && !this.preserveAttachmentsOnClose) {
-				void this.registry.detach(state.id, state.attachment).then(() => this.onAttachmentDisconnect?.(state.attachment!, state.detachReason)).catch(() => undefined);
+				void this.track(this.registry.detach(state.id, state.attachment).then(() => this.onAttachmentDisconnect?.(state.attachment!, state.detachReason)).catch(() => undefined));
 			}
 		});
 		socket.resume();
@@ -210,6 +228,10 @@ export class ManagedSessionIpcServer {
 				}
 				if (!state.attachment) {
 					state.attachment = await this.registry.attach(envelope, state.id);
+					if (state.closed || this.closing) {
+						if (!this.preserveAttachmentsOnClose) await this.registry.detach(state.id, state.attachment);
+						return;
+					}
 					state.capabilities = envelope.payload.requestedCapabilities as string[] | undefined;
 					this.attachedSockets.set(state.attachment.conversationId, socket);
 					this.attachedCapabilities.set(state.attachment.conversationId, state.capabilities ?? []);

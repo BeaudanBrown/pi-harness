@@ -4,6 +4,7 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MAX_NDJSON_FRAME_BYTES,
 	type ManagedAdapterLiveStatus,
+	type ManagedSessionCapability,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 	encodeNdjsonEnvelope,
@@ -83,7 +84,9 @@ export interface BoundAdapterOptions {
 	role: AdapterRole;
 	attachmentNonce: string;
 	runtimeId?: string;
-	requestedCapabilities?: Array<"commentary-v1" | "notification-disposition-v1" | "recovery-attention-v1">;
+	requestedCapabilities?: ManagedSessionCapability[];
+	/** Synchronous durability barrier before a newly confirmed binding can project. */
+	beforeMatrixBindingReady?: () => void;
 	binding: SessionBinding;
 	onEnvelope: (envelope: ManagedSessionEnvelope) => Promise<void> | void;
 	onMedia?: (image: ReceivedImage) => Promise<void> | void;
@@ -99,7 +102,11 @@ export class BoundAdapterClient {
 	#attachmentId?: string;
 	#generation = 1;
 	#capabilities: string[] = [];
-	supports(capability: "commentary-v1" | "notification-disposition-v1" | "recovery-attention-v1"): boolean { return this.#capabilities.includes(capability); }
+	supports(capability: ManagedSessionCapability): boolean { return this.#capabilities.includes(capability); }
+	#matrixBindingPending = true;
+	get matrixBindingPending(): boolean { return this.#matrixBindingPending; }
+	/** A stored room binding on this connection, not account or phone readiness. */
+	get matrixBound(): boolean { return this.connected && !this.#matrixBindingPending; }
 	#placement?: WorkspaceIdentity;
 	get placement(): WorkspaceIdentity | undefined { return this.#placement ? { ...this.#placement } : undefined; }
 	#closing = false;
@@ -152,9 +159,13 @@ export class BoundAdapterClient {
 				},
 			});
 			if (response.type !== "attachment.accepted") throw responseError(response);
-			const capabilities = response.payload.capabilities as string[] | undefined;
-			if (capabilities?.some((item) => !this.options.requestedCapabilities?.includes(item as "commentary-v1" | "notification-disposition-v1" | "recovery-attention-v1"))) throw new ManagedAdapterError("Relay returned an unrequested capability", "invalid_response");
+			const capabilities = response.payload.capabilities as ManagedSessionCapability[] | undefined;
+			if (capabilities?.some((item) => !this.options.requestedCapabilities?.includes(item))) throw new ManagedAdapterError("Relay returned an unrequested capability", "invalid_response");
 			this.#capabilities = capabilities ?? [];
+			if (this.supports("local-enrollment-v1") !== (response.payload.matrixBinding !== undefined)) throw new ManagedAdapterError("Relay omitted or exposed unnegotiated Matrix binding state", "invalid_response");
+			const pending = response.payload.matrixBinding === "pending";
+			if (!pending) this.options.beforeMatrixBindingReady?.();
+			this.#matrixBindingPending = pending;
 			this.#attachmentId = String(response.payload.attachmentId);
 			this.#placement = response.payload.placement as WorkspaceIdentity | undefined;
 			this.#generation = Number.isSafeInteger(response.payload.generation) ? Number(response.payload.generation) : 1;
@@ -341,6 +352,9 @@ export class BoundAdapterClient {
 			: timeoutMs ?? this.options.timeouts?.requestMs ?? REQUEST_TIMEOUT_MS;
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return Promise.reject(new ManagedAdapterError("Relay connection is unavailable"));
+		if (this.#matrixBindingPending && !["attachment.attach", "self.status", "control.result", "refresh.result"].includes(envelope.type)) {
+			return Promise.reject(new ManagedAdapterError("Local conversation is active; Matrix binding is pending", "matrix_unavailable"));
+		}
 		if (this.#pending.size >= MAX_PENDING_REQUESTS) return Promise.reject(new ManagedAdapterError("Relay request capacity was reached", "capacity_reached"));
 		const expectation = expectedResponse(envelope);
 		return new Promise((resolve, reject) => {
@@ -396,10 +410,21 @@ export class BoundAdapterClient {
 				continue;
 			}
 			this.#inboundWork = this.#inboundWork
-				.then(() => envelope.type === "media.begin" || envelope.type === "media.chunk" ? this.consumeMedia(envelope) : this.options.onEnvelope(envelope))
+				.then(() => this.consumeUnsolicited(envelope))
 				.then(() => undefined)
 				.catch(() => { this.#socket?.destroy(); });
 		}
+	}
+
+	private async consumeUnsolicited(envelope: ManagedSessionEnvelope): Promise<void> {
+		if (envelope.type === "binding.status") {
+			if (!this.supports("local-enrollment-v1")) throw new ManagedAdapterError("Unnegotiated binding status", "invalid_response");
+			if (!this.#matrixBindingPending) return;
+			this.options.beforeMatrixBindingReady?.();
+			this.#matrixBindingPending = false;
+		}
+		if (envelope.type === "media.begin" || envelope.type === "media.chunk") return this.consumeMedia(envelope);
+		await this.options.onEnvelope(envelope);
 	}
 
 	private async consumeMedia(envelope: ManagedSessionEnvelope): Promise<void> {
@@ -466,7 +491,7 @@ export class CoordinatorAdapterClient extends BoundAdapterClient {
 	}
 }
 
-export async function requestSelfBind(options: {
+export interface SelfBindOptions {
 	socketPath: string;
 	role: "ordinary_adapter";
 	creationKey: string;
@@ -476,7 +501,19 @@ export async function requestSelfBind(options: {
 	bindingBoundaryEntryId: string;
 	sourceCwd: string;
 	sourceSessionFile: string;
-}): Promise<string> {
+}
+
+export async function requestSelfBind(options: SelfBindOptions): Promise<string> {
+	return (await requestBinding(options, false)).conversationId;
+}
+
+export async function requestLocalBind(options: SelfBindOptions): Promise<{ conversationId: string; matrixBinding: "pending" | "bound" }> {
+	const result = await requestBinding(options, true);
+	if (!result.matrixBinding) throw new ManagedAdapterError("Relay did not confirm local enrollment", "invalid_response");
+	return { conversationId: result.conversationId, matrixBinding: result.matrixBinding };
+}
+
+async function requestBinding(options: SelfBindOptions, local: boolean): Promise<{ conversationId: string; matrixBinding?: "pending" | "bound" }> {
 	const socket = await openSocket(options.socketPath);
 	try {
 		const request: ManagedSessionEnvelope = {
@@ -486,14 +523,15 @@ export async function requestSelfBind(options: {
 				creationKey: options.creationKey, concept: options.concept, sessionId: options.sessionId,
 				attachmentNonce: options.attachmentNonce, bindingBoundaryEntryId: options.bindingBoundaryEntryId,
 				sourceCwd: options.sourceCwd, sourceSessionFile: options.sourceSessionFile,
+				...(local ? { requestedCapabilities: ["local-enrollment-v1"] } : {}),
 			},
 		};
 		socket.write(encodeNdjsonEnvelope(request));
-		const response = await readSingleEnvelope(socket, RELAY_SIDE_EFFECT_TIMEOUT_MS);
+		const response = await readSingleEnvelope(socket, local ? REQUEST_TIMEOUT_MS : RELAY_SIDE_EFFECT_TIMEOUT_MS);
 		if (response.role !== "relay" || response.inReplyTo !== request.messageId || response.type !== "self.result" ||
 			response.payload.operation !== "self.bind" || response.payload.status !== "ok" ||
 			typeof response.payload.boundConversationId !== "string") throw responseError(response);
-		return response.payload.boundConversationId;
+		return { conversationId: response.payload.boundConversationId, matrixBinding: response.payload.matrixBinding as "pending" | "bound" | undefined };
 	} finally {
 		socket.destroy();
 	}

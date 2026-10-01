@@ -232,8 +232,23 @@ HostLifecycle now admits those local registrations before coordinator bootstrap
 or Matrix availability. A bounded background reconciler finishes only the Matrix
 binding, without reopening Pi transcripts or launching/promoting a process. Unit
 fixtures preserve the active attachment through outage/retry and isolate a stalled
-conversation from other completions; affected gates pass. Frontend capability
-opt-in, accurate pending presentation, and no-shutdown integration remain before
-the high Spec finding is resolved.
+conversation from other completions; affected gates pass. The ordinary frontend
+now opts in, keeps the same Pi running, gates Matrix-only effects, and records a
+durable historical cutoff before enabling projection on binding completion.
+Production IPC tests admit and reattach a fresh roomless source across relay
+restart while authentication remains blocked, then complete exactly the five
+host/coordinator/project/checkout/conversation resources without launching Pi.
+A real packaged Pi remains responsive after enrollment against a fake relay;
+adapter fixtures verify silent catch-up, notifying new finals, and refusal to
+publish readiness after a failed durable cutoff write. These address the high
+Spec finding without claiming live Matrix/account/device acceptance.
+
+The new shutdown fixture also exposed an existing ownership-release race: socket
+closure did not drain asynchronous detach writes. IPC now drains admitted work
+and disconnect callbacks before releasing ownership, including delayed admission
+and peer checks. A gated detach test verifies this boundary deterministically.
+All 305 managed-session tests and source contracts pass. Two intermediate fixture
+failures were corrected without weakening production validation: Pi signatures
+require `v: 1` / `final_answer`, and workspace-identify rejects resolve-only fields.
 
 No push, deployment, live migration or phone-delivery claim is made.

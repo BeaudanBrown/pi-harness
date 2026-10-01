@@ -188,6 +188,8 @@ class FakeRelay {
 	enableCommentary = false;
 	enableDisposition = false;
 	enableRecovery = false;
+	enableLocal = false;
+	matrixPending = false;
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
@@ -252,11 +254,15 @@ class FakeRelay {
 			role: "relay" as const,
 			inReplyTo: envelope.messageId,
 		};
+		const local = this.enableLocal && Array.isArray(envelope.payload.requestedCapabilities) && envelope.payload.requestedCapabilities.includes("local-enrollment-v1");
 		if (envelope.type === "self.bind") {
-			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId } }));
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId,
+				...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}) } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.enableCommentary && envelope.payload.requestedCapabilities ? { capabilities: ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
+				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : [])];
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active",
+					...(capabilities.length ? { capabilities } : {}), ...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
 			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
@@ -538,8 +544,9 @@ test("manual self binding is a strict one-shot relay operation", async (t) => {
 	assert.equal(relay.frames[0]?.payload.attachmentNonce, nonce);
 });
 
-test("/remote on promotes an idle persisted ordinary session and shuts down only after relay confirmation", async (t) => {
-	const relay = await FakeRelay.start(); t.after(() => relay.close());
+test("/remote on keeps a locally enrolled Pi running through pending binding and silent catch-up", async (t) => {
+	const relay = await FakeRelay.start(); relay.enableLocal = true; relay.matrixPending = true;
+	relay.enableCommentary = true; relay.enableDisposition = true; t.after(() => relay.close());
 	const handlers = new Map<string, (...args: any[]) => any>(); const commands = new Map<string, (...args: any[]) => any>();
 	const branch: any[] = []; const notices: string[] = []; let leaf: string | null = null; let sequence = 0; let shutdowns = 0;
 	const api = {
@@ -553,15 +560,47 @@ test("/remote on promotes an idle persisted ordinary session and shuts down only
 	const ctx: any = { cwd: "/workspaces/project", hasUI: true, ui: { notify(message: string) { notices.push(message); }, setStatus() {} }, isIdle: () => true, hasPendingMessages: () => false,
 		shutdown: () => { shutdowns += 1; }, getContextUsage: () => undefined,
 		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => "/sessions/ordinary.jsonl", getBranch: () => branch, getLeafId: () => leaf } };
+	await handlers.get("session_start")!({ reason: "startup" }, ctx);
 	await commands.get("remote")!("on promoted work", ctx);
-	assert.equal(shutdowns, 1, notices.join(" | "));
+	assert.equal(shutdowns, 0, notices.join(" | "));
+	assert.ok(notices.some((notice) => notice.includes("Matrix binding pending")));
 	assert.match(environment.PI_MANAGED_SESSION_ATTACHMENT_NONCE ?? "", /^[A-Za-z0-9_-]{32,128}$/);
 	assert.deepEqual(relay.frames.filter((frame) => ["self.bind", "attachment.attach", "self.promote"].includes(frame.type)).map((frame) => frame.type),
-		["self.bind", "attachment.attach", "self.promote"]);
+		["self.bind", "attachment.attach"]);
 	const selfBind = relay.frames.find((frame) => frame.type === "self.bind")!;
 	assert.equal(selfBind.payload.sourceCwd, ctx.cwd); assert.equal(selfBind.payload.sourceSessionFile, "/sessions/ordinary.jsonl");
 	assert.deepEqual(branch.map((entry) => entry.customType), [BINDING_BOUNDARY_ENTRY_TYPE, BINDING_ENTRY_TYPE]);
+	const final = (id: string, text: string) => {
+		branch.push({ type: "message", id, parentId: leaf, message: { role: "assistant", content: [{ type: "text", text,
+			textSignature: JSON.stringify({ v: 1, id, phase: "final_answer" }) }], stopReason: "stop" } }); leaf = id;
+	};
+	final("offline-final", "Offline answer"); await handlers.get("agent_settled")!({}, ctx);
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(relay.frames.filter((frame) => frame.type === "transcript.offer").length, 0);
+	relay.matrixPending = false;
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "binding-ready", conversationId, role: "relay", type: "binding.status", payload: { matrixBinding: "bound" } });
+	await activityWait(() => relay.frames.some((frame) => frame.type === "transcript.offer" && frame.payload.body === "Offline answer"));
+	assert.equal(relay.frames.find((frame) => frame.type === "transcript.offer" && frame.payload.body === "Offline answer")!.payload.disposition, "silent");
+	final("live-final", "Live answer"); await handlers.get("agent_settled")!({}, ctx);
+	await activityWait(() => relay.frames.some((frame) => frame.type === "transcript.offer" && frame.payload.body === "Live answer"));
+	assert.equal(relay.frames.find((frame) => frame.type === "transcript.offer" && frame.payload.body === "Live answer")!.payload.disposition, "notify");
+	assert.equal(shutdowns, 0, "completion cannot authorize a later handoff");
+	assert.equal(relay.frames.filter((frame) => frame.type === "self.promote").length, 0);
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("binding readiness cannot outrun a failed durable catch-up barrier", async (t) => {
+	const relay = await FakeRelay.start(); relay.enableLocal = true; relay.matrixPending = true; t.after(() => relay.close());
+	let barrierCalls = 0; let readyFrames = 0;
+	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		requestedCapabilities: ["local-enrollment-v1"], beforeMatrixBindingReady: () => { barrierCalls++; throw Error("durable marker unavailable"); },
+		onEnvelope: () => { readyFrames++; } });
+	t.after(() => client.close("shutdown")); await client.connect();
+	assert.equal(client.matrixBindingPending, true);
+	await assert.rejects(() => client.promoteTerminalSession(), { code: "matrix_unavailable" });
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "ready-failed-barrier", conversationId, role: "relay", type: "binding.status", payload: { matrixBinding: "bound" } });
+	await activityWait(() => !client.connected);
+	assert.equal(barrierCalls, 1); assert.equal(readyFrames, 0); assert.equal(client.matrixBindingPending, true);
 });
 
 test("only the coordinator profile exposes the bounded managed lifecycle tools", () => {

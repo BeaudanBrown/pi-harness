@@ -274,7 +274,7 @@ export default function (pi) {
 		deriveTranscriptEntryId("11111111-1111-4111-8111-111111111111", String(normalUser!.id)));
 });
 
-test("real Pi promotes an ordinary persisted session only after relay confirmation", { timeout: 25_000 }, async (t) => {
+test("real Pi enrolls locally and remains responsive while Matrix binding is pending", { timeout: 25_000 }, async (t) => {
 	if (!pi || !adapterExtension) return t.skip("packaged Pi adapter probe paths are unavailable");
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-real-promotion-"));
 	const home = join(root, "home"); const socketPath = join(root, "relay.sock"); const sessionPath = join(root, "ordinary.jsonl");
@@ -296,8 +296,8 @@ test("real Pi promotes an ordinary persisted session only after relay confirmati
 				frames.push(envelope);
 				const base = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-promotion-${frames.length}`,
 					conversationId: envelope.conversationId ?? promotedConversationId, role: "relay" as const, inReplyTo: envelope.messageId };
-				if (envelope.type === "self.bind") socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: promotedConversationId } }));
-				else if (envelope.type === "attachment.attach") socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "promotion-attachment", state: "active" } }));
+				if (envelope.type === "self.bind") socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: promotedConversationId, matrixBinding: "pending" } }));
+				else if (envelope.type === "attachment.attach") socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "promotion-attachment", state: "active", capabilities: ["local-enrollment-v1"], matrixBinding: "pending" } }));
 				else if (envelope.type === "self.promote") socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.promote", status: "ok" } }));
 			}
 		});
@@ -309,9 +309,10 @@ test("real Pi promotes an ordinary persisted session only after relay confirmati
 			PI_MANAGED_SESSION_ATTACHMENT_NONCE: undefined, PI_MANAGED_SESSION_ROOT_KEY: undefined, PI_MANAGED_SESSION_WORKSPACE: undefined, PI_MANAGED_SESSION_RELATIVE_CWD: undefined },
 		stdio: ["pipe", "pipe", "pipe"],
 	});
-	const events = await rpc(child, [{ id: "promote", type: "prompt", message: "/remote on promoted from terminal" }]);
+	const events = await rpc(child, [{ id: "enroll", type: "prompt", message: "/remote on managed from terminal" }, { id: "still-local", type: "get_state" }]);
+	assert.ok(events.some((event) => event.id === "still-local" && event.type === "response" && event.success === true), JSON.stringify(events));
 	assert.deepEqual(frames.filter((frame) => ["self.bind", "attachment.attach", "self.promote"].includes(frame.type)).map((frame) => frame.type),
-		["self.bind", "attachment.attach", "self.promote"], JSON.stringify(events));
+		["self.bind", "attachment.attach"], JSON.stringify(events));
 	const bind = frames.find((frame) => frame.type === "self.bind");
 	assert.equal(bind?.payload.sourceCwd, root); assert.equal(bind?.payload.sourceSessionFile, sessionPath);
 	assert.ok(frames.some((frame) => frame.type === "attachment.detach" && frame.payload.reason === "shutdown"));
@@ -319,5 +320,5 @@ test("real Pi promotes an ordinary persisted session only after relay confirmati
 	assert.equal((entries[0] as { id?: string }).id, sessionId);
 	assert.ok(entries.some((entry) => entry.type === "custom" && entry.customType === "managed-session.binding-boundary"));
 	assert.ok(entries.some((entry) => entry.type === "custom" && entry.customType === "managed-session.binding"));
-	assert.equal(frames.some((frame) => frame.type === "transcript.offer"), false, "pre-promotion history is not projected");
+	assert.equal(frames.some((frame) => frame.type === "transcript.offer"), false, "pending binding cannot project history");
 });
