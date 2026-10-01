@@ -45,6 +45,22 @@ Conflicting ownership or mismatched creation keys fail closed, not a best-effort
 merge. Local transcripts remain intact. A new conversation may explicitly use
 retired history as context with new ownership and a fresh projection boundary.
 
+### Roomless local enrollment
+
+A locally registered conversation without a Matrix binding lives in the private
+registry's versioned `localConversations` records, not in a synchronized manifest
+with a placeholder room ID. Local identity, nonce and attachment persist
+independently of remote provisioning. Before publishing a real bound manifest,
+persist an exact verified binding receipt privately; recover an interrupted
+publication only when its logical identity and Matrix IDs match that receipt.
+Completing the binding preserves the existing attachment and nonce.
+
+`local-enrollment-v1` is required to attach while roomless. Capable clients receive
+`matrixBinding: pending|bound`; `bound` means a stored Matrix binding, not account
+membership or phone readiness. Legacy binding requests retain their bound-only
+behavior. A pending enrollment must not terminate the foreground Pi or authorize
+an implicit later process handoff.
+
 ## Host operations
 
 The public command is `pi-managed-session <noun> <action> ... [--json]`.

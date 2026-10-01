@@ -150,5 +150,5 @@ export function migrateV1Manifest(value: unknown): ConversationManifestV2 {
 export function migrateV1Bundle(manifests: unknown[], runtime: unknown) {
 	const source = parsePersistenceBundle(manifests, runtime); const migrated = source.manifests.map(migrateV1Manifest);
 	return { manifests: migrated, runtime: { ...source.runtime, schemaVersion: MANAGED_SESSION_V2_VERSION,
-		conversations: source.runtime.conversations.map(r => ({ ...r, activeGenerationId: migrated.find(m => m.conversationId === r.conversationId)!.activeGenerationId })) } };
+		conversations: source.runtime.conversations.map(r => ({ ...r, activeGenerationId: migrated.find(m => m.conversationId === r.conversationId)?.activeGenerationId ?? source.runtime.localConversations?.find(m => m.conversationId === r.conversationId)?.activeGenerationId ?? deriveGenerationId(r.conversationId, 1) })) } };
 }

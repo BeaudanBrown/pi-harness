@@ -222,7 +222,8 @@ export class ManagedSessionIpcServer {
 						inReplyTo: envelope.messageId,
 						payload: { attachmentId: state.attachment.attachmentId, state: "active", generation: state.attachment.generation,
 							...(state.capabilities ? { capabilities: state.capabilities } : {}),
-							...(state.attachment.role === "ordinary_adapter" ? { placement: this.registry.manifestByConversationId(state.attachment.conversationId)!.placement } : {}) },
+							...(state.capabilities?.includes("local-enrollment-v1") ? { matrixBinding: this.registry.manifestByConversationId(state.attachment.conversationId) ? "bound" : "pending" } : {}),
+							...(state.attachment.role === "ordinary_adapter" ? { placement: this.registry.registeredConversation(state.attachment.conversationId)!.placement } : {}) },
 					});
 					await this.onAttachment?.(state.attachment);
 					continue;

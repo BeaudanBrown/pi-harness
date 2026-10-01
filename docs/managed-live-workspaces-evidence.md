@@ -220,4 +220,15 @@ links, paired checkout persistence/migration, and cancellation fixtures. The 28 
 
 The local binding must survive and remain usable independently of remote effects,
 without placeholder room IDs or terminating the foreground Pi during the outage.
+A subsequent private-registry chunk adds roomless local enrollment with nonce-
+authenticated, capability-gated attachments. Synchronized manifests still require
+real Matrix IDs. A verified receipt is durable before manifest publication;
+receipt, publication and private-cleanup interruptions recover without replacing
+IDs or changing the attached local session. An unrelated public file cannot
+complete enrollment without the matching receipt. V2 bundle migration preserves
+pending records. Focused managed-session/source gates pass (one stale diagnostic-
+text assertion was updated to assert the unchanged typed conflict code).
+HostLifecycle, background completion and frontend no-shutdown wiring remain to be
+done before the high Spec finding is resolved.
+
 No push, deployment, live migration or phone-delivery claim is made.

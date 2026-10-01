@@ -28,6 +28,13 @@ export class ConversationManifestStore {
 		return manifests;
 	}
 
+	async read(conversationId: string): Promise<ConversationManifest | undefined> {
+		if (!/^conv_[a-f0-9]{32}$/.test(conversationId)) throw new Error("Invalid conversation ID");
+		const manifest = await new AtomicJsonFile(join(this.root, `${conversationId}.json`), parseConversationManifest).read();
+		if (manifest && manifest.conversationId !== conversationId) throw new Error("Conversation manifest filename mismatch");
+		return manifest;
+	}
+
 	async write(manifest: ConversationManifest): Promise<void> {
 		const parsed = parseConversationManifest(manifest);
 		await new AtomicJsonFile(join(this.root, `${parsed.conversationId}.json`), parseConversationManifest).write(parsed);

@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 import { isAbsolute } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
@@ -150,10 +151,13 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
-const projectionCapabilities = Type.Array(Type.Union([Type.Literal("commentary-v1"), Type.Literal("notification-disposition-v1"), Type.Literal("recovery-attention-v1")]), { maxItems: 3, uniqueItems: true });
+export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1"] as const;
+export type ManagedSessionCapability = typeof MANAGED_SESSION_CAPABILITIES[number];
+const managedCapabilities = Type.Array(Type.Union(MANAGED_SESSION_CAPABILITIES.map((value) => Type.Literal(value))), { maxItems: MANAGED_SESSION_CAPABILITIES.length, uniqueItems: true });
+const matrixBindingState = Type.Union([Type.Literal("pending"), Type.Literal("bound")]);
 const notificationDisposition = Type.Union([Type.Literal("silent"), Type.Literal("notify")]);
 const attachmentFields = {
-	requestedCapabilities: Type.Optional(projectionCapabilities),
+	requestedCapabilities: Type.Optional(managedCapabilities),
 	runtimeId: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	sessionId: identifier,
 	attachmentNonce: Type.String({ pattern: "^[A-Za-z0-9_-]{32,128}$" }),
@@ -273,6 +277,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		bindingBoundaryEntryId: TranscriptEntryIdSchema,
 		sourceCwd: boundedString(4_096),
 		sourceSessionFile: boundedString(4_096),
+		requestedCapabilities: Type.Optional(managedCapabilities),
 	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.promote", {}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "aloop.notice", {
@@ -286,12 +291,14 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		request: lifecycleArguments,
 	}),
 	relayEnvelope("attachment.accepted", {
-		capabilities: Type.Optional(projectionCapabilities),
+		capabilities: Type.Optional(managedCapabilities),
+		matrixBinding: Type.Optional(matrixBindingState),
 		placement: Type.Optional(WorkspaceIdentitySchema),
 		attachmentId: identifier,
 		generation: Type.Optional(Type.Integer({ minimum: 1 })),
 		state: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 	}),
+	relayEnvelope("binding.status", { matrixBinding: Type.Literal("bound") }),
 	relayEnvelope("control.deliver", {
 		controlId: stableId("control"),
 		name: Type.Union([
@@ -348,7 +355,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		lifecycleId: stableId("aloop"), status: Type.Literal("projected"),
 	}),
 	relayEnvelopeWithPayload("self.result", Type.Union([
-		strictObject({ operation: Type.Literal("self.bind"), status: Type.Literal("ok"), boundConversationId: ConversationIdSchema }),
+		strictObject({ operation: Type.Literal("self.bind"), status: Type.Literal("ok"), boundConversationId: ConversationIdSchema, matrixBinding: Type.Optional(matrixBindingState) }),
 		strictObject({
 			operation: Type.Literal("self.status"),
 			status: Type.Literal("ok"),
@@ -490,6 +497,13 @@ const coordinatorManifest = strictObject({
 	...generationManifestFields,
 });
 export const ConversationManifestSchema = Type.Union([projectManifest, coordinatorManifest]);
+/** Private local enrollment, never a synchronized manifest with an invented room ID. */
+export const PendingLocalConversationSchema = strictObject({
+	...Type.Omit(projectManifest, ["schemaVersion", "roomId", "projectSpace", "checkoutSpace"]).properties,
+	version: Type.Literal(1), projectKey: ProjectKeySchema, checkoutId: stableId("checkout"),
+	projectDisplayName: boundedString(128), checkoutDisplayName: boundedString(128),
+	verifiedBinding: Type.Optional(strictObject({ roomId: boundedString(255), projectSpace: boundedString(255), checkoutSpace: boundedString(255) })),
+});
 
 const pendingInput = strictObject({
 	deliveryId: DeliveryIdSchema,
@@ -641,6 +655,7 @@ const runtimeConversation = strictObject({
 export const HostRuntimeStateSchema = strictObject({
 	schemaVersion: Type.Literal(MANAGED_SESSION_STATE_VERSION),
 	hostId: identifier,
+	localConversations: Type.Optional(Type.Array(PendingLocalConversationSchema, { maxItems: 4_096 })),
 	conversations: Type.Array(runtimeConversation, { maxItems: 4_096 }),
 });
 
@@ -678,6 +693,15 @@ export interface ConversationManifest {
 	activeGenerationId?: string;
 	generations?: SessionGeneration[];
 }
+export type PendingLocalConversation = Omit<ConversationManifest, "schemaVersion" | "kind" | "roomId" | "hostSpace" | "projectSpace" | "checkoutSpace"> & {
+	version: 1; kind: "project"; placement: WorkspaceIdentity; projectKey: string; checkoutId: string;
+	projectDisplayName: string; checkoutDisplayName: string;
+	verifiedBinding?: { roomId: string; projectSpace: string; checkoutSpace: string };
+	roomId?: never; hostSpace?: never; projectSpace?: never; checkoutSpace?: never;
+};
+export type RegisteredConversation = ConversationManifest | PendingLocalConversation;
+export function hasMatrixBinding(value: RegisteredConversation): value is ConversationManifest { return !("version" in value); }
+
 export interface ManagedAdapterLiveStatus {
 	state: "idle" | "busy";
 	model?: string;
@@ -688,6 +712,7 @@ export interface ManagedAdapterLiveStatus {
 export interface HostRuntimeState {
 	schemaVersion: typeof MANAGED_SESSION_STATE_VERSION;
 	hostId: string;
+	localConversations?: PendingLocalConversation[];
 	conversations: Array<{
 		conversationId: string;
 		state: "starting" | "active" | "dormant";
@@ -920,6 +945,31 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 	}
 	assertSchema(ConversationManifestSchema, value, "conversation manifest");
 	const manifest = value as ConversationManifest;
+	validateLogicalConversation(manifest);
+	if ((manifest.checkoutId === undefined) !== (manifest.checkoutSpace === undefined) ||
+		(manifest.checkoutId !== undefined && (!manifest.projectKey || !manifest.projectSpace || manifest.kind !== "project"))) {
+		throw new ManagedSessionContractError("invalid_state", "checkout hierarchy fields require a complete project binding");
+	}
+	return manifest;
+}
+
+export function parsePendingLocalConversation(value: unknown): PendingLocalConversation {
+	assertSchema(PendingLocalConversationSchema, value, "pending local conversation");
+	const manifest = value as PendingLocalConversation;
+	validateLogicalConversation(manifest);
+	if (manifest.verifiedBinding) {
+		const rooms = Object.values(manifest.verifiedBinding);
+		if (new Set(rooms).size !== 3 || rooms.some((room) => !/^![^\s:]{1,200}:[^\s]{1,200}$/.test(room))) {
+			throw new ManagedSessionContractError("invalid_state", "local binding receipt is invalid");
+		}
+	}
+	if (manifest.creationKey === "coordinator" || manifest.conversationId !== deriveConversationId(manifest.ownerHostId, manifest.creationKey)) {
+		throw new ManagedSessionContractError("invalid_state", "local enrollment identity is invalid or protected");
+	}
+	return manifest;
+}
+
+function validateLogicalConversation(manifest: RegisteredConversation): void {
 	assertTimestamp(manifest.createdAt, "createdAt");
 	if (manifest.placement) assertWorkspaceIdentity(manifest.placement);
 	const projectIdentityFields = [manifest.projectKey, manifest.projectDisplayName, manifest.checkoutDisplayName];
@@ -927,10 +977,6 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 		manifest.kind === "project" && projectIdentityFields.some((field) => field !== undefined) &&
 			(projectIdentityFields.some((field) => field === undefined) || projectIdentityFields.slice(1).some((field) => /[\u0000-\u001f\u007f/]/.test(field ?? "")))) {
 		throw new ManagedSessionContractError("invalid_state", "stable project identity fields must appear together on project manifests only");
-	}
-	if ((manifest.checkoutId === undefined) !== (manifest.checkoutSpace === undefined) ||
-		(manifest.checkoutId !== undefined && (!manifest.projectKey || !manifest.projectSpace || manifest.kind !== "project"))) {
-		throw new ManagedSessionContractError("invalid_state", "checkout hierarchy fields require a complete project binding");
 	}
 	if ((manifest.activeGenerationId === undefined) !== (manifest.generations === undefined)) {
 		throw new ManagedSessionContractError("invalid_state", "active generation and generation history must appear together");
@@ -945,7 +991,6 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 		}
 		for (const generation of manifest.generations) assertTimestamp(generation.createdAt, "generation.createdAt");
 	}
-	return manifest;
 }
 
 export function parseHostRuntimeState(value: unknown): HostRuntimeState {
@@ -975,6 +1020,12 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		if (changed) candidate = migrated;
 	}
 	assertSchema(HostRuntimeStateSchema, candidate, "host runtime state");
+	const localIds = new Set<string>();
+	for (const local of (candidate as HostRuntimeState).localConversations ?? []) {
+		parsePendingLocalConversation(local);
+		if (localIds.has(local.conversationId)) throw new ManagedSessionContractError("conflict", "duplicate local enrollment identity");
+		localIds.add(local.conversationId);
+	}
 	const state = candidate as HostRuntimeState;
 	const conversationIds = new Set<string>();
 	for (const conversation of state.conversations) {
@@ -1141,17 +1192,32 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 	return state;
 }
 
+export function assertLocalBindingIdentity(local: PendingLocalConversation, bound: ConversationManifest): void {
+	const { version: _version, verifiedBinding, ...expected } = local;
+	const { schemaVersion: _schema, roomId: _room, hostSpace: _host, projectSpace: _project, checkoutSpace: _checkout, ...actual } = bound;
+	if (!verifiedBinding || verifiedBinding.roomId !== bound.roomId || verifiedBinding.projectSpace !== bound.projectSpace || verifiedBinding.checkoutSpace !== bound.checkoutSpace ||
+		!isDeepStrictEqual(expected, actual)) throw new ManagedSessionContractError("conflict", "local enrollment and verified Matrix binding identities differ");
+}
+
 export function parsePersistenceBundle(manifestValues: unknown[], runtimeValue: unknown): {
 	manifests: ConversationManifest[];
 	runtime: HostRuntimeState;
 } {
 	const manifests = manifestValues.map(parseConversationManifest);
-	const runtime = parseHostRuntimeState(runtimeValue);
+	const runtime = structuredClone(parseHostRuntimeState(runtimeValue));
+	// A completed manifest write may precede removal of the private pending record.
+	const pending = (runtime.localConversations ?? []).filter((local) => {
+		const bound = manifests.find((manifest) => manifest.conversationId === local.conversationId);
+		if (!bound) return true;
+		assertLocalBindingIdentity(local, bound); return false;
+	});
+	if (pending.length) runtime.localConversations = pending; else delete runtime.localConversations;
+	const registered: RegisteredConversation[] = [...manifests, ...pending];
 	const ids = new Set<string>();
 	const rooms = new Set<string>();
 	const sessions = new Set<string>();
 	const creationKeys = new Set<string>();
-	for (const manifest of manifests) {
+	for (const manifest of registered) {
 		if (manifest.ownerHostId !== runtime.hostId) {
 			throw new ManagedSessionContractError("conflict", `manifest ${manifest.conversationId} belongs to another host`);
 		}
@@ -1160,6 +1226,7 @@ export function parsePersistenceBundle(manifestValues: unknown[], runtimeValue: 
 			[rooms, manifest.roomId, "room"],
 			[creationKeys, manifest.creationKey, "creation key"],
 		] as const) {
+			if (value === undefined) continue;
 			if (set.has(value)) throw new ManagedSessionContractError("conflict", `duplicate ${label} identity ${value}`);
 			set.add(value);
 		}
@@ -1168,11 +1235,11 @@ export function parsePersistenceBundle(manifestValues: unknown[], runtimeValue: 
 			sessions.add(session);
 		}
 	}
-	if (runtime.conversations.length !== manifests.length || runtime.conversations.some((item) => !ids.has(item.conversationId))) {
-		throw new ManagedSessionContractError("conflict", "runtime conversations and synchronized manifests do not match exactly");
+	if (runtime.conversations.length !== registered.length || runtime.conversations.some((item) => !ids.has(item.conversationId))) {
+		throw new ManagedSessionContractError("conflict", "runtime conversations and registered identities do not match exactly");
 	}
 	for (const conversation of runtime.conversations) {
-		const manifest = manifests.find((candidate) => candidate.conversationId === conversation.conversationId)!;
+		const manifest = registered.find((candidate) => candidate.conversationId === conversation.conversationId)!;
 		const transition = conversation.generationTransition;
 		if (transition) {
 			const activeGenerationId = manifest.activeGenerationId ?? deriveGenerationId(manifest.conversationId, 1);

@@ -73,7 +73,7 @@ test("activity snapshots require collapsed names and balanced measured totals", 
 	const update = { ...base, type: "activity.update", payload: { activityId: payload.activityId, revision: 1, state: "tool", tools: [{ name: "bash", state: "running", count: 1 }, { name: "bash", state: "completed", count: 1 }] } };
 	assert.throws(() => parseManagedSessionV2Envelope(update), /unique collapsed/);
 });
-test("bundle migration fails closed when registry is partial", () => { const runtime = { schemaVersion: MANAGED_SESSION_STATE_VERSION, hostId: "host", conversations: [] }; assert.throws(() => migrateV1Bundle([old], runtime), /runtime conversations and synchronized manifests do not match exactly/); });
+test("bundle migration fails closed when registry is partial", () => { const runtime = { schemaVersion: MANAGED_SESSION_STATE_VERSION, hostId: "host", conversations: [] }; assert.throws(() => migrateV1Bundle([old], runtime), { code: "conflict" }); });
 
 test("store migration atomically commits deterministic v2 destinations and forbids downgrade", async () => {
 	const root = await mkdtemp(join(tmpdir(), "managed-v2-migration-"));

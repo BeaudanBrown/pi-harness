@@ -1,5 +1,6 @@
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { join, resolve } from "node:path";
+import { isDeepStrictEqual } from "node:util";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_COMPLETED_CONTROLS,
@@ -10,6 +11,12 @@ import {
 	deriveGenerationTransitionId,
 	deriveMatrixTransactionId,
 	type ConversationManifest,
+	type PendingLocalConversation,
+	type RegisteredConversation,
+	hasMatrixBinding,
+	parsePendingLocalConversation,
+	parseConversationManifest,
+	assertLocalBindingIdentity,
 	type SessionGeneration,
 	type HostRuntimeState,
 	type ManagedSessionEnvelope,
@@ -43,7 +50,7 @@ function equalHash(left: string, right: string): boolean {
 	return leftBytes.length === rightBytes.length && timingSafeEqual(leftBytes, rightBytes);
 }
 
-function expectedRole(manifest: ConversationManifest): AdapterRole {
+function expectedRole(manifest: RegisteredConversation): AdapterRole {
 	return manifest.kind === "coordinator" ? "coordinator_adapter" : "ordinary_adapter";
 }
 
@@ -63,7 +70,7 @@ export interface AcceptedAttachment {
 
 export class RelayRegistry {
 	private readonly runtimeFile: AtomicJsonFile<HostRuntimeState>;
-	private manifests = new Map<string, ConversationManifest>();
+	private manifests = new Map<string, RegisteredConversation>();
 	private state: HostRuntimeState;
 	private readonly liveConnections = new Map<string, string>();
 	private operations: Promise<void> = Promise.resolve();
@@ -105,7 +112,7 @@ export class RelayRegistry {
 		};
 		const bundle = parsePersistenceBundle(manifests, runtime);
 		if (bundle.runtime.hostId !== this.hostId) throw new RelayRegistryError("invalid_state", "Relay registry belongs to a different host");
-		this.manifests = new Map(bundle.manifests.map((manifest) => [manifest.conversationId, manifest]));
+		this.manifests = new Map([...bundle.manifests, ...(bundle.runtime.localConversations ?? [])].map((manifest) => [manifest.conversationId, manifest]));
 		this.state = bundle.runtime;
 		await this.runtimeFile.write(this.state);
 	}
@@ -438,23 +445,30 @@ export class RelayRegistry {
 
 	manifestByCreationKey(creationKey: string): ConversationManifest | undefined {
 		const manifest = [...this.manifests.values()].find((candidate) => candidate.creationKey === creationKey);
-		return manifest ? structuredClone(manifest) : undefined;
+		return manifest && hasMatrixBinding(manifest) ? structuredClone(manifest) : undefined;
 	}
 
 	manifestByConversationId(conversationId: string): ConversationManifest | undefined {
 		const manifest = this.manifests.get(conversationId);
+		return manifest && hasMatrixBinding(manifest) ? structuredClone(manifest) : undefined;
+	}
+
+	registeredConversation(conversationId: string): RegisteredConversation | undefined {
+		const manifest = this.manifests.get(conversationId);
 		return manifest ? structuredClone(manifest) : undefined;
 	}
+
+	localConversations(): PendingLocalConversation[] { return structuredClone(this.state.localConversations ?? []); }
 
 	conversationState(conversationId: string): "starting" | "active" | "dormant" {
 		return this.runtimeConversation(conversationId).state;
 	}
 
 	listManifests(): ConversationManifest[] {
-		return [...this.manifests.values()].map((manifest) => structuredClone(manifest));
+		return [...this.manifests.values()].filter(hasMatrixBinding).map((manifest) => structuredClone(manifest));
 	}
 
-	activeGeneration(manifest: ConversationManifest): SessionGeneration {
+	activeGeneration(manifest: RegisteredConversation): SessionGeneration {
 		return manifest.generations?.at(-1) ?? {
 			generationId: deriveGenerationId(manifest.conversationId, 1), ordinal: 1, piSessionId: manifest.piSessionId,
 			bindingBoundaryEntryId: manifest.bindingBoundaryEntryId, createdAt: manifest.createdAt,
@@ -491,6 +505,7 @@ export class RelayRegistry {
 		return this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
 			const manifest = this.manifests.get(conversationId);
+			if (manifest && !hasMatrixBinding(manifest)) throw new RelayRegistryError("matrix_unavailable", "Matrix binding is pending");
 			if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Only project conversations support fresh generations");
 			if (conversation.generationTransition) {
 				if (conversation.generationTransition.sourceControlId !== sourceControlId) throw new RelayRegistryError("invalid_state", "Another generation transition is unresolved");
@@ -518,7 +533,7 @@ export class RelayRegistry {
 	}
 
 	async activateGeneration(conversationId: string, transitionId: string): Promise<ConversationManifest> {
-		const current = this.manifests.get(conversationId);
+		const current = this.boundConversation(conversationId);
 		const transition = this.runtimeConversation(conversationId).generationTransition;
 		if (!current || !transition || transition.transitionId !== transitionId || !transition.toPiSessionId || !transition.toBindingBoundaryEntryId) throw new RelayRegistryError("invalid_state", "Persisted generation is unavailable for activation");
 		let replacement = current;
@@ -601,6 +616,17 @@ export class RelayRegistry {
 	}
 
 	async createProjectConversation(manifest: ConversationManifest, nonce: string, promotionSourceSessionFile?: string): Promise<ConversationManifest> {
+		const result = await this.registerProject(manifest, nonce, promotionSourceSessionFile);
+		if (!hasMatrixBinding(result)) throw new RelayRegistryError("matrix_unavailable", "Matrix binding is pending");
+		return result;
+	}
+
+	async registerLocalConversation(manifest: PendingLocalConversation, nonce: string, sourceSessionFile: string): Promise<RegisteredConversation> {
+		return this.registerProject(parsePendingLocalConversation(manifest), nonce, sourceSessionFile);
+	}
+
+	private async registerProject(manifest: RegisteredConversation, nonce: string, promotionSourceSessionFile?: string): Promise<RegisteredConversation> {
+		if (manifest.creationKey === "coordinator") throw new RelayRegistryError("permission_denied", "Coordinator identity is protected");
 		if (manifest.kind !== "project" || manifest.ownerHostId !== this.hostId || !manifest.placement) {
 			throw new RelayRegistryError("permission_denied", "Self binding requires a host-owned project manifest");
 		}
@@ -614,8 +640,9 @@ export class RelayRegistry {
 				if (existing) {
 					if (existing.creationKey === manifest.creationKey && existing.conversationId === manifest.conversationId &&
 						existing.piSessionId === manifest.piSessionId && existing.concept === manifest.concept &&
-						existing.roomId === manifest.roomId && existing.projectKey === manifest.projectKey && existing.projectSpace === manifest.projectSpace &&
-						existing.checkoutId === manifest.checkoutId && existing.checkoutSpace === manifest.checkoutSpace &&
+						existing.projectKey === manifest.projectKey && existing.checkoutId === manifest.checkoutId &&
+						(!hasMatrixBinding(manifest) || (hasMatrixBinding(existing) && existing.roomId === manifest.roomId &&
+							existing.projectSpace === manifest.projectSpace && existing.checkoutSpace === manifest.checkoutSpace)) &&
 						existing.bindingBoundaryEntryId === manifest.bindingBoundaryEntryId &&
 						JSON.stringify(existing.placement) === JSON.stringify(manifest.placement)) {
 						const runtime = this.runtimeConversation(existing.conversationId);
@@ -632,8 +659,11 @@ export class RelayRegistry {
 					}
 					throw new RelayRegistryError("invalid_state", "Managed conversation identity already exists");
 				}
-				await this.manifestStore.write(manifest);
-				created = true;
+				if (hasMatrixBinding(manifest)) { await this.manifestStore.write(manifest); created = true; }
+				else {
+					if (await this.manifestStore.read(manifest.conversationId)) throw new RelayRegistryError("invalid_state", "Unindexed Matrix binding requires registry reconciliation");
+					(this.state.localConversations ??= []).push(manifest);
+				}
 				this.manifests.set(manifest.conversationId, manifest);
 				this.state.conversations.push({
 					conversationId: manifest.conversationId,
@@ -662,6 +692,44 @@ export class RelayRegistry {
 		}
 	}
 
+	async completeLocalBinding(conversationId: string, value: Required<Pick<ConversationManifest, "roomId" | "projectSpace" | "checkoutId" | "checkoutSpace">>): Promise<ConversationManifest> {
+		const binding = { roomId: value.roomId, projectSpace: value.projectSpace, checkoutId: value.checkoutId, checkoutSpace: value.checkoutSpace };
+		// Freeze a private, verified receipt before publishing into the synchronized store.
+		await this.mutate(async () => {
+			const current = this.manifests.get(conversationId);
+			if (!current) throw new RelayRegistryError("not_found", "Local enrollment is unavailable");
+			if (hasMatrixBinding(current)) return;
+			if (current.checkoutId !== binding.checkoutId) throw new RelayRegistryError("invalid_state", "Local checkout identity changed");
+			const receipt = { roomId: binding.roomId, projectSpace: binding.projectSpace, checkoutSpace: binding.checkoutSpace };
+			if (current.verifiedBinding && !isDeepStrictEqual(current.verifiedBinding, receipt)) throw new RelayRegistryError("invalid_state", "Verified binding receipt changed");
+			const replacement = parsePendingLocalConversation({ ...current, verifiedBinding: receipt });
+			if (!this.state.localConversations?.some((item) => item.conversationId === conversationId)) throw new RelayRegistryError("invalid_state", "Local enrollment record is missing");
+			this.state.localConversations = this.state.localConversations.map((item) => item.conversationId === conversationId ? replacement : item);
+			this.manifests.set(conversationId, replacement);
+		});
+		return this.mutate(async () => {
+			const current = this.manifests.get(conversationId);
+			if (!current) throw new RelayRegistryError("not_found", "Local enrollment is unavailable");
+			if (hasMatrixBinding(current)) {
+				if (current.roomId !== binding.roomId || current.projectSpace !== binding.projectSpace || current.checkoutId !== binding.checkoutId || current.checkoutSpace !== binding.checkoutSpace) {
+					throw new RelayRegistryError("invalid_state", "Completed Matrix binding identity changed");
+				}
+				return structuredClone(current);
+			}
+			const { version: _version, verifiedBinding: _receipt, ...identity } = current;
+			const manifest = parseConversationManifest({ ...identity, schemaVersion: MANAGED_SESSION_STATE_VERSION,
+				roomId: binding.roomId, projectSpace: binding.projectSpace, checkoutId: binding.checkoutId, checkoutSpace: binding.checkoutSpace });
+			assertLocalBindingIdentity(current, manifest);
+			const saved = await this.manifestStore.read(conversationId);
+			if (saved && !isDeepStrictEqual(saved, manifest)) throw new RelayRegistryError("invalid_state", "Saved Matrix binding conflicts with local enrollment");
+			if (!saved) await this.manifestStore.write(manifest);
+			this.state.localConversations = (this.state.localConversations ?? []).filter((item) => item.conversationId !== conversationId);
+			if (!this.state.localConversations.length) delete this.state.localConversations;
+			this.manifests.set(conversationId, manifest);
+			return structuredClone(manifest);
+		});
+	}
+
 	async createCoordinatorConversation(manifest: ConversationManifest): Promise<ConversationManifest> {
 		if (manifest.kind !== "coordinator" || manifest.ownerHostId !== this.hostId) {
 			throw new RelayRegistryError("permission_denied", "Coordinator bootstrap requires a host-owned coordinator manifest");
@@ -669,7 +737,7 @@ export class RelayRegistry {
 		let written = false;
 		try {
 			return await this.mutate(async () => {
-			const existingCoordinator = [...this.manifests.values()].find((candidate) => candidate.kind === "coordinator");
+			const existingCoordinator = this.listManifests().find((candidate) => candidate.kind === "coordinator");
 			if (existingCoordinator) {
 				if (JSON.stringify(existingCoordinator) === JSON.stringify(manifest)) return existingCoordinator;
 				throw new RelayRegistryError("invalid_state", "A different coordinator manifest already exists");
@@ -696,8 +764,8 @@ export class RelayRegistry {
 
 	async reconcileProjectManifest(conversationId: string, sourceHash: string, targetHash: string,
 		identity: Required<Pick<ConversationManifest, "projectKey" | "projectDisplayName" | "checkoutDisplayName" | "projectSpace">>): Promise<ConversationManifest> {
-		const existing = this.manifests.get(conversationId);
-		if (!existing || existing.kind !== "project") throw new RelayRegistryError("not_found", "Project conversation was not found");
+		const existing = this.boundConversation(conversationId);
+		if (existing.kind !== "project") throw new RelayRegistryError("not_found", "Project conversation was not found");
 		const hash = (value: ConversationManifest) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 		const currentHash = hash(existing);
 		if (currentHash === targetHash) return existing;
@@ -825,7 +893,7 @@ export class RelayRegistry {
 	}
 
 	async deleteConversation(conversationId: string): Promise<DeletedConversation> {
-		const manifest = this.manifests.get(conversationId);
+		const manifest = this.boundConversation(conversationId);
 		const runtime = this.state.conversations.find((candidate) => candidate.conversationId === conversationId);
 		if (!manifest || !runtime) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 		if (manifest.kind === "coordinator") throw new RelayRegistryError("permission_denied", "The guaranteed coordinator conversation cannot be deleted");
@@ -956,13 +1024,16 @@ export class RelayRegistry {
 			if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 			const role = envelope.role as AdapterRole;
 			if (role !== expectedRole(manifest)) throw new RelayRegistryError("permission_denied", "Adapter role is not authorized for this conversation");
-			const payload = envelope.payload as { sessionId: string; attachmentNonce: string; bindingBoundaryEntryId: string; runtimeId?: string };
+			const payload = envelope.payload as { sessionId: string; attachmentNonce: string; bindingBoundaryEntryId: string; runtimeId?: string; requestedCapabilities?: string[] };
 			if (payload.sessionId !== manifest.piSessionId || payload.bindingBoundaryEntryId !== manifest.bindingBoundaryEntryId) {
 				throw new RelayRegistryError("permission_denied", "Adapter session binding does not match the conversation manifest");
 			}
 			const conversation = this.runtimeConversation(manifest.conversationId);
 			if (!conversation.attachmentNonceHash || !equalHash(conversation.attachmentNonceHash, nonceHash(payload.attachmentNonce))) {
 				throw new RelayRegistryError("invalid_nonce", "Attachment nonce was rejected");
+			}
+			if (!hasMatrixBinding(manifest) && !payload.requestedCapabilities?.includes("local-enrollment-v1")) {
+				throw new RelayRegistryError("matrix_unavailable", "Local enrollment requires a capable adapter while Matrix binding is pending");
 			}
 			const liveConnection = this.liveConnections.get(manifest.conversationId);
 			if (liveConnection && liveConnection !== connectionId) {
@@ -1051,8 +1122,7 @@ export class RelayRegistry {
 
 	private async updateActiveGenerationPreference(conversationId: string, kind: "model" | "thinking", value: string): Promise<SessionGeneration> {
 		return this.mutate(async () => {
-			const current = this.manifests.get(conversationId);
-			if (!current) throw new RelayRegistryError("not_found", `Managed conversation is unavailable for ${kind} selection persistence`);
+			const current = this.boundConversation(conversationId);
 			const active = this.activeGeneration(current);
 			if (active.generationId !== (current.activeGenerationId ?? deriveGenerationId(conversationId, 1))) {
 				throw new RelayRegistryError("invalid_state", `Active generation is unavailable for ${kind} selection persistence`);
@@ -1062,6 +1132,13 @@ export class RelayRegistry {
 			this.manifests.set(conversationId, replacement);
 			return { ...structuredClone(active), [kind]: value };
 		});
+	}
+
+	private boundConversation(conversationId: string): ConversationManifest {
+		const manifest = this.manifests.get(conversationId);
+		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+		if (!hasMatrixBinding(manifest)) throw new RelayRegistryError("matrix_unavailable", "Matrix binding is pending");
+		return manifest;
 	}
 
 	private runtimeConversation(conversationId: string): RuntimeConversation {
