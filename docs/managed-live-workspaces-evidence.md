@@ -461,3 +461,32 @@ headless unavailability, immediate loss of liveness on Pi's native abort signal
 while the tool is still awaiting IPC, and absence of liveness after settlement. This is not live
 Matrix delivery or interactive TUI acceptance. The initial real-Pi fixture omitted
 its tool from the SDK allowlist; correcting that fixture made the focused check pass.
+
+### #109 retirement authority and registry foundation
+
+Private terminal records freeze exact generation/attachment/window and room cleanup
+obligations before external effects. Cleanup progresses independently and compacts
+only to a permanent host/conversation/creation-key/retirement-ID tombstone; there
+is no removal or resurrection API. Completed effects cannot regress, retries cannot
+replace frozen targets, coordinator retirement is rejected, and uncertain writes
+make authority unavailable rather than accepting stale in-memory state. Reads are
+private, no-follow, nonblocking, fatal-UTF-8 and bounded; interrupted temporary
+files never substitute for primary authority. The store has a 100,000-entry safety
+bound and fails closed at capacity rather than pruning terminal authority.
+
+The registry loads terminal authority before reconciling public manifests and
+runtime state. It removes retired identities from ordinary discovery and rejects
+stale nonce/attachment/creation/restore paths. Terminal persistence is separate
+from the active runtime transaction: a failure of the latter cannot undo retirement
+in memory or after restart. Exact required stop/account/bot obligations and source
+resource identity are checked before committing. Pi transcript, project and Git
+files are not deleted. Stale synchronized active manifest files are harmless to
+registry admission while tombstones survive; deleting newer tombstones during
+backup restoration remains prohibited.
+
+Evidence: 23 focused store/registry/enrollment tests passed, including injected
+runtime-write failure after terminal commit and restoration of a stale runtime
+backup. Packaged managed-session and source-contract gates passed. This is **not**
+the complete #109 cutover: ownership-checked cleanup execution, lifecycle/legacy
+alias routing, departure handling and account integration remain. No existing
+conversation has been retired or migrated by these tests.

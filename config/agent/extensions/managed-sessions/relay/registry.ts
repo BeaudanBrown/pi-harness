@@ -27,6 +27,7 @@ import {
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ConversationManifestStore } from "./manifest-store.js";
 import { redactManagedValue } from "./redaction.js";
+import { RetirementStore, retirementId, retirementEffectId, type RetirementRecord, type RetirementTarget } from "./retirement-store.js";
 
 type RuntimeConversation = HostRuntimeState["conversations"][number];
 type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
@@ -77,6 +78,7 @@ export interface AcceptedAttachment {
 
 export class RelayRegistry {
 	private readonly runtimeFile: AtomicJsonFile<HostRuntimeState>;
+	private readonly retirements: RetirementStore;
 	private manifests = new Map<string, RegisteredConversation>();
 	private state: HostRuntimeState;
 	private readonly liveConnections = new Map<string, string>();
@@ -89,13 +91,22 @@ export class RelayRegistry {
 		private readonly manifestStore: ConversationManifestStore,
 	) {
 		this.runtimeFile = new AtomicJsonFile(join(resolve(runtimeRoot), "registry.json"), parseHostRuntimeState);
+		this.retirements = new RetirementStore(join(resolve(runtimeRoot), "retirements"), hostId);
 		this.state = { schemaVersion: MANAGED_SESSION_STATE_VERSION, hostId, conversations: [] };
 	}
 
 	async load(): Promise<void> {
 		await ensurePrivateDirectory(resolve(this.runtimeFile.path, ".."));
-		const manifests = await this.manifestStore.list();
+		await this.retirements.load();
+		const allManifests = await this.manifestStore.list();
 		const stored = await this.runtimeFile.read();
+		const excluded = new Set([...allManifests, ...(stored?.localConversations ?? [])].filter((manifest) =>
+			this.retirements.has(manifest.conversationId) || this.retirements.hasCreationKey(manifest.creationKey)).map((manifest) => manifest.conversationId));
+		const manifests = allManifests.filter((manifest) => !excluded.has(manifest.conversationId));
+		if (stored) {
+			stored.conversations = stored.conversations.filter((item) => !excluded.has(item.conversationId) && !this.retirements.has(item.conversationId));
+			if (stored.localConversations) stored.localConversations = stored.localConversations.filter((item) => !excluded.has(item.conversationId));
+		}
 		const runtime = stored ?? {
 			schemaVersion: MANAGED_SESSION_STATE_VERSION,
 			hostId: this.hostId,
@@ -204,6 +215,7 @@ export class RelayRegistry {
 	}
 
 	publishingControlPolls(): Array<{ conversationId: string; intent: NonNullable<RuntimeConversation["publishingControlPoll"]> }> {
+		this.retirements.assertAvailable();
 		return this.state.conversations.flatMap((conversation) => conversation.publishingControlPoll
 			? [{ conversationId: conversation.conversationId, intent: structuredClone(conversation.publishingControlPoll) }] : []);
 	}
@@ -287,6 +299,7 @@ export class RelayRegistry {
 	}
 
 	publishingCheckpointPolls(): Array<{ conversationId: string; intent: NonNullable<RuntimeConversation["publishingCheckpointPoll"]> }> {
+		this.retirements.assertAvailable();
 		return this.state.conversations.flatMap((conversation) => conversation.publishingCheckpointPoll
 			? [{ conversationId: conversation.conversationId, intent: structuredClone(conversation.publishingCheckpointPoll) }] : []);
 	}
@@ -341,6 +354,7 @@ export class RelayRegistry {
 	}
 
 	closingCheckpointPolls(): Array<{ conversationId: string; closing: RuntimeConversation["closingCheckpointPolls"][number] }> {
+		this.retirements.assertAvailable();
 		return this.state.conversations.flatMap((conversation) => conversation.closingCheckpointPolls.map((closing) => ({
 			conversationId: conversation.conversationId, closing: structuredClone(closing),
 		})));
@@ -451,24 +465,31 @@ export class RelayRegistry {
 	}
 
 	manifestByCreationKey(creationKey: string): ConversationManifest | undefined {
+		this.retirements.assertAvailable();
+		if (this.retirements.hasCreationKey(creationKey)) throw new RelayRegistryError("invalid_state", "Managed creation identity is permanently retired");
 		const manifest = [...this.manifests.values()].find((candidate) => candidate.creationKey === creationKey);
 		return manifest && hasMatrixBinding(manifest) ? structuredClone(manifest) : undefined;
 	}
 
 	manifestByConversationId(conversationId: string): ConversationManifest | undefined {
+		this.retirements.assertAvailable();
+		if (this.retirements.has(conversationId)) return undefined;
 		const manifest = this.manifests.get(conversationId);
 		return manifest && hasMatrixBinding(manifest) ? structuredClone(manifest) : undefined;
 	}
 
 	registeredConversation(conversationId: string): RegisteredConversation | undefined {
+		this.retirements.assertAvailable();
+		if (this.retirements.has(conversationId)) return undefined;
 		const manifest = this.manifests.get(conversationId);
 		return manifest ? structuredClone(manifest) : undefined;
 	}
 
-	localConversations(): PendingLocalConversation[] { return structuredClone(this.state.localConversations ?? []); }
+	localConversations(): PendingLocalConversation[] { this.retirements.assertAvailable(); return structuredClone(this.state.localConversations ?? []); }
 
 	/** Cheap read projection: no queues, credentials, transcripts, paths or history clones. */
 	conversationMetadata(): RegistryConversationMetadata[] {
+		this.retirements.assertAvailable();
 		const runtime = new Map(this.state.conversations.map((item) => [item.conversationId, item]));
 		return [...this.manifests.values()].map((manifest) => {
 			const state = runtime.get(manifest.conversationId);
@@ -491,6 +512,7 @@ export class RelayRegistry {
 	}
 
 	listManifests(): ConversationManifest[] {
+		this.retirements.assertAvailable();
 		return [...this.manifests.values()].filter(hasMatrixBinding).map((manifest) => structuredClone(manifest));
 	}
 
@@ -516,6 +538,7 @@ export class RelayRegistry {
 	}
 
 	generationTransitions(): Array<{ conversationId: string; transition: NonNullable<RuntimeConversation["generationTransition"]> }> {
+		this.retirements.assertAvailable();
 		return this.state.conversations.flatMap((conversation) => conversation.generationTransition ? [{ conversationId: conversation.conversationId, transition: structuredClone(conversation.generationTransition) }] : []);
 	}
 
@@ -609,6 +632,7 @@ export class RelayRegistry {
 	}
 
 	listConversations(): Array<{ conversationId: string; concept: string; kind: "project" | "coordinator"; state: "starting" | "active" | "dormant" }> {
+		this.retirements.assertAvailable();
 		return [...this.manifests.values()].map((manifest) => ({
 			conversationId: manifest.conversationId, concept: manifest.concept, kind: manifest.kind,
 			state: this.runtimeConversation(manifest.conversationId).state,
@@ -660,6 +684,8 @@ export class RelayRegistry {
 		let created = false;
 		try {
 			return await this.mutate(async () => {
+				this.assertNotRetired(manifest.conversationId);
+				if (this.retirements.hasCreationKey(manifest.creationKey)) throw new RelayRegistryError("invalid_state", "Managed creation identity is permanently retired");
 				const existing = [...this.manifests.values()].find((candidate) =>
 					candidate.creationKey === manifest.creationKey || candidate.conversationId === manifest.conversationId ||
 					candidate.piSessionId === manifest.piSessionId);
@@ -763,6 +789,8 @@ export class RelayRegistry {
 		let written = false;
 		try {
 			return await this.mutate(async () => {
+			this.assertNotRetired(manifest.conversationId);
+			if (this.retirements.hasCreationKey(manifest.creationKey)) throw new RelayRegistryError("invalid_state", "Retired identity cannot become coordinator");
 			const existingCoordinator = this.listManifests().find((candidate) => candidate.kind === "coordinator");
 			if (existingCoordinator) {
 				if (JSON.stringify(existingCoordinator) === JSON.stringify(manifest)) return existingCoordinator;
@@ -801,7 +829,7 @@ export class RelayRegistry {
 		if (hash(replacement) !== targetHash) throw new RelayRegistryError("invalid_state", "Project reconciliation target identity changed");
 		await this.manifestStore.write(replacement);
 		try {
-			return await this.mutate(async () => { this.manifests.set(conversationId, replacement); return replacement; });
+			return await this.mutate(async () => { this.assertNotRetired(conversationId); this.manifests.set(conversationId, replacement); return replacement; });
 		} catch (error) {
 			await this.manifestStore.write(existing).catch(() => undefined); throw error;
 		}
@@ -868,6 +896,7 @@ export class RelayRegistry {
 	}
 
 	liveMediaBlobIds(): Set<string> {
+		this.retirements.assertAvailable();
 		return new Set(this.state.conversations.flatMap((conversation) => [
 			...conversation.pendingInputs.filter((input) => input.media && input.status !== "completed" && input.status !== "cancelled").map((input) => input.media!.blobId),
 			...conversation.artifactExports.filter((artifact) => artifact.state !== "sent" && !artifact.failure).map((artifact) => artifact.blobId),
@@ -890,6 +919,7 @@ export class RelayRegistry {
 	endRefresh(conversationId: string): void { this.refreshing.delete(conversationId); }
 
 	artifactExports(conversationId?: string): Array<{ conversationId: string; artifact: RuntimeConversation["artifactExports"][number] }> {
+		this.retirements.assertAvailable();
 		return this.state.conversations.filter((conversation) => !conversationId || conversation.conversationId === conversationId)
 			.flatMap((conversation) => conversation.artifactExports.map((artifact) => ({ conversationId: conversation.conversationId, artifact: structuredClone(artifact) })));
 	}
@@ -945,9 +975,13 @@ export class RelayRegistry {
 	}
 
 	async restoreDeletedConversation(deleted: DeletedConversation): Promise<void> {
+		this.assertNotRetired(deleted.manifest.conversationId);
+		if (this.retirements.hasCreationKey(deleted.manifest.creationKey)) throw new RelayRegistryError("invalid_state", "Retired identity cannot be restored");
 		await this.manifestStore.write(deleted.manifest);
 		try {
 			await this.mutate(async () => {
+				this.assertNotRetired(deleted.manifest.conversationId);
+				if (this.retirements.hasCreationKey(deleted.manifest.creationKey)) throw new RelayRegistryError("invalid_state", "Retired identity cannot be restored");
 				if (this.manifests.has(deleted.manifest.conversationId)) return;
 				this.manifests.set(deleted.manifest.conversationId, deleted.manifest);
 				this.state.conversations.push(deleted.runtime);
@@ -1000,6 +1034,7 @@ export class RelayRegistry {
 	}
 
 	pendingPromotionConversationIds(): string[] {
+		this.retirements.assertAvailable();
 		return this.state.conversations.filter((conversation) => conversation.promotion && ["shutdown_confirmed", "adopted"].includes(conversation.promotion.phase))
 			.map((conversation) => conversation.conversationId);
 	}
@@ -1102,10 +1137,12 @@ export class RelayRegistry {
 	}
 
 	snapshot(): HostRuntimeState {
+		this.retirements.assertAvailable();
 		return structuredClone(this.state);
 	}
 
 	managedRoomIds(): string[] {
+		this.retirements.assertAvailable();
 		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace, manifest.checkoutSpace]
 			.filter((roomId): roomId is string => roomId !== undefined)))];
 	}
@@ -1160,7 +1197,52 @@ export class RelayRegistry {
 		});
 	}
 
+	retirement(conversationId: string): RetirementRecord | undefined { return this.retirements.get(conversationId); }
+	pendingRetirements(): RetirementRecord[] { return this.retirements.pending(); }
+	markRetirementCleanup(conversationId: string, effectId: string, phase: "blocked" | "done"): Promise<RetirementRecord> { return this.retirements.progress(conversationId, effectId, phase); }
+
+	/** Owner-resolved targets only. Commit terminal authority before runtime removal or any cleanup. */
+	async retireConversation(conversationId: string, targets: RetirementTarget[]): Promise<RetirementRecord> {
+		return this.mutate(async () => {
+			const previous = this.retirements.get(conversationId); if (previous) return previous;
+			const manifest = this.manifests.get(conversationId);
+			if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+			if (manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Coordinator cannot be retired");
+			const runtime = this.runtimeConversation(conversationId); const generation = this.activeGeneration(manifest);
+			const roomId = hasMatrixBinding(manifest) ? manifest.roomId : manifest.verifiedBinding?.roomId;
+			if (!targets.some((target) => target.kind === "stop") || roomId && (!targets.some((target) => target.kind === "operator_leave_forget") || !targets.some((target) => target.kind === "bot_leave")))
+				throw new RelayRegistryError("invalid_state", "Retirement omitted required exact cleanup");
+			for (const target of targets) {
+				if (target.kind === "stop" && (target.generationId !== generation.generationId || target.attachmentId !== runtime.attachment?.attachmentId ||
+					Boolean(target.window) !== Boolean(runtime.managedWindow) || target.window && (target.window.windowId !== runtime.managedWindow?.windowId || target.window.paneId !== runtime.managedWindow?.paneId || target.window.sessionName !== runtime.managedWindow?.sessionName)))
+					throw new RelayRegistryError("invalid_state", "Retirement stop target changed");
+				if ((target.kind === "operator_leave_forget" || target.kind === "bot_leave") && target.roomId !== roomId) throw new RelayRegistryError("invalid_state", "Retirement room target changed");
+				if (target.kind === "ancestor") {
+					const checkout = hasMatrixBinding(manifest) ? manifest.checkoutSpace : manifest.verifiedBinding?.checkoutSpace;
+					const project = hasMatrixBinding(manifest) ? manifest.projectSpace : manifest.verifiedBinding?.projectSpace;
+					if (target.roomId !== (target.spaceKind === "checkout_space" ? checkout : project) || target.childRoomId !== (target.spaceKind === "checkout_space" ? roomId : checkout))
+						throw new RelayRegistryError("invalid_state", "Retirement ancestor target changed");
+				}
+			}
+			const id = retirementId(this.hostId, conversationId);
+			const record = await this.retirements.retire({ version: 1, hostId: this.hostId, conversationId, creationKey: manifest.creationKey, retirementId: id, retiredAt: Date.now(),
+				cleanup: targets.map((target) => ({ ...target, effectId: retirementEffectId(id, target), phase: "pending" })) });
+			this.pruneRetired(); return record;
+		});
+	}
+	private assertNotRetired(conversationId: string): void {
+		if (this.retirements.has(conversationId)) throw new RelayRegistryError("invalid_state", "Managed conversation is permanently retired");
+	}
+	private pruneRetired(): void {
+		this.retirements.assertAvailable();
+		const excluded = new Set<string>();
+		for (const [id, manifest] of this.manifests) if (this.retirements.has(id) || this.retirements.hasCreationKey(manifest.creationKey)) { excluded.add(id); this.manifests.delete(id); this.liveConnections.delete(id); }
+		this.state.conversations = this.state.conversations.filter((item) => !excluded.has(item.conversationId) && !this.retirements.has(item.conversationId));
+		if (this.state.localConversations) this.state.localConversations = this.state.localConversations.filter((item) => !excluded.has(item.conversationId) && !this.retirements.has(item.conversationId));
+	}
+
 	private boundConversation(conversationId: string): ConversationManifest {
+		this.assertNotRetired(conversationId);
 		const manifest = this.manifests.get(conversationId);
 		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 		if (!hasMatrixBinding(manifest)) throw new RelayRegistryError("matrix_unavailable", "Matrix binding is pending");
@@ -1168,6 +1250,7 @@ export class RelayRegistry {
 	}
 
 	private runtimeConversation(conversationId: string): RuntimeConversation {
+		this.assertNotRetired(conversationId);
 		const conversation = this.state.conversations.find((candidate) => candidate.conversationId === conversationId);
 		if (!conversation) throw new RelayRegistryError("not_found", "Managed conversation runtime state was not found");
 		return conversation;
@@ -1177,17 +1260,21 @@ export class RelayRegistry {
 		let result!: T;
 		let failure: unknown;
 		const run = this.operations.then(async () => {
+			this.retirements.assertAvailable();
 			const before = structuredClone(this.state);
 			const liveBefore = new Map(this.liveConnections);
 			const manifestsBefore = new Map(this.manifests);
 			try {
 				result = await operation();
+				this.pruneRetired();
 				await this.runtimeFile.write(this.state);
 			} catch (error) {
 				this.state = before;
 				this.manifests = manifestsBefore;
 				this.liveConnections.clear();
 				for (const [conversationId, connectionId] of liveBefore) this.liveConnections.set(conversationId, connectionId);
+				// Runtime rollback can never roll back separately committed negative authority.
+				this.pruneRetired();
 				failure = error;
 			}
 		});
