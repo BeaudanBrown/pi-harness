@@ -185,6 +185,7 @@ class FakeRelay {
 	projectActivity?: (envelope: ManagedSessionEnvelope) => Promise<"updated" | "finalized">;
 	beforeActivityAck?: (socket: Socket, envelope: ManagedSessionEnvelope) => Promise<void>;
 	checkpointError?: { code: string; message: string };
+	enableCommentary = false;
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
@@ -253,7 +254,7 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.placement ? { placement: this.placement } : {}) } }));
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.enableCommentary && envelope.payload.requestedCapabilities ? { capabilities: ["commentary-v1"] } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
 			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
@@ -1049,8 +1050,8 @@ test("closing backlog bounds feedback only and drains without losing frozen fina
 	assert.deepEqual(f.errors, []);
 });
 
-test("manual Pi user entry reaches Matrix before agent settles without echoing Matrix input", async (t) => {
-	const relay = await FakeRelay.start(); t.after(() => relay.close());
+test("manual user and completed commentary reach Matrix before settling without input echo or tool leakage", async (t) => {
+	const relay = await FakeRelay.start(); relay.enableCommentary = true; t.after(() => relay.close());
 	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
 	let leaf = "binding"; let sequence = 0;
 	const handlers = new Map<string, (...args: any[]) => any>();
@@ -1073,6 +1074,18 @@ test("manual Pi user entry reaches Matrix before agent settles without echoing M
 	handlers.get("message_end")!({ message: user }, ctx);
 	await activityWait(() => relay.frames.some((frame) => frame.type === "transcript.offer" && frame.payload.kind === "local_user"));
 	assert.equal(relay.frames.find((frame) => frame.type === "transcript.offer")!.payload.body, "manual prompt");
+	for (const [index, body] of ["Inspecting now.", "Found the cause."].entries()) {
+		const message = { role: "assistant", stopReason: "toolUse", content: [
+			{ type: "text", text: body, textSignature: JSON.stringify({ v: 1, id: `msg-${index}`, phase: "commentary" }) },
+			{ type: "thinking", thinking: "private reasoning" }, { type: "toolCall", name: "read", arguments: { path: "/private/tool/path" } },
+		] };
+		branch.push({ type: "message", id: `commentary-${index}`, parentId: leaf, message }); leaf = `commentary-${index}`;
+		handlers.get("tool_call")!({ toolName: "read", input: { path: "/private/tool/path" } }, ctx);
+		await activityWait(() => relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "assistant_commentary").length === index + 1);
+	}
+	const commentary = relay.frames.filter((frame) => frame.type === "transcript.offer" && frame.payload.kind === "assistant_commentary");
+	assert.deepEqual(commentary.map((frame) => frame.payload.body), ["Inspecting now.", "Found the cause."]);
+	assert.doesNotMatch(JSON.stringify(commentary), /private|reasoning|arguments/);
 	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "matrix-prompt", conversationId,
 		role: "relay", type: "input.deliver", payload: { deliveryId: deriveDeliveryId(conversationId, "$matrix-early"), matrixEventId: "$matrix-early", kind: "prompt", body: "/matrix-note" } });
 	await activityWait(() => relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "persisted"));

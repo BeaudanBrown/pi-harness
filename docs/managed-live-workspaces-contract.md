@@ -315,7 +315,11 @@ activity and housekeeping are silent. Finals, unanswered checkpoints, approval
 requests and persistent terminal failures notify. Chunking/order/transaction IDs
 are stable; only one chunk bears notification for an attention event. Checkpoint
 and final with the same explicit attentionId coalesce; do not infer equality from
-similar prose. Matrix account push rules implement requested disposition but
+similar prose. The narrow Matrix event metadata is `lol.bepis.pi.notification` with exactly
+`{version:1, disposition:"silent"|"notify"}`. Silent text carries empty
+`m.mentions`; notifying text requests a room mention. No metadata contains a
+credential, notification rule, endpoint or model-provided authority. Matrix
+account push rules implement requested disposition but
 manual room muting and OS/phone policy still decide actual alerts.
 
 Persist an outage epoch and source watermark before recovery offers are accepted.
@@ -342,8 +346,12 @@ boundary. Older relays ignoring that directory are an **unsupported downgrade**.
 
 Adapter additions use explicit capability negotiation, not guessed build ages.
 The new relay accepts the established baseline attach envelope unchanged. A new
-adapter negotiates a bounded subset of the listed live-workspace capabilities
-through a new request after attach; only that adapter receives new fields/messages.
+adapter explicitly requests a bounded subset of implemented live-workspace
+capabilities in its attach request; only a requesting adapter receives the
+corresponding accepted-capabilities field or new messages. The first implemented
+capability is `commentary-v1`. Legacy attach requests and responses remain
+unchanged. New adapters require relay-first deployment; an older strict relay
+cannot accept their new request fields.
 Legacy attachments keep input/receipts/final projection and existing process
 lifetime. They receive upgrade-required for new generation-navigation or model
 host mutation operations, including old coordinator aliases. Do not claim old

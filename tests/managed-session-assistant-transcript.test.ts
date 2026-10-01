@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { deriveTranscriptEntryId, MANAGED_SESSION_STATE_VERSION } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { planTranscriptBackfill, type SessionBinding, type ProjectionMarker } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 import { assistantTranscriptParts, assistantTranscriptSourceKey } from "../config/agent/extensions/managed-sessions/adapter/assistant-transcript.js";
 
 const text = (body: string, phase?: string) => ({ type: "text", text: body, ...(phase ? { textSignature: JSON.stringify({ v: 1, id: "msg_1", phase }) } : {}) });
@@ -34,6 +36,22 @@ test("historical unsplit final keys and concatenation are unchanged", () => {
 	const parts = assistantTranscriptParts(message([{ type: "thinking", thinking: "private" }, text("One"), text(" two")]));
 	assert.deepEqual(parts, [{ kind: "assistant_final", contentIndex: 1, body: "One two" }]);
 	assert.equal(assistantTranscriptSourceKey("abcd1234", parts[0]!, parts), "abcd1234");
+});
+
+test("capable planner splits new text but preserves offered legacy payloads and boundaries", () => {
+	const binding: SessionBinding = { version: MANAGED_SESSION_STATE_VERSION, conversationId: `conv_${"a".repeat(32)}`, sessionId: "session", concept: "concept", role: "ordinary_adapter", bindingBoundaryEntryId: deriveTranscriptEntryId("session", "boundary") };
+	const branch = [
+		{ type: "message", id: "prebinding", message: message([text("Never project")]) },
+		{ type: "custom", id: "boundary" },
+		{ type: "message", id: "mixed", message: message([text("Progress", "commentary"), text("Done", "final_answer")]) },
+	];
+	const next = planTranscriptBackfill(branch, binding, new Map(), new Map(), true).entries;
+	assert.deepEqual(next.map((entry) => [entry.piEntryKey, entry.body]), [["mixed:text:0", "Progress"], ["mixed:text:1", "Done"]]);
+	const legacy: ProjectionMarker = { version: MANAGED_SESSION_STATE_VERSION, entryId: deriveTranscriptEntryId("session", "mixed"), piEntryKey: "mixed", kind: "assistant_final", status: "offered" };
+	assert.deepEqual(planTranscriptBackfill(branch, binding, new Map(), new Map([[legacy.entryId, legacy]]), true).entries,
+		[{ entryId: legacy.entryId, piEntryKey: "mixed", kind: "assistant_final", body: "ProgressDone" }]);
+	assert.deepEqual(planTranscriptBackfill(branch, binding, new Map(), new Map([[legacy.entryId, { ...legacy, status: "projected" }]]), true).entries, []);
+	assert.deepEqual(planTranscriptBackfill(branch, binding, new Map(), new Map(), false).entries.map((entry) => entry.body), ["ProgressDone"]);
 });
 
 test("partial/failed responses, tool results, internal and unknown content never project", () => {

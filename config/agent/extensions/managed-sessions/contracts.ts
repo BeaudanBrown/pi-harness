@@ -150,7 +150,9 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
+const projectionCapabilities = Type.Array(Type.Literal("commentary-v1"), { maxItems: 1, uniqueItems: true });
 const attachmentFields = {
+	requestedCapabilities: Type.Optional(projectionCapabilities),
 	runtimeId: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	sessionId: identifier,
 	attachmentNonce: Type.String({ pattern: "^[A-Za-z0-9_-]{32,128}$" }),
@@ -208,7 +210,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		entryId: TranscriptEntryIdSchema,
 		piSessionId: identifier,
 		piEntryKey: identifier,
-		kind: Type.Union([Type.Literal("local_user"), Type.Literal("assistant_final")]),
+		kind: Type.Union([Type.Literal("local_user"), Type.Literal("assistant_final"), Type.Literal("assistant_commentary")]),
 		body: boundedString(MAX_TRANSCRIPT_TEXT_LENGTH),
 	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "activity.update", {
@@ -275,6 +277,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		request: lifecycleArguments,
 	}),
 	relayEnvelope("attachment.accepted", {
+		capabilities: Type.Optional(projectionCapabilities),
 		placement: Type.Optional(WorkspaceIdentitySchema),
 		attachmentId: identifier,
 		generation: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -561,6 +564,7 @@ const projectionEntry = strictObject({
 		Type.Literal("matrix_user"),
 		Type.Literal("local_user"),
 		Type.Literal("assistant_final"),
+		Type.Literal("assistant_commentary"),
 		Type.Literal("checkpoint"),
 		Type.Literal("notice"),
 	]),

@@ -79,3 +79,13 @@ incomplete messages and unknown phases. Focused source LSP is clean; inspecting
 the vendored Pi declaration exposed a cached missing pi-telemetry declaration,
 while the repository TypeScript build passes.
 
+The next chunk wires capability-negotiated commentary into the existing planner,
+IPC and projection ledger. Legacy attachments receive unchanged responses;
+unnegotiated commentary is rejected. Previously offered whole-entry finals keep
+their original body/transactions rather than being split on upgrade. Commentary
+uses silent notification metadata, deterministic chunks and exact lost-ack
+retries. The tool-call hook reads persisted assistant state without blocking
+local tool execution on Matrix. Managed-session and source checks pass; the
+expanded adapter fixture additionally checks early commentary and no tool or
+thinking leakage. Final/attention classification and outage recovery remain
+unfinished within #111.

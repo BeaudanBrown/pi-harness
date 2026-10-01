@@ -665,13 +665,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			});
 		});
 
-		async function projectEligibleEntries(ctx: ExtensionContext, localUsersOnly = false): Promise<void> {
+		async function projectEligibleEntries(ctx: ExtensionContext, beforeFinalOnly = false): Promise<void> {
 			if (!binding || !client?.connected) return;
 			const projectionBinding = binding;
 			const projectionClient = client;
 			const branch = ctx.sessionManager.getBranch();
 			const privateAloopEntries = aloopPrivateAssistantEntryKeys(branch);
-			const plan = planTranscriptBackfill(branch, projectionBinding, deliveries, projections);
+			const plan = planTranscriptBackfill(branch, projectionBinding, deliveries, projections, projectionClient.supports("commentary-v1"));
 			if (plan.excessiveCount !== undefined) {
 				if (!hasBackfillDiagnostic(ctx.sessionManager.getBranch(), projectionBinding, plan.excessiveCount)) {
 					appendMarker(pi, ctx, PROJECTION_DIAGNOSTIC_ENTRY_TYPE, {
@@ -683,13 +683,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			for (const entry of plan.entries) {
-				if (localUsersOnly && entry.kind !== "local_user") continue;
-				if (entry.kind === "assistant_final" && closingActivities.size) continue;
-				if (entry.kind === "assistant_final" && (isAloopLifecycleActive(projectionBinding.sessionId) || privateAloopEntries.has(entry.piEntryKey))) {
+				if (entry.kind !== "local_user" && (isAloopLifecycleActive(projectionBinding.sessionId) || privateAloopEntries.has(entry.sourcePiEntryKey ?? entry.piEntryKey))) {
 					recordProjectionMarker(ctx, { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
 						kind: entry.kind, status: "blocked", reason: "aloop_private" });
 					continue;
 				}
+				if (entry.kind === "assistant_final" && (beforeFinalOnly || closingActivities.size)) break;
 				if (!projectionClient.connected || binding !== projectionBinding || client !== projectionClient) return;
 				let marker = projections.get(entry.entryId);
 				if (!transcriptOfferWithinFrame(entry, projectionBinding)) {
@@ -705,7 +704,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					recordProjectionMarker(ctx, marker);
 				}
 				try {
-					await projectionClient.offerTranscript({ ...entry, piSessionId: projectionBinding.sessionId });
+					await projectionClient.offerTranscript({ entryId: entry.entryId, piEntryKey: entry.piEntryKey,
+						kind: entry.kind, body: entry.body, piSessionId: projectionBinding.sessionId });
 				} catch (error) {
 					if (error instanceof ManagedAdapterError && error.code === "capacity_reached") {
 						const blocked: ProjectionMarker = { ...marker, status: "blocked", reason: "backfill_limit" };
@@ -719,7 +719,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}
 				recordProjectionMarker(ctx, { ...marker, status: "projected" });
 			}
-			if (localUsersOnly || closingActivities.size) return;
+			if (beforeFinalOnly || closingActivities.size) return;
 			projectionRetryAttempt = 0;
 			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);
 			projectionRetryTimer = undefined;
@@ -1079,6 +1079,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
+				requestedCapabilities: ["commentary-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				onEnvelope: handleEnvelope, onMedia: (image) => handleMedia(image, ctx),
 				onDisconnect: () => {
@@ -1269,6 +1270,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			activity.modelTurns += 1; activity.inputTokens += event.message.usage.input; activity.outputTokens += event.message.usage.output;
 			if (event.message.stopReason === "error" && !activity.requestedOutcome) activity.requestedOutcome = "failed";
 			else if (event.message.stopReason === "aborted" && !activity.requestedOutcome) activity.requestedOutcome = "interrupted";
+		});
+		// Pi guarantees persisted assistant state before tool_call (message_end
+		// itself can still be rewritten by later extension handlers). Never use
+		// streamed text or await Matrix here, so local tools remain usable offline.
+		pi.on("tool_call", (_event, ctx) => {
+			if (binding && client?.connected) queueProjection(ctx);
 		});
 		pi.on("tool_execution_start", (event) => {
 			if (!activity) return;

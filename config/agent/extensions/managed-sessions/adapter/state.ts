@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assistantTranscriptParts, assistantTranscriptSourceKey } from "./assistant-transcript.js";
 import { ALOOP_LIFECYCLE_ENTRY_TYPE, parseAloopLifecycleEvent } from "../aloop-lifecycle.js";
 import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
@@ -39,7 +40,7 @@ export interface ProjectionMarker {
 	version: typeof MANAGED_SESSION_STATE_VERSION;
 	entryId: string;
 	piEntryKey: string;
-	kind: "local_user" | "assistant_final";
+	kind: "local_user" | "assistant_final" | "assistant_commentary";
 	status: "offered" | "projected" | "blocked";
 	reason?: "oversized" | "backfill_limit" | "aloop_private";
 }
@@ -47,7 +48,9 @@ export interface ProjectionMarker {
 export interface EligibleTranscriptEntry {
 	entryId: string;
 	piEntryKey: string;
-	kind: "local_user" | "assistant_final";
+	/** Local planner metadata only, never part of the adapter wire payload. */
+	sourcePiEntryKey?: string;
+	kind: "local_user" | "assistant_final" | "assistant_commentary";
 	body: string;
 }
 
@@ -257,7 +260,7 @@ export function restoreProjections(entries: readonly unknown[]): Map<string, Pro
 		const value = candidate.data;
 		if (value.version !== MANAGED_SESSION_STATE_VERSION || typeof value.entryId !== "string" ||
 			!/^entry_[a-f0-9]{32}$/.test(value.entryId) || typeof value.piEntryKey !== "string" ||
-			(value.kind !== "local_user" && value.kind !== "assistant_final") ||
+			(value.kind !== "local_user" && value.kind !== "assistant_final" && value.kind !== "assistant_commentary") ||
 			!(["offered", "projected", "blocked"] as unknown[]).includes(value.status) ||
 			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit" && value.reason !== "aloop_private")) continue;
 		const marker = value as unknown as ProjectionMarker;
@@ -314,6 +317,7 @@ export function eligibleTranscriptEntries(
 	entries: readonly unknown[],
 	binding: SessionBinding,
 	deliveries: ReadonlyMap<string, DeliveryMarker>,
+	options?: { commentary: boolean; legacyEntries?: ReadonlySet<string> },
 ): EligibleTranscriptEntry[] {
 	const boundaryIndex = entries.findIndex((entry) =>
 		typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string" &&
@@ -341,9 +345,18 @@ export function eligibleTranscriptEntries(
 			if (body) result.push({ entryId, piEntryKey: entry.id, kind: "local_user", body });
 			continue;
 		}
-		if (message.role !== "assistant" || message.stopReason !== "stop" || checkpointBoundary) continue;
-		const body = textContent(message.content, true);
-		if (body) result.push({ entryId, piEntryKey: entry.id, kind: "assistant_final", body });
+		if (message.role !== "assistant" || checkpointBoundary) continue;
+		if (options?.commentary && !options.legacyEntries?.has(entry.id)) {
+			const parts = assistantTranscriptParts(message);
+			for (const part of parts) {
+				const piEntryKey = assistantTranscriptSourceKey(entry.id, part, parts);
+				result.push({ entryId: persistedEntryId(binding.sessionId, piEntryKey), piEntryKey,
+					...(piEntryKey === entry.id ? {} : { sourcePiEntryKey: entry.id }), kind: part.kind, body: part.body });
+			}
+		} else if (message.stopReason === "stop") {
+			const body = textContent(message.content, true);
+			if (body) result.push({ entryId, piEntryKey: entry.id, kind: "assistant_final", body });
+		}
 	}
 	return result;
 }
@@ -373,7 +386,7 @@ export function transcriptOfferWithinFrame(entry: EligibleTranscriptEntry, bindi
 		conversationId: binding.conversationId,
 		role: binding.role,
 		type: "transcript.offer",
-		payload: { ...entry, piSessionId: binding.sessionId },
+		payload: { entryId: entry.entryId, piEntryKey: entry.piEntryKey, kind: entry.kind, body: entry.body, piSessionId: binding.sessionId },
 	};
 	return Buffer.byteLength(`${JSON.stringify(envelope)}\n`, "utf8") <= MAX_NDJSON_FRAME_BYTES;
 }
@@ -383,8 +396,12 @@ export function planTranscriptBackfill(
 	binding: SessionBinding,
 	deliveries: ReadonlyMap<string, DeliveryMarker>,
 	projections: ReadonlyMap<string, ProjectionMarker>,
+	commentary = false,
 ): { entries: EligibleTranscriptEntry[]; excessiveCount?: number } {
-	const pending = eligibleTranscriptEntries(entries, binding, deliveries)
+	// Preserve the exact old whole-entry offer, including uncertain sends. Never
+	// split a previously offered final into new transactions during upgrade.
+	const legacyEntries = new Set([...projections.values()].filter((item) => item.kind === "assistant_final").map((item) => item.piEntryKey));
+	const pending = eligibleTranscriptEntries(entries, binding, deliveries, { commentary, legacyEntries })
 		.filter((entry) => projections.get(entry.entryId)?.status !== "projected" && projections.get(entry.entryId)?.status !== "blocked");
 	if (pending.length > MAX_PROJECTION_ENTRIES) return { entries: [], excessiveCount: pending.length };
 	return { entries: pending };

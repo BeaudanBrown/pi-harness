@@ -416,8 +416,13 @@ export class ManagedMatrixClient {
 		catch (error) { if (error instanceof ManagedMatrixError && (error.status === 403 || error.status === 404)) return false; throw error; }
 	}
 	async setRoomName(roomId: string, name: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.name/`, { name }, signal); }
-	async sendText(roomId: string, transactionId: string, body: string, formattedBody?: string, signal?: AbortSignal): Promise<string> {
+	async sendText(roomId: string, transactionId: string, body: string, formattedBody?: string, signal?: AbortSignal,
+		disposition?: "silent" | "notify"): Promise<string> {
 		this.assertManagedRoom(roomId); const content: JsonObject = { msgtype: "m.text", body: boundedText(body, "message body") };
+		if (disposition) {
+			content["lol.bepis.pi.notification"] = { version: 1, disposition };
+			content["m.mentions"] = disposition === "notify" ? { room: true } : {};
+		}
 		if (formattedBody !== undefined) { content.format = "org.matrix.custom.html"; content.formatted_body = boundedText(formattedBody, "formatted message body", MAX_MESSAGE_BODY_LENGTH * 2); }
 		return this.sendEvent(roomId, "m.room.message", transactionId, content, signal);
 	}

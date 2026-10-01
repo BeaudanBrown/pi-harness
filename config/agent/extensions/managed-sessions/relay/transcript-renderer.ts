@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 
 export const MAX_MATRIX_TRANSCRIPT_CHUNK_BYTES = 8_000;
 export const MAX_MATRIX_TRANSCRIPT_CHUNKS = 64;
+export type TranscriptKind = "local_user" | "assistant_final" | "assistant_commentary";
 
 export interface RenderedTranscriptChunk {
 	body: string;
@@ -45,7 +46,7 @@ export function renderMarkdownHtml(markdown: string): string {
 	return markdown.split(/\n{2,}/).map((paragraph) => `<p>${paragraph.split("\n").map(renderInline).join("<br>")}</p>`).join("");
 }
 
-function chunkForRenderedPayload(kind: "local_user" | "assistant_final", value: string): string[] {
+function chunkForRenderedPayload(kind: TranscriptKind, value: string): string[] {
 	if (!value) return [];
 	const characters = Array.from(value);
 	const chunks: string[] = [];
@@ -83,11 +84,11 @@ export function chunkTranscript(value: string): string[] {
 	return chunkForRenderedPayload("assistant_final", value);
 }
 
-export function transcriptContentHash(kind: "local_user" | "assistant_final", body: string): string {
+export function transcriptContentHash(kind: TranscriptKind, body: string): string {
 	return createHash("sha256").update(`pi-managed-sessions:projection-content:v1\0${kind}\0${body}`, "utf8").digest("hex");
 }
 
-export function renderTranscript(kind: "local_user" | "assistant_final", body: string): RenderedTranscriptChunk[] {
+export function renderTranscript(kind: TranscriptKind, body: string): RenderedTranscriptChunk[] {
 	return chunkForRenderedPayload(kind, body).map((chunk, index) => {
 		const prefix = kind === "local_user" ? `${index === 0 ? "Local Pi user" : "Local Pi user (continued)"}:\n\n` : "";
 		const htmlPrefix = kind === "local_user" ? `<p><strong>${index === 0 ? "Local Pi user" : "Local Pi user (continued)"}:</strong></p>` : "";

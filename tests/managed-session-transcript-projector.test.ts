@@ -44,7 +44,7 @@ async function registryFixture(): Promise<{ root: string; store: ConversationMan
 	return { root, store, registry };
 }
 
-function offer(piEntryKey: string, body: string, kind: "local_user" | "assistant_final" = "assistant_final"): ManagedSessionEnvelope {
+function offer(piEntryKey: string, body: string, kind: "local_user" | "assistant_final" | "assistant_commentary" = "assistant_final"): ManagedSessionEnvelope {
 	return {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: `offer-${piEntryKey}`,
@@ -88,6 +88,31 @@ test("projection retries the same Matrix transaction after acceptance-before-ack
 	await new TranscriptProjector(restarted, matrix).project(offer("answer", "final **answer**"));
 	assert.equal(transactions.length, 2, "projected retries must not send another Matrix event");
 	await assert.rejects(() => new TranscriptProjector(restarted, matrix).project(offer("answer", "changed body")), /Conflicting transcript projection content/);
+});
+
+test("commentary requests silence and retries identical chunk payloads after a lost ack", async () => {
+	const { root, store, registry } = await registryFixture();
+	const sends: Array<{ url: string; body: string }> = [];
+	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
+		sends.push({ url: String(input), body: String(init?.body) });
+		return Response.json({ event_id: `$commentary-${sends.length}` });
+	}, [roomId]);
+	registry.markProjectionChunkSent = async () => { throw new Error("lost ack"); };
+	const entry = offer("comment:text:0", "Visible progress. ".repeat(700), "assistant_commentary");
+	await assert.rejects(() => new TranscriptProjector(registry, matrix).project(entry), /lost ack/);
+	const restarted = new RelayRegistry(hostId, join(root, "runtime"), store);
+	await restarted.load();
+	await new TranscriptProjector(restarted, matrix).project(entry);
+	assert.deepEqual(sends[0], sends[1]);
+	assert.ok(sends.length >= 3, "fixture must exercise deterministic chunking");
+	for (const sent of sends) {
+		const content = JSON.parse(sent.body);
+		assert.deepEqual(content["lol.bepis.pi.notification"], { version: 1, disposition: "silent" });
+		assert.deepEqual(content["m.mentions"], {});
+	}
+	const count = sends.length;
+	await new TranscriptProjector(restarted, matrix).project(entry);
+	assert.equal(sends.length, count);
 });
 
 test("Matrix-origin persisted users map to their operator event without a bot projection", async () => {

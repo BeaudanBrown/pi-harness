@@ -82,6 +82,7 @@ export interface BoundAdapterOptions {
 	role: AdapterRole;
 	attachmentNonce: string;
 	runtimeId?: string;
+	requestedCapabilities?: Array<"commentary-v1">;
 	binding: SessionBinding;
 	onEnvelope: (envelope: ManagedSessionEnvelope) => Promise<void> | void;
 	onMedia?: (image: ReceivedImage) => Promise<void> | void;
@@ -96,6 +97,8 @@ export class BoundAdapterClient {
 	#pending = new Map<string, PendingRequest>();
 	#attachmentId?: string;
 	#generation = 1;
+	#capabilities: string[] = [];
+	supports(capability: "commentary-v1"): boolean { return this.#capabilities.includes(capability); }
 	#placement?: WorkspaceIdentity;
 	get placement(): WorkspaceIdentity | undefined { return this.#placement ? { ...this.#placement } : undefined; }
 	#closing = false;
@@ -140,6 +143,7 @@ export class BoundAdapterClient {
 				role: this.options.role,
 				type: "attachment.attach",
 				payload: {
+					...(this.options.requestedCapabilities ? { requestedCapabilities: this.options.requestedCapabilities } : {}),
 					sessionId: this.options.binding.sessionId,
 					...(this.options.runtimeId ? { runtimeId: this.options.runtimeId } : {}),
 					attachmentNonce: this.options.attachmentNonce,
@@ -147,6 +151,9 @@ export class BoundAdapterClient {
 				},
 			});
 			if (response.type !== "attachment.accepted") throw responseError(response);
+			const capabilities = response.payload.capabilities as string[] | undefined;
+			if (capabilities?.some((item) => !this.options.requestedCapabilities?.includes(item as "commentary-v1"))) throw new ManagedAdapterError("Relay returned an unrequested capability", "invalid_response");
+			this.#capabilities = capabilities ?? [];
 			this.#attachmentId = String(response.payload.attachmentId);
 			this.#placement = response.payload.placement as WorkspaceIdentity | undefined;
 			this.#generation = Number.isSafeInteger(response.payload.generation) ? Number(response.payload.generation) : 1;
@@ -247,9 +254,10 @@ export class BoundAdapterClient {
 		entryId: string;
 		piSessionId: string;
 		piEntryKey: string;
-		kind: "local_user" | "assistant_final";
+		kind: "local_user" | "assistant_final" | "assistant_commentary";
 		body: string;
 	}): Promise<ManagedSessionEnvelope> {
+		if (entry.kind === "assistant_commentary" && !this.supports("commentary-v1")) throw new ManagedAdapterError("Commentary projection requires a capable relay", "upgrade_required");
 		const result = await this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("transcript"), conversationId: this.options.binding.conversationId,

@@ -99,6 +99,35 @@ async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHan
 	return { root, server, values };
 }
 
+test("commentary is capability-gated and legacy attachment responses remain unchanged", async (t) => {
+	let projected = 0;
+	const { server, values } = await setup(undefined, async (envelope) => {
+		projected += 1;
+		return { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay", messageId: `reply-${envelope.messageId}`,
+			conversationId: envelope.conversationId, type: "transcript.acknowledge", inReplyTo: envelope.messageId,
+			payload: { entryId: envelope.payload.entryId, status: "projected" } };
+	});
+	t.after(() => server.close());
+	for (const [index, enabled] of [false, true].entries()) {
+		const socket = await openSocket(server.socketPath);
+		t.after(() => socket.destroy());
+		const value = values[index]!;
+		const request = attach(value, `attach-${index}`);
+		if (enabled) request.payload.requestedCapabilities = ["commentary-v1"];
+		const attached = readEnvelope(socket);
+		socket.write(encodeNdjsonEnvelope(request));
+		assert.deepEqual((await attached).payload.capabilities, enabled ? ["commentary-v1"] : undefined);
+		const result = readEnvelope(socket);
+		socket.write(encodeNdjsonEnvelope({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `comment-${index}`,
+			conversationId: value.conversationId, role: "ordinary_adapter", type: "transcript.offer",
+			payload: { entryId: deriveTranscriptEntryId(value.piSessionId, "message:text:0"), piSessionId: value.piSessionId,
+				piEntryKey: "message:text:0", kind: "assistant_commentary", body: "Completed commentary" } }));
+		const response = await result;
+		assert.equal(response.type, enabled ? "transcript.acknowledge" : "error");
+	}
+	assert.equal(projected, 1);
+});
+
 test("host relay lock permits exactly one relay process per host independent of runtime path", async (t) => {
 	const helper = process.env.PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER;
 	if (!helper) return t.skip("packaged relay lock helper is unavailable");

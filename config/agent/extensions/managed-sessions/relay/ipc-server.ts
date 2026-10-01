@@ -23,6 +23,7 @@ interface ConnectionState {
 	id: string;
 	buffer: Buffer;
 	attachment?: AcceptedAttachment;
+	capabilities?: string[];
 	messageIds: Set<string>;
 	closed: boolean;
 	detachReason?: "shutdown" | "session_change" | "stop" | "bridge_delete";
@@ -203,6 +204,7 @@ export class ManagedSessionIpcServer {
 				}
 				if (!state.attachment) {
 					state.attachment = await this.registry.attach(envelope, state.id);
+					state.capabilities = envelope.payload.requestedCapabilities as string[] | undefined;
 					this.attachedSockets.set(state.attachment.conversationId, socket);
 					this.send(socket, {
 						protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
@@ -212,12 +214,16 @@ export class ManagedSessionIpcServer {
 						type: "attachment.accepted",
 						inReplyTo: envelope.messageId,
 						payload: { attachmentId: state.attachment.attachmentId, state: "active", generation: state.attachment.generation,
+							...(state.capabilities ? { capabilities: state.capabilities } : {}),
 							...(state.attachment.role === "ordinary_adapter" ? { placement: this.registry.manifestByConversationId(state.attachment.conversationId)!.placement } : {}) },
 					});
 					await this.onAttachment?.(state.attachment);
 					continue;
 				}
 				this.registry.assertAuthorized(envelope, state.id, state.attachment);
+				if (envelope.type === "transcript.offer" && envelope.payload.kind === "assistant_commentary" && !state.capabilities?.includes("commentary-v1")) {
+					throw new RelayRegistryError("permission_denied", "Commentary projection was not negotiated");
+				}
 				if (envelope.type === "attachment.detach") {
 					const payload = envelope.payload as { attachmentId: string; reason: "shutdown" | "session_change" | "stop" | "bridge_delete" };
 					state.detachReason = payload.reason;
