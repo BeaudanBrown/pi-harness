@@ -52,6 +52,11 @@ export class ManagedSessionIpcServer {
 	private server?: Server;
 	private readonly sockets = new Set<Socket>();
 	private readonly attachedSockets = new Map<string, Socket>();
+	private readonly attachedCapabilities = new Map<string, string[]>();
+	supports(conversationId: string, capability: string): boolean {
+		const socket = this.attachedSockets.get(conversationId);
+		return !!socket && !socket.destroyed && !!this.attachedCapabilities.get(conversationId)?.includes(capability);
+	}
 	private preserveAttachmentsOnClose = false;
 	private readonly runtimeDirectory: string;
 	readonly socketPath: string;
@@ -158,6 +163,7 @@ export class ManagedSessionIpcServer {
 			this.sockets.delete(socket);
 			if (state.attachment && this.attachedSockets.get(state.attachment.conversationId) === socket) {
 				this.attachedSockets.delete(state.attachment.conversationId);
+				this.attachedCapabilities.delete(state.attachment.conversationId);
 			}
 			if (state.attachment && !this.preserveAttachmentsOnClose) {
 				void this.registry.detach(state.id, state.attachment).then(() => this.onAttachmentDisconnect?.(state.attachment!, state.detachReason)).catch(() => undefined);
@@ -206,6 +212,7 @@ export class ManagedSessionIpcServer {
 					state.attachment = await this.registry.attach(envelope, state.id);
 					state.capabilities = envelope.payload.requestedCapabilities as string[] | undefined;
 					this.attachedSockets.set(state.attachment.conversationId, socket);
+					this.attachedCapabilities.set(state.attachment.conversationId, state.capabilities ?? []);
 					this.send(socket, {
 						protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 						messageId: `relay-${randomUUID()}`,
@@ -221,6 +228,9 @@ export class ManagedSessionIpcServer {
 					continue;
 				}
 				this.registry.assertAuthorized(envelope, state.id, state.attachment);
+				if (envelope.type === "recovery.confirm" && !state.capabilities?.includes("recovery-attention-v1")) {
+					throw new RelayRegistryError("permission_denied", "Recovery capability was not negotiated");
+				}
 				if (envelope.type === "transcript.offer" && envelope.payload.kind === "assistant_commentary" && !state.capabilities?.includes("commentary-v1")) {
 					throw new RelayRegistryError("permission_denied", "Commentary projection was not negotiated");
 				}

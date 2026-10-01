@@ -150,7 +150,7 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
-const projectionCapabilities = Type.Array(Type.Union([Type.Literal("commentary-v1"), Type.Literal("notification-disposition-v1")]), { maxItems: 2, uniqueItems: true });
+const projectionCapabilities = Type.Array(Type.Union([Type.Literal("commentary-v1"), Type.Literal("notification-disposition-v1"), Type.Literal("recovery-attention-v1")]), { maxItems: 3, uniqueItems: true });
 const notificationDisposition = Type.Union([Type.Literal("silent"), Type.Literal("notify")]);
 const attachmentFields = {
 	requestedCapabilities: Type.Optional(projectionCapabilities),
@@ -253,6 +253,13 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			})),
 		})),
 	}),
+	clientEnvelope(adapterRole, "recovery.confirm", {
+		requestId: identifier,
+		ready: Type.Boolean(),
+		checkpointId: Type.Union([identifier, Type.Null()]),
+	}),
+	relayEnvelope("recovery.check", { requestId: identifier }),
+	relayEnvelope("recovery.acknowledge", { requestId: identifier }),
 	clientEnvelope(adapterRole, "checkpoint.offer", {
 		checkpointId: identifier,
 		originDeliveryId: DeliveryIdSchema,

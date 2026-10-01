@@ -31,6 +31,8 @@ import { renderManagedConversationStatus } from "./status.js";
 import { prepareRelayStateDirectory } from "./state-directory.js";
 import { AtomicJsonFile } from "./atomic-json.js";
 import { retryMatrixStartup } from "./startup-retry.js";
+import { RecoveryAlerts } from "./recovery-alerts.js";
+import { RecoveryMonitor } from "./recovery-monitor.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
 	const value = environment[name]?.trim();
@@ -65,6 +67,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	const registry = new RelayRegistry(hostId, stateDirectory, manifestStore);
 	let server: ManagedSessionIpcServer | undefined;
 	let coordinatorRouter: CoordinatorRouter | undefined;
+	let recoveryMonitor: RecoveryMonitor | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
@@ -79,6 +82,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string });
 		await healthFile.write({ status: "starting", lastSuccessfulSyncAt, runtimeBuild });
 		const syncHealth = async (healthy: boolean): Promise<void> => {
+			await recoveryMonitor?.health(healthy);
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
 			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt, runtimeBuild });
 		};
@@ -104,12 +108,14 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		const transcriptProjector = new TranscriptProjector(registry, matrix);
 		activityProjector = new ActivityProjector(stateDirectory, registry, matrix);
 		await activityProjector.load();
-		const eventProjector = new RelayEventProjector(registry, matrix);
+		const recoveryAlerts: RecoveryAlerts = new RecoveryAlerts(resolve(stateDirectory, "recovery-alerts.json"), (alert) => eventProjector.projectRecoveryAlert(alert));
+		await recoveryAlerts.load();
+		const eventProjector = new RelayEventProjector(registry, matrix, recoveryAlerts);
 		await eventProjector.startNoticeOutbox(resolve(stateDirectory, "notice-outbox.json"),
 			(message) => process.stderr.write(`pi-managed-session-relay: ${redactManagedValue(message, environment)}\n`));
 		closeNotices = () => eventProjector.close();
 		registry.beginRestartReconciliation();
-		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "input.result" | "media.result" | "artifact.acknowledge" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
+		const response = (conversationId: string, inReplyTo: string, type: "self.result" | "recovery.acknowledge" | "input.result" | "media.result" | "artifact.acknowledge" | "transcript.acknowledge" | "checkpoint.acknowledge" | "activity.acknowledge" | "aloop.acknowledge" | "lifecycle.result", payload: Record<string, unknown>): ManagedSessionEnvelope => ({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: `relay-${randomUUID()}`,
 			conversationId,
@@ -160,6 +166,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				});
 			},
 			onEnvelope: async (envelope, attachment) => {
+				if (envelope.type === "recovery.confirm") {
+					recoveryMonitor?.confirm(envelope, attachment);
+					return response(attachment.conversationId, envelope.messageId, "recovery.acknowledge", { requestId: envelope.payload.requestId });
+				}
 				if (envelope.type === "control.result") {
 					const payload = envelope.payload as { controlId: string; status: "ok" | "rejected"; message: string; options?: string[];
 						generation?: { model?: string; thinking?: string }; selection?: { model: string } | { thinking: string }; liveStatus?: ManagedAdapterLiveStatus };
@@ -320,6 +330,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				return undefined;
 			},
 		});
+		recoveryMonitor = new RecoveryMonitor(recoveryAlerts, registry, server,
+			(conversationId) => !coordinatorRouter || coordinatorRouter.hasRecoveryBacklog(conversationId),
+			(message) => process.stderr.write(`pi-managed-session-relay: ${message}\n`));
+		await recoveryMonitor.health(false);
+		recoveryMonitor.start();
 		// Reattach surviving Pi processes before waiting for remote readiness.
 		await server.start();
 		const authenticatedUserId = await retryMatrixStartup(() => matrix.whoami(signal), async () => {
@@ -379,6 +394,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		}
 	} catch (error) {
 		await closeArtifactExporter().catch(() => undefined);
+		await recoveryMonitor?.close().catch(() => undefined);
 		await closeNotices().catch(() => undefined);
 		await coordinatorRouter?.stop().catch(() => undefined);
 		await activityProjector?.close().catch(() => undefined);
@@ -419,6 +435,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			clearTimeout(reconciliationTimer);
 			await closeArtifactExporter();
 			await coordinatorRouter?.stop();
+			await recoveryMonitor?.close();
 			await closeNotices();
 			await activityProjector?.close();
 			await server.close({ preserveAttachments: true });

@@ -333,6 +333,15 @@ new actionable recovery alert per conversation/outage epoch, with a stable
 recovery attention ID; obsolete work gets none. Persist that selection before
 send. Do not expire or reinterpret an accepted frozen payload on retry.
 
+Checkpoint/blocker recovery requires fresh confirmation from the attached adapter
+for the exact conversation and active generation, after backlog reconciliation.
+The relay's publication ledger alone does not prove that local input has not
+superseded a checkpoint. If the adapter is absent, defer the recovery check until
+it naturally reconnects; never wake a dormant conversation just to check. Do not
+inspect saved Pi transcripts from the relay to obtain this confirmation. Ordinary
+synchronization continues independently. This freshness boundary was explicitly
+approved by the operator for #111.
+
 ## Version and rollout boundary
 
 At baseline 9893e0f, `contracts.ts` advertises adapter/state `1.0.0` and carries
@@ -349,7 +358,8 @@ The new relay accepts the established baseline attach envelope unchanged. A new
 adapter explicitly requests a bounded subset of implemented live-workspace
 capabilities in its attach request; only a requesting adapter receives the
 corresponding accepted-capabilities field or new messages. The first implemented
-capabilities are `commentary-v1` and `notification-disposition-v1`. Legacy attach requests and responses remain
+capabilities are `commentary-v1`, `notification-disposition-v1`, and
+`recovery-attention-v1`. Legacy attach requests and responses remain
 unchanged. New adapters require relay-first deployment; an older strict relay
 cannot accept their new request fields.
 Legacy attachments keep input/receipts/final projection and existing process

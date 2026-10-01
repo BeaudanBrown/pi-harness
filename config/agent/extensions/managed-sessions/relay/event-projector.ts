@@ -13,6 +13,7 @@ import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { renderTranscript } from "./transcript-renderer.js";
 import { NoticeOutbox } from "./notice-outbox.js";
+import { type RecoveryAlert, RecoveryAlerts } from "./recovery-alerts.js";
 
 export class RelayEventProjector {
 	readonly checkpointPollPublisher: CheckpointPollPublisher;
@@ -27,8 +28,16 @@ export class RelayEventProjector {
 	}
 	async close(): Promise<void> { await this.notices?.close(); }
 
-	constructor(private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient) {
+	constructor(private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly recovery?: RecoveryAlerts) {
 		this.checkpointPollPublisher = new CheckpointPollPublisher(registry, matrix);
+	}
+
+	async projectRecoveryAlert(alert: RecoveryAlert): Promise<void> {
+		const { conversationId, piSessionId, roomId } = alert.ticket.target;
+		// Retirement removes the destination; never recreate it to deliver a reminder.
+		if (this.registry.manifestByConversationId(conversationId)?.roomId !== roomId) return;
+		await this.project(conversationId, piSessionId, roomId, alert.sourceId, "notice",
+			alert.body, undefined, "notify");
 	}
 
 	async projectCheckpoint(envelope: ManagedSessionEnvelope): Promise<void> {
@@ -61,6 +70,7 @@ export class RelayEventProjector {
 				originDeliveryId: payload.originDeliveryId,
 				chunks: [{ chunkId: deriveChunkId(expectedEntryId, 0), transactionId, status: "pending" }],
 			}, intent);
+			if (projection.chunks.some((chunk) => chunk.status === "pending")) await this.recovery?.originalAccepted(manifest.conversationId, manifest.piSessionId);
 			if (projection.chunks[0]?.transactionId !== transactionId) throw new RelayRegistryError("invalid_state", "Checkpoint poll projection has a conflicting transaction");
 			const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
 			if (runtime?.publishingCheckpointPoll?.checkpointId === payload.checkpointId || runtime?.activeCheckpointPoll?.checkpointId === payload.checkpointId) {
@@ -99,6 +109,9 @@ export class RelayEventProjector {
 			chunks: rendered.map((_chunk, index) => ({ chunkId: deriveChunkId(entryId, index),
 				transactionId: deriveMatrixTransactionId(conversationId, entryId, index), status: "pending" as const })),
 		});
+		if (kind === "checkpoint" && projection.disposition === "notify" && projection.chunks.some((chunk) => chunk.status === "pending")) {
+			await this.recovery?.originalAccepted(conversationId, piSessionId);
+		}
 		for (let index = 0; index < projection.chunks.length; index += 1) {
 			const chunkState = projection.chunks[index]!;
 			if (chunkState.status === "sent") continue;

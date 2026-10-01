@@ -233,6 +233,26 @@ function deliveredUserEntries(entries: readonly unknown[]): Map<string, string> 
 	return matched;
 }
 
+/** Only the original offer position matters: a late projection acknowledgement is not a new question. */
+export function unansweredCheckpoint(entries: readonly unknown[], binding: SessionBinding): string | null {
+	const boundary = entries.findIndex((entry) => typeof entry === "object" && entry !== null &&
+		typeof (entry as { id?: unknown }).id === "string" &&
+		deriveTranscriptEntryId(binding.sessionId, (entry as { id: string }).id) === binding.bindingBoundaryEntryId);
+	if (boundary < 0) return null;
+	const branch = entries.slice(boundary + 1);
+	const restored = restoreCheckpoints(branch);
+	let checkpointId: string | null = null;
+	for (const entry of branch) {
+		const marker = customData(entry, CHECKPOINT_ENTRY_TYPE);
+		if (marker?.data.status === "offered" && typeof marker.data.checkpointId === "string") checkpointId = marker.data.checkpointId;
+		if (typeof entry === "object" && entry !== null) {
+			const candidate = entry as { type?: string; message?: { role?: string } };
+			if (candidate.type === "message" && candidate.message?.role === "user") checkpointId = null;
+		}
+	}
+	return checkpointId && restored.get(checkpointId)?.status === "projected" ? checkpointId : null;
+}
+
 export function restoreCheckpoints(entries: readonly unknown[]): Map<string, ManagedCheckpointMarker> {
 	const checkpoints = new Map<string, ManagedCheckpointMarker>();
 	for (const entry of entries) {

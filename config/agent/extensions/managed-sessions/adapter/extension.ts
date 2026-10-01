@@ -28,6 +28,7 @@ import { resolveWorkspaceArtifact } from "./artifact-export.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	CHECKPOINT_ENTRY_TYPE,
+	unansweredCheckpoint,
 	BINDING_ENTRY_TYPE,
 	DELIVERY_ENTRY_TYPE,
 	PROJECTION_DIAGNOSTIC_ENTRY_TYPE,
@@ -1026,6 +1027,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		async function handleEnvelope(envelope: ManagedSessionEnvelope): Promise<void> {
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
+			if (envelope.type === "recovery.check") {
+				if (!client?.supports("recovery-attention-v1")) throw new ManagedAdapterError("Recovery capability was not negotiated");
+				const ready = !connectWork && !projectionRun && !projectionRetryTimer && !activity && !closingActivities.size &&
+					!inFlightDeliveries.size && !pendingUserPersistence.length && ctx.isIdle() && !ctx.hasPendingMessages() &&
+					![...checkpoints.values()].some((marker) => marker.status === "offered");
+				await client.confirmRecovery(String(envelope.payload.requestId), ready,
+					ready ? unansweredCheckpoint(ctx.sessionManager.getBranch(), binding) : null);
+				return;
+			}
 			if (envelope.type === "promotion.shutdown") {
 				if (role !== "ordinary_adapter") throw new ManagedAdapterError("Terminal-session promotion requires an ordinary adapter");
 				ctx.shutdown();
@@ -1101,7 +1111,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
-				requestedCapabilities: ["commentary-v1", "notification-disposition-v1"],
+				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				onEnvelope: handleEnvelope, onMedia: (image) => handleMedia(image, ctx),
 				onDisconnect: () => {

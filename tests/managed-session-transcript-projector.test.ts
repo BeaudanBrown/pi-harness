@@ -16,6 +16,8 @@ import { ConversationManifestStore } from "../config/agent/extensions/managed-se
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { TranscriptProjector } from "../config/agent/extensions/managed-sessions/relay/transcript-projector.js";
+import { RecoveryAlerts } from "../config/agent/extensions/managed-sessions/relay/recovery-alerts.js";
+import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
 
 const hostId = "projection-host";
 const sessionId = "projection-session";
@@ -61,6 +63,26 @@ const matrixConfig = {
 	botUserId: "@bot:example.com",
 	operatorUserId: "@operator:example.com",
 };
+
+test("accepted recovery alert retries exact Matrix bytes after relay restart without another liveness decision", async () => {
+	const { root, store, registry } = await registryFixture();
+	const sends: Array<{ url: string; body: string }> = [];
+	const matrix = new ManagedMatrixClient(matrixConfig, async (url, init) => {
+		sends.push({ url: String(url), body: String(init?.body) }); return Response.json({ event_id: "$recovery" });
+	}, [roomId]);
+	const projector = new RelayEventProjector(registry, matrix);
+	const path = join(root, "recovery-alerts.json");
+	const alerts = new RecoveryAlerts(path, (alert) => projector.projectRecoveryAlert(alert));
+	await alerts.load(); await alerts.outage([{ conversationId, piSessionId: sessionId, roomId }]); await alerts.healthy();
+	await alerts.confirm(alerts.pending()[0]!, "checkpoint-current", () => true);
+	registry.markProjectionChunkSent = async () => { throw Error("crash after Matrix acceptance"); };
+	await assert.rejects(() => alerts.drain(), /retained/); await alerts.close();
+	const restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load();
+	const recovered = new RecoveryAlerts(path, (alert) => new RelayEventProjector(restarted, matrix).projectRecoveryAlert(alert));
+	await recovered.load(); await recovered.drain(); await recovered.drain(); await recovered.close();
+	assert.equal(sends.length, 2); assert.deepEqual(sends[0], sends[1]);
+	assert.deepEqual(JSON.parse(sends[0]!.body)["m.mentions"], { room: true });
+});
 
 test("projection retries the same Matrix transaction after acceptance-before-ack crash", async () => {
 	const { root, store, registry } = await registryFixture();

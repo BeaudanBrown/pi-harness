@@ -149,6 +149,8 @@ export class CoordinatorRouter {
 	private loop?: Promise<void>;
 	private readonly launching = new Map<string, Promise<void>>();
 	private inbox?: DurableInbox;
+	hasRecoveryBacklog(conversationId: string): boolean { return !this.inbox || this.inbox.hasPending(conversationId); }
+
 	async loadInbox(path: string): Promise<void> {
 		this.inbox = new DurableInbox(path, async (conversationId, response) => {
 			const manifest = this.registry.manifestByConversationId(conversationId);

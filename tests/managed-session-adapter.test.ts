@@ -187,6 +187,7 @@ class FakeRelay {
 	checkpointError?: { code: string; message: string };
 	enableCommentary = false;
 	enableDisposition = false;
+	enableRecovery = false;
 	placement?: { rootKey: string; workspace: string; relativeCwd: string };
 	readonly sockets = new Set<Socket>();
 	readonly root: string;
@@ -255,7 +256,7 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.bind", status: "ok", boundConversationId: conversationId } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.enableCommentary && envelope.payload.requestedCapabilities ? { capabilities: ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : [])] } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.enableCommentary && envelope.payload.requestedCapabilities ? { capabilities: ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
 			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
@@ -293,6 +294,8 @@ class FakeRelay {
 				return;
 			}
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "activity.acknowledge", payload: { activityId: envelope.payload.activityId, revision: envelope.payload.revision, status: envelope.type === "activity.finalize" ? "finalized" : "updated" } }));
+		} else if (envelope.type === "recovery.confirm") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "recovery.acknowledge", payload: { requestId: envelope.payload.requestId } }));
 		} else if (envelope.type === "checkpoint.offer") {
 			if (this.checkpointError) socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { ...this.checkpointError, retryable: false } }));
 			else socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
@@ -1266,7 +1269,7 @@ test("projected checkpoints render in persisted Pi chat history while offered ma
 });
 
 test("managed adapter steers busy Matrix prompts and replay while preserving idle, explicit follow-up and checkpoint semantics", async (t) => {
-	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const relay = await FakeRelay.start(); relay.enableCommentary = true; relay.enableDisposition = true; relay.enableRecovery = true; t.after(() => relay.close());
 	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
 	let leaf = "binding"; let sequence = 0; let idle = true; let aborts = 0;
 	let activeTools = ["read", "remote_checkpoint"];
@@ -1285,7 +1288,7 @@ test("managed adapter steers busy Matrix prompts and replay while preserving idl
 	} as unknown as ExtensionAPI;
 	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath,
 		PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
-	const ctx: any = { hasUI: false, isIdle: () => idle, abort: () => { aborts += 1; }, shutdown: () => undefined, getContextUsage: () => undefined,
+	const ctx: any = { hasUI: false, isIdle: () => idle, hasPendingMessages: () => false, abort: () => { aborts += 1; }, shutdown: () => undefined, getContextUsage: () => undefined,
 		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => leaf,
 			getSessionFile: () => "/tmp/session.jsonl", getSessionDir: () => "/tmp" } };
 	await handlers.get("session_start")!({ reason: "resume" }, ctx);
@@ -1313,6 +1316,11 @@ test("managed adapter steers busy Matrix prompts and replay while preserving idl
 		"the intentional hard stop cannot overwrite a projected checkpoint with a generic model error");
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	assert.ok(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.status === "completed"));
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "check-attention", conversationId, role: "relay", type: "recovery.check", payload: { requestId: "fresh-probe" } });
+	await activityWait(() => relay.frames.some((frame) => frame.type === "recovery.confirm"));
+	const confirmed = relay.frames.find((frame) => frame.type === "recovery.confirm")!;
+	assert.equal(confirmed.payload.ready, true);
+	assert.equal(confirmed.payload.checkpointId, relay.frames.find((frame) => frame.type === "checkpoint.offer")!.payload.checkpointId);
 	idle = false; await send("$busy", "prompt", "busy message"); await send("$steer", "steer", "redirect"); await send("$legacy", "follow_up", "explicit follow-up");
 	assert.deepEqual(deliveriesSeen, [{ text: "Matrix participant @alice:example.com:\n\nidle task" },
 		{ text: "busy message", deliverAs: "steer" }, { text: "redirect", deliverAs: "steer" }, { text: "explicit follow-up", deliverAs: "followUp" }]);

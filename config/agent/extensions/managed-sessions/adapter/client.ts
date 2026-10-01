@@ -51,6 +51,7 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 		case "artifact.chunk": return { type: "artifact.acknowledge", fields: [["uploadId", String(payload.uploadId)]] };
 		case "media.reject": return { type: "media.result", fields: [["deliveryId", String(payload.deliveryId)], ["blobId", String(payload.blobId)], ["status", "rejected"]] };
 		case "transcript.offer": return { type: "transcript.acknowledge", fields: [["entryId", String(payload.entryId)], ["status", "projected"]] };
+		case "recovery.confirm": return { type: "recovery.acknowledge", fields: [["requestId", String(payload.requestId)]] };
 		case "checkpoint.offer": return { type: "checkpoint.acknowledge", fields: [["checkpointId", String(payload.checkpointId)], ["status", "projected"]] };
 		case "aloop.notice": return { type: "aloop.acknowledge", fields: [["lifecycleId", String(payload.lifecycleId)], ["status", "projected"]] };
 		case "self.status": return { type: "self.result", fields: [["operation", "self.status"], ["status", "ok"]] };
@@ -82,7 +83,7 @@ export interface BoundAdapterOptions {
 	role: AdapterRole;
 	attachmentNonce: string;
 	runtimeId?: string;
-	requestedCapabilities?: Array<"commentary-v1" | "notification-disposition-v1">;
+	requestedCapabilities?: Array<"commentary-v1" | "notification-disposition-v1" | "recovery-attention-v1">;
 	binding: SessionBinding;
 	onEnvelope: (envelope: ManagedSessionEnvelope) => Promise<void> | void;
 	onMedia?: (image: ReceivedImage) => Promise<void> | void;
@@ -98,7 +99,7 @@ export class BoundAdapterClient {
 	#attachmentId?: string;
 	#generation = 1;
 	#capabilities: string[] = [];
-	supports(capability: "commentary-v1" | "notification-disposition-v1"): boolean { return this.#capabilities.includes(capability); }
+	supports(capability: "commentary-v1" | "notification-disposition-v1" | "recovery-attention-v1"): boolean { return this.#capabilities.includes(capability); }
 	#placement?: WorkspaceIdentity;
 	get placement(): WorkspaceIdentity | undefined { return this.#placement ? { ...this.#placement } : undefined; }
 	#closing = false;
@@ -152,7 +153,7 @@ export class BoundAdapterClient {
 			});
 			if (response.type !== "attachment.accepted") throw responseError(response);
 			const capabilities = response.payload.capabilities as string[] | undefined;
-			if (capabilities?.some((item) => !this.options.requestedCapabilities?.includes(item as "commentary-v1" | "notification-disposition-v1"))) throw new ManagedAdapterError("Relay returned an unrequested capability", "invalid_response");
+			if (capabilities?.some((item) => !this.options.requestedCapabilities?.includes(item as "commentary-v1" | "notification-disposition-v1" | "recovery-attention-v1"))) throw new ManagedAdapterError("Relay returned an unrequested capability", "invalid_response");
 			this.#capabilities = capabilities ?? [];
 			this.#attachmentId = String(response.payload.attachmentId);
 			this.#placement = response.payload.placement as WorkspaceIdentity | undefined;
@@ -201,6 +202,12 @@ export class BoundAdapterClient {
 		if (result.type !== "self.result" || result.payload.operation !== "control.result" || result.payload.status !== "ok") {
 			throw new ManagedAdapterError("Relay did not confirm control result", "invalid_response");
 		}
+	}
+
+	async confirmRecovery(requestId: string, ready: boolean, checkpointId: string | null): Promise<void> {
+		if (!this.supports("recovery-attention-v1")) throw new ManagedAdapterError("Recovery capability was not negotiated");
+		await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("recovery-confirm"),
+			conversationId: this.options.binding.conversationId, role: this.options.role, type: "recovery.confirm", payload: { requestId, ready, checkpointId } });
 	}
 
 	async refreshResult(refreshId: string, status: "ready" | "busy"): Promise<void> {

@@ -100,4 +100,33 @@ request one notification. Notice outbox retries retain their first disposition,
 including legacy records without metadata. Focused managed tests cover actual
 adapter reconnect classification, persisted watermarks, mixed-content order,
 chunking, and acceptance-before-ack retries. The bounded actionable recovery
-alert and approval integration remain to finish #111.
+alert and approval integration remain to finish #111. The canonical verification
+gate passed at c8f2a8d before the following recovery chunk.
+
+### Recovery-attention chunk
+
+Operator decision: wait for fresh adapter confirmation; never wake a dormant
+conversation merely to check and never inspect its Pi transcript from the relay.
+`recovery-attention-v1` supplies an exact-attachment, fresh request/response check.
+The adapter waits for idle/backlog reconciliation and reads its own current
+branch. A late checkpoint projection acknowledgement cannot reopen a checkpoint
+superseded by local user input. The relay also checks the active Pi session,
+current attachment, pending Matrix inbox, original projected checkpoint and any
+subsequent accepted input. Unavailable/busy adapters leave the ticket pending.
+
+| Crash/race boundary | Durable identity and recovery | Evidence |
+| --- | --- | --- |
+| Matrix outage before recovery | Persist epoch and exact conversation/session/room tickets; repeated failures reuse epoch | Recovery state tests |
+| Adapter absent or replaced | No launch or session-file inspection; defer or reject stale evidence | Monitor fixture; real adapter attestation fixture |
+| Local reply before a late checkpoint ack | Original offer position, not projection-marker position, defines unanswered state | Current-branch marker fixture |
+| Revalidation before alert acceptance | Recheck exact attachment/session/inbox within serialized selection | Stale-attachment and guarded-liveness fixtures |
+| Selection before external send | Persist chosen attention, body and stable source ID | Competing selection and original-checkpoint coalescing fixtures |
+| Matrix acceptance before ack | Preserve exact body, mentions and transaction through restart | Real projector lost-ack fixture |
+| Later outage with an uncertain send | Preserve old accepted send and coalesce identical pending attention | Repeated-epoch fixture |
+| One room cannot send | Independent bounded room workers; same-room sends retain order | Failed-room/healthy-room fixture |
+
+Focused managed-session/source checks pass for the initial recovery chunk.
+Approval runtime does not exist yet: #108 must supply live, unexpired requester
+validation and connect it to the recovery selection before #111's approval
+acceptance can be claimed. The guarded selection primitive is not proof of that
+integration. #111 remains open; phone delivery remains deployment-only.
