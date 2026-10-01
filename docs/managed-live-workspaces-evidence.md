@@ -130,3 +130,42 @@ Approval runtime does not exist yet: #108 must supply live, unexpired requester
 validation and connect it to the recovery selection before #111's approval
 acceptance can be claimed. The guarded selection primitive is not proof of that
 integration. #111 remains open; phone delivery remains deployment-only.
+
+## #106 — hierarchy provisioning (in progress)
+
+| Acceptance | Planned change and evidence |
+| --- | --- |
+| Project identity shared, distinct checkout Spaces | Host/project/canonical checkout-derived IDs; relative cwd excluded; linked/root fixtures |
+| Stable aliases, uncertain creates, no foreign adoption | Durable provision records plus exact bot-authored management state; create/lost-response/concurrency fault injection |
+| Pre-join provenance | Narrow management state in initial room state, matching authenticated full hierarchy account actions (#112) |
+| Local identity while remote pending | Persist local enrollment/provisioning phases before Matrix effects; expose accurate pending/ready state to #107/#116 |
+| Safe titles, names not identity | Sanitized bounded display names and identity-derived fallback; mutable names excluded from identity derivation |
+| Legacy compatibility | Preserve existing manifests and old interrupted provisioning paths; no startup reparenting or notification changes |
+
+Crash boundaries: persist intent before room creation; resolve uncertain creates
+by host-scoped alias and exact provenance; save verified room IDs before linking;
+retry identical state links after lost acknowledgement; publish remote-ready only
+after every required link/proof succeeds. Root/project/checkout creation must
+serialize shared identities, without holding an unrelated room behind network
+failure. Account joining/notification setup (#112), existing-room migration
+(#119), title reconciliation/ancestor cleanup and launcher dispatch are dependent
+work, not evidence supplied by provisioning alone.
+
+The first #106 chunk adds strict provenance syntax, canonical checkout IDs,
+host-scoped aliases independent of names/parents, safe title fallbacks, and a
+Matrix primitive that includes provenance in the atomic create. It verifies the
+bot-authored create and management events, private/non-federated state, required
+power and membership, and absence of encryption before accepting an alias.
+Lost-response retries resolve the same proven room; same-bot foreign-host aliases,
+forged/missing proof, contradictory parents, public and encrypted targets are
+rejected without writes. Managed-session/source checks pass after adding the new
+root module to the relay's explicit packaged source list. This is a tested
+primitive, not yet wired into the hierarchy lifecycle or local-pending registry.
+
+An upgrade boundary remains to resolve before wiring: existing host Spaces were
+created without management provenance. The saved coordinator manifest can identify
+the existing host Space, but new exact NAS hierarchy proof requires a management
+marker. Adding only that marker during new provisioning would preserve all old
+room IDs/parentage/titles/notifications; requiring explicit migration first would
+instead keep new remote provisioning pending on legacy hosts. No existing Space
+has been mutated by this implementation work.

@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from "node:util";
+import { MANAGED_PROVENANCE_EVENT, managedRoomAlias, parseManagedProvenance, safeManagedTitle, type ManagedProvenance } from "../managed-provenance.js";
 import { MAX_BLOB_BYTES } from "../v2-contracts.js";
 import { MatrixError as ManagedMatrixError, MatrixHttp, MAX_MATRIX_RESPONSE_BYTES, type MatrixRetryOptions } from "../../matrix-shared/http.js";
 export { ManagedMatrixError };
@@ -305,12 +307,46 @@ export class ManagedMatrixClient {
 	async createPrivateRoom(name: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, false, signal); }
 	async createPrivateSpaceIdempotent(name: string, aliasLocalpart: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, true, signal, aliasLocalpart); }
 	async createPrivateRoomIdempotent(name: string, aliasLocalpart: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, false, signal, aliasLocalpart); }
-	private async createRoom(name: string, space: boolean, signal?: AbortSignal, aliasLocalpart?: string): Promise<string> {
+	/** New live-workspace objects carry their proof in the atomic create, not a later best-effort write. */
+	async ensureManagedRoom(name: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<string> {
+		const expected = structuredClone(parseManagedProvenance(provenance));
+		const alias = managedRoomAlias(expected);
+		const space = expected.kind.endsWith("_space");
+		let roomId = await this.lookupPrivateRoomAlias(alias, signal);
+		try {
+			if (!roomId) roomId = await this.createRoom(safeManagedTitle(name, alias), space, signal, alias, expected);
+			this.#managedRoomIds.add(roomId);
+			await this.assertManagedProvenance(roomId, expected, signal);
+			return roomId;
+		} catch (error) { if (roomId) this.#managedRoomIds.delete(roomId); throw error; }
+	}
+
+	/** Saved room IDs remain authoritative when mutable aliases or names change. */
+	async assertManagedProvenance(roomId: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<void> {
+		const expected = parseManagedProvenance(provenance);
+		await this.assertRoomAuthority(roomId, expected.kind.endsWith("_space"), signal, { spaceChild: expected.kind.endsWith("_space") });
+		const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, undefined, signal);
+		if (!Array.isArray(state) || state.length > 4096) throw new ManagedMatrixError("invalid_response", "Managed room state is unavailable or oversized");
+		const events = state.filter((event): event is JsonObject => typeof event === "object" && event !== null && !Array.isArray(event));
+		const proofs = events.filter((event) => event.type === MANAGED_PROVENANCE_EVENT && event.state_key === "");
+		const creates = events.filter((event) => event.type === "m.room.create" && event.state_key === "");
+		const joins = events.filter((event) => event.type === "m.room.join_rules" && event.state_key === "");
+		const creation = creates[0]?.content as JsonObject | undefined;
+		const joinRules = joins[0]?.content as JsonObject | undefined;
+		if (joins.length !== 1 || joinRules?.join_rule !== "invite" || creation?.["m.federate"] !== false || events.length !== state.length || events.some((event) => event.type === "m.room.encryption") ||
+			creates.length !== 1 || creates[0]!.sender !== this.botUserId || proofs.length !== 1 || proofs[0]!.sender !== this.botUserId ||
+			!isDeepStrictEqual(proofs[0]!.content, expected)) {
+			throw new ManagedMatrixError("invalid_response", "Managed room proof is foreign, contradictory, or encrypted");
+		}
+	}
+
+	private async createRoom(name: string, space: boolean, signal?: AbortSignal, aliasLocalpart?: string, provenance?: ManagedProvenance): Promise<string> {
 		if (aliasLocalpart !== undefined && !/^[a-z0-9._=-]{1,128}$/.test(aliasLocalpart)) throw new Error("Matrix room alias localpart is malformed");
 		let roomId: string;
 		try {
 			const response = await this.request("POST", "/_matrix/client/v3/createRoom", { visibility: "private", preset: "private_chat", name,
 				invite: [this.operatorUserId], is_direct: false, ...(aliasLocalpart ? { room_alias_name: aliasLocalpart } : {}),
+				...(provenance ? { initial_state: [{ type: MANAGED_PROVENANCE_EVENT, state_key: "", content: provenance }] } : {}),
 				creation_content: { ...(space ? { type: "m.space" } : {}), "m.federate": false } }, signal);
 			roomId = requiredString(response, "room_id");
 		} catch (error) {

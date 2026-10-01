@@ -19,6 +19,7 @@ stdenv.mkDerivation {
     runHook preBuild
     mkdir -p source/managed-sessions
     cp config/agent/extensions/managed-sessions/contracts.ts source/managed-sessions/contracts.ts
+    cp config/agent/extensions/managed-sessions/managed-provenance.ts source/managed-sessions/managed-provenance.ts
     cp config/agent/extensions/managed-sessions/v2-contracts.ts source/managed-sessions/v2-contracts.ts
     cp config/agent/extensions/managed-sessions/checkpoint.ts source/managed-sessions/checkpoint.ts
     cp config/agent/extensions/managed-sessions/aloop-lifecycle.ts source/managed-sessions/aloop-lifecycle.ts
