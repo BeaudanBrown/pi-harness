@@ -126,7 +126,7 @@ Nix centrally owns action IDs and policy with explicit deployment-time overrides
 
 ### Approval lifecycle
 
-Validate → freeze exact operation/arguments/targets/preconditions → persist → present → await approve/deny → revalidate → durably accept/execute → return stable result.
+Validate → freeze exact operation/arguments/targets/preconditions → persist pending approval → present → await approve/deny → revalidate → mark consent consumed → attempt execution once → return the observed outcome.
 
 - Expire after **15 minutes**; only configured operator approval counts.
 - Every tool call gets its own approval. Existing explicit typed bundles may use one approval describing their complete frozen effects.
@@ -134,7 +134,7 @@ Validate → freeze exact operation/arguments/targets/preconditions → persist 
 - Denial returns `denied by operator`, does not abort the agent turn, and identical retries may ask again. No blanket or per-turn consent.
 - An approval waits inside the tool call; do not reuse checkpoint hard-abort semantics.
 - Cancel pending approvals when their requesting run ends, its process stops, or conversation retires. Late votes do nothing. After relay restart, retain only within original expiry and only after revalidating the live requesting run; otherwise cancel.
-- Already approved and durably accepted actions finish independently, including self-stop/delete; lost responses/duplicate votes never duplicate actions.
+- Operator amendment, 2026-10-02: accept failure/uncertainty around disconnection timing rather than building durable completed-action receipt retention or automatic mutation replay. An admitted attempt may finish independently of its caller, including self-stop/delete, but relay restart does not resume an uncertain attempt. Report an unknown outcome without retrying; the operator can inspect state and explicitly request another attempt with fresh consent. Suppress duplicate votes while an approval is active. Pending approval expiry remains 15 minutes. This replaces the earlier stable-result/at-most-once guarantee across disconnect/restart; it does not remove existing operation-specific safety checks or unrelated delivery/provisioning receipts.
 - Do not hold broad lifecycle locks for the approval wait. Revalidate stale previews without expanding/reinterpreting the approval.
 
 A private peer-UID-checked mode-0600 host-control socket is separate from nonce-authenticated adapter IPC. Disabled hosts expose no socket/control surface. Never impersonate a coordinator attachment or pass secrets/nonces as CLI arguments.

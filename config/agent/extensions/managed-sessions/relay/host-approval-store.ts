@@ -1,5 +1,5 @@
 import { constants } from "node:fs";
-import { open, readdir } from "node:fs/promises";
+import { open, readdir, unlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { parseHostApprovalRecord, transitionHostApproval, type HostApprovalRecord } from "./host-approval-record.js";
@@ -90,12 +90,28 @@ export class HostApprovalStore {
 			return this.persist(transitionHostApproval(previous, detached));
 		});
 	}
+	/** Discard settled consent; an accepted record is never replay authorization on recovery. */
+	discard(approvalId: string): Promise<void> {
+		if (!idPattern.test(approvalId)) return Promise.reject(Error("Invalid approval identity"));
+		return this.write(async () => {
+			const record = this.records.get(approvalId); if (!record) return;
+			if (!["denied", "expired", "cancelled", "accepted"].includes(record.phase)) throw Error("Pending approval must be settled before removal");
+			try {
+				await unlink(join(this.directory, `${approvalId}.json`)).catch((error: unknown) => {
+					if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+				});
+				const directory = await open(this.directory, "r");
+				try { await directory.sync(); } finally { await directory.close(); }
+			} catch (error) { this.poisoned = true; throw error; }
+			this.bytes -= this.sizes.get(approvalId) ?? 0; this.sizes.delete(approvalId); this.records.delete(approvalId);
+		});
+	}
 	async close(): Promise<void> { this.closed = true; await this.loading?.catch(() => undefined); await this.tail; }
 
 	private assertReady(): void {
 		if (!this.loaded || this.poisoned) throw Error("Approval store is unavailable; ownership-safe recovery is required");
 	}
-	private write(work: () => Promise<HostApprovalRecord>): Promise<HostApprovalRecord> {
+	private write<T>(work: () => Promise<T>): Promise<T> {
 		if (this.closed) return Promise.reject(Error("Approval store is closed"));
 		const next = this.tail.then(() => { this.assertReady(); return work(); });
 		this.tail = next.then(() => undefined, () => undefined); return next;

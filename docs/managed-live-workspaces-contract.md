@@ -153,8 +153,10 @@ The staged read-only dispatcher joins in-flight retries and retains validated
 responses/errors in memory for 60 seconds after completion (1,024 entries by
 default, at most 4,096). It never evicts in-flight or unexpired identities to admit
 new work. Use a new request ID for a fresh observation; restart/expiry discards
-this read cache. It is not the durable mutation execution journal required by
-the dependent approval/retirement/open owners.
+this read cache. It is not a mutation execution journal. Under the operator's
+2026-10-02 amendment, uncertain host mutations are not automatically retried and
+completed approval outcomes do not require durable replay receipts. Existing
+operation-specific retirement/launch safety intents remain separate.
 
 Compatibility wrappers: `pi-managed-session-status` calls host status when the
 control endpoint is present, retaining its established health output/exit behavior
@@ -204,15 +206,24 @@ pending without a checkpoint abort and without holding a broad lifecycle lock.
 Denial returns `denied by operator` as a normal tool result, allowing the turn to
 continue. A new identical call may request approval again.
 
-Phases: prepared → presented → approved/denied/expired/cancelled → accepted →
-completed/failed. Revalidate immediately before durably accepting execution.
+Pending phases: prepared → presented → approved/denied/expired/cancelled →
+accepted (consent consumed before the execution attempt). Completion/failure is
+reported to a connected caller, not retained as a durable replay receipt.
+Revalidate immediately before consuming consent.
 Run end, stop, retirement or generation replacement cancels **unaccepted**
 approvals. Restart retains a pending approval only with original expiry and
 positive live requester revalidation; unknown is cancel, not approve. Duplicate
-votes and repeated tool messages select the existing durable result. Accepted
-operations finish independently of requesting process/tool response, including
-self-stop/delete. Failed preconditions require a new preview/call; never expand
-an already approved bundle.
+votes cannot start another attempt while an approval is active. An admitted
+attempt may finish independently of its caller, including self-stop/delete,
+but an uncertain outcome is reported without automatic mutation retry. On relay
+restart, consumed consent is never an instruction to resume execution; uncertain
+or interrupted requests require inspection and a new explicit call/approval.
+Completed approval records are discarded, not retained indefinitely. Pending
+records retain their original expiry and are removed when no longer needed.
+This operator-approved simplification replaces stable result replay and
+at-most-once guarantees across disconnection/restart; existing owner-specific
+safety intents and checks remain intact. Failed preconditions require a new
+preview/call; never expand an already approved bundle.
 
 ## Launch, status and retirement ordering
 

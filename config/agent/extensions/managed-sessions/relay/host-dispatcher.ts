@@ -4,6 +4,7 @@ import {
 	type HostActor, type HostReadAction, type HostResponse,
 } from "../live-workspace-contracts.js";
 import { HostPolicy } from "./host-policy.js";
+import type { ModelHostRequest } from "./host-approval-record.js";
 import { HostControlError, hostErrorResponse } from "./host-control-error.js";
 
 function canonical(value: unknown): string {
@@ -28,6 +29,7 @@ export class HostDispatcher {
 	constructor(private readonly options: {
 		hostId: string; protectedConversationId: string; policy: HostPolicy;
 		read: (request: HostReadRequest) => Promise<unknown>;
+		approve?: (request: ModelHostRequest) => Promise<HostResponse>;
 		now?: () => number; requestCapacity?: number;
 	}) {
 		this.options = { ...options };
@@ -48,6 +50,13 @@ export class HostDispatcher {
 				parseHostRequest({ ...request, actor: authenticatedActor });
 			} catch { throw new HostControlError("invalid_request", "Invalid host control request"); }
 			if (canonical(request.actor) !== canonical(authenticatedActor)) throw new HostControlError("forbidden", "Requester does not match the authenticated frontend");
+			// Mutations never use the volatile read-replay cache or an automatic execution retry.
+			if (request.actor.kind === "model" && !isHostReadAction(request.action) && this.options.approve &&
+				this.options.policy.decide(request, this.options.protectedConversationId) === "approval") {
+				const response = parseHostResponse(request.action.operation, await this.options.approve(request as ModelHostRequest));
+				if (response.requestId !== id) throw new HostControlError("failed", "Approval response correlation is invalid");
+				return response;
+			}
 			const now = this.now();
 			for (const [key, value] of this.requests) if (value.expiresAt <= now) this.requests.delete(key);
 			const digest = createHash("sha256").update(canonical([this.options.hostId, request])).digest("hex");

@@ -41,7 +41,7 @@ test("approval phase receipts cannot skip consent, extend lifetime or claim an u
 	]) assert.throws(() => parseHostApprovalRecord(changed));
 	const failed = { ...accepted, phase: "failed", result: { version: "1.0.0", requestId: "request-1", ok: false,
 		error: { code: "failed", message: "Operation failed", retryable: false } } };
-	assert.doesNotThrow(() => parseHostApprovalRecord(failed));
+	assert.throws(() => parseHostApprovalRecord(failed), "completed outcomes are not durable approval receipts");
 	assert.throws(() => parseHostApprovalRecord({ ...failed, result: { ...failed.result, requestId: "other-request" } }));
 	assert.doesNotThrow(() => parseHostApprovalRecord({ ...presented, phase: "denied", decision: { choice: "deny", at: 2000, voter } }));
 	assert.doesNotThrow(() => parseHostApprovalRecord({ ...prepared, phase: "cancelled" }));

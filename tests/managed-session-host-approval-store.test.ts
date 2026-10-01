@@ -30,6 +30,8 @@ test("private approval writes survive restart, preserve frozen retries and drain
 	assert.equal(accepted.expiresAt, prepared.expiresAt);
 	await assert.rejects(reopened.transition(prepared.approvalId, { phase: "cancelled", acceptedAt: undefined }));
 	assert.equal(JSON.parse(await readFile(file, "utf8")).phase, "accepted");
+	await reopened.discard(prepared.approvalId); await reopened.discard(prepared.approvalId);
+	assert.equal(reopened.get(prepared.approvalId), undefined); await assert.rejects(stat(file), { code: "ENOENT" });
 	await reopened.close(); await assert.rejects(reopened.prepare(prepared), /closed/);
 });
 
@@ -39,7 +41,12 @@ test("capacity and conflicting preparation fail closed without discarding existi
 	await assert.rejects(store.prepare(proposal("tool-2")), /capacity/);
 	const changed = prepareHostApproval("host", prepared.request, { ...prepared.frozen, preconditions: { instance: "other" } }, prepared.createdAt);
 	await assert.rejects(store.prepare(changed), /conflicts/); assert.deepEqual(store.get(prepared.approvalId), prepared);
+	await assert.rejects(store.discard(prepared.approvalId), /settled/);
+	await store.transition(prepared.approvalId, { phase: "cancelled" }); await store.discard(prepared.approvalId);
+	await store.prepare(proposal("tool-2")); assert.equal(store.list().length, 1, "settled consent does not consume capacity forever");
 	await store.close();
+	const reopened = new HostApprovalStore(root, "host", 1); await reopened.load();
+	assert.equal(reopened.get(prepared.approvalId), undefined); await reopened.close();
 });
 
 test("malformed primary state never falls back to temporary files; wrong ownership and privacy are rejected", async (t) => {

@@ -364,9 +364,10 @@ the existing bounded replay/policy seams were corrected without a new design.
 
 `host-approval-record.ts` freezes a model mutation's request, independently
 identified run/tool call, exact enumerated effects, private owner preconditions
-and original 15-minute expiry. Private JSON structure/bytes are bounded, including
-reserved capacity for the eventual result. Strict phase transitions cannot skip
-consent, replace presentation/decision receipts, or revoke an accepted operation.
+and original 15-minute expiry. Private JSON structure/bytes are bounded. Strict
+phase transitions cannot skip consent or replace presentation/decision receipts.
+The initial completed-result schema was superseded by the operator amendment
+below before any production activation.
 Matrix/local receipt shape validation is **not** sender or live-run authorization.
 
 `host-approval-store.ts` persists private per-approval records with atomic fsync
@@ -379,13 +380,13 @@ recovery instead of proceeding from potentially stale memory.
 
 Ten focused record/store fixtures and the TypeScript build pass: immutable input,
 phase/receipt invariants, independent call identity, fixed hash vector, original
-expiry, reserved result space, restart, write/close ordering, corruption, privacy,
+expiry, input bounds, restart, write/close ordering, corruption, privacy,
 symlink and capacity rejection, and uncertain-write fail-closed behavior. The
 initial record slice also passed the managed-session suite. This foundation is
 not imported by production startup and does not enable model mutation execution.
-Trusted origin/run tracking, owner-specific execution/reconciliation, retention
-lifecycle, Matrix/native presentation, authenticated votes, public dispatcher
-fault fixtures and #111 recovery integration remain #108 work.
+At this foundation boundary, trusted origin/run tracking, concrete execution,
+Matrix/native presentation, authenticated votes, public dispatcher fault fixtures
+and #111 recovery integration remained #108 work.
 
 The next foundation separates shared identity-schema leaves (preserving existing
 exports) so adapter envelopes can later reference host action contracts without
@@ -399,3 +400,27 @@ Five focused origin fixtures and existing live-workspace contract fixtures pass.
 The helper explicitly requires fresh nonce-authenticated attachment evidence from
 its caller; the fresh IPC exchange and native run tracker are not implemented by
 these pure fixtures and remain necessary before production exposure.
+
+### Operator amendment: single attempts, not completed-action replay
+
+On 2026-10-02 the operator explicitly chose to accept disconnection-timing
+failures instead of durable completed-action receipts and automatic mutation
+replay. #108 and the normative plan/contract now reflect that decision. The
+previous retention question is resolved, not an outstanding blocker.
+
+`HostApprovals` now provides the dispatcher with a pending-consent execution
+seam. It coalesces an active call only, freezes effects, waits without a broad
+lifecycle lock, checks operator voter identity, expiry, live requester and exact
+preconditions, then consumes consent before one execution attempt. Completed
+outcomes are not persisted. Consumed records recovered after interruption yield
+an uncertainty report and are discarded, never an instruction to execute again.
+Settled records release store capacity through durable removal. Existing read
+response caching and owner-specific safety checks remain separate.
+
+Public-dispatcher fixtures cover independent concurrent approvals, duplicate
+active calls/votes, denial and new-call consent, expiry, cancellation, stale
+preconditions, fresh requester checks, unauthorized Matrix voters, uncertain
+execution-response loss without retry, consumed-consent recovery without
+execution, and admitted self-stop/caller-loss completion. These use controlled
+presenters/executors and the real private store; they do not yet prove native
+Pi dialogs, Matrix poll integration or deployed approval execution.
