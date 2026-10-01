@@ -250,5 +250,10 @@ and peer checks. A gated detach test verifies this boundary deterministically.
 All 305 managed-session tests and source contracts pass. Two intermediate fixture
 failures were corrected without weakening production validation: Pi signatures
 require `v: 1` / `final_answer`, and workspace-identify rejects resolve-only fields.
+The full `nix run .#verify` gate passed. An intentional two-axis committed-state
+#106 audit at `acd188f` reported no Standards or Spec findings. The source LSP
+checks are clean; cached vendor telemetry declarations and an upstream settings
+schema URL still emit unrelated editor diagnostics. Account readiness, actual
+phone delivery and the remaining epic frontends are not claimed here.
 
 No push, deployment, live migration or phone-delivery claim is made.
