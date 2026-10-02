@@ -14,7 +14,7 @@ export const ExactWindowProofSchema = Type.Object({
 }, { additionalProperties: false });
 export type ExactWindowProof = Static<typeof ExactWindowProofSchema>;
 export function parseExactWindowProof(value: unknown): ExactWindowProof {
-	if (!Check(ExactWindowProofSchema, value)) throw Error("Exact window ownership is unavailable");
+	if (!Check(ExactWindowProofSchema, value) || BigInt(value.panePid) > 2147483647n || BigInt(value.serverId.split(":")[0]!) > 2147483647n) throw Error("Exact window ownership is unavailable");
 	return structuredClone(value);
 }
 export function assertExactWindowBinding(conversationId: string, window: { sessionName: string; windowId: string; paneId: string; ownership?: ExactWindowProof }): void {

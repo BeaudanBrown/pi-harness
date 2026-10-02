@@ -588,4 +588,11 @@ retirement targets retain the complete proof, reject binding mismatch or proof
 downgrade, and project-window parsing preserves the optional proof. Legacy state
 remains readable without gaining new authority. Launch/retirement runtime cutover
 still needs to select these new operations; these tests are not live deployment
-or complete #109/#110 acceptance.
+or complete #109/#110 acceptance. Follow-up nix-dotfiles commits `879dec8` and
+`ad2a05b` exercise the real exact-create dispatch with dummy Pi processes and add
+read-only exact ownership checks plus linked-window refusal. The harness mirrors
+`match`/`gone`/`changed` checks and bounds PIDs before accepting ownership. Complete
+Go tests and five focused harness ownership tests pass; the packaged harness
+managed-session/source gates passed for the ownership integration. The relay
+package explicitly includes the new shared schema (an initial missing-copy
+packaging failure was corrected). No live tmux sessions were used.

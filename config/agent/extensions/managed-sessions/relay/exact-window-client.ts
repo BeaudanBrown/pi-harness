@@ -27,6 +27,11 @@ export class ExactWindowClient {
 		if (proof.conversationId !== conversationId) throw Error("Exact window observation changed conversation");
 		return proof;
 	}
+	async check(value: ExactWindowProof): Promise<"match" | "gone" | "changed"> {
+		const result = await this.invoke("window-check-exact", parseExactWindowProof(value));
+		if (Object.keys(result).length !== 1 || typeof result.state !== "string" || !["match", "gone", "changed"].includes(result.state)) throw Error("Exact window state is unknown");
+		return result.state as "match" | "gone" | "changed";
+	}
 	async terminate(value: ExactWindowProof): Promise<boolean> {
 		const proof = parseExactWindowProof(value);
 		const result = await this.invoke("window-terminate-exact", proof);

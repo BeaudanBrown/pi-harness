@@ -27,6 +27,17 @@ test("exact window client preserves frozen identity and never falls back to lega
 	await assert.rejects(unavailable.terminate(proof), /unsupported/);
 });
 
+test("exact observation distinguishes disappearance from changed ownership without mutating", async () => {
+	for (const state of ["match", "gone", "changed"] as const) {
+		const client = new ExactWindowClient(async (operation, request) => { assert.equal(operation, "window-check-exact"); assert.deepEqual(request, proof); return { state }; });
+		assert.equal(await client.check(proof), state);
+	}
+	await assert.rejects(new ExactWindowClient(async () => ({ state: ["gone"] })).check(proof), /unknown/);
+	await assert.rejects(new ExactWindowClient(async () => ({ state: "gone", extra: true })).check(proof), /unknown/);
+	assert.throws(() => parseExactWindowProof({ ...proof, panePid: "2147483648" }));
+	assert.throws(() => parseExactWindowProof({ ...proof, serverId: `2147483648:456:${"a".repeat(32)}` }));
+});
+
 test("exact creation binds the reserved launch and workspace to the returned ownership", async () => {
 	const placement = { rootKey: "projects", workspace: "workspace", relativeCwd: "" };
 	const reply = { ...placement, conversationId, sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, role: "conversation", ownership: proof };
