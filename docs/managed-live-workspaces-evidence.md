@@ -524,3 +524,24 @@ exclude terminal conversations. Shutdown aborts cleanup and drains queued scopes
 without beginning their effects. Two new exclusion/shutdown fixtures and existing
 hierarchy/enrollment/ancestor checks pass (23 focused tests). This supplies the
 serialization boundary; it does not itself execute Space cleanup.
+
+Ancestor cleanup now also has permanent resource-level negative authority in the
+private hierarchy. Under the cleanup lock, a freshly verified unreferenced Space
+is fenced before account effects. A fence prevents old binding reuse even if the
+bot is later re-invited; shared ancestor retries match complete provenance and
+both account identities. Completion cannot erase the fence. Only an explicit new
+conversation reservation creates successor ancestor creation keys/aliases; load,
+status and cleanup never do. Pending old cleanup does not block fresh identities,
+and its frozen targets cannot follow those successors. The registry's permanent
+conversation authority is injected into hierarchy admission and ordinary discovery.
+
+| Boundary / acceptance | Evidence and recovery |
+| --- | --- |
+| Fence before account effects | Referenced and foreign targets reject; before/after write injection poisons admission until restart |
+| Completion after exact effects | Before/after completion write injection recovers only the stored phase, without remote effects |
+| New conversation/name reuse | Original aliases remain in the fixture; explicit new reservation creates distinct ancestor rooms and preserves host/checkout identity |
+| Shared resource / retry identity | Frozen provenance and account IDs must match; changed account identity rejects |
+| Offline/restart planning | Reload performs zero Matrix calls; successor provenance is frozen from private hierarchy, not rediscovered |
+
+These are #109 ownership primitives, not deployed effects or completed runtime
+assembly. Account execution remains #112's integration boundary.

@@ -6,6 +6,8 @@ import test from "node:test";
 import { HostLifecycle, type ResolvedWorkspace } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
+import { retirementTargets } from "../config/agent/extensions/managed-sessions/relay/retirement-targets.js";
+import type { RetirementTarget } from "../config/agent/extensions/managed-sessions/relay/retirement-store.js";
 import type { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import type { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { migrateV1Manifest } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
@@ -58,6 +60,66 @@ class MatrixFixture {
 		this.effect(`link:${kind}`, () => this.links.add(`${parent}/${room}`));
 	}
 }
+
+test("retired Space fences survive restart and only explicit new reservations create fresh ancestor identities", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "hierarchy-retired-spaces-")); const matrix = new MatrixFixture(); const retired = new Set<string>();
+	const make = () => new LiveHierarchy(root, hostId, matrix, () => coordinator, (id) => retired.has(id));
+	let hierarchy = make(); await hierarchy.load(); t.after(async () => { await hierarchy.close(); await rm(root, { recursive: true, force: true }); });
+	const first = await hierarchy.prepare(placement); const binding = await hierarchy.provision(first.conversationId);
+	const target = (roomId: string, childRoomId: string, spaceKind: "checkout_space" | "project_space"): Extract<RetirementTarget, { kind: "ancestor" }> => {
+		const proof = matrix.rooms.get(roomId)!;
+		return { kind: "ancestor", roomId, childRoomId, spaceKind, creationKey: proof.creationKey, provenance: proof,
+			operatorUserId: "@operator:test", botUserId: "@bot:test" };
+	};
+	const checkout = target(binding.checkoutSpace, binding.roomId, "checkout_space");
+	const project = target(binding.projectSpace, binding.checkoutSpace, "project_space");
+	await assert.rejects(hierarchy.fenceSpace(checkout), /still referenced/);
+	retired.add(first.conversationId);
+	await hierarchy.withProjectCleanup(placement.projectKey, async () => { await hierarchy.fenceSpace(checkout); await hierarchy.fenceSpace(project); });
+	// Pending old account cleanup must not block a fresh local identity/reservation.
+	await assert.rejects(hierarchy.provision(first.conversationId), /permanently retired/);
+	assert.equal(hierarchy.status(first.conversationId), undefined); assert.deepEqual(hierarchy.listConversations(), []);
+	await hierarchy.close(); const calls = matrix.calls; hierarchy = make(); await hierarchy.load(); assert.equal(matrix.calls, calls);
+	assert.equal(hierarchy.spaceRetirement(checkout), "pending");
+	assert.throws(() => hierarchy.spaceRetirement({ ...checkout, botUserId: "@other:test" }), /identity changed/);
+	// Old room aliases still exist and their cleanup is pending; neither permits re-adoption.
+	const second = await hierarchy.prepare({ ...placement, creationKey: "second" }); const fresh = await hierarchy.provision(second.conversationId);
+	assert.equal(hierarchy.spaceRetirement(checkout), "pending");
+	await hierarchy.completeSpace(checkout); await hierarchy.completeSpace(project);
+	assert.notEqual(fresh.projectSpace, binding.projectSpace); assert.notEqual(fresh.checkoutSpace, binding.checkoutSpace); assert.notEqual(fresh.roomId, binding.roomId);
+	assert.equal(fresh.hostSpace, binding.hostSpace); assert.equal(fresh.checkoutId, binding.checkoutId);
+	const planned = retirementTargets({ hostId, operatorUserId: "@operator:test", botUserId: "@bot:test", hostSpace: fresh.hostSpace,
+		manifest: { ...coordinator, ...fresh, kind: "project", creationKey: "second", projectKey: placement.projectKey },
+		stop: { kind: "stop", generationId: `gen_${"a".repeat(32)}` }, ancestorProvenance: (id) => hierarchy.ancestorProvenance(id) });
+	for (const effect of planned) if (effect.kind === "ancestor") {
+		assert.deepEqual(effect.provenance, matrix.rooms.get(effect.roomId)); assert.match(effect.creationKey, /\.r\./);
+	}
+	assert.equal(hierarchy.spaceRetirement(checkout), "done"); await assert.rejects(hierarchy.prepare(placement), /permanently retired/);
+	await hierarchy.close(); hierarchy = make(); await hierarchy.load();
+	assert.deepEqual(await hierarchy.provision(second.conversationId), fresh);
+	assert.deepEqual(await hierarchy.prepare({ ...placement, creationKey: "second" }), second);
+});
+
+test("uncertain Space fence and completion writes poison admission and recover only durable authority", async (t) => {
+	for (const boundary of ["fence", "complete"] as const) for (const timing of ["before", "after"] as const) {
+		const root = await mkdtemp(join(tmpdir(), "hierarchy-space-write-")); t.after(() => rm(root, { recursive: true, force: true }));
+		const matrix = new MatrixFixture(); let retired = false;
+		const make = () => new LiveHierarchy(root, hostId, matrix, () => coordinator, () => retired);
+		const hierarchy = make(); await hierarchy.load(); const conversation = await hierarchy.prepare(placement); const binding = await hierarchy.provision(conversation.conversationId);
+		retired = true; const proof = matrix.rooms.get(binding.checkoutSpace)!;
+		const target: Extract<RetirementTarget, { kind: "ancestor" }> = { kind: "ancestor", roomId: binding.checkoutSpace, childRoomId: binding.roomId,
+			spaceKind: "checkout_space", creationKey: proof.creationKey, provenance: proof, operatorUserId: "@operator:test", botUserId: "@bot:test" };
+		if (boundary === "complete") await hierarchy.fenceSpace(target);
+		const file = (hierarchy as unknown as { file: { write: (state: unknown) => Promise<void> } }).file; const save = file.write.bind(file);
+		file.write = async (state) => { if (timing === "after") await save(state); throw Error("interrupted Space write"); };
+		await assert.rejects(boundary === "fence" ? hierarchy.fenceSpace(target) : hierarchy.completeSpace(target), /interrupted/);
+		await assert.rejects(hierarchy.prepare({ ...placement, creationKey: "new" }), /authority is unavailable/);
+		assert.throws(() => hierarchy.spaceRetirement(target), /authority is unavailable/); await hierarchy.close();
+		const calls = matrix.calls; const recovered = make(); await recovered.load();
+		assert.equal(recovered.spaceRetirement(target), boundary === "complete" ? timing === "after" ? "done" : "pending" : timing === "after" ? "pending" : undefined);
+		assert.equal(matrix.calls, calls); await recovered.close();
+	}
+});
 
 test("ancestor cleanup excludes same-project provisioning and reservations without blocking other projects", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "hierarchy-cleanup-gate-")); const matrix = new MatrixFixture();

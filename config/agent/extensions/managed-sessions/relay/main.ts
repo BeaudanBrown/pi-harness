@@ -362,7 +362,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		recoveryMonitor.start();
 		if (coordinatorValues.every((value) => value?.trim())) {
 			hierarchy = new LiveHierarchy(resolve(stateDirectory, "live-workspaces"), hostId, matrix,
-				() => registry.listManifests().find((manifest) => manifest.kind === "coordinator"));
+				() => registry.listManifests().find((manifest) => manifest.kind === "coordinator"),
+				(conversationId) => Boolean(registry.retirement(conversationId)));
 			await hierarchy.load();
 			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(stateDirectory, "project-sessions");
 			hostLifecycle = new HostLifecycle({

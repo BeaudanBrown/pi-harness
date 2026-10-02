@@ -1,8 +1,12 @@
 import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
+import { MatrixUserIdSchema } from "../identity-contracts.js";
+import type { RetirementTarget } from "./retirement-store.js";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { deriveConversationId, type ConversationManifest } from "../contracts.js";
-import { deriveCheckoutId, parseManagedProvenance, safeManagedTitle, type ManagedProvenance } from "../managed-provenance.js";
+import { deriveCheckoutId, parseManagedProvenance, safeManagedTitle, ManagedProvenanceSchema, type ManagedProvenance } from "../managed-provenance.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 
@@ -18,10 +22,22 @@ const NodeSchema = Type.Union([
 	Type.Object({ ...common, kind: Type.Literal("conversation"), parentKey: identifier, projectKey: stable("project"), checkoutId: stable("checkout"), conversationId: stable("conv") }, { additionalProperties: false }),
 ]);
 type Node = Static<typeof NodeSchema>;
-const StateSchema = Type.Object({ version: Type.Literal(1), hostId: identifier, nodes: Type.Array(NodeSchema, { maxItems: 16384 }) }, { additionalProperties: false });
+type AncestorTarget = Extract<RetirementTarget, { kind: "ancestor" }>;
+const SpaceRetirementSchema = Type.Object({ roomId: room, provenance: ManagedProvenanceSchema,
+	operatorUserId: MatrixUserIdSchema, botUserId: MatrixUserIdSchema, complete: Type.Boolean() }, { additionalProperties: false });
+type SpaceRetirement = Static<typeof SpaceRetirementSchema>;
+function spaceIdentity(target: AncestorTarget): Omit<SpaceRetirement, "complete"> {
+	return { roomId: target.roomId, provenance: target.provenance, operatorUserId: target.operatorUserId, botUserId: target.botUserId };
+}
+function successorKey(key: string, roomId: string): string { return `${key}.r.${createHash("sha256").update(roomId).digest("hex").slice(0, 32)}`; }
+const StateSchema = Type.Object({ version: Type.Literal(1), hostId: identifier, nodes: Type.Array(NodeSchema, { maxItems: 16384 }),
+	retiredSpaces: Type.Optional(Type.Array(SpaceRetirementSchema, { maxItems: 16384 })) }, { additionalProperties: false });
 type State = Static<typeof StateSchema>;
 function parse(value: unknown): State {
 	if (!Check(StateSchema, value) || Buffer.byteLength(JSON.stringify(value)) > 16 * 1024 * 1024) throw Error("Invalid or full live hierarchy state");
+	const retired = value.retiredSpaces ?? [];
+	if (new Set(retired.map((item) => item.roomId)).size !== retired.length || retired.some((item) => item.provenance.hostId !== value.hostId ||
+		!["project_space", "worktree_space"].includes(item.provenance.kind))) throw Error("Invalid retired Space authority");
 	const nodes = new Map(value.nodes.map((node) => [node.key, node]));
 	const rooms = value.nodes.flatMap((node) => node.roomId ? [node.roomId] : []);
 	if (nodes.size !== value.nodes.length || new Set(rooms).size !== rooms.length) throw Error("Duplicate live hierarchy identity");
@@ -35,7 +51,10 @@ function parse(value: unknown): State {
 		const expectedParentKind = node.kind === "project_space" ? "host_space" : node.kind === "worktree_space" ? "project_space" : "worktree_space";
 		const expectedKey = node.kind === "project_space" ? node.projectKey : node.kind === "worktree_space" ? node.checkoutId : node.conversationId;
 		if (node.key !== expectedKey || parent?.kind !== expectedParentKind ||
-			(node.kind !== "conversation" && node.creationKey !== node.key) ||
+			(node.kind !== "conversation" && node.creationKey !== node.key && !retired.some((item) =>
+				"projectKey" in item.provenance && item.provenance.projectKey === node.projectKey && item.provenance.kind === node.kind &&
+				(node.kind !== "worktree_space" || "checkoutId" in item.provenance && item.provenance.checkoutId === node.checkoutId) &&
+				node.creationKey === successorKey(node.key, item.roomId))) ||
 			(node.kind === "conversation" && node.conversationId !== deriveConversationId(value.hostId, node.creationKey)) ||
 			("projectKey" in parent && parent.projectKey !== node.projectKey) ||
 			("checkoutId" in parent && node.kind === "conversation" && parent.checkoutId !== node.checkoutId) ||
@@ -59,6 +78,7 @@ export interface HierarchyBinding { conversationId: string; checkoutId: string; 
 /** Local reservation precedes remote effects. Loading/status never reparents existing rooms. */
 export class LiveHierarchy {
 	private state: State;
+	private poisoned = false;
 	private work: Promise<void> = Promise.resolve();
 	private readonly running = new Map<string, Promise<string>>();
 	private readonly projectScopes = new Map<string, { tail: Promise<void>; readers: Set<Promise<void>>; writers: number }>();
@@ -66,7 +86,8 @@ export class LiveHierarchy {
 	private readonly controller = new AbortController();
 	private readonly file: AtomicJsonFile<State>;
 	constructor(private readonly directory: string, readonly hostId: string, private readonly matrix: HierarchyMatrix,
-		private readonly coordinator: () => ConversationManifest | undefined) {
+		private readonly coordinator: () => ConversationManifest | undefined,
+		private readonly isRetired: (conversationId: string) => boolean = () => false) {
 		this.state = { version: 1, hostId, nodes: [] }; this.file = new AtomicJsonFile(join(directory, "hierarchy.json"), parse);
 	}
 	async load(): Promise<void> {
@@ -82,6 +103,7 @@ export class LiveHierarchy {
 		this.controller.signal.throwIfAborted();
 		const checkoutId = deriveCheckoutId(this.hostId, input.projectKey, input.canonicalCheckoutRoot);
 		const conversationId = deriveConversationId(this.hostId, input.creationKey);
+		if (this.isRetired(conversationId)) throw Error("Managed conversation is permanently retired");
 		const requested: Node[] = [
 			{ key: "host", creationKey: "host", kind: "host_space", title: this.hostId, linked: false },
 			{ key: input.projectKey, creationKey: input.projectKey, kind: "project_space", projectKey: input.projectKey, parentKey: "host", title: input.projectTitle, linked: false },
@@ -89,6 +111,24 @@ export class LiveHierarchy {
 			{ key: conversationId, creationKey: input.creationKey, kind: "conversation", projectKey: input.projectKey, checkoutId, conversationId, parentKey: checkoutId, title: input.conversationTitle, linked: false },
 		];
 		await this.mutate((state) => {
+			// Only an explicit new reservation replaces a fenced branch; cleanup may still be pending.
+			// Load/status never replace resources, and old cleanup keeps its original frozen IDs.
+			for (const wanted of requested.filter((node) => node.kind === "project_space" || node.kind === "worktree_space")) {
+				const old = state.nodes.find((node) => node.key === wanted.key);
+				const fence = state.retiredSpaces?.find((item) => item.roomId === old?.roomId);
+				if (fence) {
+					const branch = new Set([wanted.key]);
+					for (let depth = 0; depth < 3; depth++) for (const node of state.nodes) if ("parentKey" in node && branch.has(node.parentKey)) branch.add(node.key);
+					for (const node of state.nodes.filter((item) => branch.has(item.key))) {
+						if (node.kind === "conversation" ? !this.isRetired(node.conversationId) : node.roomId && !state.retiredSpaces?.some((item) => item.roomId === node.roomId))
+							throw Error("Retired Space still has unresolved hierarchy references");
+					}
+					state.nodes = state.nodes.filter((node) => !branch.has(node.key));
+				}
+				const previous = state.retiredSpaces?.filter((item) => item.provenance.kind === wanted.kind && "projectKey" in item.provenance &&
+					item.provenance.projectKey === input.projectKey && (wanted.kind !== "worktree_space" || "checkoutId" in item.provenance && item.provenance.checkoutId === checkoutId)).at(-1);
+				if (previous) wanted.creationKey = successorKey(wanted.key, previous.roomId);
+			}
 			for (const wanted of requested) {
 				const existing = state.nodes.find((item) => item.key === wanted.key);
 				if (!existing) {
@@ -104,10 +144,11 @@ export class LiveHierarchy {
 		return { conversationId, checkoutId };
 	}
 	listConversations(): Array<{ conversationId: string; checkoutId: string; projectKey: string; title: string; phase: "pending" | "hierarchy_ready" }> {
-		return this.state.nodes.flatMap((node) => node.kind === "conversation" ? [{ conversationId: node.conversationId,
+		return this.state.nodes.flatMap((node) => node.kind === "conversation" && !this.isRetired(node.conversationId) ? [{ conversationId: node.conversationId,
 			checkoutId: node.checkoutId, projectKey: node.projectKey, title: node.title, phase: node.linked ? "hierarchy_ready" as const : "pending" as const }] : []);
 	}
 	status(conversationId: string): "pending" | "hierarchy_ready" | undefined {
+		if (this.isRetired(conversationId)) return undefined;
 		const node = this.state.nodes.find((item) => item.kind === "conversation" && item.key === conversationId);
 		return node ? node.linked ? "hierarchy_ready" : "pending" : undefined; // Not a phone/account-ready claim.
 	}
@@ -118,7 +159,9 @@ export class LiveHierarchy {
 	}
 	private async provisionOnce(conversationId: string): Promise<HierarchyBinding> {
 		this.controller.signal.throwIfAborted();
+		if (this.isRetired(conversationId)) throw Error("Managed conversation is permanently retired");
 		const reserved = this.node(conversationId);
+		this.assertUnretiredBranch(reserved);
 		if (reserved.kind !== "conversation") throw Error("Expected conversation hierarchy target");
 		if (!reserved.linked) await this.ensure(conversationId);
 		this.controller.signal.throwIfAborted();
@@ -127,8 +170,46 @@ export class LiveHierarchy {
 		return { conversationId, checkoutId: conversation.checkoutId, roomId: conversation.roomId!,
 			checkoutSpace: this.node(conversation.checkoutId).roomId!, projectSpace: this.node(conversation.projectKey).roomId!, hostSpace: this.node("host").roomId! };
 	}
+	ancestorProvenance(roomId: string): ManagedProvenance | undefined {
+		this.assertAvailable(); const node = this.state.nodes.find((item) => item.roomId === roomId);
+		return node && (node.kind === "project_space" || node.kind === "worktree_space") ? structuredClone(provenance(this.hostId, node)) : undefined;
+	}
+	/** Call under withProjectCleanup after fresh checks, before the first account mutation. */
+	fenceSpace(target: AncestorTarget): Promise<void> {
+		return this.mutate((state) => {
+			const saved = state.retiredSpaces?.find((item) => item.roomId === target.roomId);
+			if (saved) { this.matchSpace(saved, target); return; }
+			const node = state.nodes.find((item) => item.roomId === target.roomId);
+			if (!node || !["project_space", "worktree_space"].includes(node.kind) || !isDeepStrictEqual(provenance(this.hostId, node), target.provenance)) throw Error("Space retirement ownership changed");
+			if (this.hasReferences(target.roomId, this.isRetired)) throw Error("Space is still referenced");
+			(state.retiredSpaces ??= []).push({ ...structuredClone(spaceIdentity(target)), complete: false });
+		}, true);
+	}
+	completeSpace(target: AncestorTarget): Promise<void> {
+		return this.mutate((state) => {
+			const saved = state.retiredSpaces?.find((item) => item.roomId === target.roomId);
+			if (!saved) throw Error("Space retirement was not fenced"); this.matchSpace(saved, target); saved.complete = true;
+		}, true);
+	}
+	spaceRetirement(target: AncestorTarget): "pending" | "done" | undefined {
+		this.assertAvailable(); const saved = this.state.retiredSpaces?.find((item) => item.roomId === target.roomId);
+		if (!saved) return undefined; this.matchSpace(saved, target); return saved.complete ? "done" : "pending";
+	}
+	private matchSpace(saved: SpaceRetirement, target: AncestorTarget): void {
+		const { complete: _complete, ...identity } = saved;
+		if (!isDeepStrictEqual(identity, spaceIdentity(target))) throw Error("Retired Space identity changed");
+	}
+	private assertAvailable(): void { if (this.poisoned) throw Error("Hierarchy retirement authority is unavailable; restart for ownership-safe recovery"); }
+	private assertUnretiredBranch(node: Node): void {
+		let current: Node | undefined = node;
+		while (current) {
+			if (this.state.retiredSpaces?.some((item) => item.roomId === current!.roomId)) throw Error("Ancestor Space is permanently retired");
+			current = "parentKey" in current ? this.node(current.parentKey) : undefined;
+		}
+	}
 	/** Includes unpublished reservations; caller supplies permanent conversation retirement authority. */
 	hasReferences(roomId: string, isRetired: (conversationId: string) => boolean): boolean {
+		this.assertAvailable();
 		const nodes = new Map(this.state.nodes.map((node) => [node.key, node]));
 		for (const node of this.state.nodes) {
 			if (node.kind !== "conversation" || isRetired(node.conversationId)) continue;
@@ -147,6 +228,7 @@ export class LiveHierarchy {
 	}
 	private async projectScope<T>(projectKey: string, exclusive: boolean, operation: () => Promise<T>): Promise<T> {
 		this.controller.signal.throwIfAborted();
+		this.assertAvailable();
 		if (!/^project_[a-f0-9]{32}$/.test(projectKey)) throw Error("Invalid hierarchy project identity");
 		if (this.scopedWork.size >= 256) throw Error("Hierarchy operation capacity reached");
 		let scope = this.projectScopes.get(projectKey);
@@ -154,7 +236,7 @@ export class LiveHierarchy {
 		const blockers = exclusive ? [scope.tail, ...scope.readers] : [scope.tail];
 		let release!: () => void; const done = new Promise<void>((resolve) => { release = resolve; }); this.scopedWork.add(done);
 		if (exclusive) { scope.tail = done; scope.writers++; } else scope.readers.add(done);
-		try { await Promise.all(blockers); this.controller.signal.throwIfAborted(); return await operation(); }
+		try { await Promise.all(blockers); this.controller.signal.throwIfAborted(); this.assertAvailable(); return await operation(); }
 		finally {
 			if (exclusive) scope.writers--; else scope.readers.delete(done);
 			if (!scope.writers && !scope.readers.size) this.projectScopes.delete(projectKey);
@@ -172,6 +254,7 @@ export class LiveHierarchy {
 	private async ensureOnce(key: string): Promise<string> {
 		this.controller.signal.throwIfAborted();
 		let node = this.node(key);
+		this.assertUnretiredBranch(node);
 		if (node.kind === "host_space") {
 			const coordinator = this.coordinator();
 			if (!coordinator?.hostSpace) throw Error("Host Space provisioning is pending");
@@ -202,8 +285,12 @@ export class LiveHierarchy {
 	private update(key: string, fields: { roomId?: string; parentRoomId?: string; createAttempted?: true; linked?: boolean }): Promise<void> {
 		return this.mutate((state) => { Object.assign(state.nodes.find((item) => item.key === key)!, fields); });
 	}
-	private mutate(change: (state: State) => void): Promise<void> {
-		const result = this.work.then(async () => { const next = structuredClone(this.state); change(next); await this.file.write(next); this.state = next; });
+	private mutate(change: (state: State) => void, retirement = false): Promise<void> {
+		const result = this.work.then(async () => {
+			this.assertAvailable(); const next = structuredClone(this.state); change(next); parse(next);
+			try { await this.file.write(next); } catch (error) { if (retirement) this.poisoned = true; throw error; }
+			this.state = next;
+		});
 		this.work = result.catch(() => undefined); return result;
 	}
 }
