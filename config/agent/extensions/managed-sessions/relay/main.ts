@@ -40,7 +40,7 @@ import { readHostPolicy } from "./host-policy.js";
 import { HostDispatcher } from "./host-dispatcher.js";
 import { HostApprovalRuntime } from "./host-approval-runtime.js";
 import { HostApprovalStore } from "./host-approval-store.js";
-import { ManagedHostMutationOwner } from "./host-mutation-owner.js";
+import { ManagedHostMutationOwner, isManagedHostPreview } from "./host-mutation-owner.js";
 import { HostReadModel } from "./host-read-model.js";
 import { ConversationRetirement } from "./conversation-retirement.js";
 import { HostControlServer } from "./host-control-server.js";
@@ -399,14 +399,21 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
 			} });
+			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server,
+				activeRun: async (id) => {
+					const witness = await hostApprovals!.controls.proofs.request(id);
+					if (!witness) throw new Error("Active target run observation is unavailable");
+					return witness.phase === "active" ? { runId: witness.runId } : undefined;
+				} }) : undefined;
 			const dispatchOptions: ConstructorParameters<typeof HostDispatcher>[0] = {
-				hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy, read: (request) => reads.read(request),
+				hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy,
+				read: (request) => owner && isManagedHostPreview(request.action) ? owner.preview(request.action) : reads.read(request),
 				...(hostLifecycle ? { launch: (action: { operation: "conversation.open" | "conversation.resume"; conversationId: string }) =>
 					action.operation === "conversation.open" ? hostLifecycle!.openConversation(action.conversationId) : hostLifecycle!.resumeConversation(action.conversationId) } : {}) };
 			if (hostLifecycle) {
 				const store = new HostApprovalStore(resolve(stateDirectory, "host-approvals"), hostId); await store.load();
 				hostApprovals = new HostApprovalRuntime({ ...dispatchOptions, store, matrix, operatorUserIds: new Set([matrix.operatorUserId]),
-					owner: new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server }),
+					owner: owner!,
 					attachment: (id) => server!.attachment(id), capable: (id) => server!.supports(id, "approval-v1"),
 					send: (envelope) => server!.sendToConversation(envelope), room: (id) => registry.manifestByConversationId(id)?.roomId,
 					acceptedInput: (id, deliveryId) => {

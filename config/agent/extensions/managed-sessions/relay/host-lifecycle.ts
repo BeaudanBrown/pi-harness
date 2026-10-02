@@ -21,7 +21,8 @@ import {
 	type WorkspaceIdentity,
 } from "../contracts.js";
 import { deriveCheckoutId } from "../managed-provenance.js";
-import { parseHostAction, type HostResult } from "../live-workspace-contracts.js";
+import { parseHostAction, type HostAction, type HostResult } from "../live-workspace-contracts.js";
+import type { FrozenJson } from "./host-approval-record.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
@@ -152,10 +153,18 @@ interface ProjectCreationIntent {
 	sessionPersisted: boolean; projectSpaceId?: string; hostSpaceLinked?: boolean; roomId?: string; roomLinked?: boolean;
 }
 
+interface BranchPlan {
+	rootKey: string; projectWorkspace: string; commonDir: string; mainPath: string;
+	branch: string; head: string; mergeTarget: string; mergeCommit: string;
+}
+
 interface WorktreePlan {
 	rootKey: string; sourceWorkspace: string; projectWorkspace: string; targetWorkspace: string; commonDir: string; mainPath: string;
 	targetPath: string; baseRef: string; baseCommit: string; branch: string;
 }
+
+type CreationAction = Extract<HostAction, { operation: "project.create" | "conversation.create" | "worktree.create" | "worktree.conversation.create" }>;
+interface FrozenWorktreeCreation { intent?: WorktreeCreationIntent; plan?: WorktreePlan }
 
 interface WorktreeCreationIntent extends WorktreePlan {
 	creationKey: string; requestedBaseRef: string; worktreeKey: string; phase: "planned" | "created"; concept?: string; conversationCreationKey?: string;
@@ -807,15 +816,54 @@ export class HostLifecycle {
 		return statuses;
 	}
 
-	private createWorktree(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean): Promise<Record<string, unknown>> {
-		return this.runWorktreeOperation(`create:${request.creationKey}`, () => this.createWorktreeOnce(request, bundled), JSON.stringify([request, bundled]));
+	/** Read-only owner preparation; no lifecycle slot is held while consent is pending. */
+	async freezeCreation(action: CreationAction): Promise<FrozenJson> {
+		const existing = this.options.registry.manifestByCreationKey(action.creationKey);
+		if (action.operation === "project.create") {
+			const matches = (await this.workspaceList()).filter((item) => item.rootKey === action.rootKey && item.workspace === action.workspace);
+			return JSON.parse(JSON.stringify({ existing: existing ?? null, matches })) as FrozenJson;
+		}
+		if (action.operation === "conversation.create") return JSON.parse(JSON.stringify({ existing: existing ?? null, workspace: await this.resolveWorkspaceIdentity(action.placement) })) as FrozenJson;
+		const file = new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${lifecycleDigest("worktree-intent", action.creationKey)}.json`), parseWorktreeCreationIntent);
+		const intent = await readPrivateIntent(file);
+		if (intent) {
+			if (intent.rootKey !== action.rootKey || intent.sourceWorkspace !== action.workspace || intent.requestedBaseRef !== action.baseRef || intent.branch !== action.branch ||
+				intent.concept !== (action.operation === "worktree.conversation.create" ? action.title : undefined)) throw new RelayRegistryError("invalid_state", "Worktree creation identity conflicts with its saved intent");
+			return JSON.parse(JSON.stringify({ intent })) as FrozenJson;
+		}
+		const plan = parseWorktreePlan(await this.invoke("worktree-create-preview", { rootKey: action.rootKey, workspace: action.workspace, baseRef: action.baseRef, branch: action.branch }));
+		return JSON.parse(JSON.stringify({ plan })) as FrozenJson;
 	}
 
-	private async createWorktreeOnce(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean): Promise<Record<string, unknown>> {
+	async executeCreation(action: CreationAction, frozen: FrozenJson): Promise<unknown> {
+		if (!isDeepStrictEqual(await this.freezeCreation(action), frozen)) throw new RelayRegistryError("invalid_state", "Approved creation preconditions changed");
+		let result: Record<string, unknown>;
+		if (action.operation === "project.create") result = await this.createProject({ rootKey: action.rootKey, workspace: action.workspace, creationKey: action.creationKey, concept: action.title });
+		else if (action.operation === "conversation.create") result = await this.start({ creationKey: action.creationKey, concept: action.title, placement: action.placement });
+		else {
+			result = await this.createWorktree({ creationKey: action.creationKey, rootKey: action.rootKey, workspace: action.workspace,
+				baseRef: action.baseRef, branch: action.branch, ...(action.operation === "worktree.conversation.create" ? { concept: action.title } : {}) },
+				action.operation === "worktree.conversation.create", frozen as FrozenWorktreeCreation);
+			if (action.operation === "worktree.create") {
+				const workspace = String(result.workspace); const identity = await this.resolveWorkspaceIdentity({ rootKey: action.rootKey, workspace, relativeCwd: "" });
+				return { rootKey: action.rootKey, workspace, checkoutId: deriveCheckoutId(this.options.hostId, identity.projectKey, identity.workspacePath) };
+			}
+		}
+		const conversationId = String(result.targetConversationId); const launchId = this.options.registry.launchIdentity(conversationId)?.launchId;
+		if (!launchId) throw new RelayRegistryError("invalid_state", "Created conversation has no managed launch identity");
+		return { conversationId, launchId, setupState: "pending" };
+	}
+
+	private createWorktree(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean, frozen?: FrozenWorktreeCreation): Promise<Record<string, unknown>> {
+		return this.runWorktreeOperation(`create:${request.creationKey}`, () => this.createWorktreeOnce(request, bundled, frozen), JSON.stringify([request, bundled, frozen]));
+	}
+
+	private async createWorktreeOnce(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean, frozen?: FrozenWorktreeCreation): Promise<Record<string, unknown>> {
 		if (bundled !== Boolean(request.concept)) throw new RelayRegistryError("invalid_state", "Bundled worktree creation requires one conversation concept");
 		const intentPath = join(resolve(this.options.projectSessionDirectory), "worktrees", `${lifecycleDigest("worktree-intent", request.creationKey)}.json`);
 		const file = new AtomicJsonFile(intentPath, parseWorktreeCreationIntent);
 		let intent = await readPrivateIntent(file); const retry = intent !== undefined;
+		if (frozen && !isDeepStrictEqual(intent, frozen.intent)) throw new RelayRegistryError("invalid_state", "Approved worktree intent changed before admission");
 		if (intent) {
 			for (const [field, value] of Object.entries({ creationKey: request.creationKey, rootKey: request.rootKey, sourceWorkspace: request.workspace, requestedBaseRef: request.baseRef, branch: request.branch,
 				...(request.concept ? { concept: request.concept } : {}) })) if ((intent as unknown as Record<string, unknown>)[field] !== value) {
@@ -823,6 +871,7 @@ export class HostLifecycle {
 			}
 		} else {
 			const plan = parseWorktreePlan(await this.invoke("worktree-create-preview", { rootKey: request.rootKey, workspace: request.workspace, baseRef: request.baseRef, branch: request.branch }));
+			if (frozen && !isDeepStrictEqual(plan, frozen.plan)) throw new RelayRegistryError("invalid_state", "Approved worktree base or placement changed before admission");
 			const worktreeKey = `worktree_${lifecycleDigest("worktree", this.options.hostId, plan.rootKey, plan.commonDir, plan.branch)}`;
 			const conversationCreationKey = request.concept ? `worktree-conversation-${lifecycleDigest("worktree-conversation", worktreeKey, request.concept)}` : undefined;
 			intent = { ...plan, creationKey: request.creationKey, requestedBaseRef: request.baseRef, worktreeKey, phase: "planned", ...(request.concept ? { concept: request.concept, conversationCreationKey } : {}) };
@@ -840,6 +889,27 @@ export class HostLifecycle {
 		const roomLink = `https://matrix.to/#/${encodeURIComponent(manifest.roomId)}`;
 		return { operation: "worktree.conversation.create", worktreeKey: intent.worktreeKey, rootKey: intent.rootKey, workspace: intent.targetWorkspace,
 			branch: intent.branch, baseCommit: intent.baseCommit, targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId), roomLink };
+	}
+
+	async removalApprovalPreview(action: Extract<HostAction, { operation: "worktree.remove.preview" | "worktree.conversation.cleanup.preview" }>): Promise<{ intent: WorktreeRemovalIntent; checkoutId: string; activeConversations: string[] }> {
+		const preview = action.operation === "worktree.remove.preview"
+			? await this.previewWorktreeRemoval({ rootKey: action.rootKey, workspace: action.workspace, ...(action.mergeTarget ? { mergeTarget: action.mergeTarget } : {}) })
+			: await this.previewConversationCleanup(action.conversationId, action.mergeTarget);
+		const intent = await this.removalApprovalSnapshot(String(preview.removalKey));
+		const identity = await this.resolveWorkspaceIdentity({ rootKey: intent.rootKey, workspace: intent.projectWorkspace, relativeCwd: "" });
+		return { intent, checkoutId: deriveCheckoutId(this.options.hostId, identity.projectKey, intent.path), activeConversations: preview.activeConversations as string[] };
+	}
+
+	async removalApprovalSnapshot(removalKey: string): Promise<WorktreeRemovalIntent> {
+		if (!/^worktree_remove_[a-f0-9]{32}$/.test(removalKey)) throw new RelayRegistryError("invalid_state", "Invalid removal identity");
+		const intent = await readPrivateIntent(new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${removalKey}.json`), parseWorktreeRemovalIntent));
+		if (!intent) throw new RelayRegistryError("not_found", "Removal preview is unavailable");
+		return intent;
+	}
+
+	executeRemovalApproval(snapshot: FrozenJson, bundled: boolean, retire?: (conversationId: string) => Promise<unknown>): Promise<Record<string, unknown>> {
+		const intent = snapshot as unknown as WorktreeRemovalIntent;
+		return this.applyWorktreeRemoval(intent.removalKey, bundled, { snapshot: intent, retire });
 	}
 
 	private async previewWorktreeRemoval(request: { rootKey: string; workspace: string; mergeTarget?: string }, targetConversationId?: string): Promise<Record<string, unknown>> {
@@ -865,20 +935,22 @@ export class HostLifecycle {
 		return this.previewWorktreeRemoval({ rootKey: manifest.placement.rootKey, workspace: manifest.placement.workspace, ...(mergeTarget ? { mergeTarget } : {}) }, conversationId);
 	}
 
-	private applyWorktreeRemoval(removalKey: string, bundled: boolean): Promise<Record<string, unknown>> {
-		return this.runWorktreeOperation(`remove:${removalKey}`, () => this.applyWorktreeRemovalOnce(removalKey, bundled));
+	private applyWorktreeRemoval(removalKey: string, bundled: boolean, approved?: { snapshot: WorktreeRemovalIntent; retire?: (conversationId: string) => Promise<unknown> }): Promise<Record<string, unknown>> {
+		return this.runWorktreeOperation(`remove:${removalKey}`, () => this.applyWorktreeRemovalOnce(removalKey, bundled, approved));
 	}
 
-	private async applyWorktreeRemovalOnce(removalKey: string, bundled: boolean): Promise<Record<string, unknown>> {
+	private async applyWorktreeRemovalOnce(removalKey: string, bundled: boolean, approved?: { snapshot: WorktreeRemovalIntent; retire?: (conversationId: string) => Promise<unknown> }): Promise<Record<string, unknown>> {
 		const file = new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${removalKey}.json`), parseWorktreeRemovalIntent);
 		const intent = await readPrivateIntent(file); if (!intent || intent.removalKey !== removalKey) throw new RelayRegistryError("not_found", "Managed worktree removal preview was not found");
 		if (bundled !== Boolean(intent.targetConversationId)) throw new RelayRegistryError("invalid_state", "Worktree removal mode conflicts with its preview");
 		if (!intent.clean || intent.locked) throw new RelayRegistryError("invalid_state", "Managed worktree must be clean and unlocked before removal");
 		return this.runWorktreeOperation(this.workspaceOperationKey({ rootKey: intent.rootKey, workspace: intent.workspace, relativeCwd: "" }),
-			() => this.applyWorktreeRemovalLocked(file, intent, bundled));
+			() => this.applyWorktreeRemovalLocked(file, intent, bundled, approved));
 	}
 
-	private async applyWorktreeRemovalLocked(file: AtomicJsonFile<WorktreeRemovalIntent>, initialIntent: WorktreeRemovalIntent, bundled: boolean): Promise<Record<string, unknown>> {
+	private async applyWorktreeRemovalLocked(file: AtomicJsonFile<WorktreeRemovalIntent>, initialIntent: WorktreeRemovalIntent, bundled: boolean, approved?: { snapshot: WorktreeRemovalIntent; retire?: (conversationId: string) => Promise<unknown> }): Promise<Record<string, unknown>> {
+		if (approved && !isDeepStrictEqual(await readPrivateIntent(file), approved.snapshot)) throw new RelayRegistryError("invalid_state", "Approved removal intent changed before admission");
+		const retire = approved?.retire ?? ((id: string) => this.delete(id));
 		let intent = initialIntent; const removalKey = intent.removalKey;
 		const removal = intent;
 		const bound = this.options.registry.listManifests().filter((manifest) => manifest.kind === "project" && manifest.placement?.rootKey === removal.rootKey && manifest.placement.workspace === removal.workspace);
@@ -900,7 +972,7 @@ export class HostLifecycle {
 					const checked = parseWorktreeRemovalIntent({ ...fresh, removalKey, phase: "planned", targetConversationId: targetId });
 					if (!isDeepStrictEqual(checked, intent)) throw new RelayRegistryError("invalid_state", "Bundled cleanup preview changed; obtain new confirmation");
 				}
-				await this.delete(targetId);
+				await retire(targetId);
 			}
 			await this.waitForRetirementStop(targetId);
 			if (intent.phase === "planned") { intent = { ...intent, phase: "stopped" }; await file.write(intent); }
@@ -912,7 +984,7 @@ export class HostLifecycle {
 		let bridgeDeleted: boolean | undefined;
 		if (bundled && intent.phase === "removed") {
 			const target = this.options.registry.manifestByConversationId(intent.targetConversationId!);
-			if (target) await this.delete(target.conversationId);
+			if (target) await retire(target.conversationId);
 			intent = { ...intent, phase: "bridge_deleted" }; await file.write(intent); bridgeDeleted = true;
 		} else if (bundled) bridgeDeleted = true;
 		return { operation: bundled ? "worktree.conversation.cleanup.apply" : "worktree.remove.apply", removalKey, workspaceRemoved: true, ...(bridgeDeleted ? { bridgeDeleted } : {}) };
@@ -930,10 +1002,35 @@ export class HostLifecycle {
 		throw new RelayRegistryError("invalid_state", "Conversation is retired but physical stop is unverified; worktree remains preserved");
 	}
 
-	private deleteWorktreeBranch(removalKey: string): Promise<Record<string, unknown>> {
+	async branchApprovalPreview(action: Extract<HostAction, { operation: "worktree.branch.preview" }>): Promise<{ plan: BranchPlan; checkoutId: string }> {
+		const raw = await this.invoke("worktree-branch-preview", { rootKey: action.rootKey, workspace: action.workspace, branch: action.branch, mergeTarget: action.mergeTarget });
+		const fields = ["rootKey", "projectWorkspace", "commonDir", "mainPath", "branch", "head", "mergeTarget", "mergeCommit"];
+		if (Object.keys(raw).length !== fields.length || fields.some((key) => typeof raw[key] !== "string")) throw new RelayRegistryError("invalid_state", "Invalid branch preview");
+		const plan = Object.fromEntries(fields.map((key) => [key, boundedHostString(raw, key, key === "commonDir" || key === "mainPath" ? 4096 : 255)])) as unknown as BranchPlan;
+		if (plan.rootKey !== action.rootKey || plan.branch !== action.branch || !isAbsolute(plan.commonDir) || !isAbsolute(plan.mainPath) ||
+			![plan.head, plan.mergeCommit].every((id) => /^[a-f0-9]{40,64}$/.test(id))) throw new RelayRegistryError("invalid_state", "Branch preview identity changed");
+		const identity = await this.resolveWorkspaceIdentity({ rootKey: action.rootKey, workspace: plan.projectWorkspace, relativeCwd: "" });
+		if (identity.workspacePath !== plan.mainPath) throw new RelayRegistryError("invalid_state", "Branch repository identity changed");
+		return { plan, checkoutId: deriveCheckoutId(this.options.hostId, identity.projectKey, identity.workspacePath) };
+	}
+
+	executeBranchApproval(snapshot: FrozenJson): Promise<Record<string, unknown>> {
+		const frozen = snapshot as unknown as Awaited<ReturnType<HostLifecycle["branchApprovalPreview"]>>;
+		const plan = frozen.plan;
+		return this.runWorktreeOperation(`repository:${plan.commonDir}`, async () => {
+			const current = await this.branchApprovalPreview({ operation: "worktree.branch.preview", rootKey: plan.rootKey, workspace: plan.projectWorkspace, branch: plan.branch, mergeTarget: plan.mergeTarget });
+			if (!isDeepStrictEqual(current, frozen)) throw new RelayRegistryError("invalid_state", "Approved branch target changed before admission");
+			const result = await this.invoke("worktree-branch-delete", { ...plan, resumeExisting: false });
+			if (result.branch !== plan.branch || result.deleted !== true || Object.keys(result).some((key) => !["branch", "deleted"].includes(key))) throw new RelayRegistryError("launch_failed", "Invalid branch deletion result");
+			return result;
+		});
+	}
+
+	private deleteWorktreeBranch(removalKey: string, approved?: WorktreeRemovalIntent): Promise<Record<string, unknown>> {
 		return this.runWorktreeOperation(`branch:${removalKey}`, async () => {
 			const file = new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${removalKey}.json`), parseWorktreeRemovalIntent);
 			let intent = await readPrivateIntent(file); if (!intent || intent.removalKey !== removalKey) throw new RelayRegistryError("not_found", "Managed worktree removal preview was not found");
+			if (approved && !isDeepStrictEqual(intent, approved)) throw new RelayRegistryError("invalid_state", "Approved branch target changed before admission");
 			if (!["removed", "bridge_deleted", "branch_deleted"].includes(intent.phase) || !intent.mergeTarget || !intent.mergeCommit || intent.merged !== true) {
 				throw new RelayRegistryError("invalid_state", "Branch deletion requires a completed removal previewed as fully merged");
 			}
@@ -1147,7 +1244,14 @@ export class HostLifecycle {
 		waiter.resolve(status === "ready");
 	}
 
-	private async refresh(conversationId: string, expected?: { attachmentId: string; desiredRuntimeId: string }): Promise<Record<string, unknown>> {
+	async refreshApproved(conversationId: string, attachmentId?: string): Promise<HostResult<"conversation.refresh">> {
+		await this.refresh(conversationId, attachmentId ? { attachmentId } : undefined);
+		const launchId = this.options.registry.launchIdentity(conversationId)?.launchId;
+		if (!launchId) throw new RelayRegistryError("invalid_state", "Refreshed conversation has no launch identity");
+		return { conversationId, launchId, launchState: this.options.registry.conversationState(conversationId) === "active" ? "attached" : "failed" };
+	}
+
+	private async refresh(conversationId: string, expected?: { attachmentId: string; desiredRuntimeId?: string }): Promise<Record<string, unknown>> {
 		const manifest = this.projectManifest(conversationId);
 		this.options.registry.beginRefresh(conversationId);
 		try {
@@ -1156,7 +1260,7 @@ export class HostLifecycle {
 				await this.resolveWorkspaceIdentity(manifest.placement!);
 				if (expected) {
 					const attachment = this.options.registry.snapshot().conversations.find((item) => item.conversationId === conversationId)?.attachment;
-					if (attachment?.attachmentId !== expected.attachmentId || attachment.runtimeId === expected.desiredRuntimeId) {
+					if (attachment?.attachmentId !== expected.attachmentId || (expected.desiredRuntimeId !== undefined && attachment.runtimeId === expected.desiredRuntimeId)) {
 						throw new RelayRegistryError("invalid_state", "Runtime refresh deferred: attachment changed during resolution");
 					}
 				}

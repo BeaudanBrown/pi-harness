@@ -3,14 +3,14 @@ import { Type, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { MatrixUserIdSchema } from "../contracts.js";
 import {
-	APPROVAL_LIFETIME_MS, HOST_CONTROL_VERSION, HostRequestSchema, HostActionSchema,
+	APPROVAL_LIFETIME_MS, HOST_CONTROL_VERSION, HostRequestSchema, HostActionSchema, HostPreviewTargetSchema, type HostResult,
 	isHostMutation, parseHostRequest, type HostAction, type HostRequest,
 } from "../live-workspace-contracts.js";
 
 export type ModelHostRequest = HostRequest & { actor: Extract<HostRequest["actor"], { kind: "model" }> };
 export type FrozenJson = null | boolean | number | string | FrozenJson[] | { [key: string]: FrozenJson };
 /** Private owner data is never rendered or accepted as model tool arguments. */
-export interface FrozenHostEffects { effects: HostAction[]; preconditions: { [key: string]: FrozenJson } }
+export interface FrozenHostEffects { effects: HostAction[]; targets?: HostResult<"conversation.delete.preview">["targets"]; preconditions: { [key: string]: FrozenJson } }
 export type HostApprovalPhase = "prepared" | "presented" | "approved" | "denied" | "expired" | "cancelled" | "accepted";
 export interface HostApprovalRecord {
 	version: typeof HOST_CONTROL_VERSION; hostId: string; approvalId: string; payloadDigest: string;
@@ -26,7 +26,7 @@ const schema = strict({
 	version: Type.Literal(HOST_CONTROL_VERSION), hostId: Type.String({ minLength: 1, maxLength: 128 }),
 	approvalId: Type.String({ pattern: "^approval_[a-f0-9]{32}$" }), payloadDigest: Type.String({ pattern: "^[a-f0-9]{64}$" }),
 	request: HostRequestSchema,
-	frozen: strict({ effects: Type.Array(HostActionSchema, { minItems: 1, maxItems: 100 }), preconditions: Type.Unknown() }),
+	frozen: strict({ effects: Type.Array(HostActionSchema, { minItems: 1, maxItems: 100 }), targets: Type.Optional(Type.Array(HostPreviewTargetSchema, { maxItems: 100 })), preconditions: Type.Unknown() }),
 	createdAt: timestamp, expiresAt: timestamp,
 	phase: Type.Enum(["prepared", "presented", "approved", "denied", "expired", "cancelled", "accepted"]),
 	presentation: Type.Optional(strict({ kind: Type.Enum(["matrix_poll", "local_dialog"]), id: Type.String({ minLength: 1, maxLength: 255 }) })),

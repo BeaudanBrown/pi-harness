@@ -11,6 +11,7 @@
     "worktree.remove.apply": { "human": "confirmed", "model": "approval" },
     "worktree.conversation.cleanup.preview": { "human": "direct", "model": "direct" },
     "worktree.conversation.cleanup.apply": { "human": "confirmed", "model": "approval" },
+    "worktree.branch.preview": { "human": "direct", "model": "direct" },
     "worktree.branch.delete": { "human": "confirmed", "model": "approval" },
     "conversation.list": { "human": "direct", "model": "direct" },
     "conversation.status": { "human": "direct", "model": "direct" },

@@ -16,9 +16,9 @@ export function hostApprovalQuestion(record: HostApprovalRecord): string {
 	const effects = record.frozen.effects;
 	const details = record.request.action.operation === "conversation.delete.apply" && effects.every((effect) => effect.operation === "conversation.delete")
 		? `${JSON.stringify(record.request.action)}\nDelete these exact conversations:\n${effects.map((effect) => effect.conversationId).join("\n")}`
-		: JSON.stringify({ action: record.request.action, effects });
+		: JSON.stringify({ action: record.request.action, effects, ...(record.frozen.targets ? { targets: record.frozen.targets } : {}) });
 	const safe = details.replace(/[\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
-	const question = `Approve this host mutation?\n${safe}\nApproval: ${record.approvalId}`;
+	const question = `Approve this host mutation?\n${safe}\nApproval: ${record.approvalId}\nExpires: ${new Date(record.expiresAt).toISOString()}`;
 	if (question.length > 4096) throw new HostControlError("unavailable", "Approval details exceed the display limit; request a smaller explicit action", false);
 	return question;
 }

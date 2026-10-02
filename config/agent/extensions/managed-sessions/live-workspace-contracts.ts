@@ -40,6 +40,7 @@ export const HostActionSchema = Type.Union([
 	action("worktree.remove.apply", preview),
 	action("worktree.conversation.cleanup.preview", { ...target, mergeTarget: Type.Optional(gitRef) }),
 	action("worktree.conversation.cleanup.apply", preview),
+	action("worktree.branch.preview", { ...workspace, branch: gitRef, mergeTarget: gitRef }),
 	action("worktree.branch.delete", preview),
 	action("conversation.list", page),
 	action("conversation.status", target),
@@ -81,7 +82,7 @@ export const HOST_ERROR_EXITS = {
 
 const readOperationNames = [
 	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status",
-	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "conversation.delete.preview",
+	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "worktree.branch.preview", "conversation.delete.preview",
 	"space.reconcile.preview", "space.cleanup.preview",
 ] as const satisfies readonly HostAction["operation"][];
 const readOperations = new Set<HostAction["operation"]>(readOperationNames);
@@ -121,13 +122,13 @@ const listResult = <T extends TSchema>(item: T) => strict({ items: Type.Array(it
 const created = strict({ conversationId: ConversationIdSchema, launchId: stable("launch"), setupState });
 const launched = strict({ conversationId: ConversationIdSchema, launchId: stable("launch"), launchState });
 const cleanup = strict({ operationId: stable("operation"), cleanupState });
-const previewTarget = Type.Union([
+export const HostPreviewTargetSchema = Type.Union([
 	strict({ kind: Type.Literal("conversation"), conversationId: ConversationIdSchema }),
 	strict({ kind: Type.Literal("worktree"), checkoutId: stable("checkout"), rootKey: identifier, workspace: text(128) }),
 	strict({ kind: Type.Literal("space"), roomId: room }),
 	strict({ kind: Type.Literal("branch"), checkoutId: stable("checkout"), branch: gitRef, tip: Type.String({ pattern: "^[a-f0-9]{40,64}$" }), mergeTarget: gitRef, mergeCommit: Type.String({ pattern: "^[a-f0-9]{40,64}$" }) }),
 ]);
-const previewResult = strict({ previewId: stable("preview"), expiresAt: Type.String({ format: "date-time" }), targets: Type.Array(previewTarget, { maxItems: 100 }), activeRuns: Type.Array(strict({ conversationId: ConversationIdSchema, runId: identifier }), { maxItems: 100 }), blockers: Type.Array(text(512), { maxItems: 100 }) });
+const previewResult = strict({ previewId: stable("preview"), expiresAt: Type.String({ format: "date-time" }), targets: Type.Array(HostPreviewTargetSchema, { maxItems: 100 }), activeRuns: Type.Array(strict({ conversationId: ConversationIdSchema, runId: identifier }), { maxItems: 100 }), blockers: Type.Array(text(512), { maxItems: 100 }) });
 export const HostResultSchemas = {
 	"host.status": strict({ hostId: identifier, relayState: enumeration(["ready", "disconnected"]), capabilities, accountState: enumeration(["ready", "pending", "unavailable"]) }),
 	"workspace.list": listResult(Type.Union([
@@ -142,6 +143,7 @@ export const HostResultSchemas = {
 	"worktree.remove.apply": cleanup,
 	"worktree.conversation.cleanup.preview": previewResult,
 	"worktree.conversation.cleanup.apply": cleanup,
+	"worktree.branch.preview": previewResult,
 	"worktree.branch.delete": cleanup,
 	"conversation.list": listResult(summary),
 	"conversation.status": summary,

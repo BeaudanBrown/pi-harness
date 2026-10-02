@@ -50,5 +50,28 @@ precondition redaction, stale target rejection and cancellation. Existing expiry
 response-loss and restart/no-replay tests also passed.
 
 Evidence: `.pi/tmp/workers/2026-10-02T06-53-34-125Z-approval-production-assembly-tests-2fe9e548fdc2/`.
-Create/reconciliation/bundle owner translation and the final issue review/gate are
-still pending; this is not a claim that #108 or the model-tool frontend is done.
+## Approved branch preview extension and remaining owner work
+
+The operator approved an explicit read-only branch preview using an existing
+repository workspace, branch and merge target. It does not depend on a deleted
+checkout, an expired removal preview or a durable completed-action receipt.
+The typed contract, immutable policy, generated CLI, production preview router
+and Git launcher now expose it. Branch deletion accepts only a branch preview,
+rechecks repository identity and both refs, rejects checked-out/unmerged branches,
+and does not replay success when the branch is absent.
+
+Packaged Git tests cover checked-out refusal, fresh preview after checkout removal,
+self-merge refusal, changed merge target, fresh replacement preview and absent
+branch refusal. Owner fixtures cover preview-kind isolation, expiry, restart
+cache loss, private-path redaction, stale tips and whole-bulk validation before
+retirement. The final affected gate passed: 435 managed-session tests, zero
+skips, and source contracts. Artifact:
+`.pi/tmp/workers/2026-10-02T07-45-59-909Z-frozen-owner-branch-preview-verified-d32666e5a45a/`.
+
+Creation/refresh and frozen worktree/bulk retirement translations are assembled;
+remaining focused evidence and the final issue review/gate are still required.
+Modern Space actions deliberately do **not** call the legacy reconciler: its
+cleanup kicks the operator and its two-level hierarchy does not implement live
+workspace ownership. A correct live reconciliation/account-cleanup owner remains
+unfinished, as does account-backed membership restoration. This is not a claim
+that #108, its reconciliation acceptance, or the model-tool frontend is done.

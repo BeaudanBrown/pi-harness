@@ -167,6 +167,7 @@ test("packaged worktree launcher creates, inventories, safely removes, and separ
 	await rm(join(linked, "ignored"));
 	for (let index = 0; index < 512; index += 1) await rm(join(linked, `ignored-${index}`));
 	execFileSync("git", ["-C", main, "merge", "--ff-only", "feature/example"]);
+	assert.throws(() => invoke("worktree-branch-preview", { rootKey: "projects", workspace: "project", branch: "feature/example", mergeTarget: "main" }), "checked-out branches cannot be deletion candidates");
 	const removable = invoke("worktree-remove-preview", { rootKey: "projects", workspace: plan.targetWorkspace, mergeTarget: "main" });
 	assert.deepEqual({ clean: removable.clean, locked: removable.locked, merged: removable.merged }, { clean: true, locked: false, merged: true });
 	execFileSync("git", ["-C", main, "worktree", "lock", linked]);
@@ -174,8 +175,18 @@ test("packaged worktree launcher creates, inventories, safely removes, and separ
 	assert.throws(() => invoke("worktree-remove-apply", { ...locked, resumeExisting: true })); execFileSync("git", ["-C", main, "worktree", "unlock", linked]);
 	assert.equal(invoke("worktree-remove-apply", { ...removable, resumeExisting: true }).removed, true); assert.equal(execFileSync("git", ["-C", main, "branch", "--list", "feature/example"], { encoding: "utf8" }).trim().length > 0, true);
 	assert.equal(invoke("worktree-remove-apply", { ...removable, resumeExisting: true }).removed, true, "post-side-effect retry recognizes exact absence");
-	assert.equal(invoke("worktree-branch-delete", { ...removable, resumeExisting: true }).deleted, true);
-	assert.equal(invoke("worktree-branch-delete", { ...removable, resumeExisting: true }).deleted, true, "branch deletion retry is idempotent");
+	const branchRequest = { rootKey: "projects", workspace: "project", branch: "feature/example", mergeTarget: "main" };
+	const freshBranch = invoke("worktree-branch-preview", branchRequest);
+	assert.equal(freshBranch.head, removable.head, "new branch preview does not require the removed workspace or its old preview");
+	assert.throws(() => invoke("worktree-branch-preview", { ...branchRequest, mergeTarget: "feature/example" }), "self-merge is not deletion authority");
+	execFileSync("git", ["-C", main, "commit", "--allow-empty", "-m", "move merge target"]);
+	assert.throws(() => invoke("worktree-branch-delete", { ...freshBranch, resumeExisting: false }), "changed merge target invalidates frozen consent");
+	const renewedBranch = invoke("worktree-branch-preview", branchRequest);
+	assert.notEqual(renewedBranch.mergeCommit, freshBranch.mergeCommit);
+	assert.equal(invoke("worktree-branch-delete", { ...renewedBranch, resumeExisting: false }).deleted, true);
+	assert.throws(() => invoke("worktree-branch-preview", branchRequest), "deleted branches cannot obtain new previews");
+	assert.throws(() => invoke("worktree-branch-delete", { ...renewedBranch, resumeExisting: false }), "approved branch deletion does not replay success");
+	assert.equal(invoke("worktree-branch-delete", { ...removable, resumeExisting: true }).deleted, true, "legacy explicit retry remains idempotent");
 	assert.throws(() => invoke("worktree-remove-preview", { rootKey: "projects", workspace: "project" }), "the main checkout cannot be removed");
 
 	const recoveryPlan = invoke("worktree-create-preview", { rootKey: "projects", workspace: "project", baseRef: "main", branch: "recovery" });

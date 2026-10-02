@@ -21,7 +21,7 @@ const commands = [
 	`worktree create ${workspace} --creation-key create-1 --base-ref main --branch topic`,
 	`worktree conversation create ${workspace} ${creation} --base-ref main --branch topic`,
 	`worktree remove preview ${workspace} --merge-target main`, `worktree remove apply ${apply}`,
-	`worktree conversation cleanup preview ${cid}`, `worktree conversation cleanup apply ${apply}`, `worktree branch delete ${apply}`,
+	`worktree conversation cleanup preview ${cid}`, `worktree conversation cleanup apply ${apply}`, `worktree branch delete ${apply}`, `worktree branch preview ${workspace} --branch feature/test --merge-target main`,
 	"conversation list", `conversation status ${cid}`, `conversation create ${workspace} ${creation}`,
 	...["open", "resume", "stop"].map((word) => `conversation ${word} ${cid}`),
 	...["refresh", "delete"].map((word) => `conversation ${word} ${cid} --confirmed`),

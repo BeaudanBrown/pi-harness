@@ -180,6 +180,20 @@ if [[ "$operation" == worktree-* ]]; then
       [[ ! -e "$expected_path" && ! -L "$expected_path" ]] || fail
       jq -nce --arg rootKey "$root_key" --arg workspace "$workspace" --arg branch "$branch" --arg head "$head" '{rootKey:$rootKey,workspace:$workspace,branch:$branch,head:$head,removed:true}'
       ;;
+    worktree-branch-preview)
+      workspace=$(field '.workspace'); resolve_project "$workspace"
+      branch=$(field '.branch'); merge_input=$(field '.mergeTarget')
+      git check-ref-format --branch "$branch" >/dev/null 2>&1 || fail
+      [[ "$branch" != -* && ${#branch} -le 255 ]] || fail
+      resolve_ref "refs/heads/$branch"; head="$resolved_commit"
+      resolve_ref "$merge_input"; merge_ref="$resolved_ref"; merge_commit="$resolved_commit"
+      [[ "$merge_ref" != "refs/heads/$branch" ]] || fail
+      ! grep -Fxq "branch refs/heads/$branch" <<<"$worktrees" || fail
+      git --git-dir="$common" merge-base --is-ancestor "$head" "$merge_commit" || fail
+      jq -nce --arg rootKey "$root_key" --arg projectWorkspace "$project_workspace" --arg commonDir "$common" --arg mainPath "$main_path" \
+        --arg branch "$branch" --arg head "$head" --arg mergeTarget "$merge_ref" --arg mergeCommit "$merge_commit" \
+        '{rootKey:$rootKey,projectWorkspace:$projectWorkspace,commonDir:$commonDir,mainPath:$mainPath,branch:$branch,head:$head,mergeTarget:$mergeTarget,mergeCommit:$mergeCommit}'
+      ;;
     worktree-branch-delete)
       workspace=$(field '.projectWorkspace'); resolve_project "$workspace"
       [[ "$common" == $(field '.commonDir') && "$main_path" == $(field '.mainPath') ]] || fail

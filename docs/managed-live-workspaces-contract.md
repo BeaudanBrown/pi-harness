@@ -84,6 +84,7 @@ is accepted. No shell interpolation or caller-provided executable/path exists.
 | worktree.remove.apply | previewId, confirmed=true | operationId, cleanupState |
 | worktree.conversation.cleanup.preview | conversationId, (mergeTarget) | previewId, expiresAt, targets, activeRuns, blockers |
 | worktree.conversation.cleanup.apply | previewId, confirmed=true | operationId, cleanupState |
+| worktree.branch.preview | rootKey, workspace, branch, mergeTarget | previewId, expiresAt, targets, activeRuns, blockers |
 | worktree.branch.delete | previewId, confirmed=true | operationId, cleanupState |
 | conversation.list | (limit, cursor) | items of conversation summary, nextCursor |
 | conversation.status | conversationId | conversation summary |
@@ -103,6 +104,9 @@ is accepted. No shell interpolation or caller-provided executable/path exists.
 
 Creation creates and opens an empty session; it never injects an objective.
 Worktree/create and constructive bundles reuse existing #83 validated primitives.
+Branch previews use an existing repository workspace, not the removed checkout or
+an old removal receipt. This explicit read-only action was approved during #108;
+branch deletion accepts only its fresh branch preview, not a removal preview.
 Branch deletion uses a separately issued preview/confirmation of the unchanged
 branch tip and merge target after checkout removal, not the earlier removal's
 approval. Bulk lists never silently expand to subsequently discovered targets.
