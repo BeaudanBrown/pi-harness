@@ -559,3 +559,12 @@ query does not enroll discovered rooms into the client's mutation allowlist.
 Four owner fixtures plus the self-membership fixture and existing guards/hierarchy
 regressions pass (33 focused tests). These use fake account/Matrix effects; relay
 scheduling/cutover and the #112 account transport are still to be connected.
+
+The IPC server retains its authenticated attachment identity independently of
+ordinary registry discovery so a terminal retirement can still address only its
+original attachment/generation. Changed attachments/generations reject the push;
+this socket observation is explicitly not a run/tool liveness proof. Disconnect
+hooks now run even when permanent retirement makes the registry detach invalid,
+so approval/proof owners can revoke their state. A real Unix-socket fixture covers
+the post-retirement exact shutdown route and disconnect behavior; focused IPC,
+host-wire and adapter-control regressions pass.

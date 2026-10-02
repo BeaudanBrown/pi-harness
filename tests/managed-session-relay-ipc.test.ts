@@ -15,7 +15,7 @@ import {
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
-import { ManagedSessionIpcServer, type EnvelopeHandler, type PeerUidResolver } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
+import { ManagedSessionIpcServer, type EnvelopeHandler, type PeerUidResolver, type AttachmentDisconnectHandler } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { peerUidFromHelper } from "../config/agent/extensions/managed-sessions/relay/peer-uid.js";
 import { RelayRegistry, RelayRegistryError } from "../config/agent/extensions/managed-sessions/relay/registry.js";
@@ -78,11 +78,31 @@ function readEnvelope(socket: Socket): Promise<ManagedSessionEnvelope> {
 	});
 }
 
+test("exact attachment shutdown survives registry retirement but rejects changed attachment/generation", async (t) => {
+	let disconnects = 0; const f = await setup(undefined, undefined, false, () => { disconnects++; });
+	t.after(async () => { await f.server.close(); await rm(f.root, { recursive: true, force: true }); });
+	const value = f.values[0]!; const socket = await openSocket(f.server.socketPath); t.after(() => socket.destroy());
+	const attached = readEnvelope(socket); socket.write(encodeNdjsonEnvelope(attach(value, "exact-attach"))); await attached;
+	const target = f.server.attachment(value.conversationId)!; assert.ok(target);
+	await f.registry.retireConversation(value.conversationId, [
+		{ kind: "stop", generationId: deriveGenerationId(value.conversationId, target.generation), attachmentId: target.attachmentId },
+		{ kind: "operator_leave_forget", roomId: value.roomId, userId: "@operator:example.com" },
+		{ kind: "bot_leave", roomId: value.roomId, userId: "@bot:example.com" },
+	]);
+	const stop: ManagedSessionEnvelope = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "retired-stop", conversationId: value.conversationId,
+		role: "relay", type: "termination.request", payload: { reason: "stop" } };
+	assert.equal(f.server.sendToAttachment({ ...target, attachmentId: "replacement" }, stop), false);
+	assert.equal(f.server.sendToAttachment({ ...target, generation: target.generation + 1 }, stop), false);
+	const delivered = readEnvelope(socket); assert.equal(f.server.sendToAttachment(target, stop), true); assert.equal((await delivered).type, "termination.request");
+	await f.server.close(); assert.equal(disconnects, 1); assert.equal(f.server.attachment(value.conversationId), undefined);
+	assert.equal(f.server.sendToAttachment(target, stop), false);
+});
+
 function waitForClose(socket: Socket): Promise<void> {
 	return new Promise((resolve) => socket.once("close", () => resolve()));
 }
 
-async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler, hostApprovalsEnabled = false): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[]; registry: RelayRegistry }> {
+async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler, hostApprovalsEnabled = false, onAttachmentDisconnect?: AttachmentDisconnectHandler): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[]; registry: RelayRegistry }> {
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-ipc-"));
 	const values = [manifest("one"), manifest("two")];
 	const store = new ConversationManifestStore(join(root, "manifests"));
@@ -95,7 +115,7 @@ async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHan
 		runtimeDirectory: join(root, "run"),
 		expectedUid: process.getuid?.(),
 		peerUid: peerUidOverride ?? (peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : () => process.getuid?.()),
-		onEnvelope, hostApprovalsEnabled,
+		onEnvelope, hostApprovalsEnabled, onAttachmentDisconnect,
 	});
 	await server.start();
 	return { root, server, values, registry };

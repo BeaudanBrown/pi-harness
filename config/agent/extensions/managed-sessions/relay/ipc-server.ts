@@ -54,6 +54,18 @@ export class ManagedSessionIpcServer {
 	private readonly sockets = new Set<Socket>();
 	private readonly attachedSockets = new Map<string, Socket>();
 	private readonly attachedCapabilities = new Map<string, string[]>();
+	private readonly attachedIdentities = new Map<string, AcceptedAttachment>();
+	/** Socket identity observation only; not a fresh run/tool liveness proof. */
+	attachment(conversationId: string): AcceptedAttachment | undefined {
+		const socket = this.attachedSockets.get(conversationId); const identity = this.attachedIdentities.get(conversationId);
+		return socket && !socket.destroyed && identity ? structuredClone(identity) : undefined;
+	}
+	sendToAttachment(target: Pick<AcceptedAttachment, "conversationId" | "attachmentId" | "generation">, envelope: ManagedSessionEnvelope): boolean {
+		if (target.conversationId !== envelope.conversationId) throw Error("Exact attachment push changed conversation");
+		const current = this.attachment(target.conversationId);
+		if (!current || current.attachmentId !== target.attachmentId || current.generation !== target.generation) return false;
+		return this.sendToConversation(envelope);
+	}
 	supports(conversationId: string, capability: string): boolean {
 		const socket = this.attachedSockets.get(conversationId);
 		return !!socket && !socket.destroyed && !!this.attachedCapabilities.get(conversationId)?.includes(capability);
@@ -187,9 +199,10 @@ export class ManagedSessionIpcServer {
 			if (state.attachment && this.attachedSockets.get(state.attachment.conversationId) === socket) {
 				this.attachedSockets.delete(state.attachment.conversationId);
 				this.attachedCapabilities.delete(state.attachment.conversationId);
+				this.attachedIdentities.delete(state.attachment.conversationId);
 			}
 			if (state.attachment && !this.preserveAttachmentsOnClose) {
-				void this.track(this.registry.detach(state.id, state.attachment).then(() => this.onAttachmentDisconnect?.(state.attachment!, state.detachReason)).catch(() => undefined));
+				void this.track(this.registry.detach(state.id, state.attachment).catch(() => undefined).then(() => this.onAttachmentDisconnect?.(state.attachment!, state.detachReason)).catch(() => undefined));
 			}
 		});
 		socket.resume();
@@ -249,6 +262,7 @@ export class ManagedSessionIpcServer {
 					}
 					state.capabilities = (envelope.payload.requestedCapabilities as string[] | undefined)?.filter((capability) => capability !== "approval-v1" || this.hostApprovalsEnabled);
 					this.attachedSockets.set(state.attachment.conversationId, socket);
+					this.attachedIdentities.set(state.attachment.conversationId, structuredClone(state.attachment));
 					this.attachedCapabilities.set(state.attachment.conversationId, state.capabilities ?? []);
 					this.send(socket, {
 						protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
