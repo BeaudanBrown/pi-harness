@@ -872,7 +872,7 @@ export class RelayRegistry {
 	async setManagedWindow(conversationId: string, window: RuntimeConversation["managedWindow"]): Promise<void> {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
-			conversation.managedWindow = window;
+			conversation.managedWindow = window ? structuredClone(window) : null;
 			conversation.lastLaunchError = undefined;
 		});
 	}
@@ -1214,7 +1214,7 @@ export class RelayRegistry {
 				throw new RelayRegistryError("invalid_state", "Retirement omitted required exact cleanup");
 			for (const target of targets) {
 				if (target.kind === "stop" && (target.generationId !== generation.generationId || target.attachmentId !== runtime.attachment?.attachmentId ||
-					Boolean(target.window) !== Boolean(runtime.managedWindow) || target.window && (target.window.windowId !== runtime.managedWindow?.windowId || target.window.paneId !== runtime.managedWindow?.paneId || target.window.sessionName !== runtime.managedWindow?.sessionName)))
+					Boolean(target.window) !== Boolean(runtime.managedWindow) || target.window && (target.window.windowId !== runtime.managedWindow?.windowId || target.window.paneId !== runtime.managedWindow?.paneId || target.window.sessionName !== runtime.managedWindow?.sessionName || !isDeepStrictEqual(target.window.ownership, runtime.managedWindow?.ownership))))
 					throw new RelayRegistryError("invalid_state", "Retirement stop target changed");
 				if ((target.kind === "operator_leave_forget" || target.kind === "bot_leave") && target.roomId !== roomId) throw new RelayRegistryError("invalid_state", "Retirement room target changed");
 				if (target.kind === "ancestor") {

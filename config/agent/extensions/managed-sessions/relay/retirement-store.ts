@@ -5,6 +5,7 @@ import { join, resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { ConversationIdSchema, GenerationIdSchema, MatrixUserIdSchema } from "../identity-contracts.js";
+import { ExactWindowProofSchema, assertExactWindowBinding } from "../exact-window-contracts.js";
 import { ManagedProvenanceSchema } from "../managed-provenance.js";
 import { deriveConversationId } from "../contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
@@ -14,7 +15,7 @@ const room = Type.String({ pattern: "^!\\S{1,254}$" });
 const phase = Type.Enum(["pending", "blocked", "done"]);
 const effectBase = { effectId: Type.String({ pattern: "^cleanup_[a-f0-9]{32}$" }), phase };
 const window = Type.Object({ sessionName: text(128), windowId: text(64), paneId: text(64),
-	serverId: Type.Optional(text(255)) }, { additionalProperties: false });
+	serverId: Type.Optional(text(255)), ownership: Type.Optional(ExactWindowProofSchema) }, { additionalProperties: false });
 export const RetirementEffectSchema = Type.Union([
 	Type.Object({ ...effectBase, kind: Type.Literal("stop"), generationId: GenerationIdSchema, attachmentId: Type.Optional(text(128)), window: Type.Optional(window) }, { additionalProperties: false }),
 	Type.Object({ ...effectBase, kind: Type.Enum(["operator_leave_forget", "bot_leave"]), roomId: room, userId: MatrixUserIdSchema }, { additionalProperties: false }),
@@ -56,6 +57,10 @@ export function parseRetirementRecord(value: unknown): RetirementRecord {
 		if (kinds.has(key) || effect.kind === "ancestor" && effect.roomId === effect.childRoomId) throw Error("Conflicting retirement cleanup targets");
 		if (effect.kind === "ancestor" && (effect.provenance.hostId !== record.hostId || effect.provenance.creationKey !== effect.creationKey ||
 			effect.provenance.kind !== (effect.spaceKind === "checkout_space" ? "worktree_space" : "project_space"))) throw Error("Retirement ancestor ownership changed");
+		if (effect.kind === "stop" && effect.window) {
+			assertExactWindowBinding(record.conversationId, effect.window);
+			if (effect.window.ownership && effect.window.serverId && effect.window.serverId !== effect.window.ownership.serverId) throw Error("Retirement server ownership changed");
+		}
 		kinds.add(key);
 	}
 	const operator = record.cleanup?.find((effect) => effect.kind === "operator_leave_forget");

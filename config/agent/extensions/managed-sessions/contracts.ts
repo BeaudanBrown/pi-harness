@@ -4,6 +4,7 @@ import { isAbsolute } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
 import { HostActionSchema, HostResultSchemas, parseHostAction, parseHostResponse } from "./live-workspace-contracts.js";
+import { ExactWindowProofSchema, assertExactWindowBinding, type ExactWindowProof } from "./exact-window-contracts.js";
 import { HostRunWitnessSchema, parseHostRunWitness } from "./host-run-contracts.js";
 import { ConversationIdSchema, GenerationIdSchema, DeliveryIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 export { ConversationIdSchema, GenerationIdSchema, DeliveryIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
@@ -636,6 +637,7 @@ const runtimeConversation = strictObject({
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	managedWindow: nullable(
 		strictObject({
+			ownership: Type.Optional(ExactWindowProofSchema),
 			sessionName: boundedString(128),
 			windowId: boundedString(64),
 			paneId: boundedString(64),
@@ -747,7 +749,7 @@ export interface HostRuntimeState {
 			originDeliveryId?: string;
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;
-		managedWindow: null | { sessionName: string; windowId: string; paneId: string };
+		managedWindow: null | { sessionName: string; windowId: string; paneId: string; ownership?: ExactWindowProof };
 		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "shutdown_confirmed" | "adopted"; requestedAt: string };
 		lastLaunchError?: { code: string; message: string; at: string };
 		generationTransition?: null | {
@@ -1045,6 +1047,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			throw new ManagedSessionContractError("conflict", `duplicate runtime conversation ${conversation.conversationId}`);
 		}
 		conversationIds.add(conversation.conversationId);
+		if (conversation.managedWindow) assertExactWindowBinding(conversation.conversationId, conversation.managedWindow);
 		if (conversation.state === "active" && conversation.attachment === null) {
 			throw new ManagedSessionContractError("invalid_state", `active conversation ${conversation.conversationId} has no attachment`);
 		}

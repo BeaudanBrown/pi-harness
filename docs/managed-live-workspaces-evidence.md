@@ -568,3 +568,24 @@ hooks now run even when permanent retirement makes the registry detach invalid,
 so approval/proof owners can revoke their state. A real Unix-socket fixture covers
 the post-retirement exact shutdown route and disconnect behavior; focused IPC,
 host-wire and adapter-control regressions pass.
+
+The operator authorized the launcher extension in nix-dotfiles. Work is isolated
+at `/home/beau/documents/nix-dotfiles-managed-live-workspaces`, branch
+`feat/managed-live-workspaces`, based on `c2a1ab8`; the original checkout's unrelated
+edits remain untouched. Commit `1c9789a` adds exact create/inspect/terminate
+operations to the existing launcher, not a second tmux controller. A launch birth
+token prevents marker installation on a replaced target; server PID/start time
+plus a private random server token, launch marker, original pane PID and IDs are
+checked inside one server-side command queue before termination. Added panes,
+respawn, legacy markers, changed session/launch/server identity and ambiguous
+observations fail closed. Complete Go tests (including disposable real tmux
+restart/ID reuse and last-window acknowledgement) and existing pre-commit hooks
+pass. No nix-dotfiles Nix build/evaluation/activation or push occurred.
+
+The harness has a matching strict private ownership schema and exact launcher
+client with no fallback to legacy termination. Runtime persistence and frozen
+retirement targets retain the complete proof, reject binding mismatch or proof
+downgrade, and project-window parsing preserves the optional proof. Legacy state
+remains readable without gaining new authority. Launch/retirement runtime cutover
+still needs to select these new operations; these tests are not live deployment
+or complete #109/#110 acceptance.

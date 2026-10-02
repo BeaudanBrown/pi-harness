@@ -1,4 +1,5 @@
 import { createHash, randomBytes } from "node:crypto";
+import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof } from "../exact-window-contracts.js";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { chmod, copyFile, lstat, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
@@ -56,6 +57,7 @@ export async function waitForProjectAttachment(options: {
 }
 
 export interface ManagedWindow {
+	ownership?: ExactWindowProof;
 	conversationId: string;
 	sessionName: string;
 	windowId: string;
@@ -104,9 +106,12 @@ export function parseProjectWindow(result: Record<string, unknown>, manifest: Co
 	if (typeof result.sessionName !== "string" || !result.sessionName) throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid sessionName");
 	if (typeof result.windowId !== "string" || !/^@[0-9]+$/.test(result.windowId)) throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid windowId");
 	if (typeof result.paneId !== "string" || !/^%[0-9]+$/.test(result.paneId)) throw new RelayRegistryError("launch_failed", "Project launcher returned an invalid paneId");
-	const fields = new Set(["conversationId", "sessionName", "windowId", "paneId", "role", "rootKey", "workspace", "relativeCwd"]);
+	const fields = new Set(["conversationId", "sessionName", "windowId", "paneId", "role", "rootKey", "workspace", "relativeCwd", "ownership"]);
 	if (Object.keys(result).some((field) => !fields.has(field))) throw new RelayRegistryError("launch_failed", "Project launcher returned unexpected fields");
+	const ownership = result.ownership === undefined ? undefined : parseExactWindowProof(result.ownership);
+	assertExactWindowBinding(manifest.conversationId, { sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId, ownership });
 	return {
+		...(ownership ? { ownership } : {}),
 		conversationId: manifest.conversationId, sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId,
 		rootKey: placement.rootKey, workspace: placement.workspace, relativeCwd: placement.relativeCwd, role: "conversation",
 	};
@@ -1176,7 +1181,7 @@ export class HostLifecycle {
 				createdWindow = window;
 			}
 			await this.options.registry.setManagedWindow(manifest.conversationId, {
-				sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId,
+				sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId, ...(window.ownership ? { ownership: window.ownership } : {}),
 			});
 			const attachment = await waitForProjectAttachment({
 				timeoutMs: this.options.attachmentTimeoutMs ?? PROJECT_ATTACHMENT_TIMEOUT_MS,
