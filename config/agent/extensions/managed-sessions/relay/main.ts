@@ -38,6 +38,9 @@ import { LiveHierarchy } from "./live-hierarchy.js";
 import { LocalEnrollmentReconciler } from "./local-enrollment-reconciler.js";
 import { readHostPolicy } from "./host-policy.js";
 import { HostDispatcher } from "./host-dispatcher.js";
+import { HostApprovalRuntime } from "./host-approval-runtime.js";
+import { HostApprovalStore } from "./host-approval-store.js";
+import { ManagedHostMutationOwner } from "./host-mutation-owner.js";
 import { HostReadModel } from "./host-read-model.js";
 import { ConversationRetirement } from "./conversation-retirement.js";
 import { HostControlServer } from "./host-control-server.js";
@@ -86,6 +89,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let localEnrollments: LocalEnrollmentReconciler | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let retirement: ConversationRetirement | undefined;
+	let hostApprovals: HostApprovalRuntime | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
 	let closeNotices = async (): Promise<void> => undefined;
@@ -148,6 +152,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			runtimeDirectory,
 			socketPath: environment.PI_MANAGED_SESSIONS_SOCKET,
 			expectedUid,
+			hostApprovalsEnabled: Boolean(hostPolicy && coordinatorValues.every((value) => value?.trim())),
 			peerUid: peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : undefined,
 			onAttachment: async (attachment) => {
 				// Admission is local; Matrix replay and overlays wait for a real binding.
@@ -168,6 +173,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				}
 			},
 			onAttachmentDisconnect: async (attachment, reason) => {
+				hostApprovals?.disconnected(attachment);
 				retirement?.kick();
 				activityProjector?.attachmentDisconnected(attachment.conversationId);
 				if (reason === "shutdown" && registry.promotion(attachment.conversationId)?.phase === "shutdown_confirmed") {
@@ -191,6 +197,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				});
 			},
 			onEnvelope: async (envelope, attachment) => {
+				if (envelope.type.startsWith("host.")) {
+					if (!hostApprovals) throw new RelayRegistryError("invalid_state", "Host approvals are unavailable");
+					return hostApprovals.handle(envelope, attachment);
+				}
 				if (!registry.manifestByConversationId(attachment.conversationId) && !["self.status", "control.result", "refresh.result"].includes(envelope.type)) {
 					throw new RelayRegistryError("matrix_unavailable", "Local conversation is active; Matrix binding is pending");
 				}
@@ -382,22 +392,38 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		retirement = new ConversationRetirement({ registry, matrix, hierarchy, server,
 			matrixAuthenticated: () => matrixAuthenticated,
 			windows: hostLifecycle?.exactWindows ?? { check: async () => { throw Error("Exact launcher is unavailable"); }, terminate: async () => { throw Error("Exact launcher is unavailable"); } },
+			cancelApprovals: (conversationId) => hostApprovals?.cancelRun(conversationId),
 			onFailure: () => process.stderr.write("pi-managed-session-relay: retirement cleanup is pending\n") });
-		// Reattach surviving Pi processes before waiting for remote readiness.
-		await server.start();
-		retirement.start();
 		if (hostPolicy) {
 			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), matrixReady: () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
 			} });
-			const dispatcher = new HostDispatcher({ hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy,
-				read: (request) => reads.read(request),
+			const dispatchOptions: ConstructorParameters<typeof HostDispatcher>[0] = {
+				hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy, read: (request) => reads.read(request),
 				...(hostLifecycle ? { launch: (action: { operation: "conversation.open" | "conversation.resume"; conversationId: string }) =>
-					action.operation === "conversation.open" ? hostLifecycle!.openConversation(action.conversationId) : hostLifecycle!.resumeConversation(action.conversationId) } : {}) });
-			controlServer = new HostControlServer({ runtimeDirectory, expectedUid: expectedUid!, peerUid: (socket) => peerUidFromHelper(peerUidHelper!, socket), dispatcher });
-			await controlServer.start();
+					action.operation === "conversation.open" ? hostLifecycle!.openConversation(action.conversationId) : hostLifecycle!.resumeConversation(action.conversationId) } : {}) };
+			if (hostLifecycle) {
+				const store = new HostApprovalStore(resolve(stateDirectory, "host-approvals"), hostId); await store.load();
+				hostApprovals = new HostApprovalRuntime({ ...dispatchOptions, store, matrix, operatorUserIds: new Set([matrix.operatorUserId]),
+					owner: new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server }),
+					attachment: (id) => server!.attachment(id), capable: (id) => server!.supports(id, "approval-v1"),
+					send: (envelope) => server!.sendToConversation(envelope), room: (id) => registry.manifestByConversationId(id)?.roomId,
+					acceptedInput: (id, deliveryId) => {
+						const manifest = registry.manifestByConversationId(id); if (!manifest) return undefined;
+						const input = registry.pendingInputs(id).find((entry) => entry.deliveryId === deliveryId);
+						return input?.status === "persisted" ? { deliveryId, roomId: manifest.roomId, eventId: input.matrixEventId, senderUserId: input.senderUserId, status: "persisted" as const } : undefined;
+					} });
+			}
+			controlServer = new HostControlServer({ runtimeDirectory, expectedUid: expectedUid!, peerUid: (socket) => peerUidFromHelper(peerUidHelper!, socket),
+				dispatcher: hostApprovals?.dispatcher ?? new HostDispatcher(dispatchOptions) });
 		}
+		// Compose owners before negotiating approval capability, without waiting for Matrix.
+		await server.start();
+		const uncertainApprovals = await hostApprovals?.recover();
+		if (uncertainApprovals?.length) process.stderr.write("pi-managed-session-relay: previous host action outcomes are unknown; inspect state before explicitly trying again\n");
+		await controlServer?.start();
+		retirement.start();
 		const authenticatedUserId = await retryMatrixStartup(() => matrix.whoami(signal), async () => {
 			await syncHealth(false);
 			process.stderr.write("pi-managed-session-relay: waiting for Matrix startup connectivity; local IPC remains available\n");
@@ -442,7 +468,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			async (manifest) => {
 				if (manifest.kind === "coordinator") await registry.recordCoordinatorDeparture(manifest.conversationId);
 				else await retirement!.retire(manifest.conversationId);
-			});
+			}, (vote) => hostApprovals?.vote(vote) ?? Promise.resolve(false));
 			await coordinatorRouter.loadInbox(resolve(stateDirectory, "inbox.json"));
 			coordinatorRouter.start();
 			await hostLifecycle!.reconcileGenerationTransitions();
@@ -463,6 +489,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		}
 	} catch (error) {
 		await controlServer?.close().catch(() => undefined);
+		await hostApprovals?.close().catch(() => undefined);
 		await retirement?.close().catch(() => undefined);
 		const enrollmentClosing = localEnrollments?.close();
 		await hierarchy?.close().catch(() => undefined);
@@ -482,6 +509,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
 			await controlServer?.close().catch(() => undefined);
+			await hostApprovals?.close().catch(() => undefined);
 			await retirement?.close().catch(() => undefined);
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
 			const enrollmentClosing = localEnrollments?.close();
@@ -513,6 +541,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle?.stopRuntimeUpdates();
 			await runtimeUpdate;
 			clearTimeout(reconciliationTimer);
+			await hostApprovals?.close();
 			await retirement?.close();
 			const enrollmentClosing = localEnrollments?.close();
 			await hierarchy?.close();

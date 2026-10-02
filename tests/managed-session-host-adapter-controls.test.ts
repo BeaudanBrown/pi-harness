@@ -4,13 +4,11 @@ import { readFileSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { HostAdapterControls } from "../config/agent/extensions/managed-sessions/relay/host-adapter-controls.js";
+import { HostApprovalRuntime } from "../config/agent/extensions/managed-sessions/relay/host-approval-runtime.js";
 import { NativeHostRun } from "../config/agent/extensions/managed-sessions/adapter/host-run.js";
 import type { BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
-import { HostApprovals } from "../config/agent/extensions/managed-sessions/relay/host-approvals.js";
 import { HostApprovalStore } from "../config/agent/extensions/managed-sessions/relay/host-approval-store.js";
 import { HostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
-import { HostDispatcher } from "../config/agent/extensions/managed-sessions/relay/host-dispatcher.js";
 import type { ManagedSessionEnvelope } from "../config/agent/extensions/managed-sessions/contracts.js";
 import type { AcceptedAttachment } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { deriveGenerationId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
@@ -22,7 +20,7 @@ const packet = (type: string, payload: Record<string, unknown>): ManagedSessionE
 test("native run, authenticated frontend and public dispatcher require exact live consent through execution", { timeout: 10000 }, async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "host-native-front-")); const store = new HostApprovalStore(root, "host"); await store.load();
 	const policy = new HostPolicy(JSON.parse(readFileSync("config/agent/managed-host-policy.json", "utf8")));
-	let controls!: HostAdapterControls; let effects = 0; let prompts = 0; let approve!: (answer: boolean) => void;
+	let controls!: HostApprovalRuntime; let effects = 0; let prompts = 0; let approve!: (answer: boolean) => void;
 	let shown!: () => void; let ready = new Promise<void>((resolve) => { shown = resolve; });
 	const client = { supports: () => true,
 		confirmHostRun: async (checkId: string, witness: unknown) => { await controls.handle(packet("host.run.confirm", { checkId, witness }), attachment); },
@@ -32,16 +30,15 @@ test("native run, authenticated frontend and public dispatcher require exact liv
 	const native = new NativeHostRun({ client: () => client, sources: () => [{ kind: "local" }], confirm: async (_question, signal) => {
 		prompts++; shown(); return new Promise<boolean>((resolve) => { approve = resolve; signal.addEventListener("abort", () => resolve(false), { once: true }); });
 	} });
-	const approvals = new HostApprovals({ hostId: "host", protectedConversationId: `conv_${"c".repeat(32)}`, policy, store, operatorUserIds: new Set(),
-		isLive: (request) => controls.isLive(request), freeze: async (request) => ({ effects: [request.action], preconditions: {} }), revalidate: async () => true,
-		execute: async () => { effects++; return { conversationId: target, runtimeState: "stopped" }; },
-		present: async (record) => { const controller = new AbortController(); return { receipt: { kind: "local_dialog", id: record.approvalId },
-			decision: controls.confirmLocal(record, "Exact stop?", controller.signal).then((answer) => ({ choice: answer ? "approve" as const : "deny" as const, at: Date.now(), voter: { kind: "local" as const } })), close: async () => { controller.abort(); } }; },
-	});
-	const dispatcher = new HostDispatcher({ hostId: "host", protectedConversationId: `conv_${"c".repeat(32)}`, policy, read: async () => { throw Error("Not a read"); }, approve: (request) => approvals.request(request) });
-	controls = new HostAdapterControls({ attachment: () => attachment, capable: () => true, room: () => undefined, acceptedInput: () => undefined, dispatcher, approvals,
+	controls = new HostApprovalRuntime({ hostId: "host", protectedConversationId: `conv_${"c".repeat(32)}`, policy, store, operatorUserIds: new Set(),
+		matrix: { startPoll: async () => { throw Error("Wrong presentation route"); }, endPoll: async () => "$closed",
+			memberJoined: async () => false, checkpointPollAnswer: async () => undefined },
+		owner: { freeze: async (request) => ({ effects: [request.action], preconditions: {} }), revalidate: async () => true,
+			execute: async () => { effects++; return { conversationId: target, runtimeState: "stopped" }; } },
+		read: async () => { throw Error("Not a read"); },
+		attachment: () => attachment, capable: () => true, room: () => undefined, acceptedInput: () => undefined,
 		send: (envelope) => { void native.receive(envelope); return true; } });
-	t.after(async () => { native.reset(); controls.close(); await approvals.close(); await store.close(); await rm(root, { recursive: true, force: true }); });
+	t.after(async () => { native.reset(); await controls.close(); await rm(root, { recursive: true, force: true }); });
 	native.begin(deriveGenerationId(conversationId, 1)); native.userMessage(); native.toolStart("tool-1");
 	const request = () => controls.handle(packet("host.request", { ...native.identity("tool-1")!, requestId: `request-${prompts}`, action: { operation: "conversation.stop", conversationId: target } }), attachment);
 	const first = request(); await ready; assert.equal(effects, 0); approve(false);

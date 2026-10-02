@@ -222,6 +222,7 @@ export class CoordinatorRouter {
 		private readonly endOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
 		private readonly syncHealth: (healthy: boolean) => Promise<void> = async () => undefined,
 		private readonly operatorDeparted: (manifest: ConversationManifest) => Promise<void> = async () => undefined,
+		private readonly hostApprovalVote: (input: { conversationId: string; roomId: string; pollEventId: string; answerId: string; senderUserId: string; eventId: string }) => Promise<boolean> = async () => false,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -324,6 +325,8 @@ export class CoordinatorRouter {
 	}
 
 	private async acceptPoll(manifest: ConversationManifest, event: Extract<AuthorizedMatrixRoomEvent, { kind: "poll_response" }>, signal: AbortSignal): Promise<void> {
+		if (await this.hostApprovalVote({ conversationId: manifest.conversationId, roomId: manifest.roomId,
+			pollEventId: event.pollEventId, answerId: event.answerId, senderUserId: event.senderUserId, eventId: event.eventId })) return;
 		const checkpointPoll = this.registry.activeCheckpointPoll(manifest.conversationId, event.pollEventId);
 		const checkpointOption = checkpointPoll?.options.find((option) => option.answerId === event.answerId)?.text;
 		if (checkpointPoll && checkpointOption) {
