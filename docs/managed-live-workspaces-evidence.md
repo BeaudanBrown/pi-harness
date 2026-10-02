@@ -515,3 +515,12 @@ outage/reload without expansion and eligibility is checked afresh. These checks
 are not reusable approval or live cleanup evidence: the concrete effect owner must
 hold its provisioning/cleanup lock across the check and next mutation. Runtime
 cleanup assembly and live verification remain pending.
+
+The live hierarchy now supplies the required per-project cleanup exclusion:
+reservations and provisioning remain concurrent with each other, cleanup excludes
+both within its project, and unrelated projects continue. Its reference query
+includes unpublished reservations and accepts permanent retirement authority to
+exclude terminal conversations. Shutdown aborts cleanup and drains queued scopes
+without beginning their effects. Two new exclusion/shutdown fixtures and existing
+hierarchy/enrollment/ancestor checks pass (23 focused tests). This supplies the
+serialization boundary; it does not itself execute Space cleanup.

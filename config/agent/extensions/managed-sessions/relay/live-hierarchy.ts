@@ -61,6 +61,8 @@ export class LiveHierarchy {
 	private state: State;
 	private work: Promise<void> = Promise.resolve();
 	private readonly running = new Map<string, Promise<string>>();
+	private readonly projectScopes = new Map<string, { tail: Promise<void>; readers: Set<Promise<void>>; writers: number }>();
+	private readonly scopedWork = new Set<Promise<void>>();
 	private readonly controller = new AbortController();
 	private readonly file: AtomicJsonFile<State>;
 	constructor(private readonly directory: string, readonly hostId: string, private readonly matrix: HierarchyMatrix,
@@ -73,7 +75,10 @@ export class LiveHierarchy {
 		if (state && state.hostId !== this.hostId) throw Error("Live hierarchy belongs to another host");
 		this.state = state ?? parse(this.state);
 	}
-	async prepare(input: HierarchyPlacement): Promise<{ conversationId: string; checkoutId: string }> {
+	prepare(input: HierarchyPlacement): Promise<{ conversationId: string; checkoutId: string }> {
+		return this.projectScope(input.projectKey, false, () => this.prepareOnce(input));
+	}
+	private async prepareOnce(input: HierarchyPlacement): Promise<{ conversationId: string; checkoutId: string }> {
 		this.controller.signal.throwIfAborted();
 		const checkoutId = deriveCheckoutId(this.hostId, input.projectKey, input.canonicalCheckoutRoot);
 		const conversationId = deriveConversationId(this.hostId, input.creationKey);
@@ -106,7 +111,12 @@ export class LiveHierarchy {
 		const node = this.state.nodes.find((item) => item.kind === "conversation" && item.key === conversationId);
 		return node ? node.linked ? "hierarchy_ready" : "pending" : undefined; // Not a phone/account-ready claim.
 	}
-	async provision(conversationId: string): Promise<HierarchyBinding> {
+	provision(conversationId: string): Promise<HierarchyBinding> {
+		const node = this.node(conversationId);
+		if (node.kind !== "conversation") return Promise.reject(Error("Expected conversation hierarchy target"));
+		return this.projectScope(node.projectKey, false, () => this.provisionOnce(conversationId));
+	}
+	private async provisionOnce(conversationId: string): Promise<HierarchyBinding> {
 		this.controller.signal.throwIfAborted();
 		const reserved = this.node(conversationId);
 		if (reserved.kind !== "conversation") throw Error("Expected conversation hierarchy target");
@@ -117,8 +127,42 @@ export class LiveHierarchy {
 		return { conversationId, checkoutId: conversation.checkoutId, roomId: conversation.roomId!,
 			checkoutSpace: this.node(conversation.checkoutId).roomId!, projectSpace: this.node(conversation.projectKey).roomId!, hostSpace: this.node("host").roomId! };
 	}
+	/** Includes unpublished reservations; caller supplies permanent conversation retirement authority. */
+	hasReferences(roomId: string, isRetired: (conversationId: string) => boolean): boolean {
+		const nodes = new Map(this.state.nodes.map((node) => [node.key, node]));
+		for (const node of this.state.nodes) {
+			if (node.kind !== "conversation" || isRetired(node.conversationId)) continue;
+			let current: Node | undefined = node;
+			while (current) {
+				if (current.roomId === roomId) return true;
+				current = "parentKey" in current ? nodes.get(current.parentKey) : undefined;
+			}
+		}
+		return false;
+	}
+	/** Cleanup is exclusive with reservations/provisioning in this project, not with other projects.
+	 * Callers must use this signal and keep fresh checks and the next mutation inside the callback. */
+	withProjectCleanup<T>(projectKey: string, operation: (signal: AbortSignal) => Promise<T>): Promise<T> {
+		return this.projectScope(projectKey, true, () => operation(this.controller.signal));
+	}
+	private async projectScope<T>(projectKey: string, exclusive: boolean, operation: () => Promise<T>): Promise<T> {
+		this.controller.signal.throwIfAborted();
+		if (!/^project_[a-f0-9]{32}$/.test(projectKey)) throw Error("Invalid hierarchy project identity");
+		if (this.scopedWork.size >= 256) throw Error("Hierarchy operation capacity reached");
+		let scope = this.projectScopes.get(projectKey);
+		if (!scope) { scope = { tail: Promise.resolve(), readers: new Set(), writers: 0 }; this.projectScopes.set(projectKey, scope); }
+		const blockers = exclusive ? [scope.tail, ...scope.readers] : [scope.tail];
+		let release!: () => void; const done = new Promise<void>((resolve) => { release = resolve; }); this.scopedWork.add(done);
+		if (exclusive) { scope.tail = done; scope.writers++; } else scope.readers.add(done);
+		try { await Promise.all(blockers); this.controller.signal.throwIfAborted(); return await operation(); }
+		finally {
+			if (exclusive) scope.writers--; else scope.readers.delete(done);
+			if (!scope.writers && !scope.readers.size) this.projectScopes.delete(projectKey);
+			this.scopedWork.delete(done); release();
+		}
+	}
 	async close(): Promise<void> {
-		this.controller.abort(); await Promise.allSettled([...this.running.values()]); await this.work;
+		this.controller.abort(); await Promise.allSettled([...this.scopedWork, ...this.running.values()]); await this.work;
 	}
 	private node(key: string): Node { const node = this.state.nodes.find((item) => item.key === key); if (!node) throw Error("Hierarchy target was not reserved"); return node; }
 	private ensure(key: string): Promise<string> {

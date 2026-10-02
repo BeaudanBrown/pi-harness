@@ -59,6 +59,39 @@ class MatrixFixture {
 	}
 }
 
+test("ancestor cleanup excludes same-project provisioning and reservations without blocking other projects", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "hierarchy-cleanup-gate-")); const matrix = new MatrixFixture();
+	const hierarchy = new LiveHierarchy(root, hostId, matrix, () => coordinator); await hierarchy.load();
+	let releaseProvision!: () => void; const provisionGate = new Promise<void>((resolve) => { releaseProvision = resolve; });
+	let provisionEntered!: () => void; const provisioning = new Promise<void>((resolve) => { provisionEntered = resolve; });
+	let releaseCleanup!: () => void; const cleanupGate = new Promise<void>((resolve) => { releaseCleanup = resolve; });
+	t.after(async () => { releaseProvision(); releaseCleanup(); await hierarchy.close(); await rm(root, { recursive: true, force: true }); });
+	const create = matrix.ensureManagedRoom.bind(matrix);
+	matrix.ensureManagedRoom = async (title, proof) => { if (proof.kind === "conversation" && proof.creationKey === "first") { provisionEntered(); await provisionGate; } return create(title, proof); };
+	const first = await hierarchy.prepare(placement); const active = hierarchy.provision(first.conversationId); await provisioning;
+	let cleanupEntered = false; const cleanup = hierarchy.withProjectCleanup(placement.projectKey, async () => { cleanupEntered = true; await cleanupGate; });
+	let reserved = false; const reservation = hierarchy.prepare({ ...placement, creationKey: "queued" }).then(() => { reserved = true; });
+	const other = await hierarchy.prepare({ ...placement, projectKey: `project_${"b".repeat(32)}`, creationKey: "other", canonicalCheckoutRoot: "/projects/other" });
+	await hierarchy.provision(other.conversationId); assert.equal(cleanupEntered, false); assert.equal(reserved, false);
+	releaseProvision(); const bound = await active;
+	for (let i = 0; i < 100 && !cleanupEntered; i++) await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(cleanupEntered, true); assert.equal(reserved, false);
+	assert.equal(hierarchy.hasReferences(bound.checkoutSpace, (id) => id === first.conversationId), false);
+	releaseCleanup(); await cleanup; await reservation; assert.equal(reserved, true);
+	assert.equal(hierarchy.hasReferences(bound.checkoutSpace, (id) => id === first.conversationId), true, "unpublished reservation blocks cleanup");
+	assert.equal(hierarchy.hasReferences(bound.projectSpace, (id) => id === first.conversationId), true);
+	assert.equal(hierarchy.hasReferences("!unrelated:test", () => false), false);
+});
+
+test("hierarchy shutdown aborts cleanup and drains queued reservations without starting their effects", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "hierarchy-cleanup-close-")); const matrix = new MatrixFixture();
+	const hierarchy = new LiveHierarchy(root, hostId, matrix, () => coordinator); await hierarchy.load(); t.after(() => rm(root, { recursive: true, force: true }));
+	let entered!: () => void; const started = new Promise<void>((resolve) => { entered = resolve; });
+	const cleanup = hierarchy.withProjectCleanup(placement.projectKey, async (signal) => { entered(); await new Promise<void>((resolve) => signal.addEventListener("abort", () => resolve(), { once: true })); });
+	await started; const queued = assert.rejects(hierarchy.prepare(placement), /abort/i);
+	await hierarchy.close(); await cleanup; await queued; assert.equal(matrix.calls, 0); assert.deepEqual(hierarchy.listConversations(), []);
+});
+
 test("HostLifecycle uses canonical checkout roots, persists checkout bindings and permits duplicate display names", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "live-hierarchy-lifecycle-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const store = new ConversationManifestStore(join(root, "manifests")); await store.write(coordinator);
