@@ -23,7 +23,7 @@ async function fixture(t: TestContext) {
 	const manifests = new ConversationManifestStore(join(root, "manifests")); await manifests.write(manifest);
 	let registry = new RelayRegistry(hostId, root, manifests); await registry.load();
 	let proof: ExactWindowProof | undefined; let state: "match" | "gone" | "changed" = "gone";
-	let attach = true; let unknownCreate = false; let invalidProof = false; let exits = true; let creates = 0;
+	let attach = true; let retainedAlive = false; let unknownCreate = false; let invalidProof = false; let exits = true; let creates = 0;
 	let beforeCreate: (() => Promise<void>) | undefined;
 	const calls: string[] = [];
 	const server = { attachment: () => undefined, sendToAttachment: () => true } as unknown as ManagedSessionIpcServer;
@@ -47,7 +47,7 @@ async function fixture(t: TestContext) {
 					if (unknownCreate) throw Error("lost create response");
 					proof = { conversationId, launchId: String(request.launchId), serverId: `123:456:${"a".repeat(32)}`, sessionName: "project",
 						windowId: `@${creates}`, paneId: `%${creates}`, panePid: "789", processBootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processStartTicks: "123" };
-					state = attach ? "match" : "changed";
+					state = attach || retainedAlive ? "match" : "changed";
 					if (attach) await registry.attach({ protocolVersion: "1.0.0", messageId: "attach", conversationId, role: "ordinary_adapter", type: "attachment.attach",
 						payload: { sessionId, attachmentNonce: env.PI_MANAGED_SESSION_ATTACHMENT_NONCE!, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId } }, `connection-${creates}`);
 					return { ...manifest.placement, conversationId, role: "conversation", sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, ownership: invalidProof ? { ...proof, processBootId: undefined } : proof };
@@ -63,7 +63,7 @@ async function fixture(t: TestContext) {
 		return lifecycle;
 	}
 	return { manifest, owner, calls, server, matrix, get registry() { return registry; }, get creates() { return creates; },
-		set attach(value: boolean) { attach = value; }, set unknownCreate(value: boolean) { unknownCreate = value; },
+		set attach(value: boolean) { attach = value; }, set retainedAlive(value: boolean) { retainedAlive = value; }, set unknownCreate(value: boolean) { unknownCreate = value; },
 		set beforeCreate(value: () => Promise<void>) { beforeCreate = value; },
 		set invalidProof(value: boolean) { invalidProof = value; },
 		set exits(value: boolean) { exits = value; }, set state(value: typeof state) { state = value; },
@@ -108,6 +108,17 @@ test("retained dead panes block retry until manual closure and verified original
 	await owner.wake(f.manifest);
 	assert.equal(f.creates, 2); assert.equal(f.registry.launchIdentity(f.manifest.conversationId)?.ordinal, 2);
 	assert.notEqual(f.registry.managedWindow(f.manifest.conversationId)?.ownership?.launchId, first?.ownership?.launchId);
+});
+
+test("direct resume persists attachment timeout without destroying its window or replaying creation", async (t) => {
+	const f = await fixture(t); f.attach = false; f.retainedAlive = true;
+	await assert.rejects(f.owner().request(request(f.manifest.conversationId, "conversation.resume")), /timed out/);
+	const window = f.registry.managedWindow(f.manifest.conversationId); assert.ok(window?.ownership);
+	await f.reload();
+	assert.match(f.registry.snapshot().conversations.find((item) => item.conversationId === f.manifest.conversationId)!.lastLaunchError!.message, /timed out/);
+	assert.deepEqual(f.registry.managedWindow(f.manifest.conversationId), window); assert.equal(f.creates, 1);
+	assert.ok(!f.calls.includes("window-terminate-exact"));
+	f.state = "gone"; f.attach = true; await f.owner().wake(f.manifest); assert.equal(f.creates, 2);
 });
 
 test("attachment cannot conceal a malformed creation proof", async (t) => {

@@ -329,11 +329,7 @@ export class BoundAdapterClient {
 
 	async selfDelete(): Promise<ManagedSessionEnvelope> {
 		if (this.options.role !== "ordinary_adapter") throw new ManagedAdapterError("Coordinator bridge deletion is forbidden", "permission_denied");
-		return this.request({
-			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
-			messageId: messageId("delete"), conversationId: this.options.binding.conversationId,
-			role: "ordinary_adapter", type: "self.delete", payload: { confirmed: true },
-		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
+		throw new ManagedAdapterError("Legacy bridge deletion is unavailable; use upgraded approved retirement controls", "invalid_state");
 	}
 
 	async close(reason: "shutdown" | "session_change" | "stop" | "bridge_delete" = "shutdown"): Promise<void> {

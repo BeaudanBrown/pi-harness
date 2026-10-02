@@ -1084,6 +1084,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (envelope.type === "input.deliver") return handleDelivery(envelope, ctx);
 			if (envelope.type === "termination.request") {
 				const reason = String(envelope.payload.reason);
+				if (reason === "bridge_delete") {
+					notify(ctx, "Legacy unbind-only termination was refused; upgrade retirement controls", "warning");
+					return;
+				}
 				if (reason === "stop" || reason === "abort") {
 					if (activity) activity.requestedOutcome = "cancelled";
 					for (const deliveryId of new Set([...activeDeliveries.keys(), ...pendingUserPersistence.map((item) => item.deliveryId)])) {
@@ -1096,12 +1100,6 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}
 				ctx.abort();
 				if (reason === "stop" || reason === "generation_change") ctx.shutdown();
-				if (reason === "bridge_delete") {
-					appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId: binding.sessionId, reason: "bridge_delete" });
-					const detached = client;
-					binding = undefined; client = undefined; setCheckpointActive(false); setStatus(ctx);
-					await detached?.close("bridge_delete");
-				}
 				return;
 			}
 			throw new ManagedAdapterError(`Unsupported relay operation ${envelope.type}`, "invalid_message");
@@ -1441,7 +1439,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		});
 
 		pi.registerCommand("remote", {
-			description: role === "ordinary_adapter" ? "Bind, inspect, or delete this managed relay bridge" : "Inspect this coordinator relay bridge",
+			description: role === "ordinary_adapter" ? "Bind or inspect this managed conversation" : "Inspect this coordinator relay bridge",
 			handler: async (args, ctx) => {
 				const input = args.trim();
 				if (input === "status") {
@@ -1454,19 +1452,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					return;
 				}
 				if (role !== "ordinary_adapter") return notify(ctx, "Coordinator supports only /remote status", "error");
-				if (input === "delete --confirm") {
-					if (!binding || !client?.connected) return notify(ctx, "No connected managed bridge to delete", "error");
-					try {
-						const result = await client.selfDelete();
-						if (result.type !== "self.result" || result.payload.operation !== "self.delete" || result.payload.status !== "ok") throw new ManagedAdapterError("Relay did not confirm bridge deletion");
-						appendMarker(pi, ctx, UNBOUND_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, sessionId: binding.sessionId, reason: "bridge_delete" });
-						await client.close("bridge_delete");
-						binding = undefined; client = undefined; setCheckpointActive(false); setStatus(ctx);
-						notify(ctx, "Managed bridge deleted; Pi session and process were preserved");
-					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Bridge deletion failed", "error"); }
-					return;
-				}
-				if (input.startsWith("delete")) return notify(ctx, "Use /remote delete --confirm to delete only bridge metadata", "warning");
+				if (input.startsWith("delete")) return notify(ctx, "Legacy bridge deletion is unavailable. Use upgraded approved retirement controls, or leave this conversation's Matrix room to retire it. No binding was changed.", "warning");
 				if (input.startsWith("on ")) {
 					const sourceSessionFile = ctx.sessionManager.getSessionFile();
 					if (!sourceSessionFile) return notify(ctx, "Persist this Pi session before binding it", "error");
@@ -1504,7 +1490,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed binding failed", "error"); }
 					return;
 				}
-				notify(ctx, role === "ordinary_adapter" ? "Usage: /remote on <concept> | status | delete --confirm" : "Usage: /remote status", "warning");
+				notify(ctx, role === "ordinary_adapter" ? "Usage: /remote on <concept> | status" : "Usage: /remote status", "warning");
 			},
 		});
 	};

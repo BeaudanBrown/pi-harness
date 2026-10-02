@@ -572,8 +572,9 @@ test("ordinary adapter speaks only fixed role-bound operations and deduplicates 
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.equal(relay.frames.at(-1)?.type, "input.acknowledge");
 	assert.equal(relay.frames.at(-1)?.role, "ordinary_adapter");
-	assert.equal((await client.selfDelete()).payload.status, "ok");
-	assert.equal(relay.frames.at(-1)?.payload.confirmed, true);
+	await assert.rejects(client.selfDelete(), /upgraded approved retirement controls/);
+	assert.ok(!relay.frames.some((frame) => frame.type === "self.delete"), "legacy deletion is never sent, even to an older relay");
+	assert.equal(client.connected, true);
 });
 
 test("manual self binding is a strict one-shot relay operation", async (t) => {
@@ -621,6 +622,15 @@ test("/remote on keeps a locally enrolled Pi running through pending binding and
 	const selfBind = relay.frames.find((frame) => frame.type === "self.bind")!;
 	assert.equal(selfBind.payload.sourceCwd, ctx.cwd); assert.equal(selfBind.payload.sourceSessionFile, "/sessions/ordinary.jsonl");
 	assert.deepEqual(branch.map((entry) => entry.customType), [BINDING_BOUNDARY_ENTRY_TYPE, BINDING_ENTRY_TYPE]);
+	await commands.get("remote")!("delete --confirm", ctx);
+	assert.ok(notices.some((notice) => notice.includes("Legacy bridge deletion is unavailable")));
+	assert.ok(!relay.frames.some((frame) => frame.type === "self.delete"));
+	assert.deepEqual(branch.map((entry) => entry.customType), [BINDING_BOUNDARY_ENTRY_TYPE, BINDING_ENTRY_TYPE], "removed command cannot unbind a live session");
+	let aborts = 0; ctx.abort = () => { aborts++; };
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "obsolete-delete", conversationId, role: "relay", type: "termination.request", payload: { reason: "bridge_delete" } });
+	await new Promise((resolve) => setTimeout(resolve, 20));
+	assert.equal(aborts, 0); assert.equal(shutdowns, 0);
+	assert.ok(!branch.some((entry) => entry.customType === UNBOUND_ENTRY_TYPE));
 	const final = (id: string, text: string) => {
 		branch.push({ type: "message", id, parentId: leaf, message: { role: "assistant", content: [{ type: "text", text,
 			textSignature: JSON.stringify({ v: 1, id, phase: "final_answer" }) }], stopReason: "stop" } }); leaf = id;

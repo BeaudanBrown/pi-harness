@@ -166,7 +166,12 @@ the legacy read-only health fallback; it is not the picker inventory interface. 
 `project.space.cleanup` to frozen cleanup apply. Legacy `/remote delete` and all
 close/delete aliases map to retirement, never the previous bridge-only deletion.
 Adapters without the new approval capability cannot invoke legacy mutation
-aliases to bypass approvals: return upgrade-required. Room-local human aliases
+aliases to bypass approvals: return upgrade-required. During staged rollout,
+`/remote delete` is disabled: its bridge-only implementation and help entry are
+removed, and neither the adapter nor relay sends/executes legacy unbinding.
+Canonical alias exposure belongs to the approved frontend cutover (#113); until
+then, refusal preserves the binding. Verified operator room departure already
+uses canonical retirement. Room-local human aliases
 are normalized with authenticated event provenance before dispatch. `!start`
 uses resume without a prompt; `!abort` remains a run interruption, not host stop.
 All frontends expose bounded help generated from this operation contract.

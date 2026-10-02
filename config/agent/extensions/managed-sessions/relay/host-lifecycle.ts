@@ -1240,7 +1240,10 @@ export class HostLifecycle {
 			if (attached && windowObserved) return;
 			// A live window that misses the deadline remains eligible to attach; terminating it
 			// would race the adapter's active-state transition at the exact timeout boundary.
-			if (attachmentTimedOut) throw error;
+			if (attachmentTimedOut) {
+				await this.options.registry.recordLaunchError(manifest.conversationId, "launch_failed", "Managed project Pi attachment timed out; inspect the retained window before retry");
+				throw error;
+			}
 			// Failure is not cleanup consent. Preserve the failed pane and its proof;
 			// manual closure plus verified process exit is required before retry.
 			if (!attached) await this.options.registry.markDormant(manifest.conversationId);

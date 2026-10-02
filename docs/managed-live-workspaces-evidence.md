@@ -714,3 +714,21 @@ packaged-only cases). NAS leave/forget transport remains #112 as specified by
 #109; approval/frontend composition remains #108/#113. Unknown launch or legacy
 physical ownership stays visibly blocked for manual inspection under the approved
 simplicity policy; no additional automatic continuation recovery is introduced.
+
+Issue-boundary pinned audit (`7d84317`):
+
+- **Standards:** one medium/dependent #110 finding: attachment timeout omitted
+  durable error evidence. Fixed now: record the bounded timeout error while
+  preserving its window and attachment eligibility; direct resume/restart test
+  passes.
+- **Spec:** one medium/current finding: the obsolete `/remote delete` adapter
+  still contained bridge-only unbinding. Removed that implementation/help entry,
+  prevented the client from sending `self.delete` even to an older relay, and
+  refused old `bridge_delete` termination without abort/unbind/disconnect. Tests
+  verify the binding survives. Canonical alias exposure remains #113, subject to
+  the contract's existing upgrade-required rule when approved controls are absent;
+  no legacy confirmation is promoted to destructive consent. Operator room
+  departure is already the canonical close path.
+
+No repeated subjective audit was run; the remediation is bounded and does not
+change the reviewed retirement design.

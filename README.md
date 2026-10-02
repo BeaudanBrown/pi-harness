@@ -243,9 +243,11 @@ private relay protocol, persist binding/delivery provenance in Pi session
 history, and preserve Pi's normal prompt-template, skill, and extension-command
 expansion. They are deliberately absent from default settings and the default
 Pi wrapper; an enabled managed-session host must select exactly one profile.
-The ordinary profile provides `/remote on <concept>`, `/remote status`, and
-`/remote delete --confirm`; there is no `/remote off` operation and no ordinary
-host-wide lifecycle tool surface. `/remote on` locally enrolls a persisted, idle
+The ordinary profile provides `/remote on <concept>` and `/remote status`.
+Legacy `/remote delete` is disabled until approved retirement controls are
+available; it never unbinds a live process. Leaving an individual conversation's
+Matrix room as the configured operator triggers canonical retirement. There is
+no `/remote off` operation and no ordinary host-wide lifecycle tool surface. `/remote on` locally enrolls a persisted, idle
 ordinary Pi session: the relay verifies its canonical placement and durable Pi
 identity without waiting for Matrix authentication or provisioning. The same Pi
 continues running while a private pending registration survives relay restarts.
