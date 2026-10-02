@@ -18,6 +18,7 @@ export interface HostApprovalRecord {
 	presentation?: { kind: "matrix_poll" | "local_dialog"; id: string };
 	decision?: { choice: "approve" | "deny"; at: number; voter: { kind: "local" } | { kind: "matrix"; userId: string; eventId: string } };
 	acceptedAt?: number;
+	notificationDisposition?: "silent" | "notify";
 }
 
 const strict = <T extends Record<string, TSchema>>(fields: T) => Type.Object(fields, { additionalProperties: false });
@@ -33,6 +34,7 @@ const schema = strict({
 	decision: Type.Optional(strict({ choice: Type.Enum(["approve", "deny"]), at: timestamp,
 		voter: Type.Union([strict({ kind: Type.Literal("local") }), strict({ kind: Type.Literal("matrix"), userId: MatrixUserIdSchema, eventId: Type.String({ pattern: "^\\$\\S{1,254}$" }) })]) })),
 	acceptedAt: Type.Optional(timestamp),
+	notificationDisposition: Type.Optional(Type.Enum(["silent", "notify"])),
 });
 
 function canonical(value: unknown): string {
@@ -73,10 +75,10 @@ export function hostApprovalRequestDigest(request: ModelHostRequest): string {
 	return createHash("sha256").update(canonical({ actor, action: request.action })).digest("hex");
 }
 
-function payloadDigest(record: Pick<HostApprovalRecord, "hostId" | "request" | "frozen" | "createdAt" | "expiresAt">): string {
+function payloadDigest(record: Pick<HostApprovalRecord, "hostId" | "request" | "frozen" | "createdAt" | "expiresAt" | "notificationDisposition">): string {
 	const { requestId: _correlation, ...actor } = record.request.actor;
 	return createHash("sha256").update(canonical({ hostId: record.hostId, actor, action: record.request.action, frozen: record.frozen,
-		createdAt: record.createdAt, expiresAt: record.expiresAt })).digest("hex");
+		createdAt: record.createdAt, expiresAt: record.expiresAt, ...(record.notificationDisposition ? { notificationDisposition: record.notificationDisposition } : {}) })).digest("hex");
 }
 
 export function parseHostApprovalRecord(value: unknown): HostApprovalRecord {
@@ -124,8 +126,8 @@ export function transitionHostApproval(value: HostApprovalRecord, patch: Approva
 }
 
 /** Call only after the authenticated frontend and owner have resolved origin and all effects. */
-export function prepareHostApproval(hostId: string, request: ModelHostRequest, frozen: FrozenHostEffects, now: number): HostApprovalRecord {
+export function prepareHostApproval(hostId: string, request: ModelHostRequest, frozen: FrozenHostEffects, now: number, notificationDisposition?: "silent" | "notify"): HostApprovalRecord {
 	parseHostRequest(request); validatePrivateJson(frozen.preconditions);
-	const input = structuredClone({ version: HOST_CONTROL_VERSION, hostId, request, frozen, createdAt: now, expiresAt: now + APPROVAL_LIFETIME_MS, phase: "prepared" as const });
+	const input = structuredClone({ version: HOST_CONTROL_VERSION, hostId, request, frozen, createdAt: now, expiresAt: now + APPROVAL_LIFETIME_MS, phase: "prepared" as const, ...(notificationDisposition ? { notificationDisposition } : {}) });
 	return parseHostApprovalRecord({ ...input, approvalId: hostApprovalId(hostId, request.actor), payloadDigest: payloadDigest(input) });
 }

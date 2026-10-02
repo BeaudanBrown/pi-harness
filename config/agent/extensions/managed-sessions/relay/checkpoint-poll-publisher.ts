@@ -20,8 +20,10 @@ export class CheckpointPollPublisher {
 			await this.registry.markProjectionChunkSent(conversationId, intent.entryId, chunkId);
 			return active.pollEventId;
 		}
+		const projection = this.registry.snapshot().conversations.find((item) => item.conversationId === conversationId)?.projection.find((item) => item.entryId === intent.entryId);
+		if (!projection) throw new RelayRegistryError("invalid_state", "Checkpoint poll projection is unavailable");
 		const pollEventId = await this.matrix.startPoll(roomId, intent.transactionId, intent.question,
-			intent.options.map((option) => ({ id: option.answerId, text: option.text })), undefined, "unstable");
+			intent.options.map((option) => ({ id: option.answerId, text: option.text })), undefined, "unstable", projection.disposition);
 		this.afterMatrixAcceptance();
 		await this.registry.completeCheckpointPollPublication(conversationId, intent.checkpointId, pollEventId);
 		await this.registry.markProjectionChunkSent(conversationId, intent.entryId, this.projectionChunkId(conversationId, intent.entryId));

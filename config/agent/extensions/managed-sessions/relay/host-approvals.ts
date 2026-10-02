@@ -31,6 +31,7 @@ export class HostApprovals {
 	constructor(private readonly options: {
 		hostId: string; protectedConversationId: string; policy: HostPolicy; store: HostApprovalStore;
 		operatorUserIds: ReadonlySet<string>;
+		notificationDisposition?: () => "silent" | "notify";
 		isLive: (request: ModelHostRequest) => Promise<boolean>;
 		freeze: (request: ModelHostRequest) => Promise<FrozenHostEffects>;
 		present: (record: HostApprovalRecord) => Promise<HostApprovalPresentation>;
@@ -57,6 +58,19 @@ export class HostApprovals {
 			}
 			return { ...structuredClone(await entry.response), requestId: request.actor.requestId };
 		} catch (error) { return hostErrorResponse(request.actor.requestId, error); }
+	}
+
+	/** Read-only recovery evidence from a fresh live-tool challenge, never saved transcripts. */
+	async recoveryAttention(conversationId: string): Promise<{ id: string; stillCurrent: () => boolean } | undefined> {
+		for (const [id, entry] of this.active) {
+			if (entry.request.actor.conversationId !== conversationId || entry.request.actor.presentation !== "matrix_poll") continue;
+			const pending = () => !this.closed && this.active.get(id) === entry && !entry.cancelled && !entry.executing &&
+				this.options.store.get(id)?.phase === "presented" && (this.options.store.get(id)?.expiresAt ?? 0) > this.now();
+			if (!pending() || !await this.options.isLive(structuredClone(entry.request)).catch(() => false) || !pending()) continue;
+			const freshUntil = this.now() + 5_000;
+			return { id, stillCurrent: () => this.now() < freshUntil && pending() };
+		}
+		return undefined;
 	}
 
 	/** Called on run end, generation replacement, retirement or loss of the requesting tool. */
@@ -114,7 +128,7 @@ export class HostApprovals {
 			if (record?.phase === "accepted") throw uncertain();
 			if (record && !["prepared", "presented"].includes(record.phase)) throw new HostControlError("cancelled", "Previous consent cannot be reused; make a new explicit call");
 			if (!await this.options.isLive(structuredClone(request))) throw new HostControlError("cancelled", "Requesting tool is no longer live");
-			if (!record) record = await this.options.store.prepare(prepareHostApproval(this.options.hostId, request, await this.options.freeze(structuredClone(request)), this.now()));
+			if (!record) record = await this.options.store.prepare(prepareHostApproval(this.options.hostId, request, await this.options.freeze(structuredClone(request)), this.now(), this.options.notificationDisposition?.() ?? "notify"));
 			ownsConsent = true;
 			for (const effect of record.frozen.effects) if (this.options.policy.decide({ ...request, action: effect }, this.options.protectedConversationId) === "forbidden")
 				throw new HostControlError("forbidden", "A frozen effect is forbidden");

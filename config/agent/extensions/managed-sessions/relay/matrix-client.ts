@@ -52,8 +52,18 @@ function transaction(value: string): string {
 
 function hasExpectedPollContent(content: JsonObject, pollKey: string, fallbackKey: string): boolean {
 	const keys = Object.keys(content);
-	if (!keys.includes(pollKey) || !keys.includes(fallbackKey) || keys.some((key) => key !== pollKey && key !== fallbackKey && key !== "m.mentions")) return false;
-	if (!Object.hasOwn(content, "m.mentions")) return true; // Polls published before notification support remain resolvable.
+	if (!keys.includes(pollKey) || !keys.includes(fallbackKey) || keys.some((key) => key !== pollKey && key !== fallbackKey && key !== "m.mentions" && key !== "lol.bepis.pi.notification")) return false;
+	const metadata = content["lol.bepis.pi.notification"];
+	if (metadata !== undefined) {
+		if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return false;
+		const notice = metadata as JsonObject;
+		if (Object.keys(notice).length !== 2 || notice.version !== 1 || !["notify", "silent"].includes(String(notice.disposition))) return false;
+		if (notice.disposition === "silent") {
+			const mentions = content["m.mentions"];
+			return typeof mentions === "object" && mentions !== null && !Array.isArray(mentions) && Object.keys(mentions).length === 0;
+		}
+	}
+	if (!Object.hasOwn(content, "m.mentions")) return metadata === undefined; // Legacy polls remain resolvable.
 	const mentions = content["m.mentions"];
 	return typeof mentions === "object" && mentions !== null && !Array.isArray(mentions) &&
 		Object.keys(mentions).length === 1 && (mentions as JsonObject).room === true;
@@ -562,13 +572,14 @@ export class ManagedMatrixClient {
 		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/typing/${encodeURIComponent(this.botUserId)}`,
 			typing ? { typing: true, timeout: timeoutMs } : { typing: false }, signal);
 	}
-	async startPoll(roomId: string, transactionId: string, question: string, answers: readonly MatrixPollAnswer[], signal?: AbortSignal, dialect: "stable" | "unstable" = "unstable"): Promise<string> {
+	async startPoll(roomId: string, transactionId: string, question: string, answers: readonly MatrixPollAnswer[], signal?: AbortSignal, dialect: "stable" | "unstable" = "unstable", disposition?: "silent" | "notify"): Promise<string> {
 		if (answers.length < 1 || answers.length > MAX_POLL_ANSWERS || new Set(answers.map((answer) => answer.id)).size !== answers.length) throw new Error("Poll answers are malformed or out of bounds");
 		const text = boundedText(question, "poll question", 4_096);
 		const normalized = answers.map((answer) => ({ id: boundedText(answer.id, "poll answer ID", 255), text: boundedText(answer.text, "poll answer", 1_024) }));
 		const fallback = boundedText([text, ...normalized.map((answer, index) => `${index + 1}. ${answer.text}`)].join("\n"), "poll fallback");
 		if (dialect === "stable") return this.sendEvent(roomId, "m.poll.start", transactionId, {
-			"m.mentions": { room: true },
+			"m.mentions": disposition === "silent" ? {} : { room: true },
+			...(disposition ? { "lol.bepis.pi.notification": { version: 1, disposition } } : {}),
 			"m.text": [{ mimetype: "text/plain", body: fallback }],
 			"m.poll": {
 				kind: "m.disclosed", max_selections: 1, question: { "m.text": [{ body: text }] },
@@ -576,7 +587,8 @@ export class ManagedMatrixClient {
 			},
 		}, signal);
 		return this.sendEvent(roomId, "org.matrix.msc3381.poll.start", transactionId, {
-			"m.mentions": { room: true },
+			"m.mentions": disposition === "silent" ? {} : { room: true },
+			...(disposition ? { "lol.bepis.pi.notification": { version: 1, disposition } } : {}),
 			"org.matrix.msc1767.text": fallback,
 			"org.matrix.msc3381.poll.start": {
 				kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1, question: { "org.matrix.msc1767.text": text },

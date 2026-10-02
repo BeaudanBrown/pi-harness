@@ -28,7 +28,8 @@ export class RelayEventProjector {
 	}
 	async close(): Promise<void> { await this.notices?.close(); }
 
-	constructor(private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly recovery?: RecoveryAlerts) {
+	constructor(private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly recovery?: RecoveryAlerts,
+		private readonly checkpointDisposition: () => "silent" | "notify" = () => "notify") {
 		this.checkpointPollPublisher = new CheckpointPollPublisher(registry, matrix);
 	}
 
@@ -68,9 +69,10 @@ export class RelayEventProjector {
 			const projection = await this.registry.beginCheckpointPollProjection(manifest.conversationId, {
 				entryId: expectedEntryId, kind: "checkpoint", status: "projecting", contentHash: intent.intentHash,
 				originDeliveryId: payload.originDeliveryId,
+				...(existing ? existing.disposition ? { disposition: existing.disposition } : {} : { disposition: this.checkpointDisposition() }),
 				chunks: [{ chunkId: deriveChunkId(expectedEntryId, 0), transactionId, status: "pending" }],
 			}, intent);
-			if (projection.chunks.some((chunk) => chunk.status === "pending")) await this.recovery?.originalAccepted(manifest.conversationId, manifest.piSessionId);
+			if (projection.disposition !== "silent" && projection.chunks.some((chunk) => chunk.status === "pending")) await this.recovery?.originalAccepted(manifest.conversationId, manifest.piSessionId);
 			if (projection.chunks[0]?.transactionId !== transactionId) throw new RelayRegistryError("invalid_state", "Checkpoint poll projection has a conflicting transaction");
 			const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
 			if (runtime?.publishingCheckpointPoll?.checkpointId === payload.checkpointId || runtime?.activeCheckpointPoll?.checkpointId === payload.checkpointId) {
@@ -80,7 +82,7 @@ export class RelayEventProjector {
 			}
 		} else {
 			await this.project(manifest.conversationId, manifest.piSessionId, manifest.roomId,
-				sourceKey, "checkpoint", renderRemoteCheckpoint(checkpoint), payload.originDeliveryId, "notify");
+				sourceKey, "checkpoint", renderRemoteCheckpoint(checkpoint), payload.originDeliveryId, this.checkpointDisposition());
 		}
 		await this.registry.acknowledgeInput(manifest.conversationId, payload.originDeliveryId, "completed", origin.piEntryId);
 	}

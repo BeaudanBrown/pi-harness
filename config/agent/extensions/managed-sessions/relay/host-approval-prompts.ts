@@ -48,7 +48,7 @@ export class HostApprovalPrompts {
 		if (this.polls.size >= 64) throw new HostControlError("unavailable", "Too many active approval polls", false);
 		const roomId = record.request.actor.origin.roomId;
 		const eventId = record.presentation?.id ?? await this.options.matrix.startPoll(roomId,
-			deriveMatrixTransactionId(record.request.actor.conversationId, record.approvalId, 0), question, answers, abort.signal, "unstable");
+			deriveMatrixTransactionId(record.request.actor.conversationId, record.approvalId, 0), question, answers, abort.signal, "unstable", record.notificationDisposition);
 		if (this.polls.has(eventId)) throw new HostControlError("conflict", "Approval poll is already active");
 		let resolve!: Poll["resolve"]; const decision = new Promise<Decision>((done) => { resolve = done; });
 		const poll: Poll = { record: structuredClone(record), roomId, eventId, question, settled: false, resolve, abort };
@@ -58,6 +58,10 @@ export class HostApprovalPrompts {
 			this.polls.delete(eventId); poll.settled = true; abort.abort();
 			await this.options.matrix.endPoll(roomId, deriveMatrixTransactionId(record.request.actor.conversationId, record.approvalId, 1), eventId, "Host approval closed", undefined, "unstable");
 		} };
+	}
+
+	isPending(approvalId: string): boolean {
+		return [...this.polls.values()].some((poll) => poll.record.approvalId === approvalId && !poll.settled && poll.record.expiresAt > (this.options.now ?? Date.now)());
 	}
 
 	/** Sender/event fields must come from authenticated Matrix intake, never tool parameters. */

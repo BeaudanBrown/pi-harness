@@ -119,7 +119,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				"Artifact export failed permanently at the media service. Resolve the service error and request a new export; conversation history is preserved.", "notify"),
 		});
 		closeArtifactExporter = () => artifactExporter.close();
-		const controlPollPublisher = new ControlPollPublisher(registry, matrix);
+		const controlPollPublisher = new ControlPollPublisher(registry, matrix, undefined, () => matrixHealthy ? "notify" : "silent");
 		const coordinatorValues = [
 			environment.PI_MANAGED_COORDINATOR_WORKSPACE_DIR,
 			environment.PI_MANAGED_COORDINATOR_SESSION_FILE,
@@ -134,7 +134,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await activityProjector.load();
 		const recoveryAlerts: RecoveryAlerts = new RecoveryAlerts(resolve(stateDirectory, "recovery-alerts.json"), (alert) => eventProjector.projectRecoveryAlert(alert));
 		await recoveryAlerts.load();
-		const eventProjector = new RelayEventProjector(registry, matrix, recoveryAlerts);
+		const eventProjector = new RelayEventProjector(registry, matrix, recoveryAlerts, () => matrixHealthy ? "notify" : "silent");
 		await eventProjector.startNoticeOutbox(resolve(stateDirectory, "notice-outbox.json"),
 			(message) => process.stderr.write(`pi-managed-session-relay: ${redactManagedValue(message, environment)}\n`));
 		closeNotices = () => eventProjector.close();
@@ -366,7 +366,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		});
 		recoveryMonitor = new RecoveryMonitor(recoveryAlerts, registry, server,
 			(conversationId) => !coordinatorRouter || coordinatorRouter.hasRecoveryBacklog(conversationId),
-			(message) => process.stderr.write(`pi-managed-session-relay: ${message}\n`));
+			(message) => process.stderr.write(`pi-managed-session-relay: ${message}\n`), 5_000,
+			async (conversationId) => hostApprovals?.recoveryAttention(conversationId));
 		await recoveryMonitor.health(false);
 		recoveryMonitor.start();
 		if (coordinatorValues.every((value) => value?.trim())) {
@@ -413,6 +414,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (hostLifecycle) {
 				const store = new HostApprovalStore(resolve(stateDirectory, "host-approvals"), hostId); await store.load();
 				hostApprovals = new HostApprovalRuntime({ ...dispatchOptions, store, matrix, operatorUserIds: new Set([matrix.operatorUserId]),
+					notificationDisposition: () => matrixHealthy ? "notify" : "silent",
+					onNotifyingPoll: async (record) => {
+						const manifest = registry.manifestByConversationId(record.request.actor.conversationId);
+						if (manifest && registry.activeGeneration(manifest).generationId === record.request.actor.generationId) await recoveryAlerts.originalAccepted(manifest.conversationId, manifest.piSessionId);
+					},
 					owner: owner!,
 					attachment: (id) => server!.attachment(id), capable: (id) => server!.supports(id, "approval-v1"),
 					send: (envelope) => server!.sendToConversation(envelope), room: (id) => registry.manifestByConversationId(id)?.roomId,

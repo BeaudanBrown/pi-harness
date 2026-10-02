@@ -186,10 +186,10 @@ test("control poll intent recovers an accepted PUT and a vote arriving before ev
 	const source = { controlId: deriveControlId(manifest.conversationId, "$uncertain-model"), matrixEventId: "$uncertain-model", name: "model" as const };
 	await registry.recordPendingControl(manifest.conversationId, source);
 	const transactionId = deriveMatrixTransactionId(manifest.conversationId, source.controlId, 0);
-	const putPaths: string[] = [];
+	const putPaths: string[] = []; const putBodies: string[] = [];
 	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const url = String(input); const method = init?.method ?? "GET";
-		if (method === "PUT" && url.includes("/org.matrix.msc3381.poll.start/")) { putPaths.push(new URL(url).pathname); return Response.json({ event_id: "$accepted-poll" }); }
+		if (method === "PUT" && url.includes("/org.matrix.msc3381.poll.start/")) { putPaths.push(new URL(url).pathname); putBodies.push(String(init?.body)); return Response.json({ event_id: "$accepted-poll" }); }
 		if (method === "GET" && url.includes("/event/")) return Response.json({ sender: config.botUserId, type: "org.matrix.msc3381.poll.start", content: {
 			"org.matrix.msc1767.text": "Choose\n1. !model scoped/model",
 			"org.matrix.msc3381.poll.start": { kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1,
@@ -198,7 +198,7 @@ test("control poll intent recovers an accepted PUT and a vote arriving before ev
 		} });
 		throw new Error(`unexpected Matrix request ${method} ${url}`);
 	}, [manifest.roomId]);
-	const crashing = new ControlPollPublisher(registry, matrix, () => { throw new Error("injected crash after Matrix acceptance"); });
+	const crashing = new ControlPollPublisher(registry, matrix, () => { throw new Error("injected crash after Matrix acceptance"); }, () => "silent");
 	await assert.rejects(crashing.publish({ conversationId: manifest.conversationId, roomId: manifest.roomId, sourceControl: source,
 		scope: "model", prompt: "Choose", options: [{ answerId: "pi-control-0", command: "!model scoped/model" }] }), /injected crash/);
 	const uncertain = registry.snapshot().conversations[0];
@@ -213,6 +213,8 @@ test("control poll intent recovers an accepted PUT and a vote arriving before ev
 	await new ControlPollPublisher(restarted, matrix).reconcile();
 	assert.equal(putPaths.length, 2);
 	assert.equal(putPaths[0], putPaths[1], "reconciliation retries the identical idempotent Matrix transaction path");
+	assert.equal(putBodies[0], putBodies[1], "recovery never turns an uncertain silent poll into a notifying poll");
+	assert.deepEqual(JSON.parse(putBodies[0])["lol.bepis.pi.notification"], { version: 1, disposition: "silent" });
 	assert.equal(putPaths[1]?.endsWith(`/${transactionId}`), true);
 	assert.equal(restarted.snapshot().conversations[0]?.publishingControlPoll, null);
 	assert.equal(restarted.activeControlPollOption(manifest.conversationId, "$accepted-poll", "pi-control-0"), "!model scoped/model");
@@ -579,12 +581,12 @@ test("checkpoint option polls persist opaque mappings and recover the same accep
 			answerId: deriveCheckpointPollAnswerId("checkpoint-poll-recovery", index), text,
 		})) };
 	const intent = { ...intentBase, intentHash: deriveCheckpointPollIntentHash(intentBase) };
-	await registry.beginProjection(manifest.conversationId, { entryId, kind: "checkpoint", status: "projecting", contentHash: intent.intentHash, originDeliveryId: deliveryId,
+	await registry.beginProjection(manifest.conversationId, { entryId, kind: "checkpoint", status: "projecting", contentHash: intent.intentHash, originDeliveryId: deliveryId, disposition: "silent",
 		chunks: [{ chunkId: deriveChunkId(entryId, 0), transactionId, status: "pending" }] });
-	const transactions: string[] = [];
-	const matrix = new ManagedMatrixClient(config, async (input) => {
+	const transactions: string[] = []; const bodies: string[] = [];
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
 		const path = new URL(String(input)).pathname;
-		if (path.includes("/org.matrix.msc3381.poll.start/")) { transactions.push(path.split("/").at(-1)!); return Response.json({ event_id: "$checkpoint-poll" }); }
+		if (path.includes("/org.matrix.msc3381.poll.start/")) { bodies.push(String(init?.body)); transactions.push(path.split("/").at(-1)!); return Response.json({ event_id: "$checkpoint-poll" }); }
 		throw new Error(`unexpected request ${path}`);
 	}, [manifest.roomId]);
 	const crashing = new CheckpointPollPublisher(registry, matrix, () => { throw new Error("crash after poll acceptance"); });
@@ -594,6 +596,8 @@ test("checkpoint option polls persist opaque mappings and recover the same accep
 	await restarted.load();
 	await new CheckpointPollPublisher(restarted, matrix).reconcile();
 	assert.deepEqual(transactions, [transactionId, transactionId]);
+	assert.equal(bodies[0], bodies[1]); assert.deepEqual(JSON.parse(bodies[0])["m.mentions"], {});
+	assert.deepEqual(JSON.parse(bodies[0])["lol.bepis.pi.notification"], { version: 1, disposition: "silent" });
 	assert.equal(restarted.snapshot().conversations[0]?.publishingCheckpointPoll, null);
 	assert.equal(restarted.snapshot().conversations[0]?.activeCheckpointPoll?.pollEventId, "$checkpoint-poll");
 	assert.notEqual(intent.options[0]?.answerId, intent.options[0]?.text, "persisted answer IDs are opaque");

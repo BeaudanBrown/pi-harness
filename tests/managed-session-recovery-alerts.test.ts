@@ -81,14 +81,26 @@ test("monitor requires a fresh exact-attachment reply after backlog; never wakes
 			return true;
 		},
 	};
-	const monitor = new RecoveryMonitor(alerts, registry as any, server as any, () => backlog, () => {}, 20);
+	let approvalLive = false; let revokeApproval = false; let approvalChecks = 0;
+	const monitor = new RecoveryMonitor(alerts, registry as any, server as any, () => backlog, () => {}, 20, async () => {
+		approvalChecks++; if (!approvalLive) return undefined;
+		if (revokeApproval) approvalLive = false;
+		return { id: `approval_${"b".repeat(32)}`, stillCurrent: () => approvalLive };
+	});
 	await monitor.health(false); await monitor.health(true); await monitor.tick();
-	assert.equal(probes, 0); assert.equal(alerts.pending().length, 1, "dormant check waits without a wake");
+	assert.equal(probes, 0); assert.equal(approvalChecks, 0); assert.equal(alerts.pending().length, 1, "dormant check waits without a wake");
 	attached = true; backlog = true; await monitor.tick(); assert.equal(probes, 0);
 	backlog = false; ready = false; await monitor.tick(); assert.equal(sent.length, 0); assert.equal(alerts.pending().length, 1);
 	ready = true; replaceAttachment = true; await monitor.tick(); assert.equal(sent.length, 0, "a disconnected attachment cannot attest for its replacement");
 	replaceAttachment = false; await monitor.tick(); await monitor.tick(); assert.equal(sent.length, 1);
 	await monitor.health(false); await monitor.health(true); reported = null; await monitor.tick();
 	assert.equal(sent.length, 1, "resolved checkpoint does not notify on later outage");
+	await monitor.health(false); await monitor.health(true); approvalLive = true; revokeApproval = true;
+	await monitor.tick(); assert.equal(sent.length, 1, "expired or cancelled approval cannot admit a recovery alert");
+	assert.equal(alerts.pending().length, 1);
+	approvalLive = true; revokeApproval = false; await monitor.tick(); await monitor.tick();
+	assert.equal(sent.length, 2); assert.equal(sent[1].attentionId, `approval_${"b".repeat(32)}`);
+	await monitor.health(false); await monitor.health(true); await alerts.originalAccepted(target.conversationId, target.piSessionId);
+	await monitor.tick(); assert.equal(sent.length, 2, "new notifying poll already occupies the recovery slot");
 	await monitor.close();
 });

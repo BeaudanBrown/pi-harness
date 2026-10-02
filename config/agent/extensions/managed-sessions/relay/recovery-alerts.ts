@@ -66,7 +66,7 @@ export class RecoveryAlerts {
 			if (state.alerts.some((alert) => !alert.sent && alert.attentionId === attentionId &&
 				alert.ticket.target.conversationId === ticket.target.conversationId && alert.ticket.target.piSessionId === ticket.target.piSessionId)) return;
 			state.alerts.push({ ticket: structuredClone(current), attentionId, sourceId: sourceId(current),
-				body: "Connection recovered. This conversation still has a checkpoint awaiting your response.", sent: false });
+				body: "Connection recovered. This conversation still has a question or host approval awaiting your response.", sent: false });
 		});
 	}
 	/** Frozen payloads are retried, never reclassified using later liveness or expiry. */

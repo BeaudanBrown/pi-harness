@@ -551,6 +551,7 @@ const publishingControlPoll = strictObject({
 	transactionId: MatrixTransactionIdSchema,
 	prompt: boundedString(4_096),
 	options: controlPollOptions,
+	disposition: Type.Optional(Type.Union([Type.Literal("silent"), Type.Literal("notify")])),
 });
 const activeControlPoll = strictObject({
 	pollEventId: boundedString(255),
@@ -735,7 +736,7 @@ export interface HostRuntimeState {
 		completedControlIds: string[];
 		publishingControlPoll: null | {
 			sourceControl: { controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string };
-			scope: "model" | "thinking"; transactionId: string; prompt: string;
+			scope: "model" | "thinking"; transactionId: string; prompt: string; disposition?: "silent" | "notify";
 			options: Array<{ answerId: string; command: string }>;
 		};
 		activeControlPoll: null | { pollEventId: string; sourceControlId: string; scope: "model" | "thinking"; options: Array<{ answerId: string; command: string }> };

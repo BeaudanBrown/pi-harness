@@ -15,7 +15,8 @@ export class RecoveryMonitor {
 	private stopped = false;
 	constructor(private readonly alerts: RecoveryAlerts, private readonly registry: RelayRegistry,
 		private readonly server: ManagedSessionIpcServer, private readonly backlogPending: (conversationId: string) => boolean,
-		private readonly diagnostic: (message: string) => void, private readonly timeoutMs = 5_000) {}
+		private readonly diagnostic: (message: string) => void, private readonly timeoutMs = 5_000,
+		private readonly approvalAttention?: (conversationId: string) => Promise<{ id: string; stillCurrent: () => boolean } | undefined>) {}
 	async health(healthy: boolean): Promise<void> {
 		if (healthy) await this.alerts.healthy();
 		else await this.alerts.outage(this.registry.listManifests().map(({ conversationId, piSessionId, roomId }) => ({ conversationId, piSessionId, roomId })));
@@ -60,11 +61,12 @@ export class RecoveryMonitor {
 				conversationId, role: "relay", type: "recovery.check", payload: { requestId } })) finish();
 		});
 		if (!evidence?.ready || this.stopped) return;
-		const stillCurrent = () => this.attachmentId(conversationId) === attachmentId &&
+		const approval = evidence.checkpointId === null ? await this.approvalAttention?.(conversationId) : undefined;
+		const stillCurrent = () => !this.stopped && this.attachmentId(conversationId) === attachmentId &&
 			this.server.supports(conversationId, "recovery-attention-v1") &&
 			this.registry.manifestByConversationId(conversationId)?.piSessionId === piSessionId &&
-			!this.backlogPending(conversationId) && this.checkpointCurrent(ticket, evidence.checkpointId);
-		await this.alerts.confirm(ticket, evidence.checkpointId, stillCurrent);
+			!this.backlogPending(conversationId) && (approval ? approval.stillCurrent() : this.checkpointCurrent(ticket, evidence.checkpointId));
+		await this.alerts.confirm(ticket, evidence.checkpointId ?? approval?.id ?? null, stillCurrent);
 	}
 	private checkpointCurrent(ticket: RecoveryTicket, checkpointId: string | null): boolean {
 		if (checkpointId === null) return true;

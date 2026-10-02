@@ -21,10 +21,14 @@ export class ControlPollPublisher {
 		private readonly registry: RelayRegistry,
 		private readonly matrix: ManagedMatrixClient,
 		private readonly afterMatrixAcceptance: () => void | Promise<void> = () => undefined,
+		private readonly disposition: () => "silent" | "notify" = () => "notify",
 	) {}
 
 	async publish(publication: ControlPollPublication): Promise<void> {
+		const saved = this.registry.publishingControlPolls().find((item) => item.conversationId === publication.conversationId && item.intent.sourceControl.controlId === publication.sourceControl.controlId)?.intent;
+		const disposition = saved ? saved.disposition : this.disposition();
 		const intent = {
+			...(disposition ? { disposition } : {}),
 			sourceControl: structuredClone(publication.sourceControl),
 			scope: publication.scope,
 			transactionId: deriveMatrixTransactionId(publication.conversationId, publication.sourceControl.controlId, 0),
@@ -48,7 +52,7 @@ export class ControlPollPublisher {
 	private async publishIntent(conversationId: string, roomId: string,
 		intent: NonNullable<RuntimeConversation["publishingControlPoll"]>): Promise<void> {
 		const pollEventId = await this.matrix.startPoll(roomId, intent.transactionId, intent.prompt,
-			intent.options.map((option) => ({ id: option.answerId, text: option.command })), undefined, "unstable");
+			intent.options.map((option) => ({ id: option.answerId, text: option.command })), undefined, "unstable", intent.disposition);
 		await this.afterMatrixAcceptance();
 		await this.registry.completeControlPollPublication(conversationId, intent.sourceControl.controlId, pollEventId);
 	}

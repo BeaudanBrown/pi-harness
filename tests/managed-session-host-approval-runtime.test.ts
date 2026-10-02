@@ -25,7 +25,7 @@ async function until(predicate: () => boolean) {
 
 test("composed Matrix approval routes the original participant request but only an operator can consume frozen consent", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "host-approval-runtime-")); const store = new HostApprovalStore(root, "host"); await store.load();
-	let runtime!: HostApprovalRuntime; let effects = 0; let valid = true; let polls = 0; const questions: string[] = [];
+	let runtime!: HostApprovalRuntime; let effects = 0; let valid = true; let polls = 0; const questions: string[] = []; let originalNotifications = 0;
 	const client = { supports: () => true,
 		confirmHostRun: async (checkId: string, witness: unknown) => { await runtime.handle(packet("host.run.confirm", { checkId, witness }), attachment); },
 		observeHostRun: async (witness: unknown) => { await runtime.handle(packet("host.run.observe", { witness }), attachment); },
@@ -34,6 +34,7 @@ test("composed Matrix approval routes the original participant request but only 
 		confirm: async () => { throw Error("Matrix-origin call must not use a local dialog"); } });
 	runtime = new HostApprovalRuntime({ hostId: "host", protectedConversationId: id("conv", "c"), store,
 		policy: new HostPolicy(JSON.parse(readFileSync("config/agent/managed-host-policy.json", "utf8"))), operatorUserIds: new Set([operator]),
+		onNotifyingPoll: async () => { originalNotifications++; },
 		matrix: { startPoll: async (room, _transaction, question) => { assert.equal(room, roomId); questions.push(question); return `$poll-${++polls}`; },
 			endPoll: async () => "$closed", memberJoined: async () => true,
 			checkpointPollAnswer: async (_room, _poll, answer) => answer === "approve" ? "Approve" : "Deny" },
@@ -50,16 +51,21 @@ test("composed Matrix approval routes the original participant request but only 
 	const first = request(); await until(() => store.list()[0]?.phase === "presented");
 	assert.equal(effects, 0); assert.equal(await vote(participant), false);
 	assert.ok(!questions[0]!.includes("not-for-display"));
+	const attention = await runtime.recoveryAttention(conversationId);
+	assert.ok(attention?.stillCurrent()); assert.equal(originalNotifications, 1);
 	assert.equal((await Promise.all([vote(operator), vote(operator)])).filter(Boolean).length, 1);
 	assert.equal(((await first)?.payload.response as { ok: boolean }).ok, true); assert.equal(effects, 1); assert.equal(store.list().length, 0);
 	assert.equal(await vote(operator), false, "late consent cannot replay execution");
+	assert.equal(attention!.stillCurrent(), false); assert.equal(await runtime.recoveryAttention(conversationId), undefined);
 
 	native.toolEnd("tool"); native.toolStart("tool"); valid = false;
 	const stale = request(); await until(() => store.list()[0]?.phase === "presented"); await vote(operator);
 	assert.equal(((await stale)?.payload.response as { error: { code: string } }).error.code, "stale_preview"); assert.equal(effects, 1);
 
 	native.toolEnd("tool"); native.toolStart("tool"); valid = true;
-	const cancelled = request(); await until(() => store.list()[0]?.phase === "presented"); runtime.cancelRun(conversationId);
+	const cancelled = request(); await until(() => store.list()[0]?.phase === "presented");
+	const pendingAttention = await runtime.recoveryAttention(conversationId); assert.ok(pendingAttention?.stillCurrent());
+	runtime.cancelRun(conversationId); assert.equal(pendingAttention!.stillCurrent(), false);
 	assert.equal(((await cancelled)?.payload.response as { error: { code: string } }).error.code, "cancelled");
 	assert.equal(await vote(operator), false); assert.equal(effects, 1); assert.equal(store.list().length, 0);
 });

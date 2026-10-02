@@ -27,6 +27,8 @@ export class HostApprovalRuntime {
 	constructor(private readonly options: {
 		hostId: string; protectedConversationId: string; policy: HostPolicy; store: HostApprovalStore;
 		operatorUserIds: ReadonlySet<string>;
+		notificationDisposition?: () => "silent" | "notify";
+		onNotifyingPoll?: (record: HostApprovalRecord) => Promise<void>;
 		matrix: Pick<ManagedMatrixClient, "startPoll" | "endPoll" | "memberJoined" | "checkpointPollAnswer">;
 		owner: HostMutationOwner;
 		read(request: HostReadRequest): Promise<unknown>;
@@ -42,7 +44,13 @@ export class HostApprovalRuntime {
 		this.approvals = new HostApprovals({ ...options,
 			isLive: (request) => this.controls.isLive(request),
 			freeze: (request) => options.owner.freeze(request),
-			present: (record) => this.prompts.present(record),
+			present: async (record) => {
+				const presentation = await this.prompts.present(record);
+				try {
+					if (record.request.actor.presentation === "matrix_poll" && (record.notificationDisposition ?? "notify") === "notify") await options.onNotifyingPoll?.(record);
+					return presentation;
+				} catch (error) { await presentation.close().catch(() => undefined); throw error; }
+			},
 			revalidate: (record) => options.owner.revalidate(record),
 			execute: (record) => options.owner.execute(record) });
 		this.dispatcher = new HostDispatcher({ ...options, approve: (request) => this.approvals.request(request) });
@@ -55,6 +63,11 @@ export class HostApprovalRuntime {
 	vote(input: Parameters<HostApprovalPrompts["vote"]>[0]): Promise<boolean> { return this.prompts.vote(input); }
 	disconnected(attachment: AcceptedAttachment): void { this.controls.disconnected(attachment); }
 	cancelRun(conversationId: string, runId?: string): void { this.approvals.cancelRun(conversationId, runId); }
+	async recoveryAttention(conversationId: string): Promise<{ id: string; stillCurrent: () => boolean } | undefined> {
+		const attention = await this.approvals.recoveryAttention(conversationId);
+		if (!attention || !this.prompts.isPending(attention.id)) return undefined;
+		return { id: attention.id, stillCurrent: () => attention.stillCurrent() && this.prompts.isPending(attention.id) };
+	}
 	recover(): ReturnType<HostApprovals["recover"]> { return this.approvals.recover(); }
 	async close(): Promise<void> {
 		this.controls.close();

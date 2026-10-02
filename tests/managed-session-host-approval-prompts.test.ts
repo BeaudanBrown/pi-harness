@@ -37,6 +37,25 @@ test("real Matrix poll format binds origin, fixed options and bot content; only 
 	assert.equal(await prompts.vote(vote), false);
 });
 
+test("catch-up approval polls stay silent and remain verifiable without loosening content checks", async () => {
+	let content: Record<string, unknown> = {}; let type = "";
+	const matrix = new ManagedMatrixClient({ homeserver: "https://example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" }, async (input, init) => {
+		const path = decodeURIComponent(new URL(String(input)).pathname);
+		if (path.includes("/send/")) { type = path.split("/send/")[1].split("/")[0]; content = JSON.parse(String(init?.body)); return Response.json({ event_id: "$poll" }); }
+		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		return Response.json({ sender: "@bot:example.com", type, content });
+	}, [roomId]);
+	const original = record();
+	const silent = prepareHostApproval("host", original.request, original.frozen, 1000, "silent");
+	const prompts = new HostApprovalPrompts({ matrix, operatorUserIds: new Set(["@operator:example.com"]), now: () => 1000, confirmLocal: async () => false });
+	const shown = await prompts.present(silent);
+	assert.deepEqual(content["m.mentions"], {}); assert.deepEqual(content["lol.bepis.pi.notification"], { version: 1, disposition: "silent" });
+	const vote = { conversationId, roomId, pollEventId: "$poll", answerId: "approve", senderUserId: "@operator:example.com", eventId: "$vote" };
+	content["m.mentions"] = { room: true }; assert.equal(await prompts.vote(vote), false);
+	content["m.mentions"] = {}; assert.equal(await prompts.vote(vote), true); assert.equal((await shown.decision).choice, "approve");
+	await shown.close();
+});
+
 test("native presentation returns ordinary denial and binds cancellation to the exact call", async () => {
 	const matrix = { startPoll: async () => { throw Error("No Matrix for local approval"); } } as unknown as ManagedMatrixClient;
 	let signal: AbortSignal | undefined;

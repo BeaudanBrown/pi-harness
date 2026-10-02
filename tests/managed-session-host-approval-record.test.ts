@@ -25,6 +25,15 @@ test("approval identity scopes independent calls while freezing request, effects
 	assert.equal(record.frozen.preconditions.instance, "frozen-instance");
 });
 
+test("approval notification disposition is immutable across persistence and phase transitions", () => {
+	const frozen = prepare().frozen;
+	const silent = prepareHostApproval("host", request, frozen, 1000, "silent");
+	assert.equal(parseHostApprovalRecord(JSON.parse(JSON.stringify(silent))).notificationDisposition, "silent");
+	assert.throws(() => parseHostApprovalRecord({ ...silent, notificationDisposition: "notify" }), /payload changed/);
+	assert.equal(transitionHostApproval(silent, { phase: "cancelled" }).notificationDisposition, "silent");
+	assert.doesNotThrow(() => parseHostApprovalRecord(prepare()), "legacy pending consent is still readable");
+});
+
 test("approval phase receipts cannot skip consent, extend lifetime or claim an unaccepted result", () => {
 	const prepared = prepare(); const presented = { ...prepared, phase: "presented", presentation: { kind: "local_dialog", id: "dialog-1" } };
 	assert.doesNotThrow(() => parseHostApprovalRecord(presented));
