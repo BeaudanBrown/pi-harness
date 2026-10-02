@@ -45,4 +45,20 @@ switch a remote tmux client. Remaining approved frontend composition (#113), pic
 - Evidence: `.pi/tmp/workers/2026-10-02T06-06-18-260Z-window-first-affected-verified-eb81f70e2484/`.
 
 This is not picker UI, live phone acceptance, a production launch, deployment,
-or nix-dotfiles Nix evaluation/build. Final review/canonical evidence follows.
+or nix-dotfiles Nix evaluation/build.
+
+## Issue-boundary review
+
+The final pinned diff review at harness `a40b930` (base `057f9f7`) returned no
+Standards or Spec findings. Both axes read the immutable external launcher export
+of `aec1113`, including its diff and full Go module. Review artifacts:
+`.pi/tmp/reviews/2026-10-02T06-17-23-736Z-057f9f742c62-303e5b96ba36/`.
+
+The latest affected gate passed 431 packaged managed-session tests with zero skips
+and source contracts. First-server admission is now explicit: a first launch may
+create its server; subsequent failed inspections require the original proof's
+verified exit before creating again. Arbitrary inspection failure is never absence.
+Evidence: `.pi/tmp/workers/2026-10-02T06-15-43-054Z-window-first-reviewable-affected-c0e2b9002ad5/`.
+
+No findings required remediation. Canonical verification follows this review;
+actual picker/UI acceptance remains separately owned and unauthorized here.
