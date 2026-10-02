@@ -226,14 +226,19 @@
                     '{rootKey:$rootKey,workspace:$workspace,relativeCwd:$relativeCwd,workspacePath:$workspacePath,cwd:$cwd,projectKey:null,projectDisplayName:null,checkoutDisplayName:null}'
                 fi
                 ;;
-              window-inspect)
+              window-inspect|window-inspect-exact)
                 conversation_id=$(jq -er 'if (keys == ["conversationId"]) and (.conversationId | test("^conv_[a-f0-9]{32}$")) then .conversationId else error("invalid request") end' <<<"$request")
                 matches=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F "$format|#{session_name}|#{@managed_pi_conversation_id}" 2>/dev/null | awk -F '|' -v id="$conversation_id" '$4 == id { print $1 "|" $2 "|" $3 }' || true)
                 [[ $(awk 'NF { count++ } END { print count + 0 }' <<<"$matches") -le 1 ]]
                 existing=$(awk 'NF { print; exit }' <<<"$matches")
                 if [[ -n "$existing" ]]; then
                   IFS='|' read -r window_id pane_id session_name <<<"$existing"
-                  jq -cn --arg conversationId "$conversation_id" --arg sessionName "$session_name" --arg windowId "$window_id" --arg paneId "$pane_id" '{conversationId:$conversationId,exists:true,sessionName:$sessionName,windowId:$windowId,paneId:$paneId}'
+                  if [[ "$operation" == window-inspect-exact ]]; then
+                    ownership=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" show-option -w -v -t "$window_id" @managed_test_ownership)
+                    jq -cn --arg conversationId "$conversation_id" --argjson ownership "$ownership" '{conversationId:$conversationId,exists:true,ownership:$ownership}'
+                  else
+                    jq -cn --arg conversationId "$conversation_id" --arg sessionName "$session_name" --arg windowId "$window_id" --arg paneId "$pane_id" '{conversationId:$conversationId,exists:true,sessionName:$sessionName,windowId:$windowId,paneId:$paneId}'
+                  fi
                 else
                   jq -cn --arg conversationId "$conversation_id" '{conversationId:$conversationId,exists:false}'
                 fi
@@ -252,7 +257,7 @@
                 tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_pi_conversation_id "$conversation_id"
                 jq -cn --arg conversationId "$conversation_id" --arg windowId "$window_id" --arg paneId "$pane_id" '{conversationId:$conversationId,sessionName:"default",windowId:$windowId,paneId:$paneId,role:"coordinator"}'
                 ;;
-              window-create)
+              window-create|window-create-exact)
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}" "''${PI_MANAGED_TEST_PROVIDER:?}"
                 conversation_id=$(jq -er '.conversationId | select(test("^conv_[a-f0-9]{32}$"))' <<<"$request")
                 workspace=$(jq -er '.placement.workspace' <<<"$request")
@@ -271,8 +276,25 @@
                     "exec direnv exec '$cwd' '$PI_MANAGED_TEST_MANAGED_PI' --mode rpc --model coordinator-probe/fake --extension '$PI_MANAGED_TEST_PROVIDER' >>''${PI_MANAGED_TEST_PROJECT_LOG:-/dev/null} 2>&1")
                 IFS='|' read -r window_id pane_id <<<"$created"
                 tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_pi_conversation_id "$conversation_id"
-                jq -cn --arg conversationId "$conversation_id" --arg sessionName "$workspace" --arg windowId "$window_id" --arg paneId "$pane_id" \
-                  --arg workspace "$workspace" --arg relativeCwd "$relative_cwd" '{conversationId:$conversationId,sessionName:$sessionName,windowId:$windowId,paneId:$paneId,rootKey:"projects",workspace:$workspace,relativeCwd:$relativeCwd,role:"conversation"}'
+                # Fake-launcher ABI evidence only; kernel stopping is tested in the Go launcher.
+                ownership=null
+                if [[ "$operation" == window-create-exact ]]; then
+                  launch_id=$(jq -er '.launchId | select(test("^launch_[a-f0-9]{32}$"))' <<<"$request")
+                  pane_pid=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" display-message -p -t "$pane_id" '#{pane_pid}')
+                  ownership=$(jq -cn --arg conversationId "$conversation_id" --arg launchId "$launch_id" --arg sessionName "$workspace" --arg windowId "$window_id" --arg paneId "$pane_id" --arg panePid "$pane_pid" \
+                    '{conversationId:$conversationId,launchId:$launchId,sessionName:$sessionName,windowId:$windowId,paneId:$paneId,panePid:$panePid,serverId:"123:456:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",processBootId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",processStartTicks:"123"}')
+                  tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_test_ownership "$ownership"
+                fi
+                jq -cn --arg conversationId "$conversation_id" --arg sessionName "$workspace" --arg windowId "$window_id" --arg paneId "$pane_id" --argjson ownership "$ownership" \
+                  --arg workspace "$workspace" --arg relativeCwd "$relative_cwd" '{conversationId:$conversationId,sessionName:$sessionName,windowId:$windowId,paneId:$paneId,rootKey:"projects",workspace:$workspace,relativeCwd:$relativeCwd,role:"conversation"} + (if $ownership == null then {} else {ownership:$ownership} end)'
+                ;;
+              window-check-exact)
+                window_id=$(jq -er '.windowId | select(test("^@[0-9]+$"))' <<<"$request")
+                ownership=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" show-option -w -v -t "$window_id" @managed_test_ownership)
+                dead=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" display-message -p -t "$window_id" '#{pane_dead}')
+                if [[ "$dead" == 0 && $(jq -cS . <<<"$ownership") == $(jq -cS . <<<"$request") ]]; then
+                  jq -cn '{state:"match"}'
+                else jq -cn '{state:"changed"}'; fi
                 ;;
               window-terminate|bridge-clear)
                 conversation_id=$(jq -er '.conversationId | select(test("^conv_[a-f0-9]{32}$"))' <<<"$request")

@@ -635,6 +635,8 @@ const runtimeConversation = strictObject({
 	closingCheckpointPolls: Type.Array(closingCheckpointPoll, { maxItems: 64 }),
 	artifactExports: Type.Array(artifactExport, { maxItems: MAX_ARTIFACT_EXPORTS }),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
+	launch: Type.Optional(strictObject({ launchId: stableId("launch"), generationId: GenerationIdSchema,
+		ordinal: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), observed: Type.Boolean() })),
 	managedWindow: nullable(
 		strictObject({
 			ownership: Type.Optional(ExactWindowProofSchema),
@@ -749,6 +751,7 @@ export interface HostRuntimeState {
 			originDeliveryId?: string;
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;
+		launch?: { launchId: string; generationId: string; ordinal: number; observed: boolean };
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string; ownership?: ExactWindowProof };
 		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "shutdown_confirmed" | "adopted"; requestedAt: string };
 		lastLaunchError?: { code: string; message: string; at: string };

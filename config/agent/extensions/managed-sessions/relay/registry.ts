@@ -845,6 +845,26 @@ export class RelayRegistry {
 		}
 	}
 
+	launchIdentity(conversationId: string): RuntimeConversation["launch"] { return structuredClone(this.runtimeConversation(conversationId).launch); }
+
+	/** Commit admission before invoking the launcher. An uncertain invocation is never replayed. */
+	async prepareProjectLaunch(conversationId: string, nonce: string): Promise<NonNullable<RuntimeConversation["launch"]>> {
+		if (!/^[A-Za-z0-9_-]{32,128}$/.test(nonce)) throw new RelayRegistryError("invalid_nonce", "Attachment nonce is invalid");
+		return this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			if (conversation.state === "active" || conversation.managedWindow || conversation.launch?.observed === false)
+				throw new RelayRegistryError("invalid_state", "Previous launch requires ownership-safe inspection before retry");
+			const generationId = this.activeGeneration(this.boundConversation(conversationId)).generationId;
+			const ordinal = (conversation.launch?.ordinal ?? 0) + 1;
+			if (!Number.isSafeInteger(ordinal)) throw new RelayRegistryError("capacity_reached", "Launch ordinal limit reached");
+			const hash = createHash("sha256").update("pi-managed-sessions:launch:live-v1\0");
+			for (const part of [conversationId, generationId, String(ordinal)]) hash.update(`${Buffer.byteLength(part)}:${part}`);
+			conversation.launch = { launchId: `launch_${hash.digest("hex").slice(0, 32)}`, generationId, ordinal, observed: false };
+			conversation.attachmentNonceHash = nonceHash(nonce); conversation.state = "starting";
+			return structuredClone(conversation.launch);
+		});
+	}
+
 	async beginLaunch(conversationId: string): Promise<void> {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
@@ -866,6 +886,10 @@ export class RelayRegistry {
 	async setManagedWindow(conversationId: string, window: RuntimeConversation["managedWindow"]): Promise<void> {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
+			if (window && conversation.launch) {
+				if (window.ownership?.launchId !== conversation.launch.launchId) throw new RelayRegistryError("invalid_state", "Observed window changed its reserved launch");
+				conversation.launch.observed = true;
+			}
 			conversation.managedWindow = window ? structuredClone(window) : null;
 			conversation.lastLaunchError = undefined;
 		});
@@ -1151,12 +1175,12 @@ export class RelayRegistry {
 	}
 
 	/** Private, bounded preparation snapshot; retireConversation revalidates it at commit. */
-	retirementCandidate(conversationId: string): { manifest: RegisteredConversation; generationId: string; state: RuntimeConversation["state"]; attachmentId?: string; window: RuntimeConversation["managedWindow"] } {
+	retirementCandidate(conversationId: string): { manifest: RegisteredConversation; generationId: string; state: RuntimeConversation["state"]; unresolvedLaunch: boolean; attachmentId?: string; window: RuntimeConversation["managedWindow"] } {
 		this.assertNotRetired(conversationId);
 		const manifest = this.manifests.get(conversationId);
 		if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Retirement requires a project conversation");
 		const runtime = this.runtimeConversation(conversationId);
-		return { manifest: structuredClone(manifest), generationId: this.activeGeneration(manifest).generationId, state: runtime.state,
+		return { manifest: structuredClone(manifest), generationId: this.activeGeneration(manifest).generationId, state: runtime.state, unresolvedLaunch: runtime.state === "starting" || runtime.launch?.observed === false,
 			...(runtime.attachment ? { attachmentId: runtime.attachment.attachmentId } : {}), window: structuredClone(runtime.managedWindow) };
 	}
 	retirement(conversationId: string): RetirementRecord | undefined { return this.retirements.get(conversationId); }
@@ -1176,7 +1200,7 @@ export class RelayRegistry {
 				throw new RelayRegistryError("invalid_state", "Retirement omitted required exact cleanup");
 			for (const target of targets) {
 				if (target.kind === "stop" && (target.generationId !== generation.generationId || target.attachmentId !== runtime.attachment?.attachmentId ||
-					Boolean(target.unresolvedLaunch) !== (runtime.state === "starting") || Boolean(target.unresolvedBinding) !== (!hasMatrixBinding(manifest) && !manifest.verifiedBinding) ||
+					Boolean(target.unresolvedLaunch) !== (runtime.state === "starting" || runtime.launch?.observed === false) || Boolean(target.unresolvedBinding) !== (!hasMatrixBinding(manifest) && !manifest.verifiedBinding) ||
 					Boolean(target.window) !== Boolean(runtime.managedWindow) || target.window && (target.window.windowId !== runtime.managedWindow?.windowId || target.window.paneId !== runtime.managedWindow?.paneId || target.window.sessionName !== runtime.managedWindow?.sessionName || !isDeepStrictEqual(target.window.ownership, runtime.managedWindow?.ownership))))
 					throw new RelayRegistryError("invalid_state", "Retirement stop target changed");
 				if ((target.kind === "operator_leave_forget" || target.kind === "bot_leave") && target.roomId !== roomId) throw new RelayRegistryError("invalid_state", "Retirement room target changed");

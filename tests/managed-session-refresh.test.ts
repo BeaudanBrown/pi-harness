@@ -19,7 +19,7 @@ test("refresh requires coordinator authority and literal confirmation", () => {
 	assert.throws(() => parseManagedSessionEnvelope({ ...envelope, payload: { request: { ...envelope.payload.request, confirmed: false } } }));
 });
 
-test("coordinator refresh refuses busy, preserves session and queue, and recovers failed same-session relaunch", { timeout: 30_000 }, async (t) => {
+test("coordinator refresh preserves session and queue, refuses busy, and does not replay uncertain relaunch", { timeout: 30_000 }, async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "pi-refresh-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const workspace = join(root, "workspace"); await mkdir(join(workspace, "sub"), { recursive: true });
 	const record = join(root, "launch.json"); const fail = join(root, "fail"); const sessions = join(root, "sessions");
@@ -31,13 +31,14 @@ const placement = {rootKey:'projects',workspace:'workspace',relativeCwd:'sub'};
 let result;
 if(op==='workspace-resolve') result={...placement,workspacePath:${JSON.stringify(workspace)},cwd:${JSON.stringify(join(workspace, "sub"))},projectKey:'project_'+ 'a'.repeat(32),projectDisplayName:'workspace',checkoutDisplayName:'workspace'};
 else if(op==='root-ensure') result={sessionName:'workspace'};
-else if(op==='window-inspect') result={conversationId:request.conversationId,exists:false};
-else if(op==='window-create') {
+else if(op==='window-inspect-exact') result={conversationId:request.conversationId,exists:false};
+else if(op==='window-create-exact') {
  if(fs.existsSync(${JSON.stringify(fail)})) process.exit(1);
  const env=Object.fromEntries(['ROOT_KEY','WORKSPACE','RELATIVE_CWD','WORKSPACE_PATH'].map(k=>[k,process.env['PI_MANAGED_SESSION_'+k]]));
  fs.writeFileSync(${JSON.stringify(record)},JSON.stringify({conversationId:request.conversationId,nonce:process.env.PI_MANAGED_SESSION_ATTACHMENT_NONCE,env}));
- result={conversationId:request.conversationId,sessionName:'workspace',windowId:'@7',paneId:'%8',...placement,role:'conversation'};
-} else if(op==='window-terminate') result={terminated:true}; else process.exit(2);
+ const ownership={conversationId:request.conversationId,launchId:request.launchId,sessionName:'workspace',windowId:'@7',paneId:'%8',panePid:'789',serverId:'123:456:'+'a'.repeat(32),processBootId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',processStartTicks:'123'};
+ result={conversationId:request.conversationId,sessionName:'workspace',windowId:'@7',paneId:'%8',...placement,role:'conversation',ownership};
+} else if(op==='window-check-exact') result={state:'gone'}; else process.exit(2);
 console.log(JSON.stringify(result));
 `, { mode: 0o700 });
 	const registry = new RelayRegistry("refresh-host", join(root, "runtime"), new ConversationManifestStore(join(root, "manifests"))); await registry.load();
@@ -90,10 +91,6 @@ console.log(JSON.stringify(result));
 	assert.equal((await request("conversation.refresh", { confirmed: true })).conversationState, "active"); await reattaching;
 	assert.deepEqual(registry.manifestByConversationId(id), manifest); assert.deepEqual(registry.pendingInputs(id), [queued]);
 	assert.equal(await readFile(join(sessions, id, "session.jsonl"), "utf8"), history); assert.equal(rooms, 2);
-	await writeFile(fail, "fail"); await assert.rejects(() => request("conversation.refresh", { confirmed: true }), /window-create failed/);
-	assert.equal(registry.conversationState(id), "dormant"); assert.deepEqual(registry.pendingInputs(id), [queued]);
-	await rm(fail); await rm(record); const recovering = attach(); await request("conversation.refresh", { confirmed: true }); await recovering;
-	assert.deepEqual(registry.manifestByConversationId(id), manifest); assert.deepEqual(registry.pendingInputs(id), [queued]);
 	const before = refreshRequests;
 	await lifecycle.reconcileRuntimeUpdates(runtimeId);
 	assert.equal(refreshRequests, before, "matching runtime is not restarted");
@@ -127,4 +124,10 @@ console.log(JSON.stringify(result));
 	await new Promise((resolve) => setTimeout(resolve, 30));
 	await lifecycle.reconcileRuntimeUpdates("c".repeat(64));
 	assert.equal(registry.conversationState(id), "dormant", "updates never wake dormant conversations");
+	await writeFile(fail, "fail"); await assert.rejects(() => request("conversation.refresh", { confirmed: true }), /window-create-exact failed/);
+	assert.equal(registry.conversationState(id), "dormant"); assert.deepEqual(registry.pendingInputs(id), [queued]);
+	await rm(fail); await rm(record);
+	await assert.rejects(() => request("conversation.refresh", { confirmed: true }), /inspection before retry/);
+	await assert.rejects(readFile(record), { code: "ENOENT" });
+	assert.deepEqual(registry.manifestByConversationId(id), manifest); assert.deepEqual(registry.pendingInputs(id), [queued]);
 });

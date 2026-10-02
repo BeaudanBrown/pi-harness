@@ -48,7 +48,7 @@ export class ConversationRetirement {
 			operatorUserId: matrix.operatorUserId, botUserId: matrix.botUserId,
 			...(hierarchy ? { ancestorProvenance: (roomId: string) => hierarchy.ancestorProvenance(roomId) } : {}),
 			stop: { kind: "stop", generationId: candidate.generationId,
-				...(candidate.state === "starting" ? { unresolvedLaunch: true as const } : {}),
+				...(candidate.unresolvedLaunch ? { unresolvedLaunch: true as const } : {}),
 				...(!hasMatrixBinding(candidate.manifest) && !candidate.manifest.verifiedBinding ? { unresolvedBinding: true as const } : {}),
 				...(candidate.attachmentId ? { attachmentId: candidate.attachmentId } : {}), ...(candidate.window ? { window: candidate.window } : {}) } });
 		return { conversationId, targets };

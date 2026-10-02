@@ -663,3 +663,36 @@ high/current finding remains for normal lifecycle launch/stop/refresh/generation
 cutover, which still calls legacy operations. The `ExactWindowClient` contract is
 ready, but ordinary creation does not yet use it. This is the next #110/#109
 integration chunk, not completed launch behavior or deployable epic acceptance.
+
+### Normal lifecycle exact-ownership cutover (#109/#110)
+
+The normal project start/resume, terminal promotion, stop, refresh and generation
+paths now use the exact launcher API, not legacy window mutation. Refresh only
+observes confirmed exit after graceful idle shutdown; it does not force an
+unattached process. Failed startup preserves its pane and binding for manual
+closure. No new recovery daemon, archive window or automatic mutation replay is
+introduced. Window-first public responses and remaining retirement continuation
+assembly are still separate acceptance items; this does not close either issue.
+
+| Acceptance / boundary | Implementation and focused evidence |
+| --- | --- |
+| Fresh launch identity before side effects | Runtime atomically records generation, monotonic ordinal, derived launch ID and nonce verifier before invocation; exact lifecycle tests inspect admission from inside the fake launcher. |
+| Exact ownership survives creation | Birth-backed result is validated and persisted before launch success; even an early adapter attachment cannot conceal a malformed result. Existing IPC lifecycle/promotion tests exercise the normal path. |
+| Stop and generation replacement | Exact proof only, with positive post-stop exit check; acknowledgement without exit keeps the binding. No normal project legacy launcher calls remain. |
+| Graceful refresh | Confirmed exit is required without forced termination. |
+| Failed pane / manual retry | Preserve pane and proof; reject retained/changed ownership, allow a new ordinal only after verified manual closure. |
+| Lost create response / restart | Keep unobserved admission and refuse replay; surface manual-inspection failure. Retirement retains this unresolved obligation even if runtime is dormant. |
+| Concurrent lifecycle operations | Join only identical launch/generation requests; conflicting workspace operations fail explicitly instead of joining an unrelated promise. A stop cannot overtake an admitted launch. |
+
+Focused exact lifecycle, existing lifecycle and retirement checks passed: 19 tests,
+with four packaged-only tests deferred to the packaged gate. The packaged fixture
+uses a fake exact-launcher ABI with real Pi/direnv; it does not establish kernel
+stop correctness, which remains covered by the separate Go launcher tests.
+
+Final affected gates passed (`exact-lifecycle-final-attachment-check`,
+2026-10-02): packaged managed-session tests and source contracts. All 417 tests
+passed with no skips, including real Pi/direnv and Unix IPC. Stop/generation
+shutdown messages are bound to the captured attachment, not a later reconnect.
+The earlier lifecycle-cutover review finding is addressed for normal project
+paths; no additional review cycle was run for this integration increment.
+No deployment, push or live-session mutation was performed.
