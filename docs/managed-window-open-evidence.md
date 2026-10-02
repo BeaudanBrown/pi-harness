@@ -62,3 +62,19 @@ Evidence: `.pi/tmp/workers/2026-10-02T06-15-43-054Z-window-first-reviewable-affe
 
 No findings required remediation. Canonical verification follows this review;
 actual picker/UI acceptance remains separately owned and unauthorized here.
+
+## Final gate and handoff
+
+`nix run .#verify` passed all 12 canonical groups at `5f0eeb1`, including 431
+managed-session tests with zero skips and production package builds. Artifact:
+`.pi/tmp/workers/2026-10-02T06-20-09-827Z-window-first-final-canonical-9ea1bd212c53/`.
+Go suite and external pre-commit checks passed at `aec1113`. LSP reports no changed
+TypeScript/Nix errors; the external Go folder is outside the LSP workspace and was
+verified with Go directly. No LSP behavior changed.
+
+This evidence addition is documentation-only after the verified executable
+snapshot, so the canonical gate is not repeated for its result log. Both worktrees
+are committed and clean. No push, deployment, activation, live migration or live
+retirement occurred; the original nix-dotfiles checkout's three unrelated dirty
+files remain untouched. Approved model/frontend assembly and actual picker UI
+remain in their existing dependent issues.
