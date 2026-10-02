@@ -241,9 +241,13 @@ running. During relay reconnect grace, use validated launcher process evidence;
 a stale attachment, shell wrapper, dead pane or mere marker is insufficient.
 Unavailable observation means unknown, not stopped or permission to recreate.
 Revalidate stable server, window and pane identity/marker before switch/kill.
-Failed retry replaces only that failed window. Manual window kill makes the
-conversation dormant; a new authorized input may wake it, cancelled old work
-cannot. Coordinator opening uses its protected bootstrap/ensure path.
+Prefer clear failures and explicit manual retry over elaborate recovery. A
+retained dead pane is left untouched and blocks retry until the operator closes
+it. Do not create archival or successor windows to work around it. After manual
+closure, revalidate disappearance and ownership before permitting a fresh launch;
+closure alone does not prove that an orphaned original process exited. Manual
+window kill makes the conversation dormant; a new authorized input may wake it,
+cancelled old work cannot. Coordinator opening uses its protected bootstrap/ensure path.
 
 Names are `● title` for known running and `○ title` for stopped/failed. Unknown
 keeps last-known presentation with honest detailed status. Typing indicates

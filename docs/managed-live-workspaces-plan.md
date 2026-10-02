@@ -154,6 +154,8 @@ After the host accepts closure durably:
 
 Operator-approved process identity clarification: forced stopping stays inside the existing nix-dotfiles launcher and uses a Linux kernel process handle plus recorded boot/start identity. Never signal a reusable numeric PID or kill a window container that may hold replacement work. Legacy or unverifiable identities remain pending; no new service or general process manager is introduced.
 
+Operator-approved simplicity clarification: prefer clear failures and explicit manual retry over elaborate automatic recovery. A retained dead startup pane blocks retry until the operator closes it; leave it untouched rather than adding automatic dead-pane replacement, archival windows or successor-window recovery. Revalidate exact ownership and process exit before a fresh launch. This supersedes automatic replacement of retained failed windows, not the safety checks that protect unrelated work.
+
 Retain private cleanup intents with exact Matrix IDs, phases, and process observations until effects are confirmed. If stop fails, surface pending cleanup failure; never report a live process as removed. After retirement, network failure never restores resumability. A close sent through Matrix while the host is offline cannot stop it until received.
 
 Preserve local Pi transcripts and project/Git files. Leave other human participants and their history untouched; leave/forget is not server-side history erasure. Concept/title reuse gets new identity/room. Explicit resume of retired Pi history may reuse the preserved history as context under new ownership, without old bindings or history backfill.
