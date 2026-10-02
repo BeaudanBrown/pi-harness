@@ -63,12 +63,13 @@ test("interrupted cards return a typed continuation signal without rewriting fin
 });
 
 test("attachment loss interrupts every unfinished activity before later final answers", async (t) => {
-	const root = await mkdtemp(join(tmpdir(), "managed-multiple-interrupt-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const root = await mkdtemp(join(tmpdir(), "managed-multiple-interrupt-"));
 	let card = 0;
 	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" },
 		async (input) => Response.json(String(input).includes("/send/") ? { event_id: `$card-${++card}` } : {}), [roomId]);
 	const registry = { manifestByConversationId: () => ({ roomId }) } as unknown as RelayRegistry;
-	const projector = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 1 }); t.after(() => projector.close());
+	const projector = new ActivityProjector(root, registry, matrix, { interruptionGraceMs: 1 });
+	t.after(async () => { await projector.close(); await rm(root, { recursive: true, force: true }); });
 	const olderId = deriveActivityId(deriveGenerationId(conversationId, 1), "older-run");
 	const newerId = deriveActivityId(deriveGenerationId(conversationId, 1), "newer-run");
 	await projector.project(envelope("activity.update", { activityId: olderId, revision: 0, state: "busy" }));

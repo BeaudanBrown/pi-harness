@@ -152,6 +152,8 @@ After the host accepts closure durably:
 5. Remove newly empty verified harness-owned worktree/project ancestor Spaces, including relevant operator membership, but retain the host Space.
 6. Compact completed cleanup to a minimal permanent tombstone preventing resurrection from retries, stale adapters, creation keys, synchronized manifests, or old backups merged with current retirement state.
 
+Operator-approved process identity clarification: forced stopping stays inside the existing nix-dotfiles launcher and uses a Linux kernel process handle plus recorded boot/start identity. Never signal a reusable numeric PID or kill a window container that may hold replacement work. Legacy or unverifiable identities remain pending; no new service or general process manager is introduced.
+
 Retain private cleanup intents with exact Matrix IDs, phases, and process observations until effects are confirmed. If stop fails, surface pending cleanup failure; never report a live process as removed. After retirement, network failure never restores resumability. A close sent through Matrix while the host is offline cannot stop it until received.
 
 Preserve local Pi transcripts and project/Git files. Leave other human participants and their history untouched; leave/forget is not server-side history erasure. Concept/title reuse gets new identity/room. Explicit resume of retired Pi history may reuse the preserved history as context under new ownership, without old bindings or history backfill.

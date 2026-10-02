@@ -11,7 +11,7 @@ import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay
 
 const hostId = "host"; const conversationId = deriveConversationId(hostId, "window");
 const proof: ExactWindowProof = { conversationId, serverId: `123:456:${"a".repeat(32)}`, launchId: `launch_${"b".repeat(32)}`,
-	sessionName: "workspace", windowId: "@1", paneId: "%2", panePid: "789" };
+	sessionName: "workspace", windowId: "@1", paneId: "%2", panePid: "789", processBootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processStartTicks: "123456" };
 
 test("exact window client preserves frozen identity and never falls back to legacy termination", async () => {
 	const calls: string[] = []; let accepted = false;
@@ -25,6 +25,18 @@ test("exact window client preserves frozen identity and never falls back to lega
 	assert.deepEqual(calls, ["window-inspect-exact", "window-terminate-exact", "window-terminate-exact"]);
 	const unavailable = new ExactWindowClient(async () => { throw Error("unsupported launcher"); });
 	await assert.rejects(unavailable.terminate(proof), /unsupported/);
+});
+
+test("legacy proofs remain readable but cannot authorize forced stopping or new creation", async () => {
+	const { processBootId: _boot, processStartTicks: _ticks, ...legacy } = proof;
+	assert.deepEqual(parseExactWindowProof(legacy), legacy);
+	assert.throws(() => parseExactWindowProof({ ...legacy, processBootId: proof.processBootId }), /incomplete/);
+	let calls = 0; const client = new ExactWindowClient(async () => { calls++; return { terminated: true }; });
+	await assert.rejects(client.terminate(legacy), /kernel process identity/); assert.equal(calls, 0);
+	const placement = { rootKey: "projects", workspace: "workspace", relativeCwd: "" };
+	const old = new ExactWindowClient(async () => ({ ...placement, conversationId, role: "conversation", sessionName: legacy.sessionName,
+		windowId: legacy.windowId, paneId: legacy.paneId, ownership: legacy }));
+	await assert.rejects(old.create(conversationId, proof.launchId, placement), /kernel process identity/);
 });
 
 test("exact observation distinguishes disappearance from changed ownership without mutating", async () => {

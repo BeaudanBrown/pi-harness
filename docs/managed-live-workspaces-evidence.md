@@ -628,8 +628,28 @@ and retirement rechecks after a termination acknowledgement. More importantly,
 the public exact forced-stop operation has been disabled fail-closed in the
 nix-dotfiles source (`dde1841`); the incomplete tmux-only mutation prototype exists only in
 tests. No live deployment used it. A kernel-lifetime-bound primitive (proposed:
-Linux pidfd plus recorded process birth identity inside the same launcher) needs
-an operator decision before forced-stop integration continues. No fallback to
-killing by PID/window marker is authorized. Final affected packaged gates passed
+Linux pidfd plus recorded process birth identity inside the same launcher) was
+subsequently approved by the operator. No fallback to killing by PID/window
+marker is authorized. Final affected packaged gates passed
 (`retirement-runtime-cutover-affected-final`, 2026-10-02); the complete Go suite
 and the real-IPC upgrade-guard fixtures also passed. No changes were activated.
+
+The approved kernel-bound launcher implementation (`nix-dotfiles` commit
+`a448e1a`) now records Linux boot UUID
+and process start ticks, pins a pidfd before checking ownership, revalidates the
+pinned process after the check, and sends TERM/conditional KILL through that same
+descriptor. It never kills the window container. Kernel support is checked before
+exact creation; unsupported platforms/kernels and incomplete legacy proofs fail
+closed without fallback. The harness validates/preserves both birth fields and
+rejects forced stopping or fresh creation results without them. Existing records
+remain readable without gaining authority.
+
+Disposable-process and real-tmux tests cover birth mismatch, dead descriptors,
+a respawn during observation, unrelated panes added after observation, signal
+escalation, actual public create/stop dispatch, and retained dead panes. The latter
+remain pending cleanup rather than being removed or adopted. The complete Go
+suite and focused harness proof/retirement tests pass. This does not yet complete
+window-first launch integration or the epic's live acceptance. Packaged affected
+harness gates passed (`kernel-proof-affected-final`, 2026-10-02). An unrelated
+activity fixture teardown race exposed by the first gate run was corrected by
+draining its projector before deleting its temporary directory.

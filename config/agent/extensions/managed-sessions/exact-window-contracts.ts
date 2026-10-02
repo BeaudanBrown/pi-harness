@@ -11,10 +11,13 @@ export const ExactWindowProofSchema = Type.Object({
 	windowId: Type.String({ pattern: "^@[0-9]{1,20}$" }),
 	paneId: Type.String({ pattern: "^%[0-9]{1,20}$" }),
 	panePid: Type.String({ pattern: "^[1-9][0-9]{0,19}$" }),
+	processBootId: Type.Optional(Type.String({ pattern: "^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$" })),
+	processStartTicks: Type.Optional(Type.String({ pattern: "^[0-9]{1,20}$" })),
 }, { additionalProperties: false });
 export type ExactWindowProof = Static<typeof ExactWindowProofSchema>;
 export function parseExactWindowProof(value: unknown): ExactWindowProof {
 	if (!Check(ExactWindowProofSchema, value) || BigInt(value.panePid) > 2147483647n || BigInt(value.serverId.split(":")[0]!) > 2147483647n) throw Error("Exact window ownership is unavailable");
+	if ((value.processBootId === undefined) !== (value.processStartTicks === undefined)) throw Error("Exact process birth identity is incomplete");
 	return structuredClone(value);
 }
 export function assertExactWindowBinding(conversationId: string, window: { sessionName: string; windowId: string; paneId: string; ownership?: ExactWindowProof }): void {

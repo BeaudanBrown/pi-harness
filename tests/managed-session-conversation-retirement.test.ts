@@ -31,7 +31,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, owned = true
 	} else await registry.setAttachmentNonce(first.conversationId, nonce);
 	let attachment = await registry.attach({ protocolVersion: "1.0.0", role: "ordinary_adapter", type: "attachment.attach", messageId: "attach", conversationId: first.conversationId,
 		payload: { sessionId: first.piSessionId, attachmentNonce: nonce, bindingBoundaryEntryId: first.bindingBoundaryEntryId, requestedCapabilities: ["local-enrollment-v1"] } }, "socket") as ReturnType<import("../config/agent/extensions/managed-sessions/relay/ipc-server.js").ManagedSessionIpcServer["attachment"]>;
-	const proof = { conversationId: first.conversationId, serverId: `123:456:${"a".repeat(32)}`, launchId: `launch_${"b".repeat(32)}`, sessionName: "workspace", windowId: "@1", paneId: "%1", panePid: "789" };
+	const proof = { conversationId: first.conversationId, serverId: `123:456:${"a".repeat(32)}`, launchId: `launch_${"b".repeat(32)}`, sessionName: "workspace", windowId: "@1", paneId: "%1", panePid: "789", processBootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processStartTicks: "123456" };
 	await registry.setManagedWindow(first.conversationId, { sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, ...(owned ? { ownership: proof } : {}) });
 	const events: string[] = []; const state = { authenticated: true, accountAvailable: true, processExitVerified: true, window: "match" as "match" | "gone" | "changed" };
 	const observe = (name: string) => { assert.ok(registry.retirement(first.conversationId)); assert.equal(registry.registeredConversation(first.conversationId), undefined); events.push(name); };
