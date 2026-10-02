@@ -611,5 +611,25 @@ conversations, original-only retry, changed/legacy window refusal and preparatio
 drift. Unresolved launch and room-binding continuations are explicitly frozen as
 blocked obligations: disappearance of one known window must not falsely complete
 those continuations. Their launch/provisioning owners still need to reconcile
-that boundary. This owner is not yet installed in production startup or legacy
-routes, and account execution still awaits the NAS transport.
+that boundary. The owner is now installed in relay startup/shutdown, including original frozen
+cleanup rooms in the private Matrix allowlist. Lifecycle deletion and bundled
+cleanup delegate to terminal retirement; the old delete/restore APIs have been
+removed. Legacy model-mutation and self-delete frames fail with an upgrade
+message without disconnecting otherwise authenticated adapters. Retired status
+reports complete/pending/blocked cleanup without returning a resumable inventory
+item. The full approved host-mutation frontend and NAS account execution remain
+unfinished; `approval-v1` remains withheld.
+
+Integration also exposed an additional process-lifetime boundary: tmux window
+removal alone does not prove the original process exited, and a respawn can
+retain markers while a numeric PID can eventually be reused. The read-only
+launcher check now requires positive original-process absence before `gone`,
+and retirement rechecks after a termination acknowledgement. More importantly,
+the public exact forced-stop operation has been disabled fail-closed in the
+nix-dotfiles source (`dde1841`); the incomplete tmux-only mutation prototype exists only in
+tests. No live deployment used it. A kernel-lifetime-bound primitive (proposed:
+Linux pidfd plus recorded process birth identity inside the same launcher) needs
+an operator decision before forced-stop integration continues. No fallback to
+killing by PID/window marker is authorized. Final affected packaged gates passed
+(`retirement-runtime-cutover-affected-final`, 2026-10-02); the complete Go suite
+and the real-IPC upgrade-guard fixtures also passed. No changes were activated.

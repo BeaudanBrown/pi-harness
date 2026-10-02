@@ -8,7 +8,7 @@ import { join, resolve } from "node:path";
 import test from "node:test";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
-import { BoundAdapterClient, requestLocalBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { BoundAdapterClient, CoordinatorAdapterClient, requestLocalBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { requestHostControl } from "../config/agent/extensions/managed-sessions/relay/host-control-client.js";
 
@@ -178,6 +178,17 @@ process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.
 	blocked = false; release(); relay = await starting;
 	for (let attempt = 0; attempt < 300 && !client.matrixBound; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
 	assert.equal(client.matrixBound, true); assert.equal((await client.selfStatus()).payload.conversationState, "active");
+	await assert.rejects(client.selfDelete(), { code: "invalid_state" });
+	assert.equal((await client.selfStatus()).payload.conversationState, "active", "legacy unbind consent cannot silently become retirement consent");
+	const coordinator = relay.registry.listManifests().find((item) => item.kind === "coordinator")!;
+	const coordinatorNonce = "c".repeat(32); await relay.registry.setAttachmentNonce(coordinator.conversationId, coordinatorNonce);
+	const coordinatorClient = new CoordinatorAdapterClient({ socketPath, role: "coordinator_adapter", attachmentNonce: coordinatorNonce,
+		binding: { version: "1.0.0", conversationId: coordinator.conversationId, concept: coordinator.concept, sessionId: coordinator.piSessionId,
+			bindingBoundaryEntryId: coordinator.bindingBoundaryEntryId, role: "coordinator_adapter" }, onEnvelope: () => undefined });
+	t.after(() => coordinatorClient.close("shutdown")); await coordinatorClient.connect();
+	await assert.rejects(coordinatorClient.lifecycleRequest({ operation: "conversation.delete", targetConversationId: result.conversationId, confirmed: true }), { code: "invalid_state" });
+	assert.equal((await coordinatorClient.lifecycleRequest({ operation: "conversation.list" })).type, "lifecycle.result");
+	assert.ok(relay.registry.registeredConversation(result.conversationId));
 	assert.equal(state.createCalls, 5); assert.equal(await readFile(sourceSessionFile, "utf8"), sourceBytes);
 	assert.deepEqual(new Set((await readFile(operations, "utf8")).trim().split("\n").map((line) => JSON.parse(line))), new Set(["workspace-identify", "workspace-resolve"]));
 });

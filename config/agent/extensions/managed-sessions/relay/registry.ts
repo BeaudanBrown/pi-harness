@@ -56,12 +56,6 @@ function expectedRole(manifest: RegisteredConversation): AdapterRole {
 	return manifest.kind === "coordinator" ? "coordinator_adapter" : "ordinary_adapter";
 }
 
-export interface DeletedConversation {
-	manifest: ConversationManifest;
-	runtime: RuntimeConversation;
-	connectionId?: string;
-}
-
 export interface RegistryConversationMetadata {
 	conversationId: string; kind: "project" | "coordinator"; title: string; activeGenerationId: string;
 	attached: boolean; matrixBound: boolean; placement?: WorkspaceIdentity; projectKey?: string; checkoutId?: string;
@@ -946,51 +940,6 @@ export class RelayRegistry {
 			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
 			if (input.status === "accepted") input.status = "delivered";
 		});
-	}
-
-	async deleteConversation(conversationId: string): Promise<DeletedConversation> {
-		const manifest = this.boundConversation(conversationId);
-		const runtime = this.state.conversations.find((candidate) => candidate.conversationId === conversationId);
-		if (!manifest || !runtime) throw new RelayRegistryError("not_found", "Managed conversation was not found");
-		if (manifest.kind === "coordinator") throw new RelayRegistryError("permission_denied", "The guaranteed coordinator conversation cannot be deleted");
-		const savedManifest = structuredClone(manifest);
-		const savedRuntime = structuredClone(runtime);
-		const savedConnection = this.liveConnections.get(conversationId);
-		await this.mutate(async () => {
-			this.manifests.delete(conversationId);
-			this.liveConnections.delete(conversationId);
-			this.state.conversations = this.state.conversations.filter((candidate) => candidate.conversationId !== conversationId);
-		});
-		try {
-			await this.manifestStore.remove(conversationId);
-		} catch (error) {
-			await this.mutate(async () => {
-				this.manifests.set(conversationId, savedManifest);
-				this.state.conversations.push(savedRuntime);
-				if (savedConnection) this.liveConnections.set(conversationId, savedConnection);
-			});
-			throw error;
-		}
-		return { manifest: savedManifest, runtime: savedRuntime, ...(savedConnection ? { connectionId: savedConnection } : {}) };
-	}
-
-	async restoreDeletedConversation(deleted: DeletedConversation): Promise<void> {
-		this.assertNotRetired(deleted.manifest.conversationId);
-		if (this.retirements.hasCreationKey(deleted.manifest.creationKey)) throw new RelayRegistryError("invalid_state", "Retired identity cannot be restored");
-		await this.manifestStore.write(deleted.manifest);
-		try {
-			await this.mutate(async () => {
-				this.assertNotRetired(deleted.manifest.conversationId);
-				if (this.retirements.hasCreationKey(deleted.manifest.creationKey)) throw new RelayRegistryError("invalid_state", "Retired identity cannot be restored");
-				if (this.manifests.has(deleted.manifest.conversationId)) return;
-				this.manifests.set(deleted.manifest.conversationId, deleted.manifest);
-				this.state.conversations.push(deleted.runtime);
-				if (deleted.connectionId) this.liveConnections.set(deleted.manifest.conversationId, deleted.connectionId);
-			});
-		} catch (error) {
-			await this.manifestStore.remove(deleted.manifest.conversationId).catch(() => undefined);
-			throw error;
-		}
 	}
 
 	async acknowledgeInput(conversationId: string, deliveryId: string, status: string, piEntryId?: string, completionKind?: string): Promise<void> {

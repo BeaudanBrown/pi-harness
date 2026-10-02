@@ -33,7 +33,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, owned = true
 		payload: { sessionId: first.piSessionId, attachmentNonce: nonce, bindingBoundaryEntryId: first.bindingBoundaryEntryId, requestedCapabilities: ["local-enrollment-v1"] } }, "socket") as ReturnType<import("../config/agent/extensions/managed-sessions/relay/ipc-server.js").ManagedSessionIpcServer["attachment"]>;
 	const proof = { conversationId: first.conversationId, serverId: `123:456:${"a".repeat(32)}`, launchId: `launch_${"b".repeat(32)}`, sessionName: "workspace", windowId: "@1", paneId: "%1", panePid: "789" };
 	await registry.setManagedWindow(first.conversationId, { sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, ...(owned ? { ownership: proof } : {}) });
-	const events: string[] = []; const state = { authenticated: true, accountAvailable: true, window: "match" as "match" | "gone" | "changed" };
+	const events: string[] = []; const state = { authenticated: true, accountAvailable: true, processExitVerified: true, window: "match" as "match" | "gone" | "changed" };
 	const observe = (name: string) => { assert.ok(registry.retirement(first.conversationId)); assert.equal(registry.registeredConversation(first.conversationId), undefined); events.push(name); };
 	const matrix = { operatorUserId: "@operator:example.com", botUserId: "@bot:example.com",
 		accountJoined: async (room: string) => { assert.equal(room, first.roomId); observe("bot-observe"); return true; },
@@ -41,7 +41,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, owned = true
 		leaveRoom: async (room: string) => { assert.equal(room, first.roomId); observe("bot-leave"); } } as unknown as ManagedMatrixClient;
 	owner = new ConversationRetirement({ registry, matrix, matrixAuthenticated: () => state.authenticated,
 		server: { attachment: () => attachment, sendToAttachment: (target, frame) => { assert.deepEqual(target, attachment); assert.equal(frame.type, "termination.request"); assert.equal(frame.payload.reason, "stop"); observe("native-stop"); return true; } },
-		windows: { check: async (value) => { assert.deepEqual(value, proof); observe("window-check"); return state.window; },
+		windows: { check: async (value) => { assert.deepEqual(value, proof); observe("window-check"); if (state.window === "gone" && !state.processExitVerified) throw Error("Original process exit is unknown"); return state.window; },
 			terminate: async (value) => { assert.deepEqual(value, proof); observe("window-stop"); state.window = "gone"; attachment = undefined; return true; } },
 		account: { completed: async () => state.accountAvailable, leaveAndForget: async (target) => { assert.equal(target.roomId, first.roomId); observe("operator-leave"); return state.accountAvailable; } },
 		cancelApprovals: () => observe("cancel-approvals") });
@@ -79,6 +79,15 @@ test("changed or legacy window ownership remains visibly blocked without forced 
 		assert.equal(f.registry.retirement(f.first.conversationId)?.cleanup?.find((effect) => effect.kind === "stop")?.phase, "blocked");
 		assert.ok(!f.events.includes("window-stop")); assert.ok(f.registry.registeredConversation(f.other.conversationId));
 	}
+});
+
+test("window termination acknowledgement does not conceal an unverified original process exit", async (t) => {
+	const f = await fixture(t); f.state.processExitVerified = false;
+	await f.owner.retire(f.first.conversationId); await f.owner.drain();
+	assert.equal(f.registry.retirement(f.first.conversationId)?.cleanup?.find((effect) => effect.kind === "stop")?.phase, "blocked");
+	f.state.processExitVerified = true; f.owner.kick(); await f.owner.drain();
+	assert.equal(f.events.filter((event) => event === "window-stop").length, 1, "positive read-only exit confirmation does not replay termination");
+	assert.equal(f.registry.retirement(f.first.conversationId)?.cleanup, undefined);
 });
 
 test("frozen retirement plans cannot expand to changed window ownership", async (t) => {

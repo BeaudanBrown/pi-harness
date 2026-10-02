@@ -15,7 +15,7 @@ export class HostReadModel {
 	private readonly loading = new Map<string, Promise<unknown[]>>();
 	private readonly now: () => number;
 	constructor(private readonly options: {
-		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata">; matrixReady: () => boolean;
+		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean;
 		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; now?: () => number;
 	}) { this.options = { ...options }; this.now = options.now ?? (() => performance.now()); this.pages = new HostInventoryPages(options.hostId, this.now); }
 
@@ -26,6 +26,8 @@ export class HostReadModel {
 				capabilities: ["host-control-v1"], accountState: "unavailable" } satisfies HostResult<"host.status">;
 			case "conversation.list": return this.pages.page(action, this.conversations());
 			case "conversation.status": {
+				const retired = this.options.registry.retirement(action.conversationId);
+				if (retired) throw new HostControlError("retired", `Conversation is permanently retired; cleanup ${!retired.cleanup ? "complete" : retired.cleanup.some((effect) => effect.phase === "blocked") ? "pending (blocked)" : "pending"}`);
 				const item = this.conversations().find((row) => row.conversationId === action.conversationId);
 				if (!item) throw new HostControlError("not_found", "Conversation was not found");
 				return item;

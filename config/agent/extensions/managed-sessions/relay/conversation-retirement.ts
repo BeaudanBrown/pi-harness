@@ -117,7 +117,10 @@ export class ConversationRetirement {
 		if (before === "changed") return "blocked";
 		if (before === "match") {
 			try { if (!await windows.terminate(proof)) return "blocked"; }
-			catch { signal.throwIfAborted(); if (await windows.check(proof) !== "gone") return "blocked"; }
+			catch { signal.throwIfAborted(); }
+			signal.throwIfAborted();
+			// A tmux acknowledgement alone is not proof its original process exited.
+			if (await windows.check(proof) !== "gone") return "blocked";
 		}
 		signal.throwIfAborted();
 		// Window disappearance cannot settle a launch/binding continuation that

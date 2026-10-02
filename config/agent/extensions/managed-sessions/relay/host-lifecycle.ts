@@ -1,5 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof } from "../exact-window-contracts.js";
+import { ExactWindowClient } from "./exact-window-client.js";
+import type { RetirementRecord } from "./retirement-store.js";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import { chmod, copyFile, lstat, open, readFile, readdir, rename, rm, unlink } from "node:fs/promises";
@@ -339,6 +341,7 @@ export class HostLifecycle {
 	}
 	private readonly reconciler: ProjectReconciler;
 	private readonly projectSpaces: ProjectSpaces;
+	readonly exactWindows: Pick<ExactWindowClient, "inspect" | "check" | "terminate">;
 
 	constructor(private readonly options: {
 		hostId: string;
@@ -355,11 +358,13 @@ export class HostLifecycle {
 		generationRetryMs?: number;
 		attachmentTimeoutMs?: number;
 		endOperationFeedback?: (conversationId: string, operationId: string) => Promise<void>;
+		retireConversation?: (conversationId: string) => Promise<RetirementRecord>;
 	}) {
 		if (!isAbsolute(options.launcher)) throw new Error("Managed lifecycle launcher must be absolute");
 		if (options.attachmentTimeoutMs !== undefined && (!Number.isSafeInteger(options.attachmentTimeoutMs) || options.attachmentTimeoutMs < 100 || options.attachmentTimeoutMs > 10 * 60_000)) {
 			throw new Error("Managed lifecycle attachment timeout must be between 100ms and 10 minutes");
 		}
+		this.exactWindows = new ExactWindowClient((operation, request) => this.invoke(operation, request));
 		this.projectSpaces = new ProjectSpaces(options.registry, options.matrix);
 		this.reconciler = new ProjectReconciler({ registry: options.registry, matrix: options.matrix, intentDirectory: options.projectSessionDirectory,
 			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement) });
@@ -1113,15 +1118,11 @@ export class HostLifecycle {
 	}
 
 	private async delete(conversationId: string): Promise<Record<string, unknown>> {
-		const manifest = this.projectManifest(conversationId);
-		this.options.server.sendToConversation({ protocolVersion: "1.0.0", messageId: `relay-delete-${randomBytes(8).toString("hex")}`,
-			conversationId, role: "relay", type: "termination.request", payload: { reason: "bridge_delete" } });
-		const window = this.options.registry.managedWindow(conversationId);
-		await this.invoke("bridge-clear", { conversationId, ...(window ? { windowId: window.windowId, paneId: window.paneId } : {}) });
-		const deleted = await this.options.registry.deleteConversation(conversationId);
-		try { await this.options.matrix.leaveRoom(manifest.roomId); }
-		catch (error) { await this.options.registry.restoreDeletedConversation(deleted); throw error; }
-		return { operation: "conversation.delete", targetConversationId: conversationId };
+		this.projectManifest(conversationId);
+		if (!this.options.retireConversation) throw new RelayRegistryError("invalid_state", "Canonical retirement is unavailable");
+		const retired = await this.options.retireConversation(conversationId);
+		return { operation: "conversation.delete", targetConversationId: conversationId, retirementId: retired.retirementId,
+			cleanupState: retired.cleanup?.some((effect) => effect.phase === "blocked") ? "failed" : retired.cleanup ? "pending" : "complete" };
 	}
 
 	private projectManifest(conversationId: string): ConversationManifest {

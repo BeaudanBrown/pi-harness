@@ -13,7 +13,7 @@ import type { SessionBinding } from "../config/agent/extensions/managed-sessions
 
 const nonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
 
-test("production relay attaches, reports status, and deletes only bridge state", { timeout: 10_000 }, async (t) => {
+test("production relay attaches, reports status, and refuses legacy unbinding/deletion", { timeout: 10_000 }, async (t) => {
 	const peerUidHelper = process.env.PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER;
 	const relayLockHelper = process.env.PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER;
 	if (!peerUidHelper || !relayLockHelper) return t.skip("packaged relay security helpers are unavailable");
@@ -25,14 +25,12 @@ test("production relay attaches, reports status, and deletes only bridge state",
 	const boundaryEntryId = deriveTranscriptEntryId(sessionId, "boundary");
 	const originalFetch = globalThis.fetch;
 	const requests: Array<{ path: string; authorization: string | null; body?: string }> = [];
-	let failLeave = false;
 	globalThis.fetch = async (input, init) => {
 		const url = new URL(String(input));
 		requests.push({ path: url.pathname, authorization: new Headers(init?.headers).get("authorization"), ...(typeof init?.body === "string" ? { body: init.body } : {}) });
 		if (url.pathname.endsWith("/whoami")) return Response.json({ user_id: "@bot:example.com" });
 		if (url.pathname.endsWith("/createRoom")) return Response.json({ room_id: "!production:example.com" });
 		if (url.pathname.includes("/send/")) return Response.json({ event_id: "$projected" });
-		if (url.pathname.endsWith("/leave") && failLeave) return new Response("temporary", { status: 503 });
 		return Response.json({});
 	};
 	let running: Awaited<ReturnType<typeof startManagedSessionRelay>> | undefined;
@@ -148,22 +146,18 @@ test("production relay attaches, reports status, and deletes only bridge state",
 	assert.match(statusRequests[0]?.body ?? "", /Saved model:/, "relay composes durable state with the adapter live snapshot");
 	assert.doesNotMatch(statusRequests[0]?.body ?? "", /roomId|workspacePath|matrixEventId/, "status remains redacted");
 	for (let i = 0; i < 200 && requests.filter((request) => request.path.includes("/send/")).length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-	failLeave = true;
-	await assert.rejects(() => replayClient.selfDelete(), /Matrix request failed \(HTTP 503\)/);
-	assert.equal(running.registry.snapshot().conversations.length, 1, "failed Matrix leave must restore relay persistence and attachment");
-	failLeave = false;
-	assert.equal((await replayClient.selfStatus()).payload.conversationState, "active", "transient Matrix errors preserve IPC attachment");
-	assert.equal((await replayClient.selfDelete()).payload.status, "ok");
-	await replayClient.close("bridge_delete");
-	assert.deepEqual(running.registry.snapshot().conversations, []);
+	await assert.rejects(() => replayClient.selfDelete(), /upgraded approved host controls/);
+	assert.equal(running.registry.snapshot().conversations.length, 1, "unsupported legacy deletion cannot mutate persistence");
+	assert.equal((await replayClient.selfStatus()).payload.conversationState, "active", "an unsupported legacy action does not disconnect an authenticated adapter");
+	await replayClient.close("shutdown");
+	assert.equal(running.registry.retirement(conversationId), undefined);
+	assert.equal(running.registry.snapshot().conversations.length, 1);
 	assert.deepEqual(requests.filter((request) => !request.path.includes("/typing/")).map((request) => request.path), [
 		"/_matrix/client/v3/account/whoami",
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, transcript.entryId, 0)}`,
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, controlNoticeEntryId, 0)}`,
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, modelNoticeEntryId, 0)}`,
 		`/_matrix/client/v3/rooms/!production%3Aexample.com/send/m.room.message/${deriveMatrixTransactionId(conversationId, thinkingNoticeEntryId, 0)}`,
-		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
-		"/_matrix/client/v3/rooms/!production%3Aexample.com/leave",
 	]);
 	assert.equal(requests.filter((request) => request.path.includes("/typing/")).every((request) => JSON.parse(request.body ?? "{}").typing === false), true,
 		"replayed controls never claim the agent is generating");

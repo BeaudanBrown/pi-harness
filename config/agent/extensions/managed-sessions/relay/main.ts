@@ -40,6 +40,7 @@ import { LocalEnrollmentReconciler } from "./local-enrollment-reconciler.js";
 import { readHostPolicy } from "./host-policy.js";
 import { HostDispatcher } from "./host-dispatcher.js";
 import { HostReadModel } from "./host-read-model.js";
+import { ConversationRetirement } from "./conversation-retirement.js";
 import { HostControlServer } from "./host-control-server.js";
 
 function required(environment: NodeJS.ProcessEnv, name: string): string {
@@ -85,6 +86,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let hierarchy: LiveHierarchy | undefined;
 	let localEnrollments: LocalEnrollmentReconciler | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
+	let retirement: ConversationRetirement | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
 	let closeNotices = async (): Promise<void> => undefined;
@@ -94,6 +96,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		// Ephemeral observation, never a recovery source. No tokens or error text.
 		let lastSuccessfulSyncAt: string | null = null;
 		let matrixHealthy = false;
+		let matrixAuthenticated = false;
 		const runtimeBuild = environment.PI_MANAGED_RELAY_BUILD ?? "unknown";
 		const healthFile = new AtomicJsonFile<{ status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string }>(
 			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string });
@@ -104,7 +107,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
 			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt, runtimeBuild });
 		};
-		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, registry.managedRoomIds(), { maxAttempts: 1 });
+		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, [...new Set([...registry.managedRoomIds(), ...registry.retirementRoomIds()])], { maxAttempts: 1 });
 		const spool = new BlobSpool(resolve(stateDirectory, "media-spool"));
 		const media = new ManagedImageTransport(spool, matrix);
 		await media.initialize(registry.liveMediaBlobIds());
@@ -329,6 +332,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				}
 				if (envelope.type === "lifecycle.request") {
 					if (!hostLifecycle || attachment.role !== "coordinator_adapter") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle is unavailable");
+					const operation = (envelope.payload.request as Record<string, unknown>).operation;
+					if (typeof operation !== "string" || !["workspace.list", "worktree.list", "conversation.list", "conversation.status"].includes(operation))
+						throw new RelayRegistryError("invalid_state", "Legacy model mutations require upgraded approved host controls");
 					return response(attachment.conversationId, envelope.messageId, "lifecycle.result", await hostLifecycle.request(envelope));
 				}
 				if (envelope.type === "self.promote") {
@@ -341,16 +347,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					});
 				}
 				if (envelope.type === "self.delete") {
-					const deleted = await registry.deleteConversation(attachment.conversationId);
-					try {
-						await matrix.leaveRoom(deleted.manifest.roomId);
-					} catch (error) {
-						await registry.restoreDeletedConversation(deleted);
-						throw error;
-					}
-					return response(attachment.conversationId, envelope.messageId, "self.result", {
-						operation: "self.delete", status: "ok",
-					});
+					// The old frame proves neither a human action nor a live approved tool.
+					// Never reinterpret its former unbind-only meaning as destructive consent.
+					throw new RelayRegistryError("invalid_state", "Legacy deletion requires upgraded approved host controls");
 				}
 				return undefined;
 			},
@@ -372,10 +371,19 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
 				endOperationFeedback: (conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId),
+				retireConversation: (conversationId) => {
+					if (!retirement) throw new RelayRegistryError("invalid_state", "Canonical retirement is unavailable");
+					return retirement.retire(conversationId);
+				},
 			});
 		}
+		retirement = new ConversationRetirement({ registry, matrix, hierarchy, server,
+			matrixAuthenticated: () => matrixAuthenticated,
+			windows: hostLifecycle?.exactWindows ?? { check: async () => { throw Error("Exact launcher is unavailable"); }, terminate: async () => { throw Error("Exact launcher is unavailable"); } },
+			onFailure: () => process.stderr.write("pi-managed-session-relay: retirement cleanup is pending\n") });
 		// Reattach surviving Pi processes before waiting for remote readiness.
 		await server.start();
+		retirement.start();
 		if (hostPolicy) {
 			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, matrixReady: () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
@@ -390,6 +398,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			process.stderr.write("pi-managed-session-relay: waiting for Matrix startup connectivity; local IPC remains available\n");
 		}, signal);
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
+		matrixAuthenticated = true; retirement.kick();
 		// Pending publications are reconciled in independent room workers, never on the boot/intake path.
 		if (coordinatorValues.every((value) => value?.trim())) {
 			coordinator = await retryMatrixStartup(() => bootstrapCoordinator(hostId, {
@@ -450,6 +459,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		}
 	} catch (error) {
 		await controlServer?.close().catch(() => undefined);
+		await retirement?.close().catch(() => undefined);
 		const enrollmentClosing = localEnrollments?.close();
 		await hierarchy?.close().catch(() => undefined);
 		await enrollmentClosing;
@@ -468,6 +478,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
 			await controlServer?.close().catch(() => undefined);
+			await retirement?.close().catch(() => undefined);
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
 			const enrollmentClosing = localEnrollments?.close();
 			await hierarchy?.close().catch(() => undefined);
@@ -498,6 +509,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle?.stopRuntimeUpdates();
 			await runtimeUpdate;
 			clearTimeout(reconciliationTimer);
+			await retirement?.close();
 			const enrollmentClosing = localEnrollments?.close();
 			await hierarchy?.close();
 			await enrollmentClosing;

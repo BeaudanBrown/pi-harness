@@ -38,7 +38,6 @@ test("retirement removes ordinary discovery and rejects stale nonce, attachment,
 	await assert.rejects(f.registry.setAttachmentNonce(f.first.conversationId, nonce)); await assert.rejects(f.registry.attach(f.packet, "stale-socket"));
 	assert.throws(() => f.registry.assertAuthorized({ ...f.packet, type: "self.status", payload: {} }, "socket", f.attachment));
 	await assert.rejects(f.registry.createProjectConversation(f.first, nonce), /retired/);
-	await assert.rejects(f.registry.restoreDeletedConversation({ manifest: f.first, runtime: before.conversations.find((item) => item.conversationId === f.first.conversationId)! }), /retired/);
 	assert.equal(await readFile(join(f.root, "transcript.jsonl"), "utf8"), "preserve transcript\n");
 	// Simulate restoration of an old runtime file while permanent tombstones survive.
 	await writeFile(join(f.runtime, "registry.json"), JSON.stringify(before));

@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { readHostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
 import { HostReadModel } from "../config/agent/extensions/managed-sessions/relay/host-read-model.js";
 import { parseHostResponse, HOST_CONTROL_VERSION, type HostReadAction } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
+import type { RetirementRecord } from "../config/agent/extensions/managed-sessions/relay/retirement-store.js";
 import type { RegistryConversationMetadata } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 
 test("startup policy reads reject symlinks, non-files, oversized data and malformed UTF-8", async (t) => {
@@ -29,9 +30,22 @@ async function read<O extends HostReadAction["operation"]>(model: HostReadModel,
 	return parseHostResponse(action.operation, { version: HOST_CONTROL_VERSION, requestId: "read-1", ok: true, data: await model.read(request(action)) });
 }
 
+test("retired status reports cleanup without exposing receipts or returning a resumable conversation", async () => {
+	const retired: RetirementRecord = { version: 1, hostId: "host", conversationId: base.conversationId, creationKey: "first", retirementId: id("retirement"), retiredAt: 1 };
+	let inventoryReads = 0;
+	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => { inventoryReads++; return []; }, retirement: () => retired }, matrixReady: () => false });
+	for (const phase of ["pending", "blocked", undefined] as const) {
+		if (phase) retired.cleanup = [{ kind: "stop", generationId: base.activeGenerationId, effectId: id("cleanup"), phase }]; else delete retired.cleanup;
+		await assert.rejects(model.read(request({ operation: "conversation.status", conversationId: base.conversationId })), {
+			code: "retired", message: `Conversation is permanently retired; cleanup ${phase === "blocked" ? "pending (blocked)" : phase ?? "complete"}` });
+	}
+	assert.equal(inventoryReads, 0, "retirement lookup does not sweep ordinary inventories");
+	const result = await read(model, { operation: "conversation.list" }); assert.ok(result.ok); assert.deepEqual(result.data.items, []);
+});
+
 test("host read model includes roomless and unresolved rows without inventing runtime or account readiness", async () => {
 	let rows: RegistryConversationMetadata[] = [base, { ...base, conversationId: id("conv", "b"), attached: false, matrixBound: true, checkoutId: undefined }];
-	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => structuredClone(rows) }, matrixReady: () => false });
+	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => structuredClone(rows), retirement: () => undefined }, matrixReady: () => false });
 	const result = await read(model, { operation: "conversation.list" }); assert.ok(result.ok);
 	assert.equal(result.data.items[0].runtimeState, "running"); assert.equal(result.data.items[0].setupState, "pending");
 	assert.equal(result.data.items[1].runtimeState, "unknown"); assert.equal(result.data.items[1].setupState, "disconnected");
@@ -45,7 +59,7 @@ test("host read model includes roomless and unresolved rows without inventing ru
 test("workspace joins preserve unknown/conflicting identities and avoid per-row discovery", async () => {
 	let calls = 0; let now = 0;
 	let metadata = [base];
-	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => structuredClone(metadata) }, matrixReady: () => false, now: () => now,
+	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => structuredClone(metadata), retirement: () => undefined }, matrixReady: () => false, now: () => now,
 		lifecycle: { workspaceList: async () => { calls++; return [{ rootKey: "projects", workspace: "repo" }, { rootKey: "projects", workspace: "unmanaged" }]; }, worktreeInventory: async () => [] } });
 	const first = await read(model, { operation: "workspace.list" }); assert.ok(first.ok);
 	assert.ok(first.data.items.some((row) => row.workspace === "repo" && "checkoutId" in row && row.checkoutId === base.checkoutId));
@@ -60,7 +74,7 @@ test("workspace joins preserve unknown/conflicting identities and avoid per-row 
 
 test("worktree metadata discovery is shared while in flight and cached; detached branches remain absent", async () => {
 	let release!: () => void; const gate = new Promise<void>((done) => { release = done; }); let calls = 0;
-	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => [] }, matrixReady: () => false,
+	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => [], retirement: () => undefined }, matrixReady: () => false,
 		lifecycle: { workspaceList: async () => [], worktreeInventory: async () => { calls++; await gate; return [{ rootKey: "projects", workspace: "repo", checkoutId: id("checkout"), locked: false, availability: "available" }]; } } });
 	const action = { operation: "worktree.list" as const, rootKey: "projects", workspace: "repo" };
 	const first = read(model, action); const second = read(model, action); assert.equal(calls, 1); release();
@@ -70,7 +84,7 @@ test("worktree metadata discovery is shared while in flight and cached; detached
 });
 
 test("preview implementations remain staged and invalid public placement cannot escape validation", async () => {
-	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => [base] }, matrixReady: () => false });
+	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => [base], retirement: () => undefined }, matrixReady: () => false });
 	await assert.rejects(model.read(request({ operation: "conversation.delete.preview", conversationIds: [base.conversationId] })), { code: "upgrade_required" });
 	await assert.rejects(model.read(request({ operation: "workspace.list" })), { code: "unavailable" });
 	for (const operation of ["workspace.list", "worktree.list"] as const) assert.throws(() => parseHostResponse(operation, {

@@ -10,6 +10,7 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION, MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, deriveTranscriptEntryId, type ConversationManifest, type ManagedSessionEnvelope,
 	encodeNdjsonEnvelope, parseNdjsonEnvelope,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { ConversationRetirement } from "../config/agent/extensions/managed-sessions/relay/conversation-retirement.js";
 import { HostLifecycle, parseProjectWindow, PROJECT_ATTACHMENT_TIMEOUT_MS, waitForProjectAttachment } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { CoordinatorRouter } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
@@ -239,6 +240,8 @@ test("bundled worktree conversation creation and cleanup recover forward without
 			...(decodeURIComponent(path).includes("!bundle1:example.com") ? { type: "m.space" } : {}) });
 		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
+		if (path.includes("/state/m.room.power_levels/")) return Response.json({ users: { [matrixConfig.botUserId]: 100 } });
+		if (path.endsWith("/joined_rooms")) return Response.json({ joined_rooms: ["!bundle1:example.com", "!bundle2:example.com"] });
 		if (path.endsWith("/leave") && leaveAttempts++ === 0) return new Response("injected leave outage", { status: 503 });
 		return Response.json({ event_id: "$ok" });
 	}, [], { maxAttempts: 1 });
@@ -246,7 +249,11 @@ test("bundled worktree conversation creation and cleanup recover forward without
 	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworktree-create-preview) printf '${JSON.stringify({ rootKey: "projects", sourceWorkspace: "project", projectWorkspace: "project", targetWorkspace: "project-feature-bundled-deadbeef", commonDir: join(main, ".git"), mainPath: main, targetPath: linked, baseRef: "refs/heads/main", baseCommit: "a".repeat(40), branch: "feature/bundled" })}\\n';;\nworktree-create-apply) mkdir -p '${linked}/.git'; printf '{"rootKey":"projects","workspace":"project-feature-bundled-deadbeef","branch":"feature/bundled","baseCommit":"${"a".repeat(40)}"}\\n';;\nworkspace-resolve) name=$(field workspace); printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_${"a".repeat(32)}","projectDisplayName":"project","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$name";;\nroot-ensure) printf '{"sessionName":"project","workspacePath":"${linked}"}\\n';;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) conversation=$(field conversationId); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > '${record}'; printf '{"conversationId":"%s","sessionName":"project","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"project-feature-bundled-deadbeef","relativeCwd":"","role":"conversation"}\\n' "$conversation";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nworktree-remove-preview) printf '${JSON.stringify({ rootKey: "projects", workspace: "project-feature-bundled-deadbeef", projectWorkspace: "project", path: linked, commonDir: join(main, ".git"), mainPath: main, branch: "feature/bundled", head: "a".repeat(40), clean: true, locked: false, mergeTarget: "refs/heads/main", mergeCommit: "b".repeat(40), merged: true })}\\n';;\nworktree-remove-apply) if test ! -e '${removalAttempt}'; then touch '${removalAttempt}'; exit 1; fi; rm -rf '${linked}'; printf '{"rootKey":"projects","workspace":"project-feature-bundled-deadbeef","branch":"feature/bundled","head":"${"a".repeat(40)}","removed":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\nworktree-branch-delete) printf '{"branch":"feature/bundled","deleted":true}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") }); await server.start(); t.after(async () => server.close());
-	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath, registry, matrix, server, environment: { ...process.env } });
+	let retirement: ConversationRetirement;
+	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath, registry, matrix, server, environment: { ...process.env },
+		retireConversation: (id) => retirement.retire(id) });
+	retirement = new ConversationRetirement({ registry, matrix, server, windows: lifecycle.exactWindows, matrixAuthenticated: () => true });
+	t.after(() => retirement.close());
 	const coordinatorId = deriveConversationId(hostId, "coordinator"); const create = { operation: "worktree.conversation.create", creationKey: "bundle-create", rootKey: "projects", workspace: "project", baseRef: "main", branch: "feature/bundled", concept: "bundled work" };
 	const attaching = attachFromRecord(record, server, registry); const created = await lifecycle.request(lifecycleEnvelope(coordinatorId, create)); const socket = await attaching;
 	const conversationId = String(created.targetConversationId); const sessionFile = join(sessions, conversationId, "session.jsonl"); const history = await readFile(sessionFile, "utf8");
@@ -261,8 +268,11 @@ test("bundled worktree conversation creation and cleanup recover forward without
 	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /selected conversation resumed/,
 		"a retry cannot remove the checkout after the selected conversation resumes beyond the persisted stop phase");
 	setTimeout(() => resumedSocket.destroy(), 25); await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.stop", targetConversationId: conversationId }));
-	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /Matrix POST/);
-	assert.equal(registry.manifestByConversationId(conversationId)?.kind, "project", "failed leave restores bridge state after worktree removal");
+	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true }));
+	await retirement.drain(); assert.equal(leaveAttempts, 1);
+	assert.equal(registry.manifestByConversationId(conversationId), undefined, "failed cleanup cannot restore a retired identity");
+	assert.ok(registry.retirement(conversationId)?.cleanup?.some((effect) => effect.kind === "bot_leave" && effect.phase === "blocked"));
+	retirement.kick(); await retirement.drain(); assert.equal(leaveAttempts, 2);
 	const cleaned = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true }));
 	assert.deepEqual({ workspaceRemoved: cleaned.workspaceRemoved, bridgeDeleted: cleaned.bridgeDeleted }, { workspaceRemoved: true, bridgeDeleted: true });
 	assert.equal(registry.manifestByConversationId(conversationId), undefined); assert.equal(await readFile(sessionFile, "utf8"), history, "bundled cleanup preserves Pi history");
@@ -397,7 +407,7 @@ function lifecycleEnvelope(coordinatorId: string, request: Record<string, unknow
 		role: "coordinator_adapter", type: "lifecycle.request", payload: { request } } as ManagedSessionEnvelope;
 }
 
-test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and bridge-deletes without project loss", { timeout: 30_000 }, async (t) => {
+test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and retires without project loss", { timeout: 30_000 }, async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "pi-lifecycle-"));
 	const runtime = join(root, "runtime"); const manifests = join(root, "manifests"); const sessions = join(root, "sessions");
 	const workspaceRoot = join(root, "workspaces"); const workspace = join(workspaceRoot, "alpha"); const record = join(root, "launch.json");
@@ -452,11 +462,15 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") });
 	await server.start(); t.after(async () => server.close());
 	let completionNoticeAttempts = 0;
+	let retirement: ConversationRetirement;
 	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath,
 		registry, matrix, server, environment: { ...process.env, TEST_LAUNCH_RECORD: record, PI_MATRIX_ACCESS_TOKEN: "must-not-leak" },
+		retireConversation: (id) => retirement.retire(id),
 		generationRetryMs: 10, projectNotice: async (sourceId) => {
 			if (sourceId.endsWith(":completed") && completionNoticeAttempts++ === 0) throw new Error("injected completion notice outage");
 		} });
+	retirement = new ConversationRetirement({ registry, matrix, server, windows: lifecycle.exactWindows, matrixAuthenticated: () => true });
+	t.after(() => retirement.close());
 	assert.deepEqual(await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "workspace.list" })), {
 		operation: "workspace.list", workspaces: [{ rootKey: "projects", workspace: "alpha" }],
 	});
@@ -604,7 +618,8 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const beforeDelete = await readFile(sessionFile, "utf8");
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.delete", targetConversationId: conversationId, confirmed: true }));
 	assert.equal(registry.manifestByConversationId(conversationId), undefined);
-	assert.equal(await readFile(sessionFile, "utf8"), beforeDelete, "bridge deletion preserves Pi history");
+	await retirement.drain(); assert.ok(registry.retirement(conversationId));
+	assert.equal(await readFile(sessionFile, "utf8"), beforeDelete, "retirement preserves Pi history");
 	assert.ok(await stat(workspace));
 	const pendingId = deriveDeliveryId(secondConversationId, "$cancel-on-stop");
 	await registry.recordAcceptedInput(secondConversationId, { deliveryId: pendingId, matrixEventId: "$cancel-on-stop", kind: "prompt", body: "do not recover", status: "accepted" });
@@ -616,7 +631,8 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 		operation: "conversation.delete", targetConversationId: secondConversationId, confirmed: false,
 	})), /explicit confirmation/);
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.delete", targetConversationId: secondConversationId, confirmed: true }));
-	assert.equal(registry.manifestByConversationId(secondConversationId), undefined, "stopped conversations remain bridge-deletable without a window");
+	await retirement.drain(); assert.ok(registry.retirement(secondConversationId));
+	assert.equal(registry.manifestByConversationId(secondConversationId), undefined, "stopped conversations can retire even when physical cleanup lacks ownership proof");
 	secondSocket.destroy(); independentSocket.destroy(); createdSocket.destroy();
 });
 
