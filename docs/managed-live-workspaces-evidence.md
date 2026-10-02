@@ -653,3 +653,13 @@ window-first launch integration or the epic's live acceptance. Packaged affected
 harness gates passed (`kernel-proof-affected-final`, 2026-10-02). An unrelated
 activity fixture teardown race exposed by the first gate run was corrected by
 draining its projector before deleting its temporary directory.
+
+Pinned kernel-bound audit follow-up: `nix-dotfiles` `b36e2e0` removes legacy
+`window-terminate` and `legacy-window-cleanup` container-kill bypasses found by
+Spec review. Public-operation tests preserve original, respawned and multipane
+fixtures; the complete Go suite passes. Both review axes then accessed immutable
+external source exported from that commit. Standards: no findings. Spec: one
+high/current finding remains for normal lifecycle launch/stop/refresh/generation
+cutover, which still calls legacy operations. The `ExactWindowClient` contract is
+ready, but ordinary creation does not yet use it. This is the next #110/#109
+integration chunk, not completed launch behavior or deployable epic acceptance.
