@@ -311,7 +311,7 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 }
 
 export class HostLifecycle {
-	private readonly launches = new Map<string, Promise<void>>();
+	private readonly launches = new Map<string, { window: Promise<void>; ready: Promise<void> }>();
 	private readonly creations = new Map<string, Promise<Record<string, unknown>>>();
 	private readonly worktreeOperations = new Map<string, { identity?: string; promise: Promise<unknown> }>();
 	private readonly provisions = new Map<string, { identity: string; promise: Promise<MatrixConversationBinding> }>();
@@ -1054,6 +1054,34 @@ export class HostLifecycle {
 		return { operation: "conversation.start", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };
 	}
 
+	/** Returns an exact target, never switches a client, and does not cancel readiness observation. */
+	async openConversation(conversationId: string): Promise<HostResult<"conversation.open">> {
+		const manifest = this.projectManifest(conversationId);
+		const running = this.worktreeOperations.get(this.workspaceOperationKey(manifest.placement!));
+		if (running && running.identity !== `launch:${conversationId}`) {
+			throw new RelayRegistryError("invalid_state", "Conflicting workspace operation is already in progress; retry explicitly");
+		}
+		const ready = this.resume(conversationId);
+		// The relay, not the requesting picker connection, owns the bounded observer.
+		void ready.catch(() => undefined);
+		const launch = this.launches.get(conversationId);
+		if (launch) await launch.window;
+		else await ready;
+		const window = this.options.registry.managedWindow(conversationId);
+		if (!window?.ownership) throw new RelayRegistryError("invalid_state", "Open requires exact managed window ownership");
+		assertExactWindowBinding(conversationId, window);
+		if (await this.exactWindows.check(window.ownership) !== "match") {
+			throw new RelayRegistryError("launch_failed", "Open target disappeared or changed; inspect the retained window before retry");
+		}
+		this.projectManifest(conversationId); // Retirement wins an asynchronous observation.
+		if (!isDeepStrictEqual(window, this.options.registry.managedWindow(conversationId))) {
+			throw new RelayRegistryError("invalid_state", "Open target changed during observation");
+		}
+		return { conversationId, launchId: window.ownership.launchId,
+			launchState: this.options.registry.conversationState(conversationId) === "active" ? "attached" : "window_created",
+			window: { conversationId, sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId } };
+	}
+
 	private resume(conversationId: string): Promise<Record<string, unknown>> {
 		const manifest = this.projectManifest(conversationId);
 		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => this.resumeOnce(conversationId), `launch:${conversationId}`);
@@ -1061,7 +1089,6 @@ export class HostLifecycle {
 
 	private async resumeOnce(conversationId: string): Promise<Record<string, unknown>> {
 		const manifest = this.projectManifest(conversationId);
-		await this.invoke("root-ensure", manifest.placement!);
 		if (this.options.registry.conversationState(conversationId) !== "active") {
 			const promotion = this.options.registry.promotion(conversationId);
 			if (promotion?.phase === "prepared") throw new RelayRegistryError("invalid_state", "Terminal promotion must be retried from its source Pi session");
@@ -1168,14 +1195,19 @@ export class HostLifecycle {
 
 	private async launchProject(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
 		const inProgress = this.launches.get(manifest.conversationId);
-		if (inProgress) return inProgress;
-		const launch = this.launchProjectOnce(manifest, existingNonce, existingSessionFile)
-			.finally(() => { if (this.launches.get(manifest.conversationId) === launch) this.launches.delete(manifest.conversationId); });
-		this.launches.set(manifest.conversationId, launch);
-		return launch;
+		if (inProgress) return inProgress.ready;
+		let windowCreated!: () => void; let windowFailed!: (error: unknown) => void;
+		const window = new Promise<void>((resolve, reject) => { windowCreated = resolve; windowFailed = reject; });
+		// Resume-only callers need not observe the earlier window promise.
+		void window.catch(() => undefined);
+		const ready = this.launchProjectOnce(manifest, existingNonce, existingSessionFile, windowCreated)
+			.catch((error) => { windowFailed(error); throw error; })
+			.finally(() => { if (this.launches.get(manifest.conversationId)?.ready === ready) this.launches.delete(manifest.conversationId); });
+		this.launches.set(manifest.conversationId, { window, ready });
+		return ready;
 	}
 
-	private async launchProjectOnce(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
+	private async launchProjectOnce(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string, windowCreated?: () => void): Promise<void> {
 		if (manifest.kind !== "project" || !manifest.placement) throw new RelayRegistryError("invalid_state", "Project launch requires project placement");
 		const nonce = existingNonce ?? randomBytes(32).toString("base64url");
 		const activeGeneration = this.options.registry.activeGeneration(manifest);
@@ -1221,6 +1253,7 @@ export class HostLifecycle {
 				sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId, ...(window.ownership ? { ownership: window.ownership } : {}),
 			});
 			windowObserved = true;
+			windowCreated?.();
 			const attachment = await waitForProjectAttachment({
 				timeoutMs: this.options.attachmentTimeoutMs ?? PROJECT_ATTACHMENT_TIMEOUT_MS,
 				state: () => this.options.registry.conversationState(manifest.conversationId),

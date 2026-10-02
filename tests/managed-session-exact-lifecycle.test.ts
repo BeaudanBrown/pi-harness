@@ -90,6 +90,43 @@ test("normal launch persists exact ownership and stop verifies exit without lega
 	} finally { await retirement.close(); }
 });
 
+test("open returns the window while concurrent resume keeps observing one launch", async (t) => {
+	const f = await fixture(t); f.attach = false; f.retainedAlive = true; const owner = f.owner();
+	const opening = owner.openConversation(f.manifest.conversationId);
+	let settled = false;
+	const resuming = owner.wake(f.manifest).finally(() => { settled = true; });
+	const failed = assert.rejects(resuming, /timed out/);
+	const [first, second] = await Promise.all([opening, owner.openConversation(f.manifest.conversationId)]);
+	assert.deepEqual(first, second); assert.equal(first.launchState, "window_created");
+	assert.equal(first.window.windowId, "@1"); assert.equal(f.creates, 1); assert.equal(settled, false);
+	await assert.rejects(owner.request(request(f.manifest.conversationId, "conversation.stop")), /Conflicting workspace operation/);
+	await failed;
+	assert.match(f.registry.snapshot().conversations[0]!.lastLaunchError!.message, /timed out/);
+	assert.ok(!f.calls.includes("window-terminate-exact"));
+});
+
+test("active open revalidates its exact target without restarting", async (t) => {
+	const f = await fixture(t); const owner = f.owner(); await owner.wake(f.manifest);
+	assert.equal((await owner.openConversation(f.manifest.conversationId)).launchState, "attached");
+	assert.equal(f.creates, 1);
+	f.state = "changed";
+	await assert.rejects(owner.openConversation(f.manifest.conversationId), /disappeared or changed/);
+	f.state = "gone";
+	await assert.rejects(owner.openConversation(f.manifest.conversationId), /disappeared or changed/);
+	assert.equal(f.creates, 1);
+});
+
+test("open cannot publish a launch that retirement overtook", async (t) => {
+	const f = await fixture(t); const owner = f.owner();
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: owner.exactWindows });
+	f.beforeCreate = async () => { await retirement.retire(f.manifest.conversationId); };
+	try {
+		await assert.rejects(owner.openConversation(f.manifest.conversationId), /retired/);
+		assert.ok(f.registry.retirement(f.manifest.conversationId));
+		assert.equal(f.registry.manifestByConversationId(f.manifest.conversationId), undefined);
+	} finally { await retirement.close(); }
+});
+
 test("a termination acknowledgement without exit retains the exact binding", async (t) => {
 	const f = await fixture(t); const owner = f.owner(); await owner.wake(f.manifest); f.exits = false;
 	const window = f.registry.managedWindow(f.manifest.conversationId);
