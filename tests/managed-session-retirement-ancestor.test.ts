@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { deriveConversationId, deriveGenerationId, deriveTranscriptEntryId, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { retirementTargets } from "../config/agent/extensions/managed-sessions/relay/retirement-targets.js";
 import { RetirementStore, retirementId, retirementEffectId, type RetirementRecord } from "../config/agent/extensions/managed-sessions/relay/retirement-store.js";
+import { RetirementAncestorOwner, type RetirementAncestorOwnerOptions } from "../config/agent/extensions/managed-sessions/relay/retirement-ancestor-owner.js";
 import { verifyRetirementAncestor } from "../config/agent/extensions/managed-sessions/relay/retirement-ancestor.js";
 
 const hostId = "host"; const hostSpace = "!host:example.com"; const operatorUserId = "@operator:example.com"; const botUserId = "@bot:example.com";
@@ -22,6 +23,74 @@ function fixture() {
 	const project = record.cleanup!.find((effect) => effect.kind === "ancestor" && effect.spaceKind === "project_space")!;
 	return { manifest, targets, record, checkout, project };
 }
+
+function executorFixture() {
+	const f = fixture(); const records = new Map([[f.record.conversationId, f.record]]); const calls: string[] = [];
+	const phases = new Map<string, "pending" | "done">(); const children = new Map([[f.manifest.checkoutSpace!, [f.manifest.roomId]], [f.manifest.projectSpace!, [f.manifest.checkoutSpace!]], [hostSpace, [f.manifest.projectSpace!]]]);
+	const joined = new Set([hostSpace, f.manifest.checkoutSpace!, f.manifest.projectSpace!]);
+	const state = { ownership: true, referenced: false, operatorDone: false, loseLeave: false, pendingAccount: false, changeOwnershipAfterAccount: false };
+	const options: RetirementAncestorOwnerOptions = { hostId, hostSpace: () => hostSpace, retirement: (id) => records.get(id), hasReferences: async () => state.referenced,
+		hierarchy: {
+			withProjectCleanup: async (_key, operation) => operation(new AbortController().signal), hasReferences: () => false,
+			spaceRetirement: (effect) => phases.get(effect.roomId), fenceSpace: async (effect) => { calls.push("fence"); phases.set(effect.roomId, "pending"); },
+			completeSpace: async (effect) => { calls.push("complete"); phases.set(effect.roomId, "done"); },
+		}, matrix: { botUserId, operatorUserId,
+			assertManagedProvenance: async (roomId) => { calls.push(`proof:${roomId}`); if (!state.ownership || !joined.has(roomId)) throw Error("Ownership unavailable"); },
+			assertRoomAuthority: async () => undefined, spaceChildren: async (roomId) => children.get(roomId) ?? [], joinedMemberIds: async () => new Set([botUserId, operatorUserId]),
+			removeSpaceChild: async (roomId, child) => { calls.push(`unlink:${child}`); children.set(roomId, children.get(roomId)!.filter((id) => id !== child)); },
+			accountJoined: async (roomId) => { calls.push("observe-bot"); return joined.has(roomId); },
+			leaveRoom: async (roomId) => { calls.push("leave-bot"); joined.delete(roomId); if (state.loseLeave) throw Error("Lost leave response"); },
+		}, operator: { completed: async () => { calls.push("observe-operator"); return state.operatorDone; },
+			leaveAndForget: async () => { calls.push("leave-operator"); if (state.pendingAccount) return false; state.operatorDone = true; if (state.changeOwnershipAfterAccount) state.ownership = false; return true; } },
+	};
+	return { ...f, records, calls, phases, children, state, options, owner: new RetirementAncestorOwner(options), signal: new AbortController().signal };
+}
+
+test("ancestor owner unlinks only original children, fences before accounts and completes shared sibling cleanup once", async () => {
+	const f = executorFixture(); const second = structuredClone(f.record);
+	second.conversationId = deriveConversationId(hostId, "second"); second.creationKey = "second"; second.retirementId = retirementId(hostId, second.conversationId);
+	second.cleanup = second.cleanup!.map(({ effectId: _id, phase: _phase, ...target }) => {
+		if (target.kind === "operator_leave_forget" || target.kind === "bot_leave") target.roomId = "!second:example.com";
+		if (target.kind === "ancestor" && target.spaceKind === "checkout_space") target.childRoomId = "!second:example.com";
+		return { ...target, phase: "pending", effectId: retirementEffectId(second.retirementId, target) };
+	});
+	f.records.set(second.conversationId, second); f.children.get(f.manifest.checkoutSpace!)!.push("!second:example.com");
+	assert.equal(await f.owner.run(f.record.conversationId, f.checkout.effectId, f.signal), "blocked");
+	assert.ok(!f.calls.includes("leave-operator"));
+	const next = second.cleanup!.find((item) => item.kind === "ancestor" && item.spaceKind === "checkout_space")!;
+	assert.equal(await f.owner.run(second.conversationId, next.effectId, f.signal), "done");
+	assert.ok(f.calls.indexOf("fence") < f.calls.indexOf("leave-operator"));
+	assert.ok(f.calls.indexOf("leave-operator") < f.calls.indexOf("leave-bot"));
+	const count = f.calls.length; assert.equal(await f.owner.run(f.record.conversationId, f.checkout.effectId, f.signal), "done"); assert.equal(f.calls.length, count);
+	assert.equal(f.calls.filter((call) => call === "leave-bot").length, 1);
+});
+
+test("project cleanup waits for its child and removes only its exact host link without leaving the host", async () => {
+	const f = executorFixture();
+	assert.equal(await f.owner.run(f.record.conversationId, f.project.effectId, f.signal), "pending"); assert.deepEqual(f.calls, []);
+	assert.equal(await f.owner.run(f.record.conversationId, f.checkout.effectId, f.signal), "done"); f.checkout.phase = "done";
+	f.children.get(hostSpace)!.push("!unrelated-project:example.com");
+	assert.equal(await f.owner.run(f.record.conversationId, f.project.effectId, f.signal), "done");
+	assert.deepEqual(f.children.get(hostSpace), ["!unrelated-project:example.com"]);
+	assert.equal(f.phases.has(hostSpace), false); assert.equal(f.calls.filter((call) => call === "leave-bot").length, 2);
+});
+
+test("lost bot leave response is recovered through read-only completion observations, not effect replay", async () => {
+	const f = executorFixture(); f.state.loseLeave = true;
+	await assert.rejects(f.owner.run(f.record.conversationId, f.checkout.effectId, f.signal), /Lost leave/);
+	assert.equal(f.phases.get(f.manifest.checkoutSpace!), "pending");
+	const count = f.calls.length; assert.equal(await f.owner.run(f.record.conversationId, f.checkout.effectId, f.signal), "done");
+	assert.deepEqual(f.calls.slice(count), ["observe-bot", "observe-operator", "complete"]);
+	assert.equal(f.calls.filter((call) => call === "leave-bot").length, 1);
+});
+
+test("pending account cleanup and changed ownership cannot authorize bot departure", async () => {
+	const f = executorFixture(); f.state.pendingAccount = true;
+	assert.equal(await f.owner.run(f.record.conversationId, f.checkout.effectId, f.signal), "pending"); assert.ok(!f.calls.includes("leave-bot"));
+	f.state.pendingAccount = false; f.state.changeOwnershipAfterAccount = true;
+	await assert.rejects(f.owner.run(f.record.conversationId, f.checkout.effectId, f.signal), /Ownership unavailable/);
+	assert.ok(!f.calls.includes("leave-bot")); assert.equal(f.phases.get(f.manifest.checkoutSpace!), "pending");
+});
 
 test("offline retirement persists only original ancestor targets across reconnect and changed discovery", async (t) => {
 	const path = await mkdtemp(join(tmpdir(), "retirement-ancestor-")); t.after(() => rm(path, { recursive: true, force: true }));

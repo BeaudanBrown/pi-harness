@@ -15,6 +15,22 @@ const config = {
 	operatorUserId: "@operator:example.com",
 };
 
+test("self membership observation survives departure without granting discovered rooms mutation authority", async () => {
+	let rooms: unknown = ["!known:example.com", "!unrelated:example.com"]; const calls: string[] = [];
+	const client = new ManagedMatrixClient(config, async (input, init) => {
+		const url = new URL(String(input)); calls.push(`${init?.method} ${url.pathname}`);
+		if (url.pathname.endsWith("/joined_rooms")) return Response.json({ joined_rooms: rooms });
+		if (url.pathname.endsWith("/leave")) { rooms = ["!unrelated:example.com"]; return Response.json({}); }
+		throw Error("Unexpected route");
+	}, ["!known:example.com"]);
+	assert.equal(await client.accountJoined("!known:example.com"), true);
+	await client.leaveRoom("!known:example.com"); assert.equal(await client.accountJoined("!known:example.com"), false);
+	await assert.rejects(client.leaveRoom("!unrelated:example.com"), /not owned/);
+	rooms = ["!duplicate:example.com", "!duplicate:example.com"]; await assert.rejects(client.accountJoined("!known:example.com"), /self membership/);
+	rooms = [1]; await assert.rejects(client.accountJoined("!known:example.com"), /self membership/);
+	assert.equal(calls.filter((call) => call.startsWith("POST")).length, 1);
+});
+
 test("Matrix client exposes only fixed whoami, sync, room, state, send, and leave routes", async () => {
 	const calls: Array<{ url: URL; init?: RequestInit }> = [];
 	const fetchMock: typeof fetch = async (input, init) => {

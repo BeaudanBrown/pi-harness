@@ -599,6 +599,16 @@ export class ManagedMatrixClient {
 		this.assertManagedRoom(roomId); boundedText(userId, "Matrix user ID", 255);
 		await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/kick`, { user_id: userId, reason: "Obsolete empty managed project Space cleanup" }, signal);
 	}
+	/** Authenticated self-membership observation, including after a lost leave response.
+	 * Returned room IDs never become discovery or mutation targets. */
+	async accountJoined(roomId: string, signal?: AbortSignal): Promise<boolean> {
+		if (!/^!\S{1,254}$/.test(roomId)) throw new ManagedMatrixError("invalid_response", "Invalid self membership target");
+		const result = await this.request("GET", "/_matrix/client/v3/joined_rooms", undefined, signal);
+		const rooms = result && typeof result === "object" && !Array.isArray(result) ? (result as JsonObject).joined_rooms : undefined;
+		if (!Array.isArray(rooms) || rooms.length > 16384 || rooms.some((id) => typeof id !== "string" || !/^!\S{1,254}$/.test(id)) || new Set(rooms).size !== rooms.length)
+			throw new ManagedMatrixError("invalid_response", "Matrix self membership is unavailable or oversized");
+		return rooms.includes(roomId);
+	}
 	async leaveRoom(roomId: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {}, signal); this.#managedRoomIds.delete(roomId); }
 	private assertManagedRoom(roomId: string): void { if (!this.#managedRoomIds.has(roomId)) throw new ManagedMatrixError("invalid_response", "Matrix room is not owned by this relay"); }
 	private parseMxc(value: string): { serverName: string; mediaId: string } {

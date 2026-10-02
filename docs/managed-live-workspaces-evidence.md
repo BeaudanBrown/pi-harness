@@ -545,3 +545,17 @@ conversation authority is injected into hierarchy admission and ordinary discove
 
 These are #109 ownership primitives, not deployed effects or completed runtime
 assembly. Account execution remains #112's integration boundary.
+
+`RetirementAncestorOwner` executes the ancestor obligation under the project
+cleanup lock. It unlinks only the original retired child (allowing siblings to
+make independent progress), then freshly verifies emptiness/references before
+fencing and account effects. Ownership is rechecked after operator leave/forget
+before bot departure. Shared ancestors converge through their permanent fence,
+not per-model execution receipts. A lost bot-leave response is recovered through
+read-only bot membership plus exact operator completion observations; missing
+observations stay pending. Project cleanup removes only its original host link,
+never the host Space or unrelated children. The bounded authenticated self-membership
+query does not enroll discovered rooms into the client's mutation allowlist.
+Four owner fixtures plus the self-membership fixture and existing guards/hierarchy
+regressions pass (33 focused tests). These use fake account/Matrix effects; relay
+scheduling/cutover and the #112 account transport are still to be connected.
