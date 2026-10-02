@@ -10,7 +10,6 @@ import {
 	type ManagedSessionEnvelope,
 } from "../contracts.js";
 import { bootstrapCoordinator, type CoordinatorIdentity } from "./coordinator-bootstrap.js";
-import { launchCoordinator } from "./coordinator-launcher.js";
 import { CoordinatorRouter } from "./coordinator-router.js";
 import { ConversationManifestStore } from "./manifest-store.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
@@ -369,6 +368,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle = new HostLifecycle({
 				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
 				socketPath: server.socketPath, registry, matrix, hierarchy, server, environment,
+				coordinator: { launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(),
+					sessionFile: coordinatorValues[1]!.trim(), workspaceDirectory: coordinatorValues[0]!.trim() },
 				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
 				endOperationFeedback: (conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId),
@@ -386,11 +387,14 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await server.start();
 		retirement.start();
 		if (hostPolicy) {
-			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, matrixReady: () => {
+			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), matrixReady: () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
 			} });
-			const dispatcher = new HostDispatcher({ hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy, read: (request) => reads.read(request) });
+			const dispatcher = new HostDispatcher({ hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy,
+				read: (request) => reads.read(request),
+				...(hostLifecycle ? { launch: (action: { operation: "conversation.open" | "conversation.resume"; conversationId: string }) =>
+					action.operation === "conversation.open" ? hostLifecycle!.openConversation(action.conversationId) : hostLifecycle!.resumeConversation(action.conversationId) } : {}) });
 			controlServer = new HostControlServer({ runtimeDirectory, expectedUid: expectedUid!, peerUid: (socket) => peerUidFromHelper(peerUidHelper!, socket), dispatcher });
 			await controlServer.start();
 		}
@@ -420,12 +424,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			const identity = coordinator;
 			coordinatorRouter = new CoordinatorRouter(identity.manifest, registry, matrix, server, async (manifest) => {
 				try {
-					if (manifest.kind === "project") await hostLifecycle!.wake(manifest);
-					else await launchCoordinator({
-						launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), manifest,
-						sessionFile: identity.sessionFile, workspaceDirectory: identity.workspaceDirectory,
-						socketPath: server!.socketPath, registry, environment,
-					});
+					await hostLifecycle!.wake(manifest);
 				} catch (error) {
 					await registry.recordLaunchError(manifest.conversationId, "launch_failed",
 						error instanceof Error ? error.message : "Managed conversation launch failed");

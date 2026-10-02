@@ -16,14 +16,14 @@ export class HostReadModel {
 	private readonly now: () => number;
 	constructor(private readonly options: {
 		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean;
-		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; now?: () => number;
+		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; now?: () => number;
 	}) { this.options = { ...options }; this.now = options.now ?? (() => performance.now()); this.pages = new HostInventoryPages(options.hostId, this.now); }
 
 	async read(request: HostReadRequest): Promise<unknown> {
 		const action = request.action;
 		switch (action.operation) {
 			case "host.status": return { hostId: this.options.hostId, relayState: this.options.matrixReady() ? "ready" : "disconnected",
-				capabilities: ["host-control-v1"], accountState: "unavailable" } satisfies HostResult<"host.status">;
+				capabilities: this.options.windowFirstOpen ? ["host-control-v1", "window-first-open-v1"] : ["host-control-v1"], accountState: "unavailable" } satisfies HostResult<"host.status">;
 			case "conversation.list": return this.pages.page(action, this.conversations());
 			case "conversation.status": {
 				const retired = this.options.registry.retirement(action.conversationId);

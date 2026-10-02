@@ -2,6 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof } from "../exact-window-contracts.js";
 import { ExactWindowClient } from "./exact-window-client.js";
+import { launchCoordinator as ensureCoordinatorWindow } from "./coordinator-launcher.js";
 import type { RetirementRecord } from "./retirement-store.js";
 import { spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
@@ -358,6 +359,7 @@ export class HostLifecycle {
 		generationReady?: (conversationId: string) => Promise<void>;
 		generationRetryMs?: number;
 		attachmentTimeoutMs?: number;
+		coordinator?: { launcher: string; sessionFile: string; workspaceDirectory: string };
 		endOperationFeedback?: (conversationId: string, operationId: string) => Promise<void>;
 		retireConversation?: (conversationId: string) => Promise<RetirementRecord>;
 	}) {
@@ -635,7 +637,6 @@ export class HostLifecycle {
 	}
 
 	async wake(manifest: ConversationManifest): Promise<void> {
-		if (manifest.kind === "coordinator" || !manifest.placement) throw new RelayRegistryError("permission_denied", "Coordinator wake uses its dedicated launcher");
 		await this.resume(manifest.conversationId);
 	}
 
@@ -676,7 +677,7 @@ export class HostLifecycle {
 				: `Fresh Pi session generation ${transition.ordinal} requested; preserving this room and all prior Pi sessions.`);
 			const resolved = await this.invoke("workspace-resolve", manifest.placement!);
 			if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical cwd");
-			const root = await this.invoke("root-ensure", manifest.placement!);
+			const root = await this.invoke("root-resolve", manifest.placement!);
 			if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
 			const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, `generation-${transition.ordinal}.jsonl`);
 			if (manifest.activeGenerationId !== transition.toGenerationId || !this.options.registry.isActiveGenerationAttached(conversationId)) {
@@ -1019,7 +1020,8 @@ export class HostLifecycle {
 
 	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
 		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
-		return this.runWorktreeOperation(this.workspaceOperationKey(request.placement), () => this.startOnce(request, provisioned));
+		return this.runWorktreeOperation(this.workspaceOperationKey(request.placement), () => this.startOnce(request, provisioned),
+			`create:${deriveConversationId(this.options.hostId, request.creationKey)}:${JSON.stringify([request.concept, request.placement])}`);
 	}
 
 	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
@@ -1033,7 +1035,6 @@ export class HostLifecycle {
 			return { operation: "conversation.start", targetConversationId: existing.conversationId, conversationState: this.options.registry.conversationState(existing.conversationId) };
 		}
 		const resolved = await this.resolveWorkspaceIdentity(request.placement);
-		await this.invoke("root-ensure", request.placement);
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
 		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept);
 		const identity = provisioned ?? resolved;
@@ -1056,15 +1057,25 @@ export class HostLifecycle {
 
 	/** Returns an exact target, never switches a client, and does not cancel readiness observation. */
 	async openConversation(conversationId: string): Promise<HostResult<"conversation.open">> {
-		const manifest = this.projectManifest(conversationId);
-		const running = this.worktreeOperations.get(this.workspaceOperationKey(manifest.placement!));
-		if (running && running.identity !== `launch:${conversationId}`) {
+		const manifest = this.liveManifest(conversationId);
+		const running = this.worktreeOperations.get(this.launchOperationKey(manifest));
+		if (running && running.identity !== `launch:${conversationId}` && !running.identity?.startsWith(`create:${conversationId}:`)) {
 			throw new RelayRegistryError("invalid_state", "Conflicting workspace operation is already in progress; retry explicitly");
 		}
 		const ready = this.resume(conversationId);
 		// The relay, not the requesting picker connection, owns the bounded observer.
 		void ready.catch(() => undefined);
-		const launch = this.launches.get(conversationId);
+		let launch = this.launches.get(conversationId);
+		if (!launch && running?.identity?.startsWith(`create:${conversationId}:`)) {
+			// Registration may be visible while its final durable write is still
+			// completing. Join that writer without waiting for Pi attachment.
+			let settled = false;
+			void ready.then(() => { settled = true; }, () => { settled = true; });
+			while (!launch && !settled) {
+				await new Promise((resolve) => setTimeout(resolve, 10));
+				launch = this.launches.get(conversationId);
+			}
+		}
 		if (launch) await launch.window;
 		else await ready;
 		const window = this.options.registry.managedWindow(conversationId);
@@ -1073,7 +1084,7 @@ export class HostLifecycle {
 		if (await this.exactWindows.check(window.ownership) !== "match") {
 			throw new RelayRegistryError("launch_failed", "Open target disappeared or changed; inspect the retained window before retry");
 		}
-		this.projectManifest(conversationId); // Retirement wins an asynchronous observation.
+		this.liveManifest(conversationId); // Retirement wins an asynchronous observation.
 		if (!isDeepStrictEqual(window, this.options.registry.managedWindow(conversationId))) {
 			throw new RelayRegistryError("invalid_state", "Open target changed during observation");
 		}
@@ -1082,14 +1093,46 @@ export class HostLifecycle {
 			window: { conversationId, sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId } };
 	}
 
+	async resumeConversation(conversationId: string): Promise<HostResult<"conversation.resume">> {
+		await this.resume(conversationId);
+		const target = await this.openConversation(conversationId);
+		return { conversationId, launchId: target.launchId, launchState: target.launchState };
+	}
+
+	private launchOperationKey(manifest: ConversationManifest): string {
+		return manifest.kind === "coordinator" ? "coordinator" : this.workspaceOperationKey(manifest.placement!);
+	}
+
 	private resume(conversationId: string): Promise<Record<string, unknown>> {
-		const manifest = this.projectManifest(conversationId);
-		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => this.resumeOnce(conversationId), `launch:${conversationId}`);
+		const manifest = this.liveManifest(conversationId);
+		const key = this.launchOperationKey(manifest);
+		const creating = this.worktreeOperations.get(key)?.identity;
+		const identity = creating?.startsWith(`create:${conversationId}:`) ? creating : `launch:${conversationId}`;
+		return this.runWorktreeOperation(key, () => this.resumeOnce(conversationId), identity).then(() => ({
+			operation: "conversation.resume", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId),
+		}));
 	}
 
 	private async resumeOnce(conversationId: string): Promise<Record<string, unknown>> {
-		const manifest = this.projectManifest(conversationId);
-		if (this.options.registry.conversationState(conversationId) !== "active") {
+		const manifest = this.liveManifest(conversationId);
+		if (manifest.kind === "coordinator") {
+			if (this.options.registry.conversationState(conversationId) !== "active") await this.launch(conversationId, async (windowCreated) => {
+				const config = this.options.coordinator;
+				if (!config) throw new RelayRegistryError("invalid_state", "Coordinator launch configuration is unavailable");
+				try {
+					const proof = await ensureCoordinatorWindow({ ...config, manifest, registry: this.options.registry,
+						socketPath: this.options.socketPath, environment: this.options.environment });
+					windowCreated();
+					const result = await waitForProjectAttachment({ timeoutMs: this.options.attachmentTimeoutMs ?? PROJECT_ATTACHMENT_TIMEOUT_MS,
+						state: () => this.options.registry.conversationState(conversationId),
+						inspectWindow: async () => await this.exactWindows.check(proof) === "match" });
+					if (result !== "attached") throw new RelayRegistryError("launch_failed", result === "timeout" ? "Coordinator attachment timed out; inspect the retained window" : "Coordinator window exited or changed; inspect retained panes manually");
+				} catch (error) {
+					await this.options.registry.recordLaunchError(conversationId, "launch_failed", error instanceof Error ? error.message : "Coordinator launch failed");
+					throw error;
+				}
+			});
+		} else if (this.options.registry.conversationState(conversationId) !== "active") {
 			const promotion = this.options.registry.promotion(conversationId);
 			if (promotion?.phase === "prepared") throw new RelayRegistryError("invalid_state", "Terminal promotion must be retried from its source Pi session");
 			if (promotion) await this.completeTerminalPromotion(conversationId);
@@ -1186,24 +1229,33 @@ export class HostLifecycle {
 			cleanupState: retired.cleanup?.some((effect) => effect.phase === "blocked") ? "failed" : retired.cleanup ? "pending" : "complete" };
 	}
 
-	private projectManifest(conversationId: string): ConversationManifest {
+	private liveManifest(conversationId: string): ConversationManifest {
 		const manifest = this.options.registry.manifestByConversationId(conversationId);
 		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+		return manifest;
+	}
+
+	private projectManifest(conversationId: string): ConversationManifest {
+		const manifest = this.liveManifest(conversationId);
 		if (manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle cannot modify the guaranteed coordinator");
 		return manifest;
 	}
 
-	private async launchProject(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
-		const inProgress = this.launches.get(manifest.conversationId);
+	private launchProject(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
+		return this.launch(manifest.conversationId, (windowCreated) => this.launchProjectOnce(manifest, existingNonce, existingSessionFile, windowCreated));
+	}
+
+	private launch(conversationId: string, run: (windowCreated: () => void) => Promise<void>): Promise<void> {
+		const inProgress = this.launches.get(conversationId);
 		if (inProgress) return inProgress.ready;
 		let windowCreated!: () => void; let windowFailed!: (error: unknown) => void;
 		const window = new Promise<void>((resolve, reject) => { windowCreated = resolve; windowFailed = reject; });
 		// Resume-only callers need not observe the earlier window promise.
 		void window.catch(() => undefined);
-		const ready = this.launchProjectOnce(manifest, existingNonce, existingSessionFile, windowCreated)
+		const ready = run(windowCreated)
 			.catch((error) => { windowFailed(error); throw error; })
-			.finally(() => { if (this.launches.get(manifest.conversationId)?.ready === ready) this.launches.delete(manifest.conversationId); });
-		this.launches.set(manifest.conversationId, { window, ready });
+			.finally(() => { if (this.launches.get(conversationId)?.ready === ready) this.launches.delete(conversationId); });
+		this.launches.set(conversationId, { window, ready });
 		return ready;
 	}
 
@@ -1215,7 +1267,7 @@ export class HostLifecycle {
 			activeGeneration.ordinal === 1 ? "session.jsonl" : `generation-${activeGeneration.ordinal}.jsonl`);
 		const resolved = await this.invoke("workspace-resolve", manifest.placement);
 		if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd) || typeof resolved.workspacePath !== "string" || !isAbsolute(resolved.workspacePath)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical workspace paths");
-		const root = await this.invoke("root-ensure", manifest.placement);
+		const root = await this.invoke("root-resolve", manifest.placement);
 		if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
 		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal);
 		if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {
@@ -1287,12 +1339,20 @@ export class HostLifecycle {
 
 	private async inspectProjectWindow(manifest: ConversationManifest, expectedSessionName: string): Promise<ManagedWindow | undefined> {
 		const persisted = this.options.registry.managedWindow(manifest.conversationId);
-		const proof = await this.exactWindows.inspect(manifest.conversationId);
+		const launch = this.options.registry.launchIdentity(manifest.conversationId);
+		// A first admission can create the first tmux server/window. The launcher
+		// independently rejects duplicate markers; no inspection error is treated as absence.
+		if (!persisted && !launch) return undefined;
+		let proof: ExactWindowProof | undefined;
+		try { proof = await this.exactWindows.inspect(manifest.conversationId); }
+		catch (error) {
+			if (persisted?.ownership && await this.exactWindows.check(persisted.ownership) === "gone") return undefined;
+			throw error;
+		}
 		if (!proof) {
 			if (persisted) await this.stopExactWindow(manifest.conversationId, persisted, false);
 			return undefined;
 		}
-		const launch = this.options.registry.launchIdentity(manifest.conversationId);
 		if (!proof.processBootId || proof.processStartTicks === undefined || proof.sessionName !== expectedSessionName ||
 			(persisted ? !isDeepStrictEqual(persisted.ownership, proof) : !launch || launch.launchId !== proof.launchId || launch.generationId !== this.options.registry.activeGeneration(manifest).generationId))
 			throw new RelayRegistryError("launch_failed", "Window has no matching durable exact ownership; inspect it manually");

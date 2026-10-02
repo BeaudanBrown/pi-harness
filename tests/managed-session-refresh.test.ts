@@ -30,7 +30,7 @@ const request = JSON.parse(fs.readFileSync(0, 'utf8')); const op = process.argv[
 const placement = {rootKey:'projects',workspace:'workspace',relativeCwd:'sub'};
 let result;
 if(op==='workspace-resolve') result={...placement,workspacePath:${JSON.stringify(workspace)},cwd:${JSON.stringify(join(workspace, "sub"))},projectKey:'project_'+ 'a'.repeat(32),projectDisplayName:'workspace',checkoutDisplayName:'workspace'};
-else if(op==='root-ensure') result={sessionName:'workspace'};
+else if(op==='root-resolve') result={sessionName:'workspace'};
 else if(op==='window-inspect-exact') result={conversationId:request.conversationId,exists:false};
 else if(op==='window-create-exact') {
  if(fs.existsSync(${JSON.stringify(fail)})) process.exit(1);

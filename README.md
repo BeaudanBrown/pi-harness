@@ -227,9 +227,13 @@ metadata, not proof of filesystem authority or Matrix/account/phone readiness.
 Workspace/worktree discovery is cached for 30 seconds; conversation metadata is
 projected directly from the relay's in-memory registration/attachment state.
 
-The new API is currently read-only: approval, retirement and window-first mutation
-execution are staged dependent work and return typed errors rather than invoking
-legacy bypasses. `managedSessions.actionPolicyOverrides` is a validated Nix-only
+The new API supports reads and policy-authorized local-human open/resume.
+Open returns the exact marked window without waiting for Pi attachment; resume
+waits for bounded attachment readiness. Both join one persisted launch, including
+the protected coordinator's original session. Failed panes remain for manual
+inspection/closure; no automatic replacement or client switching occurs. Model
+mutation approval and other mutation frontends remain staged work and return
+typed errors rather than invoking legacy bypasses. `managedSessions.actionPolicyOverrides` is a validated Nix-only
 startup policy; model mutation approval and coordinator protection cannot be
 removed. Changes require a guarded relay rollout, not a runtime policy editor.
 For direct relay development, `PI_MANAGED_HOST_ACTION_POLICY` explicitly selects

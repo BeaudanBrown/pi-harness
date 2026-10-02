@@ -1,14 +1,11 @@
 import { randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
+import { isDeepStrictEqual } from "node:util";
+import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof } from "../exact-window-contracts.js";
+import { ExactWindowClient } from "./exact-window-client.js";
 import type { ConversationManifest } from "../contracts.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
-
-interface WindowResult {
-	sessionName: string;
-	windowId: string;
-	paneId: string;
-}
 
 function safeJsonObject(value: string, label: string): Record<string, unknown> {
 	let parsed: unknown;
@@ -17,34 +14,18 @@ function safeJsonObject(value: string, label: string): Record<string, unknown> {
 	return parsed as Record<string, unknown>;
 }
 
-function parseWindow(value: string, expectedConversationId: string): WindowResult {
+function parseWindow(value: string, expectedConversationId: string, launchId: string): ExactWindowProof {
 	const result = safeJsonObject(value, "Coordinator launcher");
 	if (result.conversationId !== expectedConversationId || result.role !== "coordinator" || result.sessionName !== "default" ||
 		typeof result.windowId !== "string" || !/^@[0-9]+$/.test(result.windowId) ||
 		typeof result.paneId !== "string" || !/^%[0-9]+$/.test(result.paneId) ||
-		Object.keys(result).some((key) => !["conversationId", "sessionName", "windowId", "paneId", "role"].includes(key))) {
+		Object.keys(result).some((key) => !["conversationId", "sessionName", "windowId", "paneId", "role", "ownership"].includes(key))) {
 		throw new RelayRegistryError("launch_failed", "Coordinator launcher returned an invalid managed window");
 	}
-	return { sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId };
-}
-
-function parseInspection(value: string, expectedConversationId: string): WindowResult | undefined {
-	const result = safeJsonObject(value, "Managed window inspection");
-	if (result.conversationId !== expectedConversationId || typeof result.exists !== "boolean") {
-		throw new RelayRegistryError("launch_failed", "Managed window inspection returned invalid identity");
-	}
-	if (!result.exists) {
-		if (Object.keys(result).some((key) => !["conversationId", "exists"].includes(key))) {
-			throw new RelayRegistryError("launch_failed", "Managed window inspection returned invalid absence");
-		}
-		return undefined;
-	}
-	if (result.sessionName !== "default" || typeof result.windowId !== "string" || !/^@[0-9]+$/.test(result.windowId) ||
-		typeof result.paneId !== "string" || !/^%[0-9]+$/.test(result.paneId) ||
-		Object.keys(result).some((key) => !["conversationId", "exists", "sessionName", "windowId", "paneId"].includes(key))) {
-		throw new RelayRegistryError("launch_failed", "Managed window inspection returned an invalid coordinator window");
-	}
-	return { sessionName: "default", windowId: result.windowId, paneId: result.paneId };
+	const proof = parseExactWindowProof(result.ownership);
+	assertExactWindowBinding(expectedConversationId, { sessionName: result.sessionName, windowId: result.windowId, paneId: result.paneId, ownership: proof });
+	if (proof.launchId !== launchId || !proof.processBootId || !proof.processStartTicks) throw new RelayRegistryError("launch_failed", "Coordinator launch changed its reserved identity");
+	return proof;
 }
 
 async function invokeLauncher(launcher: string, operation: string, request: object, environment: NodeJS.ProcessEnv): Promise<string> {
@@ -73,20 +54,37 @@ export async function launchCoordinator(options: {
 	socketPath: string;
 	registry: RelayRegistry;
 	environment?: NodeJS.ProcessEnv;
-}): Promise<void> {
+}): Promise<ExactWindowProof> {
 	if (!isAbsolute(options.launcher)) throw new Error("Coordinator launcher must be an absolute executable path");
 	if (options.manifest.kind !== "coordinator") throw new RelayRegistryError("permission_denied", "Only the coordinator can use the coordinator launcher");
 	const launcherEnvironment = { ...options.environment };
 	for (const name of Object.keys(launcherEnvironment)) if (name.startsWith("PI_MATRIX_")) delete launcherEnvironment[name];
-	const request = { conversationId: options.manifest.conversationId };
-	const existing = parseInspection(await invokeLauncher(options.launcher, "window-inspect", request, launcherEnvironment), options.manifest.conversationId);
-	if (existing) {
-		await options.registry.setManagedWindow(options.manifest.conversationId, existing);
-		return;
+	const conversationId = options.manifest.conversationId;
+	const exact = new ExactWindowClient(async (operation, request) => safeJsonObject(await invokeLauncher(options.launcher, operation, request, launcherEnvironment), operation));
+	const saved = options.registry.managedWindow(conversationId);
+	const launchIdentity = options.registry.launchIdentity(conversationId);
+	let existing: ExactWindowProof | undefined;
+	if (saved || launchIdentity) {
+		try { existing = await exact.inspect(conversationId); }
+		catch (error) {
+			if (!saved?.ownership || await exact.check(saved.ownership) !== "gone") throw error;
+		}
 	}
+	if (existing) {
+		const launch = launchIdentity;
+		if (existing.sessionName !== "default" || !existing.processBootId || !existing.processStartTicks ||
+			(saved ? !isDeepStrictEqual(saved.ownership, existing) : !launch || launch.launchId !== existing.launchId)) {
+			throw new RelayRegistryError("launch_failed", "Coordinator window has no matching durable exact ownership; inspect it manually");
+		}
+		await options.registry.setManagedWindow(conversationId, { sessionName: existing.sessionName, windowId: existing.windowId, paneId: existing.paneId, ownership: existing });
+		return existing;
+	}
+	if (saved && (!saved.ownership || await exact.check(saved.ownership) !== "gone")) throw new RelayRegistryError("launch_failed", "Coordinator process exit is unverified; inspect retained panes manually");
+	await options.registry.setManagedWindow(conversationId, null);
 	const nonce = randomBytes(32).toString("base64url");
-	await options.registry.setAttachmentNonce(options.manifest.conversationId, nonce);
-	const window = parseWindow(await invokeLauncher(options.launcher, "coordinator-ensure", request, {
+	const launch = await options.registry.prepareProjectLaunch(conversationId, nonce);
+	const request = { conversationId, launchId: launch.launchId };
+	const window = parseWindow(await invokeLauncher(options.launcher, "coordinator-ensure-exact", request, {
 		...launcherEnvironment,
 		PI_MANAGED_SESSION_LAUNCH_ROLE: "coordinator",
 		PI_MANAGED_SESSIONS_SOCKET: options.socketPath,
@@ -98,6 +96,7 @@ export async function launchCoordinator(options: {
 		PI_MANAGED_COORDINATOR_CWD: options.workspaceDirectory,
 		...(options.manifest.selectedModel ? { PI_MANAGED_SESSION_MODEL: options.manifest.selectedModel } : {}),
 		...(options.manifest.selectedThinking ? { PI_MANAGED_SESSION_THINKING: options.manifest.selectedThinking } : {}),
-	}), options.manifest.conversationId);
-	await options.registry.setManagedWindow(options.manifest.conversationId, window);
+	}), conversationId, launch.launchId);
+	await options.registry.setManagedWindow(conversationId, { sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId, ownership: window });
+	return window;
 }

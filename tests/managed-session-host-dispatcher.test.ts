@@ -45,6 +45,23 @@ test("model mutations, protected coordinator actions and staged human mutations 
 	assert.equal(reads(), 1);
 });
 
+test("human opens revalidate through the launch owner while model opens still require approval", async () => {
+	let launches = 0; let available = true;
+	const dispatcher = new HostDispatcher({ hostId: "host", protectedConversationId,
+		policy: new HostPolicy(JSON.parse(readFileSync("config/agent/managed-host-policy.json", "utf8"))), read: async () => status,
+		launch: async (action) => {
+			launches++; if (!available) throw Error("target disappeared");
+			return { conversationId: action.conversationId, launchId: id("launch"), launchState: "window_created",
+				window: { conversationId: action.conversationId, sessionName: "default", windowId: "@1", paneId: "%1" } };
+		} });
+	const action = { operation: "conversation.open", conversationId: protectedConversationId };
+	assert.equal((await dispatcher.dispatch(request(action), human())).ok, true);
+	available = false;
+	assert.equal(code(await dispatcher.dispatch(request(action), human())), "failed", "same request ID cannot replay a stale target");
+	assert.equal(code(await dispatcher.dispatch(request(action, model), model)), "approval_required");
+	assert.equal(launches, 2);
+});
+
 test("retained identity rejects changed arguments and requester context without depending on property order", async () => {
 	const { dispatcher, reads } = harness();
 	const original = request();

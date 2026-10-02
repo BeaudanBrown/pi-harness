@@ -12,6 +12,7 @@ import {
 } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { bootstrapCoordinator } from "../config/agent/extensions/managed-sessions/relay/coordinator-bootstrap.js";
 import { launchCoordinator } from "../config/agent/extensions/managed-sessions/relay/coordinator-launcher.js";
+import { HostLifecycle } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { CoordinatorRouter } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
@@ -143,27 +144,47 @@ test("coordinator launcher receives only fixed host configuration and records ex
 	await value.registry.createCoordinatorConversation(manifest);
 	await assert.rejects(() => value.registry.retireConversation(conversationId, []), /cannot be retired/);
 	const launcher = join(value.root, "launcher");
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) grep -F '"conversationId":"${conversationId}"' >/dev/null; test -n "$PI_MANAGED_SESSION_ATTACHMENT_NONCE"; test -z "\${PI_MATRIX_ACCESS_TOKEN-}"; test "$PI_MANAGED_SESSION_MODEL" = local-llm/coordinator; test "$PI_MANAGED_SESSION_THINKING" = medium; printf '{"conversationId":"${conversationId}","sessionName":"default","windowId":"@7","paneId":"%%8","role":"coordinator"}\\n';;\n*) exit 2;;\nesac\n`);
+	const proofFile = join(value.root, "proof.json"); const invalidFile = join(value.root, "invalid");
+	await writeFile(launcher, `#!${process.execPath}
+const fs = require('node:fs'); const assert = require('node:assert/strict');
+const request = JSON.parse(fs.readFileSync(0, 'utf8')); const op = process.argv[3];
+const proofFile = ${JSON.stringify(proofFile)};
+let proof = fs.existsSync(proofFile) ? JSON.parse(fs.readFileSync(proofFile, 'utf8')) : undefined;
+if (op === 'window-inspect-exact') console.log(JSON.stringify({conversationId: request.conversationId, exists: !!proof, ...(proof ? {ownership: proof} : {})}));
+else if (op === 'window-check-exact') console.log(JSON.stringify({state: proof ? 'match' : 'gone'}));
+else if (op === 'coordinator-ensure-exact') {
+  assert.ok(process.env.PI_MANAGED_SESSION_ATTACHMENT_NONCE); assert.ok(!process.env.PI_MATRIX_ACCESS_TOKEN);
+  assert.equal(process.env.PI_MANAGED_SESSION_MODEL, 'local-llm/coordinator'); assert.equal(process.env.PI_MANAGED_SESSION_THINKING, 'medium');
+  assert.equal(process.env.PI_MANAGED_COORDINATOR_SESSION_FILE, ${JSON.stringify(value.sessionFile)});
+  proof = {conversationId: request.conversationId, launchId: request.launchId, sessionName: 'default', windowId: '@7', paneId: '%8', panePid: '789', serverId: '123:456:' + 'a'.repeat(32), processBootId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', processStartTicks: '123'};
+  fs.writeFileSync(proofFile, JSON.stringify(proof));
+  console.log(JSON.stringify({conversationId: request.conversationId, sessionName: 'default', windowId: '@7', paneId: '%8', role: fs.existsSync(${JSON.stringify(invalidFile)}) ? 'ordinary' : 'coordinator', ownership: proof}));
+} else throw Error('unexpected operation ' + op);
+`);
 	await chmod(launcher, 0o700);
-	await launchCoordinator({
-		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
-		socketPath: join(value.root, "relay.sock"), registry: value.registry,
-		environment: { PATH: process.env.PATH, PI_MATRIX_ACCESS_TOKEN: "must-not-leak" },
-	});
+	await mkdir(join(value.root, "sessions")); await writeFile(value.sessionFile, "preserved coordinator history\n");
+	const owner = new HostLifecycle({ hostId, launcher, projectSessionDirectory: join(value.root, "projects"),
+		socketPath: join(value.root, "relay.sock"), registry: value.registry, matrix: new ManagedMatrixClient(matrixConfig),
+		server: {} as ManagedSessionIpcServer, attachmentTimeoutMs: 100,
+		coordinator: { launcher, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory },
+		environment: { PATH: process.env.PATH, PI_MATRIX_ACCESS_TOKEN: "must-not-leak" } });
+	const opening = owner.openConversation(conversationId);
+	const resuming = assert.rejects(owner.resumeConversation(conversationId), /attachment timed out/);
+	const target = await opening;
+	assert.equal(target.window.sessionName, "default"); assert.equal(target.launchState, "window_created");
+	await resuming;
+	assert.equal(await readFile(value.sessionFile, "utf8"), "preserved coordinator history\n");
 	const runtime = value.registry.snapshot().conversations[0]!;
-	assert.deepEqual(runtime.managedWindow, { sessionName: "default", windowId: "@7", paneId: "%8" });
+	assert.deepEqual(runtime.managedWindow, { sessionName: "default", windowId: "@7", paneId: "%8", ownership: JSON.parse(await readFile(proofFile, "utf8")) });
 	assert.match(runtime.attachmentNonceHash ?? "", /^[a-f0-9]{64}$/);
 	const firstNonceHash = runtime.attachmentNonceHash;
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\ncat >/dev/null\nprintf '{"conversationId":"${conversationId}","exists":true,"sessionName":"default","windowId":"@7","paneId":"%%8"}\\n'\n`);
-	await chmod(launcher, 0o700);
 	await launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
 		socketPath: join(value.root, "relay.sock"), registry: value.registry, environment: { PATH: process.env.PATH },
 	});
 	assert.equal(value.registry.snapshot().conversations[0]!.attachmentNonceHash, firstNonceHash,
 		"reusing the same process preserves the nonce it can authenticate with");
-	await writeFile(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\ncase "$2" in\nwindow-inspect) cat >/dev/null; printf '{"conversationId":"${conversationId}","exists":false}\\n';;\ncoordinator-ensure) cat >/dev/null; printf '{"conversationId":"conv_ffffffffffffffffffffffffffffffff","sessionName":"default","windowId":"@9","paneId":"%%9","role":"ordinary"}\\n';;\nesac\n`);
-	await chmod(launcher, 0o700);
+	await rm(proofFile); await writeFile(invalidFile, "invalid");
 	await assert.rejects(() => launchCoordinator({
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
 		socketPath: join(value.root, "relay.sock"), registry: value.registry, environment: { PATH: process.env.PATH },

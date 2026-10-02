@@ -1,8 +1,9 @@
 # Window-first open (#110)
 
 Implementation boundary: the existing lifecycle/launcher owns launch and exact
-window validation. Opening does not switch a remote tmux client. Approved frontend
-composition (#113), picker interaction (#118/#119), deployment and live acceptance
+window validation. The existing local-human socket/CLI exposes open/resume under
+immutable host policy; model mutations still require approval. Opening does not
+switch a remote tmux client. Remaining approved frontend composition (#113), picker interaction (#118/#119), deployment and live acceptance
 (#121) remain separate. No automatic failed-pane replacement or mutation replay.
 
 ## Acceptance → evidence plan
@@ -27,5 +28,21 @@ composition (#113), picker interaction (#118/#119), deployment and live acceptan
 | Retirement during launch | Permanent tombstone rejects stale persistence/admission; never return a retired target |
 | Caller retry / relay restart | Reuse verified existing window; fail closed on unknown ownership or unresolved creation |
 
-Results will be recorded after focused and canonical checks. No live acceptance
-or deployment is authorized by this issue.
+## Affected verification
+
+- Project fixtures pass concurrent open/resume/start, delayed successful attachment,
+  timeout persistence, retained panes, lost creation response, conflict and retirement
+  races, target disappearance/reuse, and open over Unix IPC with caller disconnect.
+- Coordinator fixtures prove protected default placement, original session-file
+  preservation, matching proof reuse without nonce rotation, and bounded resume.
+- Packaged managed-session/source gates passed (430 tests, zero skips), including
+  real Pi through Unix IPC and disposable tmux with a fake launcher ABI. The
+  project trace now asserts exactly one initial window, without a shell placeholder.
+- Complete Go launcher suite passed, including actual exact coordinator/project
+  creation and guarded kernel stopping in disposable tmux. An existing respawn
+  fixture was made deterministic: it now waits for its intended original-exited
+  boundary instead of assuming tmux's respawn acknowledgement implies reaping.
+- Evidence: `.pi/tmp/workers/2026-10-02T06-06-18-260Z-window-first-affected-verified-eb81f70e2484/`.
+
+This is not picker UI, live phone acceptance, a production launch, deployment,
+or nix-dotfiles Nix evaluation/build. Final review/canonical evidence follows.

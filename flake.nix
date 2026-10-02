@@ -202,7 +202,7 @@
                 jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg workspacePath "$workspace_path" \
                   '{rootKey:$rootKey,workspace:$workspace,relativeCwd:"",workspacePath:$workspacePath,cwd:$workspacePath,projectKey:null,projectDisplayName:null,checkoutDisplayName:null}'
                 ;;
-              workspace-resolve|root-ensure)
+              workspace-resolve|root-ensure|root-resolve)
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
                 root_key=$(jq -er '.rootKey' <<<"$request")
                 workspace=$(jq -er '.workspace' <<<"$request")
@@ -214,8 +214,8 @@
                 [[ -d "$workspace_path" && ! -L "$configured_root/$workspace" && $(dirname "$workspace_path") == "$configured_root" && $(stat -c %u "$workspace_path") == $(id -u) ]]
                 cwd=$(realpath "$workspace_path/''${relative_cwd:-.}")
                 [[ "$cwd" == "$workspace_path" || "$cwd" == "$workspace_path/"* ]]
-                if [[ "$operation" == root-ensure ]]; then
-                  if ! tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" has-session -t "=$workspace" 2>/dev/null; then
+                if [[ "$operation" == root-ensure || "$operation" == root-resolve ]]; then
+                  if [[ "$operation" == root-ensure ]] && ! tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" has-session -t "=$workspace" 2>/dev/null; then
                     tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" new-session -d -s "$workspace" -n shell -c "$workspace_path"
                   fi
                   jq -cn --arg sessionName "$workspace" --arg workspacePath "$workspace_path" '{sessionName:$sessionName,workspacePath:$workspacePath}'
@@ -243,8 +243,9 @@
                   jq -cn --arg conversationId "$conversation_id" '{conversationId:$conversationId,exists:false}'
                 fi
                 ;;
-              coordinator-ensure)
-                conversation_id=$(jq -er 'if (keys == ["conversationId"]) and (.conversationId | test("^conv_[a-f0-9]{32}$")) then .conversationId else error("invalid request") end' <<<"$request")
+              coordinator-ensure-exact)
+                conversation_id=$(jq -er 'if (keys == ["conversationId","launchId"]) and (.conversationId | test("^conv_[a-f0-9]{32}$")) then .conversationId else error("invalid request") end' <<<"$request")
+                launch_id=$(jq -er '.launchId | select(test("^launch_[a-f0-9]{32}$"))' <<<"$request")
                 : "''${PI_MANAGED_TEST_COORDINATOR_PI:?}" "''${PI_MANAGED_TEST_PROVIDER:?}"
                 command="$PI_MANAGED_TEST_COORDINATOR_PI --mode rpc --model coordinator-probe/fake --extension $PI_MANAGED_TEST_PROVIDER"
                 ! tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F '#{@managed_pi_conversation_id}' 2>/dev/null | grep -Fx "$conversation_id" >/dev/null
@@ -255,7 +256,12 @@
                 fi
                 IFS='|' read -r window_id pane_id <<<"$created"
                 tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_pi_conversation_id "$conversation_id"
-                jq -cn --arg conversationId "$conversation_id" --arg windowId "$window_id" --arg paneId "$pane_id" '{conversationId:$conversationId,sessionName:"default",windowId:$windowId,paneId:$paneId,role:"coordinator"}'
+                # Fake ABI only: production birth/marker verification is covered by the Go suite.
+                pane_pid=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" display-message -p -t "$pane_id" '#{pane_pid}')
+                ownership=$(jq -cn --arg conversationId "$conversation_id" --arg launchId "$launch_id" --arg windowId "$window_id" --arg paneId "$pane_id" --arg panePid "$pane_pid" \
+                  '{conversationId:$conversationId,launchId:$launchId,sessionName:"default",windowId:$windowId,paneId:$paneId,panePid:$panePid,serverId:"123:456:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",processBootId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",processStartTicks:"123"}')
+                tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_test_ownership "$ownership"
+                jq -cn --arg conversationId "$conversation_id" --arg windowId "$window_id" --arg paneId "$pane_id" --argjson ownership "$ownership" '{conversationId:$conversationId,sessionName:"default",windowId:$windowId,paneId:$paneId,role:"coordinator",ownership:$ownership}'
                 ;;
               window-create|window-create-exact)
                 : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}" "''${PI_MANAGED_TEST_PROVIDER:?}"
@@ -263,16 +269,20 @@
                 workspace=$(jq -er '.placement.workspace' <<<"$request")
                 relative_cwd=$(jq -er '.placement.relativeCwd' <<<"$request")
                 cwd=$(realpath "$PI_MANAGED_TEST_WORKSPACE_ROOT/$workspace/''${relative_cwd:-.}")
-                existing=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F "$format|#{@managed_pi_conversation_id}" | awk -F '|' -v id="$conversation_id" '$3 == id { print $1 "|" $2; exit }')
+                existing=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F "$format|#{@managed_pi_conversation_id}" 2>/dev/null | awk -F '|' -v id="$conversation_id" '$3 == id { print $1 "|" $2; exit }' || true)
                 [[ -z "$existing" ]]
-                created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" new-window -d -P -F "$format" \
+                create_args=(new-window -t "=$workspace:")
+                if ! tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" has-session -t "=$workspace" 2>/dev/null; then
+                  create_args=(new-session -s "$workspace")
+                fi
+                created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" "''${create_args[@]}" -d -P -F "$format" \
                     -e "PATH=$PATH" -e "HOME=$HOME" -e "DIRENV_CONFIG=''${DIRENV_CONFIG:-}" -e "PI_CODING_AGENT_DIR=''${PI_CODING_AGENT_DIR:-}" \
                     -e "PI_MANAGED_SESSION_LAUNCH_ROLE=$PI_MANAGED_SESSION_LAUNCH_ROLE" -e "PI_MANAGED_SESSIONS_SOCKET=$PI_MANAGED_SESSIONS_SOCKET" \
                     -e "PI_MANAGED_SESSION_CONVERSATION_ID=$PI_MANAGED_SESSION_CONVERSATION_ID" -e "PI_MANAGED_SESSION_CONCEPT=$PI_MANAGED_SESSION_CONCEPT" \
                     -e "PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID=$PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID" \
                     -e "PI_MANAGED_SESSION_ATTACHMENT_NONCE=$PI_MANAGED_SESSION_ATTACHMENT_NONCE" -e "PI_MANAGED_PROJECT_SESSION_FILE=$PI_MANAGED_PROJECT_SESSION_FILE" \
                     -e "PI_MANAGED_TEST_PROVIDER=$PI_MANAGED_TEST_PROVIDER" -e "PI_MANAGED_TEST_PROJECT_LOG=''${PI_MANAGED_TEST_PROJECT_LOG:-/dev/null}" \
-                    -t "=$workspace:" -n "pi-''${conversation_id: -8}" -c "$cwd" \
+                    -n "pi-''${conversation_id: -8}" -c "$cwd" \
                     "exec direnv exec '$cwd' '$PI_MANAGED_TEST_MANAGED_PI' --mode rpc --model coordinator-probe/fake --extension '$PI_MANAGED_TEST_PROVIDER' >>''${PI_MANAGED_TEST_PROJECT_LOG:-/dev/null} 2>&1")
                 IFS='|' read -r window_id pane_id <<<"$created"
                 tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_pi_conversation_id "$conversation_id"

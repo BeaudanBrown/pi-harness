@@ -14,8 +14,11 @@ export async function requestHostControl<O extends HostAction["operation"]>(opti
 			request = parseHostRequest({ version: HOST_CONTROL_VERSION, actor: { kind: "human_local", requestId: options.requestId }, action: options.action });
 		}
 		catch { throw new HostControlError("invalid_request", "Invalid host control request"); }
-		const timeout = options.timeoutMs ?? 30_000;
-		if (!Number.isInteger(timeout) || timeout < 1 || timeout > 30_000) throw new HostControlError("invalid_request", "Invalid host control timeout");
+		// Resume includes bounded launcher admission plus the 60-second attachment
+		// observation. A read/open deadline must not truncate that readiness contract.
+		const limit = options.action.operation === "conversation.resume" ? 120_000 : 30_000;
+		const timeout = options.timeoutMs ?? limit;
+		if (!Number.isInteger(timeout) || timeout < 1 || timeout > limit) throw new HostControlError("invalid_request", "Invalid host control timeout");
 		try {
 			const directory = await lstat(dirname(options.socketPath)); const socket = await lstat(options.socketPath); const uid = process.getuid?.();
 			if (uid === undefined || !directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== uid || (directory.mode & 0o077) !== 0 ||

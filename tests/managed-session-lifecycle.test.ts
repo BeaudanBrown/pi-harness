@@ -24,7 +24,7 @@ import { TranscriptProjector } from "../config/agent/extensions/managed-sessions
 // These IPC fixtures model process exit as already observed; race/unknown cases have separate tests.
 async function writeLifecycleLauncher(path: string, source: string, options?: { mode: number }): Promise<void> {
 	const augment = `let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);v.ownership={conversationId:v.conversationId,launchId:process.argv[1],serverId:"123:456:${"a".repeat(32)}",sessionName:v.sessionName,windowId:v.windowId,paneId:v.paneId,panePid:"789",processBootId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",processStartTicks:"123"};console.log(JSON.stringify(v))})`;
-	const exact = source.replaceAll("window-inspect)", "window-inspect-exact)")
+	const exact = source.replaceAll("root-ensure)", "root-resolve)").replaceAll("window-inspect)", "window-inspect-exact)")
 		.replaceAll("window-terminate)", "window-check-exact) printf '{\"state\":\"gone\"}\\n';;\nwindow-terminate-exact)")
 		.replace(/^window-create\)(.*);;$/gm, (_line, body: string) => `window-create-exact)${body} | ${process.execPath} -e '${augment}' "$(field launchId)";;`);
 	await writeFile(path, exact, options);
@@ -789,6 +789,8 @@ export default function (pi: ExtensionAPI) {
 		throw new Error(`${error instanceof Error ? error.message : "project launch failed"}; session=${session.trim()}; project-log=${pane.trim()}`);
 	}
 	assert.equal(started.conversationState, "active");
+	assert.equal(execFileSync(tmux, ["-L", tmuxSocket, "list-windows", "-t", "=alpha", "-F", "#{window_id}"], { encoding: "utf8" }).trim().split("\n").length, 1,
+		"managed Pi is the first window, without a shell placeholder");
 	await Promise.race([finalProjected, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("real project final projection timed out")), 15_000))]);
 	const project = registry.manifestByCreationKey("real-project")!;
 	assert.equal(registry.pendingInputs(project.conversationId)[0]?.status, "completed");

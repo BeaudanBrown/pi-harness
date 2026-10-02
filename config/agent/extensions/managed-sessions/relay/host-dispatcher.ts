@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
 	HOST_CONTROL_VERSION, isHostReadAction, parseHostRequest, parseHostResponse,
-	type HostActor, type HostReadAction, type HostResponse,
+	type HostActor, type HostAction, type HostReadAction, type HostResponse,
 } from "../live-workspace-contracts.js";
 import { HostPolicy } from "./host-policy.js";
 import type { ModelHostRequest } from "./host-approval-record.js";
@@ -29,6 +29,7 @@ export class HostDispatcher {
 	constructor(private readonly options: {
 		hostId: string; protectedConversationId: string; policy: HostPolicy;
 		read: (request: HostReadRequest) => Promise<unknown>;
+		launch?: (action: Extract<HostAction, { operation: "conversation.open" | "conversation.resume" }>) => Promise<unknown>;
 		approve?: (request: ModelHostRequest) => Promise<HostResponse>;
 		now?: () => number; requestCapacity?: number;
 	}) {
@@ -57,6 +58,9 @@ export class HostDispatcher {
 				if (response.requestId !== id) throw new HostControlError("failed", "Approval response correlation is invalid");
 				return response;
 			}
+			// A target must be revalidated even when a caller repeats its request ID.
+			// Only reads use the replay cache; launch joining belongs to the lifecycle owner.
+			if (!isHostReadAction(request.action)) return await this.execute(request);
 			const now = this.now();
 			for (const [key, value] of this.requests) if (value.expiresAt <= now) this.requests.delete(key);
 			const digest = createHash("sha256").update(canonical([this.options.hostId, request])).digest("hex");
@@ -78,8 +82,10 @@ export class HostDispatcher {
 			const decision = this.options.policy.decide(request, this.options.protectedConversationId);
 			if (decision === "forbidden") throw new HostControlError("forbidden", "Host action is forbidden");
 			if (decision === "approval") throw new HostControlError("approval_required", "This action requires its own host approval");
-			// Mutation execution joins through the durable approval/retirement/open owners.
-			// This volatile read-replay cache must never substitute for their execution journal.
+			if ((request.action.operation === "conversation.open" || request.action.operation === "conversation.resume") && this.options.launch) {
+				const data = await this.options.launch(request.action);
+				return structuredClone(parseHostResponse(request.action.operation, { version: HOST_CONTROL_VERSION, requestId: id, ok: true, data }));
+			}
 			if (!isHostReadAction(request.action)) throw new HostControlError("upgrade_required", "This relay does not yet support this mutation through host controls");
 			const data = await this.options.read({ version: request.version, actor: request.actor, action: request.action });
 			return structuredClone(parseHostResponse(request.action.operation, { version: HOST_CONTROL_VERSION, requestId: id, ok: true, data }));

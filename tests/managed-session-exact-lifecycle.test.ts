@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { HostControlServer } from "../config/agent/extensions/managed-sessions/relay/host-control-server.js";
+import { HostDispatcher } from "../config/agent/extensions/managed-sessions/relay/host-dispatcher.js";
+import { HostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
+import { requestHostControl } from "../config/agent/extensions/managed-sessions/relay/host-control-client.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveConversationId, deriveTranscriptEntryId, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
@@ -23,8 +27,10 @@ async function fixture(t: TestContext) {
 	const manifests = new ConversationManifestStore(join(root, "manifests")); await manifests.write(manifest);
 	let registry = new RelayRegistry(hostId, root, manifests); await registry.load();
 	let proof: ExactWindowProof | undefined; let state: "match" | "gone" | "changed" = "gone";
+	let inspectError = false;
 	let attach = true; let retainedAlive = false; let unknownCreate = false; let invalidProof = false; let exits = true; let creates = 0;
 	let beforeCreate: (() => Promise<void>) | undefined;
+	let launchNonce: string | undefined;
 	const calls: string[] = [];
 	const server = { attachment: () => undefined, sendToAttachment: () => true } as unknown as ManagedSessionIpcServer;
 	const matrix = { operatorUserId: "@operator:example.com", botUserId: "@bot:example.com" } as ManagedMatrixClient;
@@ -35,12 +41,13 @@ async function fixture(t: TestContext) {
 			calls.push(op);
 			switch (op) {
 				case "workspace-resolve": return { ...manifest.placement, cwd: root, workspacePath: root };
-				case "root-ensure": return { sessionName: "project" };
+				case "root-resolve": return { sessionName: "project" };
 				case "window-inspect-exact":
+					if (inspectError) throw Error("tmux server cannot be contacted");
 					if (state === "changed") throw Error("retained dead pane: close it manually");
 					return { conversationId, exists: state === "match", ...(state === "match" ? { ownership: proof } : {}) };
 				case "window-create-exact": {
-					creates++;
+					creates++; launchNonce = env.PI_MANAGED_SESSION_ATTACHMENT_NONCE;
 					assert.equal(registry.launchIdentity(conversationId)?.launchId, request.launchId, "launch admission is durable before invocation");
 					assert.equal(registry.launchIdentity(conversationId)?.observed, false);
 					await beforeCreate?.();
@@ -62,11 +69,16 @@ async function fixture(t: TestContext) {
 		};
 		return lifecycle;
 	}
-	return { manifest, owner, calls, server, matrix, get registry() { return registry; }, get creates() { return creates; },
+	return { root, manifest, owner, calls, server, matrix, get registry() { return registry; }, get creates() { return creates; },
+		set inspectError(value: boolean) { inspectError = value; },
 		set attach(value: boolean) { attach = value; }, set retainedAlive(value: boolean) { retainedAlive = value; }, set unknownCreate(value: boolean) { unknownCreate = value; },
 		set beforeCreate(value: () => Promise<void>) { beforeCreate = value; },
 		set invalidProof(value: boolean) { invalidProof = value; },
 		set exits(value: boolean) { exits = value; }, set state(value: typeof state) { state = value; },
+		async attachNow() {
+			await registry.attach({ protocolVersion: "1.0.0", messageId: "late-attach", conversationId, role: "ordinary_adapter", type: "attachment.attach",
+				payload: { sessionId, attachmentNonce: launchNonce!, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId } }, `connection-${creates}`);
+		},
 		async reload() { registry = new RelayRegistry(hostId, root, manifests); await registry.load(); } };
 }
 
@@ -105,6 +117,45 @@ test("open returns the window while concurrent resume keeps observing one launch
 	assert.ok(!f.calls.includes("window-terminate-exact"));
 });
 
+test("open and resume join a matching start but conflicting creation arguments do not", async (t) => {
+	const f = await fixture(t); f.attach = false; f.retainedAlive = true; const owner = f.owner();
+	const envelope = { ...request(f.manifest.conversationId, "conversation.resume"), payload: { request: {
+		operation: "conversation.start", creationKey: f.manifest.creationKey, concept: f.manifest.concept, placement: f.manifest.placement! } } };
+	const starting = owner.request(envelope);
+	const failed = assert.rejects(starting, /timed out/);
+	const target = await owner.openConversation(f.manifest.conversationId);
+	assert.equal(target.launchState, "window_created");
+	await assert.rejects(owner.request({ ...envelope, payload: { request: { ...envelope.payload.request, concept: "different" } } }), /Conflicting/);
+	await failed; assert.equal(f.creates, 1);
+});
+
+test("resume succeeds only after the opened instance attaches", async (t) => {
+	const f = await fixture(t); f.attach = false; f.retainedAlive = true; const owner = f.owner();
+	const opening = owner.openConversation(f.manifest.conversationId);
+	let ready = false; const resuming = owner.resumeConversation(f.manifest.conversationId).then((value) => { ready = true; return value; });
+	const target = await opening; assert.equal(ready, false);
+	await f.attachNow(); const resumed = await resuming;
+	assert.equal(resumed.launchState, "attached"); assert.equal(resumed.launchId, target.launchId); assert.equal(f.creates, 1);
+});
+
+test("IPC open disconnect does not cancel readiness and a missing relay is typed unavailable", async (t) => {
+	const f = await fixture(t); f.attach = false; f.retainedAlive = true; const owner = f.owner();
+	const dispatcher = new HostDispatcher({ hostId: "host", protectedConversationId: deriveConversationId("host", "coordinator"),
+		policy: new HostPolicy(JSON.parse(await readFile("config/agent/managed-host-policy.json", "utf8"))),
+		read: async () => { throw Error("not used"); }, launch: (action) => action.operation === "conversation.open"
+			? owner.openConversation(action.conversationId) : owner.resumeConversation(action.conversationId) });
+	const server = new HostControlServer({ runtimeDirectory: join(f.root, "control"), expectedUid: process.getuid!(), peerUid: () => process.getuid!(), dispatcher });
+	await server.start();
+	try {
+		const response = await requestHostControl({ socketPath: server.socketPath, requestId: "open", action: { operation: "conversation.open", conversationId: f.manifest.conversationId } });
+		assert.equal(response.ok, true); if (response.ok) assert.equal(response.data.launchState, "window_created");
+		await assert.rejects(owner.wake(f.manifest), /timed out/);
+		assert.match(f.registry.snapshot().conversations[0]!.lastLaunchError!.message, /timed out/); assert.equal(f.creates, 1);
+	} finally { await server.close(); }
+	const offline = await requestHostControl({ socketPath: server.socketPath, requestId: "offline", action: { operation: "conversation.open", conversationId: f.manifest.conversationId } });
+	assert.equal(offline.ok, false); if (!offline.ok) assert.equal(offline.error.code, "unavailable");
+});
+
 test("active open revalidates its exact target without restarting", async (t) => {
 	const f = await fixture(t); const owner = f.owner(); await owner.wake(f.manifest);
 	assert.equal((await owner.openConversation(f.manifest.conversationId)).launchState, "attached");
@@ -125,6 +176,15 @@ test("open cannot publish a launch that retirement overtook", async (t) => {
 		assert.ok(f.registry.retirement(f.manifest.conversationId));
 		assert.equal(f.registry.manifestByConversationId(f.manifest.conversationId), undefined);
 	} finally { await retirement.close(); }
+});
+
+test("first-server creation needs no placeholder and later inspection failure requires proven exit", async (t) => {
+	const f = await fixture(t); const owner = f.owner(); f.inspectError = true;
+	await owner.wake(f.manifest); assert.equal(f.creates, 1);
+	assert.ok(!f.calls.includes("window-inspect-exact")); assert.ok(!f.calls.includes("root-ensure"));
+	await f.registry.markDormant(f.manifest.conversationId);
+	await assert.rejects(owner.wake(f.manifest), /server cannot be contacted/); assert.equal(f.creates, 1);
+	f.state = "gone"; await owner.wake(f.manifest); assert.equal(f.creates, 2);
 });
 
 test("a termination acknowledgement without exit retains the exact binding", async (t) => {
