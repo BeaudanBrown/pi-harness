@@ -1141,6 +1141,10 @@ export class RelayRegistry {
 		return structuredClone(this.state);
 	}
 
+	/** Only original frozen cleanup resources; never an ordinary conversation inventory. */
+	retirementRoomIds(): string[] {
+		return [...new Set(this.pendingRetirements().flatMap((record) => (record.cleanup ?? []).flatMap((effect) => effect.kind === "stop" ? [] : [effect.roomId])))];
+	}
 	managedRoomIds(): string[] {
 		this.retirements.assertAvailable();
 		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace, manifest.checkoutSpace]
@@ -1197,6 +1201,15 @@ export class RelayRegistry {
 		});
 	}
 
+	/** Private, bounded preparation snapshot; retireConversation revalidates it at commit. */
+	retirementCandidate(conversationId: string): { manifest: RegisteredConversation; generationId: string; state: RuntimeConversation["state"]; attachmentId?: string; window: RuntimeConversation["managedWindow"] } {
+		this.assertNotRetired(conversationId);
+		const manifest = this.manifests.get(conversationId);
+		if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Retirement requires a project conversation");
+		const runtime = this.runtimeConversation(conversationId);
+		return { manifest: structuredClone(manifest), generationId: this.activeGeneration(manifest).generationId, state: runtime.state,
+			...(runtime.attachment ? { attachmentId: runtime.attachment.attachmentId } : {}), window: structuredClone(runtime.managedWindow) };
+	}
 	retirement(conversationId: string): RetirementRecord | undefined { return this.retirements.get(conversationId); }
 	pendingRetirements(): RetirementRecord[] { return this.retirements.pending(); }
 	markRetirementCleanup(conversationId: string, effectId: string, phase: "blocked" | "done"): Promise<RetirementRecord> { return this.retirements.progress(conversationId, effectId, phase); }
@@ -1214,6 +1227,7 @@ export class RelayRegistry {
 				throw new RelayRegistryError("invalid_state", "Retirement omitted required exact cleanup");
 			for (const target of targets) {
 				if (target.kind === "stop" && (target.generationId !== generation.generationId || target.attachmentId !== runtime.attachment?.attachmentId ||
+					Boolean(target.unresolvedLaunch) !== (runtime.state === "starting") || Boolean(target.unresolvedBinding) !== (!hasMatrixBinding(manifest) && !manifest.verifiedBinding) ||
 					Boolean(target.window) !== Boolean(runtime.managedWindow) || target.window && (target.window.windowId !== runtime.managedWindow?.windowId || target.window.paneId !== runtime.managedWindow?.paneId || target.window.sessionName !== runtime.managedWindow?.sessionName || !isDeepStrictEqual(target.window.ownership, runtime.managedWindow?.ownership))))
 					throw new RelayRegistryError("invalid_state", "Retirement stop target changed");
 				if ((target.kind === "operator_leave_forget" || target.kind === "bot_leave") && target.roomId !== roomId) throw new RelayRegistryError("invalid_state", "Retirement room target changed");

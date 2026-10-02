@@ -17,7 +17,7 @@ const effectBase = { effectId: Type.String({ pattern: "^cleanup_[a-f0-9]{32}$" }
 const window = Type.Object({ sessionName: text(128), windowId: text(64), paneId: text(64),
 	serverId: Type.Optional(text(255)), ownership: Type.Optional(ExactWindowProofSchema) }, { additionalProperties: false });
 export const RetirementEffectSchema = Type.Union([
-	Type.Object({ ...effectBase, kind: Type.Literal("stop"), generationId: GenerationIdSchema, attachmentId: Type.Optional(text(128)), window: Type.Optional(window) }, { additionalProperties: false }),
+	Type.Object({ ...effectBase, kind: Type.Literal("stop"), generationId: GenerationIdSchema, unresolvedLaunch: Type.Optional(Type.Literal(true)), unresolvedBinding: Type.Optional(Type.Literal(true)), attachmentId: Type.Optional(text(128)), window: Type.Optional(window) }, { additionalProperties: false }),
 	Type.Object({ ...effectBase, kind: Type.Enum(["operator_leave_forget", "bot_leave"]), roomId: room, userId: MatrixUserIdSchema }, { additionalProperties: false }),
 	Type.Object({ ...effectBase, kind: Type.Literal("ancestor"), roomId: room, childRoomId: room,
 		spaceKind: Type.Enum(["checkout_space", "project_space"]), creationKey: text(128), provenance: ManagedProvenanceSchema,

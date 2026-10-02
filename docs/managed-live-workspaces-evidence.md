@@ -595,4 +595,21 @@ read-only exact ownership checks plus linked-window refusal. The harness mirrors
 Go tests and five focused harness ownership tests pass; the packaged harness
 managed-session/source gates passed for the ownership integration. The relay
 package explicitly includes the new shared schema (an initial missing-copy
-packaging failure was corrected). No live tmux sessions were used.
+packaging failure was corrected). No production tmux sessions were used.
+
+A composed `ConversationRetirement` owner now joins frozen preparation, terminal
+commit, approval cancellation, independent cleanup scheduling, guarded window
+stop, exact account targets and conditional ancestor cleanup. It permits local
+retirement while Matrix is offline but withholds account effects until the bot
+identity has been authenticated. Runtime-projection failure after a successful
+terminal commit does not prevent cleanup. Completed obligations compact away;
+only negative authority remains. Preparation is separately callable so approved
+model actions can execute their original plan rather than expanding it later.
+
+Seventeen focused tests pass, including unchanged project/history files and other
+conversations, original-only retry, changed/legacy window refusal and preparation
+drift. Unresolved launch and room-binding continuations are explicitly frozen as
+blocked obligations: disappearance of one known window must not falsely complete
+those continuations. Their launch/provisioning owners still need to reconcile
+that boundary. This owner is not yet installed in production startup or legacy
+routes, and account execution still awaits the NAS transport.
