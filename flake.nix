@@ -398,6 +398,7 @@
           terraform-ls
           tailwindcss-language-server
         ];
+        matrixMarkdown = pkgs.callPackage ./nix/matrix-markdown.nix { };
         typeSetup = ''
           types_root=.pi-types/node_modules
           mkdir -p "$types_root/@earendil-works" "$types_root/@types"
@@ -407,6 +408,9 @@
           ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-tui "$types_root/@earendil-works/pi-tui"
           ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types/node "$types_root/@types/node"
           ln -sfn ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$types_root/typebox"
+          ln -sfn ${matrixMarkdown}/lib/node_modules/@types/markdown-it "$types_root/@types/markdown-it"
+          ln -sfn ${matrixMarkdown}/lib/node_modules/@types/linkify-it "$types_root/@types/linkify-it"
+          ln -sfn ${matrixMarkdown}/lib/node_modules/@types/mdurl "$types_root/@types/mdurl"
         '';
         evalTooling = pkgs.runCommand "pi-harness-eval-tooling" {
           nativeBuildInputs = [ pkgs.typescript ];

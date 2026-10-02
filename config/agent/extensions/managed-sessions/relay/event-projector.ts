@@ -11,7 +11,7 @@ import { renderRemoteCheckpoint, renderRemoteCheckpointPollQuestion, validateRem
 import { CheckpointPollPublisher } from "./checkpoint-poll-publisher.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
-import { renderTranscript } from "./transcript-renderer.js";
+import { prepareTextProjection } from "./text-projection.js";
 import { NoticeOutbox } from "./notice-outbox.js";
 
 export class RelayEventProjector {
@@ -86,20 +86,15 @@ export class RelayEventProjector {
 	private async project(conversationId: string, piSessionId: string, roomId: string, sourceKey: string,
 		kind: "checkpoint" | "notice", body: string, originDeliveryId?: string): Promise<void> {
 		const entryId = deriveTranscriptEntryId(piSessionId, sourceKey);
-		const rendered = renderTranscript("assistant_final", body);
-		if (kind === "checkpoint" && rendered.length !== 1) throw new RelayRegistryError("invalid_state", "Checkpoint must fit one Matrix event");
-		const projection = await this.registry.beginProjection(conversationId, {
-			entryId, kind, status: "projecting", contentHash: createHash("sha256").update(`managed-${kind}\0`).update(body).digest("hex"),
+		const projection = await prepareTextProjection(this.registry, conversationId, {
+			entryId, kind, contentHash: createHash("sha256").update(`managed-${kind}\0`).update(body).digest("hex"),
 			...(originDeliveryId ? { originDeliveryId } : {}),
-			chunks: rendered.map((_chunk, index) => ({ chunkId: deriveChunkId(entryId, index),
-				transactionId: deriveMatrixTransactionId(conversationId, entryId, index), status: "pending" as const })),
-		});
+		}, body, "assistant_final", kind === "checkpoint");
 		for (let index = 0; index < projection.chunks.length; index += 1) {
 			const chunkState = projection.chunks[index]!;
 			if (chunkState.status === "sent") continue;
-			const chunk = rendered[index];
-			if (!chunk) throw new RelayRegistryError("invalid_state", "Relay event chunk plan changed during recovery");
-			await this.matrix.sendText(roomId, chunkState.transactionId, chunk.body, chunk.formattedBody);
+			if (chunkState.body === undefined || chunkState.formattedBody === undefined) throw new RelayRegistryError("invalid_state", "Relay event payload is missing during recovery");
+			await this.matrix.sendText(roomId, chunkState.transactionId, chunkState.body, chunkState.formattedBody);
 			await this.registry.markProjectionChunkSent(conversationId, entryId, chunkState.chunkId);
 		}
 	}

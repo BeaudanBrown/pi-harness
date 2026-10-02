@@ -142,6 +142,15 @@ is used to resolve collisions. This is not cross-host conversation migration or
 shared-room authority.
 
 Creation keys are durable retry keys, not display names. Coordinator-created conversation keys are supplied by the trusted coordinator adapter. Manual ordinary `/remote on` creates its key once, persists it with the binding-boundary attempt before contacting the relay, and reuses that key on retry. Promotion has persisted `prepared`, `shutdown_requested`, `shutdown_confirmed`, and `adopted` phases: failure before shutdown leaves the source process and file untouched; only an authenticated graceful-shutdown detach can confirm adoption authority, unqualified socket loss remains reconnectable, adoption handles cross-filesystem moves, and restart recovery resumes only confirmed shutdowns. The binding boundary also defines the projection start, so the adopted session retains earlier model history without backfilling it to Matrix. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
+Text projections introduced by #122 carry an explicit rendering version and freeze
+both bounded pending Matrix bodies before the first send. A missing rendering
+version selects the exact legacy renderer, including after a partial delivery.
+Versioned pending bodies are replayed without re-rendering; sent marks release
+payload bytes while retaining source hash, rendering version and transaction
+identity. A 16 MiB host-wide pending-payload budget and per-chunk UTF-8 budgets
+fail closed. Unknown rendering versions and mixed/missing payload metadata are
+errors. Strict older readers cannot read the new optional fields; downgrade is
+unsupported. Adapter wire semantics and checkpoint poll rendering are unchanged.
 
 ### V2 rich-interaction and generation amendment
 

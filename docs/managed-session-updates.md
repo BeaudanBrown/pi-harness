@@ -42,6 +42,18 @@ The existing V2 migration remains a separate, explicit breaking operation;
 automatic state downgrade is prohibited. Compatibility with arbitrarily old
 adapters is not promised.
 
+Android-first Markdown rendering (#122) adds strict optional `renderingVersion: 2`
+and frozen payload fields to host-local text projections without changing the
+adapter wire subset. Existing projections without those fields retain their exact
+legacy renderer and transaction boundaries. New pending chunks freeze both bodies
+before sending; sent chunks release payload bytes but retain identity/hash/version.
+The host-wide pending payload budget is 16 MiB, with 8,000 UTF-8 bytes per field
+and at most 64 chunks per entry. A full budget rejects a new projection without
+sending; retry after existing pending delivery completes. Do not downgrade to an
+older relay after versioned records have been written: strict older readers reject
+them even when sent payload bytes have been released. No automatic projection
+migration, old-message edit, adapter restart or room replacement is required.
+
 ## Crash-boundary matrix
 
 | Boundary | Before/effect | Recovery |

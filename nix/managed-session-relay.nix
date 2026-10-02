@@ -6,8 +6,10 @@
   piPackage,
   imagemagick,
   runtimeShell,
+  callPackage,
 }:
 
+let matrixMarkdown = callPackage ./matrix-markdown.nix { }; in
 stdenv.mkDerivation {
   pname = "pi-managed-session-relay";
   version = "0.1.0";
@@ -37,7 +39,9 @@ stdenv.mkDerivation {
         "baseUrl": ".",
         "paths": {
           "typebox": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"],
-          "typebox/value": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.d.mts"]
+          "typebox/value": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.d.mts"],
+          "markdown-it": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/index.d.ts"],
+          "markdown-it/*": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/*"]
         },
         "rootDir": "source",
         "outDir": "lib"
@@ -56,6 +60,7 @@ stdenv.mkDerivation {
   installPhase = ''
     runHook preInstall
     mkdir -p "$out/lib/node_modules" "$out/libexec" "$out/bin"
+    cp -R ${matrixMarkdown}/lib/node_modules/. "$out/lib/node_modules/"
     cp -R lib/managed-sessions "$out/lib/managed-sessions"
     cp -R lib/matrix-shared "$out/lib/matrix-shared"
     cp -R ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$out/lib/node_modules/typebox"

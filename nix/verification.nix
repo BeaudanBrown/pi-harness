@@ -23,6 +23,7 @@
   lspPackages,
 }:
 let
+  matrixMarkdown = pkgs.callPackage ./matrix-markdown.nix { };
   prepareSource = ''
     work="$TMPDIR/pi-harness-source"
     cp -R --no-preserve=mode ${source} "$work"
@@ -132,7 +133,7 @@ let
     chmod -R u+w "$work"
     chmod +x "$work/bin/pi-playwright"
     cd "$work"
-    export NODE_PATH=${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules
+    export NODE_PATH=${matrixMarkdown}/lib/node_modules:${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:${piPackage}/lib/node_modules/@mariozechner/pi-coding-agent/node_modules
     mapfile -t test_files < <(${selector})
     if [[ ''${#test_files[@]} -eq 0 ]]; then
       echo "${name}: no tests selected" >&2

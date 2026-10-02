@@ -407,8 +407,10 @@ export class RelayRegistry {
 			const existing = conversation.projection.find((candidate) => candidate.entryId === projection.entryId);
 			if (existing) {
 				if (existing.kind !== projection.kind || existing.contentHash !== projection.contentHash || existing.originDeliveryId !== projection.originDeliveryId ||
+					existing.renderingVersion !== projection.renderingVersion ||
 					existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
-						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId)) {
+						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId ||
+						(chunk.status === "pending" && (chunk.body !== projection.chunks[index]?.body || chunk.formattedBody !== projection.chunks[index]?.formattedBody)))) {
 					throw new RelayRegistryError("invalid_state", "Conflicting transcript projection content");
 				}
 				return structuredClone(existing);
@@ -418,6 +420,11 @@ export class RelayRegistry {
 			parseHostRuntimeState(this.state);
 			return structuredClone(projection);
 		});
+	}
+
+	projectionByEntryId(conversationId: string, entryId: string): RuntimeConversation["projection"][number] | undefined {
+		const projection = this.runtimeConversation(conversationId).projection.find((candidate) => candidate.entryId === entryId);
+		return projection ? structuredClone(projection) : undefined;
 	}
 
 	checkpointProjectionForOrigin(conversationId: string, originDeliveryId: string): RuntimeConversation["projection"][number] | undefined {
@@ -432,6 +439,8 @@ export class RelayRegistry {
 			const chunk = projection?.chunks.find((candidate) => candidate.chunkId === chunkId);
 			if (!projection || !chunk) throw new RelayRegistryError("not_found", "Transcript projection chunk was not found");
 			chunk.status = "sent";
+			// Only pending transactions need frozen payloads. Keep identities/hashes after delivery.
+			delete chunk.body; delete chunk.formattedBody;
 			projection.status = projection.chunks.every((candidate) => candidate.status === "sent") ? "projected" : "projecting";
 		});
 	}

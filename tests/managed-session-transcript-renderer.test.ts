@@ -18,7 +18,8 @@ test("Markdown rendering escapes HTML, rejects unsafe links, and always retains 
 	assert.match(html, /bad \(unsafe URL omitted\)/);
 	const [local] = renderTranscript("local_user", source);
 	assert.ok(local?.body.startsWith("Local Pi user:\n\n"));
-	assert.ok(local?.body.includes(source));
+	assert.ok(local?.body.includes("bold <script>alert(1)</script> safe (https://example.com/a)"));
+	assert.ok(local?.body.includes("bad (unsafe URL omitted)"));
 	assert.match(local?.formattedBody ?? "", /<strong>Local Pi user:<\/strong>/);
 });
 
@@ -27,7 +28,8 @@ test("transcript chunking is deterministic, UTF-8 bounded, ordered, and content-
 	const first = chunkTranscript(source);
 	const second = chunkTranscript(source);
 	assert.deepEqual(first, second);
-	assert.equal(first.join(""), source);
+	// The new fallback is readable semantic text; Markdown normalizes paragraph whitespace.
+	assert.deepEqual(first.join("").trim().split(/\s+/), source.trim().split(/\s+/));
 	assert.ok(first.length > 1 && first.length <= 64);
 	assert.ok(first.every((chunk) => Buffer.byteLength(chunk, "utf8") <= MAX_MATRIX_TRANSCRIPT_CHUNK_BYTES));
 	assert.equal(transcriptContentHash("assistant_final", source), transcriptContentHash("assistant_final", source));

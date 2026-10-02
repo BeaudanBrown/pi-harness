@@ -169,7 +169,7 @@ test("production relay attaches, reports status, and deletes only bridge state",
 	assert.ok(requests.every((request) => request.authorization === "Bearer test-token-never-in-ipc"));
 	const sent = requests.find((request) => request.path.includes("/send/"));
 	const sentContent = JSON.parse(sent?.body ?? "{}") as { body?: string; formatted_body?: string };
-	assert.equal(sentContent.body, transcript.body, "plain fallback preserves readable source text");
+	assert.equal(sentContent.body, "final answer <script>unsafe</script>", "plain fallback preserves readable semantic text");
 	assert.match(sentContent.formatted_body ?? "", /<strong>answer<\/strong>/);
 	assert.doesNotMatch(sentContent.formatted_body ?? "", /<script>/);
 });

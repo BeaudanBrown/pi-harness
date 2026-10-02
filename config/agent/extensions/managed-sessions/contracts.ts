@@ -14,6 +14,7 @@ export const MAX_COMPLETED_CONTROLS = 4_096;
 export const MAX_CONTROL_POLL_OPTIONS = 20;
 export const MAX_CHECKPOINT_POLL_OPTIONS = 8;
 export const MAX_PROJECTION_ENTRIES = 4_096;
+export const MAX_FROZEN_PROJECTION_BYTES = 16 * 1024 * 1024;
 export const MAX_ARTIFACT_EXPORTS = 256;
 
 const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
@@ -567,10 +568,13 @@ const projectionEntry = strictObject({
 	status: Type.Union([Type.Literal("offered"), Type.Literal("projecting"), Type.Literal("projected")]),
 	contentHash: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	originDeliveryId: Type.Optional(DeliveryIdSchema),
+	renderingVersion: Type.Optional(Type.Literal(2)),
 	chunks: Type.Array(strictObject({
 		chunkId: ChunkIdSchema,
 		transactionId: MatrixTransactionIdSchema,
 		status: Type.Union([Type.Literal("pending"), Type.Literal("sent")]),
+		body: Type.Optional(boundedString(8_000)),
+		formattedBody: Type.Optional(boundedString(8_000)),
 	}), { maxItems: 64 }),
 });
 const runtimeConversation = strictObject({
@@ -696,7 +700,8 @@ export interface HostRuntimeState {
 			status: string;
 			contentHash?: string;
 			originDeliveryId?: string;
-			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
+			renderingVersion?: 2;
+			chunks: Array<{ chunkId: string; transactionId: string; status: string; body?: string; formattedBody?: string }>;
 		}>;
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string };
 		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "shutdown_confirmed" | "adopted"; requestedAt: string };
@@ -954,6 +959,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 	assertSchema(HostRuntimeStateSchema, candidate, "host runtime state");
 	const state = candidate as HostRuntimeState;
 	const conversationIds = new Set<string>();
+	let frozenProjectionBytes = 0;
 	for (const conversation of state.conversations) {
 		if (conversationIds.has(conversation.conversationId)) {
 			throw new ManagedSessionContractError("conflict", `duplicate runtime conversation ${conversation.conversationId}`);
@@ -1103,7 +1109,24 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 				if (checkpointOrigins.has(projection.originDeliveryId)) throw new ManagedSessionContractError("conflict", `duplicate checkpoint origin ${projection.originDeliveryId}`);
 				checkpointOrigins.add(projection.originDeliveryId);
 			}
+			if (projection.renderingVersion !== undefined &&
+				(projection.kind === "matrix_user" || !projection.contentHash || projection.chunks.length === 0 ||
+					(projection.status !== "projecting" && projection.status !== "projected") ||
+					(projection.status === "projected") !== projection.chunks.every((chunk) => chunk.status === "sent"))) {
+				throw new ManagedSessionContractError("invalid_state", "Invalid versioned text projection");
+			}
 			for (const chunk of projection.chunks) {
+				const hasPayload = chunk.body !== undefined || chunk.formattedBody !== undefined;
+				if ((hasPayload && (projection.renderingVersion !== 2 || chunk.body === undefined || chunk.formattedBody === undefined)) ||
+					(projection.renderingVersion === 2 && chunk.status === "pending" && !hasPayload)) {
+					throw new ManagedSessionContractError("invalid_state", "Invalid frozen projection payload");
+				}
+				if (hasPayload) {
+					const bytes = [chunk.body!, chunk.formattedBody!].map((body) => Buffer.byteLength(body, "utf8"));
+					if (bytes.some((size) => size > 8_000)) throw new ManagedSessionContractError("invalid_state", "Frozen projection chunk exceeds byte budget");
+					frozenProjectionBytes += bytes[0]! + bytes[1]!;
+					if (frozenProjectionBytes > MAX_FROZEN_PROJECTION_BYTES) throw new ManagedSessionContractError("invalid_state", "Frozen projection capacity reached");
+				}
 				if (chunks.has(chunk.chunkId)) {
 					throw new ManagedSessionContractError("conflict", `duplicate projection chunk ${chunk.chunkId}`);
 				}
