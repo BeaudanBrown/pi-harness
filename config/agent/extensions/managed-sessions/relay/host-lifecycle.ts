@@ -889,11 +889,20 @@ export class HostLifecycle {
 		if (selected && intent.phase !== "planned" && this.options.registry.conversationState(selected.conversationId) !== "dormant") {
 			throw new RelayRegistryError("invalid_state", "Bundled cleanup preview became stale when its selected conversation resumed");
 		}
-		if (bundled && intent.phase === "planned") {
-			const target = this.options.registry.manifestByConversationId(intent.targetConversationId!);
-			if (target && this.options.registry.conversationState(target.conversationId) === "starting") throw new RelayRegistryError("invalid_state", "Bundled worktree cleanup cannot interrupt a starting conversation");
-			if (target && this.options.registry.conversationState(target.conversationId) === "active") await this.stopOnce(target.conversationId);
-			intent = { ...intent, phase: "stopped" }; await file.write(intent);
+		if (bundled && intent.phase !== "bridge_deleted" && intent.phase !== "branch_deleted") {
+			const targetId = intent.targetConversationId!;
+			const target = this.options.registry.manifestByConversationId(targetId);
+			if (target) {
+				if (this.options.registry.conversationState(targetId) === "starting") throw new RelayRegistryError("invalid_state", "Bundled worktree cleanup cannot interrupt a starting conversation");
+				if (intent.phase === "planned") {
+					const fresh = await this.invoke("worktree-remove-preview", { rootKey: intent.rootKey, workspace: intent.workspace, ...(intent.mergeTarget ? { mergeTarget: intent.mergeTarget } : {}) });
+					const checked = parseWorktreeRemovalIntent({ ...fresh, removalKey, phase: "planned", targetConversationId: targetId });
+					if (!isDeepStrictEqual(checked, intent)) throw new RelayRegistryError("invalid_state", "Bundled cleanup preview changed; obtain new confirmation");
+				}
+				await this.delete(targetId);
+			}
+			await this.waitForRetirementStop(targetId);
+			if (intent.phase === "planned") { intent = { ...intent, phase: "stopped" }; await file.write(intent); }
 		}
 		if (["planned", "stopped"].includes(intent.phase)) {
 			await this.runWorktreeOperation(`repository:${intent.commonDir}`, () => this.invoke("worktree-remove-apply", { ...intent, resumeExisting: true }));
@@ -906,6 +915,18 @@ export class HostLifecycle {
 			intent = { ...intent, phase: "bridge_deleted" }; await file.write(intent); bridgeDeleted = true;
 		} else if (bundled) bridgeDeleted = true;
 		return { operation: bundled ? "worktree.conversation.cleanup.apply" : "worktree.remove.apply", removalKey, workspaceRemoved: true, ...(bridgeDeleted ? { bridgeDeleted } : {}) };
+	}
+
+	private async waitForRetirementStop(conversationId: string): Promise<void> {
+		for (let attempt = 0; attempt < 60; attempt++) {
+			const retired = this.options.registry.retirement(conversationId);
+			if (!retired) throw new RelayRegistryError("invalid_state", "Bundled cleanup requires committed retirement");
+			const stop = retired.cleanup?.find((effect) => effect.kind === "stop");
+			if (!retired.cleanup || stop?.phase === "done") return;
+			if (!stop || stop.phase === "blocked") break;
+			await new Promise((resolveWait) => setTimeout(resolveWait, 250));
+		}
+		throw new RelayRegistryError("invalid_state", "Conversation is retired but physical stop is unverified; worktree remains preserved");
 	}
 
 	private deleteWorktreeBranch(removalKey: string): Promise<Record<string, unknown>> {
@@ -1119,7 +1140,8 @@ export class HostLifecycle {
 		if (attachment) this.options.server.sendToAttachment(attachment, { protocolVersion: "1.0.0", messageId: `relay-stop-${randomBytes(8).toString("hex")}`,
 			conversationId, role: "relay", type: "termination.request", payload: { reason: "stop" } });
 		await this.stopExactWindow(conversationId, window);
-		await this.options.registry.setManagedWindow(conversationId, null);
+		// Retain the proof of the exited instance so later retirement can verify
+		// absence rather than losing its only process identity.
 		for (let attempt = 0; attempt < 20 && this.options.registry.conversationState(conversationId) !== "dormant"; attempt += 1) {
 			await new Promise((resolveWait) => setTimeout(resolveWait, 50));
 		}

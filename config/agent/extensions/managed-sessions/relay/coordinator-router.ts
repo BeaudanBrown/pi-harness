@@ -81,6 +81,29 @@ function roomTimeline(response: unknown, roomId: string): unknown[] {
 	return value.events;
 }
 
+/** Only the configured operator's own leave event in this exact conversation is consent.
+ * Kicks, bans, other accounts and Space membership are never lifecycle authority. */
+export function operatorDepartureEvents(response: unknown, manifest: ConversationManifest, operatorUserId: string, now = Date.now(), initial = false): string[] {
+	const result: string[] = [];
+	let values: unknown[];
+	if (initial) {
+		const room = (response as { rooms?: { join?: Record<string, { state?: { events?: unknown }; timeline?: { events?: unknown } }> } } | null)?.rooms?.join?.[manifest.roomId];
+		values = [room?.state?.events, room?.timeline?.events].flatMap((events) => Array.isArray(events) ? events : [])
+			.filter((event) => event?.type === "m.room.member" && event?.state_key === operatorUserId);
+		if (values.length > MAX_TIMELINE_EVENTS) throw Error("Operator membership history exceeds the bounded initial observation");
+	} else values = roomTimeline(response, manifest.roomId);
+	for (const value of values) {
+		if (!value || typeof value !== "object") continue;
+		const event = value as Record<string, unknown>;
+		const content = event.content as { membership?: unknown } | undefined;
+		if (event.type === "m.room.member" && event.sender === operatorUserId && event.state_key === operatorUserId && content?.membership === "leave" &&
+			typeof event.event_id === "string" && event.event_id.length > 0 && event.event_id.length <= 255 &&
+			typeof event.origin_server_ts === "number" && Number.isSafeInteger(event.origin_server_ts) &&
+			event.origin_server_ts >= Date.parse(manifest.createdAt) && event.origin_server_ts <= now + MAX_FUTURE_EVENT_SKEW_MS) result.push(event.event_id);
+	}
+	return result;
+}
+
 export function roomEventSenderIds(response: unknown, roomId: string, excludedSenderUserIds: ReadonlySet<string>, hasCursor: boolean, now = Date.now()): ReadonlySet<string> {
 	const senders = new Set<string>();
 	for (const value of roomTimeline(response, roomId)) {
@@ -160,6 +183,9 @@ export class CoordinatorRouter {
 	}
 
 	private async routeRoom(manifest: ConversationManifest, response: unknown, signal: AbortSignal): Promise<void> {
+		if (operatorDepartureEvents(response, manifest, this.matrix.operatorUserId).length) {
+			await this.operatorDeparted(manifest); return;
+		}
 		const publications = await Promise.allSettled([
 			this.reconcileControlPollPublications(manifest.conversationId),
 			this.reconcileCheckpointPollPublications(manifest.conversationId),
@@ -195,6 +221,7 @@ export class CoordinatorRouter {
 		private readonly beginOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
 		private readonly endOperationFeedback: (conversationId: string, operationId: string) => Promise<void> = async () => undefined,
 		private readonly syncHealth: (healthy: boolean) => Promise<void> = async () => undefined,
+		private readonly operatorDeparted: (manifest: ConversationManifest) => Promise<void> = async () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -245,6 +272,11 @@ export class CoordinatorRouter {
 				// Initial sync is a deliberate no-replay boundary, not an incremental gap.
 				// A limited retained timeline is normal here and must not prevent startup.
 				if (!established) {
+					// Prompts are not replayed, but a self-leave after this binding's
+					// creation remains closure consent even on the first observation.
+					for (const manifest of this.registry.listManifests()) {
+						if (operatorDepartureEvents(sync.response, manifest, this.matrix.operatorUserId, Date.now(), true).length) await this.operatorDeparted(manifest);
+					}
 					await this.registry.setMatrixCursor(this.manifest.conversationId, sync.nextBatch);
 					await this.syncHealth(true);
 					failures = 0;
@@ -262,7 +294,8 @@ export class CoordinatorRouter {
 					].map((item) => item.conversationId));
 					const jobs = this.registry.listManifests().flatMap((manifest) => {
 						const candidates = roomEventSenderIds(response, manifest.roomId, this.matrix.ignoredSenderUserIds, true);
-						const eligible = new Set(authorizedRoomEvents(response, manifest.roomId, candidates, true).map((event) => event.eventId));
+						const eligible = new Set([...authorizedRoomEvents(response, manifest.roomId, candidates, true).map((event) => event.eventId),
+							...operatorDepartureEvents(response, manifest, this.matrix.operatorUserId)]);
 						// Syntax/sender filtering here avoids persisting our own activity events.
 						// Fresh membership authorization still happens in the room worker.
 						const events = roomTimeline(response, manifest.roomId).filter((event) => event !== null && typeof event === "object" && eligible.has((event as { event_id: string }).event_id));

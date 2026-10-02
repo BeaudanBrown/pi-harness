@@ -47,6 +47,18 @@ test("retirement removes ordinary discovery and rejects stale nonce, attachment,
 	assert.equal(replacement.pendingRetirements()[0].retirementId, retired.retirementId);
 });
 
+test("new identity can reuse preserved Pi history with a fresh room and projection boundary", async (t) => {
+	const f = await fixture(t); await f.registry.retireConversation(f.first.conversationId, f.targets);
+	const fresh = { ...manifest("resumed"), piSessionId: f.first.piSessionId,
+		bindingBoundaryEntryId: deriveTranscriptEntryId(f.first.piSessionId, "fresh-boundary") };
+	await f.registry.createProjectConversation(fresh, nonce);
+	assert.notEqual(fresh.conversationId, f.first.conversationId); assert.notEqual(fresh.roomId, f.first.roomId);
+	assert.equal(f.registry.manifestByConversationId(fresh.conversationId)?.bindingBoundaryEntryId, fresh.bindingBoundaryEntryId);
+	assert.deepEqual(f.registry.snapshot().conversations.find((item) => item.conversationId === fresh.conversationId)?.projection, []);
+	await assert.rejects(f.registry.attach(f.packet, "stale-history-attachment"), /retired|not found/);
+	assert.ok(f.registry.retirement(f.first.conversationId));
+});
+
 test("runtime write failure after terminal commit cannot roll back retirement in memory or after restart", async (t) => {
 	const f = await fixture(t); const write = AtomicJsonFile.prototype.write;
 	AtomicJsonFile.prototype.write = async function (value: unknown) {

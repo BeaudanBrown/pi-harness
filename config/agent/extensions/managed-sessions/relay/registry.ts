@@ -845,6 +845,14 @@ export class RelayRegistry {
 		}
 	}
 
+	/** Deliberate coordinator departure is non-retiring and never automatic rejoin consent. */
+	async recordCoordinatorDeparture(conversationId: string): Promise<void> {
+		await this.mutate(async () => {
+			if (this.boundConversation(conversationId).kind !== "coordinator") throw new RelayRegistryError("permission_denied", "Project departure requires canonical retirement");
+			this.runtimeConversation(conversationId).operatorDeparted = true;
+		});
+	}
+
 	launchIdentity(conversationId: string): RuntimeConversation["launch"] { return structuredClone(this.runtimeConversation(conversationId).launch); }
 
 	/** Commit admission before invoking the launcher. An uncertain invocation is never replayed. */

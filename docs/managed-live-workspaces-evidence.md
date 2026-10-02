@@ -696,3 +696,21 @@ shutdown messages are bound to the captured attachment, not a later reconnect.
 The earlier lifecycle-cutover review finding is addressed for normal project
 paths; no additional review cycle was run for this integration increment.
 No deployment, push or live-session mutation was performed.
+
+### Retirement departure and bundle wiring (#109)
+
+| Acceptance / crash boundary | Implementation / evidence |
+| --- | --- |
+| Operator voluntarily leaves | Exact self-sent `m.room.member` leave in an owned conversation is routed before joined-member authorization. Kicks, bans, other users, old/future events and Space events do not authorize retirement. |
+| Initial observation | Membership closure consent after binding creation is honored without replaying historical prompts, including limited initial timelines. |
+| Incremental sync / pre-commit failure | The existing durable room inbox retains the leave event; a router restart completes terminal retirement without waking Pi or requiring the departed operator to remain joined. |
+| Coordinator departure | Keep its identity/session and persist a no-automatic-reinvite marker. Explicit account restoration belongs to the account/control leaves. |
+| Bundle preconditions | Recheck the frozen worktree preview before retirement; changed preconditions do not retire anything. |
+| Bundle removal failure | Commit retirement, await verified physical stop, then attempt worktree removal. Failure never restores resumability; retry retains the same checkout and preserves Pi history. |
+| Stop before later retirement | Keep the exited instance's proof so retirement can verify absence rather than losing process identity. |
+
+Focused routing, exact lifecycle and bundle tests passed (16 plus four
+packaged-only cases). NAS leave/forget transport remains #112 as specified by
+#109; approval/frontend composition remains #108/#113. Unknown launch or legacy
+physical ownership stays visibly blocked for manual inspection under the approved
+simplicity policy; no additional automatic continuation recovery is introduced.

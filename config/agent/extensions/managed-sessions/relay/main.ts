@@ -169,6 +169,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				}
 			},
 			onAttachmentDisconnect: async (attachment, reason) => {
+				retirement?.kick();
 				activityProjector?.attachmentDisconnected(attachment.conversationId);
 				if (reason === "shutdown" && registry.promotion(attachment.conversationId)?.phase === "shutdown_confirmed") {
 					await hostLifecycle?.completeTerminalPromotion(attachment.conversationId).catch((error) => {
@@ -438,7 +439,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
 			(conversationId) => controlPollPublisher.reconcile(conversationId), (conversationId) => eventProjector!.checkpointPollPublisher.reconcile(conversationId), media,
 			(conversationId, operationId) => activityProjector!.beginOperationFeedback(conversationId, operationId),
-			(conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId), syncHealth);
+			(conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId), syncHealth,
+			async (manifest) => {
+				if (manifest.kind === "coordinator") await registry.recordCoordinatorDeparture(manifest.conversationId);
+				else await retirement!.retire(manifest.conversationId);
+			});
 			await coordinatorRouter.loadInbox(resolve(stateDirectory, "inbox.json"));
 			coordinatorRouter.start();
 			await hostLifecycle!.reconcileGenerationTransitions();

@@ -242,7 +242,7 @@ test("bundled worktree conversation creation and cleanup recover forward without
 	const runtime = join(root, "runtime"); const manifests = join(root, "manifests"); const sessions = join(root, "sessions"); const record = join(root, "launch.json"); const removalAttempt = join(root, "removal-attempt");
 	await mkdir(join(main, ".git"), { recursive: true });
 	const registry = new RelayRegistry(hostId, runtime, new ConversationManifestStore(manifests)); await registry.load();
-	let room = 0; let leaveAttempts = 0;
+	let room = 0; let leaveAttempts = 0; let allowLeave = false;
 	const matrix = new ManagedMatrixClient(matrixConfig, async (input) => {
 		const path = new URL(String(input)).pathname;
 		if (path.endsWith("/createRoom")) return Response.json({ room_id: `!bundle${++room}:example.com` });
@@ -252,14 +252,14 @@ test("bundled worktree conversation creation and cleanup recover forward without
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		if (path.includes("/state/m.room.power_levels/")) return Response.json({ users: { [matrixConfig.botUserId]: 100 } });
 		if (path.endsWith("/joined_rooms")) return Response.json({ joined_rooms: ["!bundle1:example.com", "!bundle2:example.com"] });
-		if (path.endsWith("/leave") && leaveAttempts++ === 0) return new Response("injected leave outage", { status: 503 });
+		if (path.endsWith("/leave")) { leaveAttempts++; if (!allowLeave) return new Response("injected leave outage", { status: 503 }); }
 		return Response.json({ event_id: "$ok" });
 	}, [], { maxAttempts: 1 });
 	const launcher = join(root, "launcher");
 	await writeLifecycleLauncher(launcher, `#!${process.env.PI_TEST_SHELL ?? "/bin/sh"}\nset -eu\nop="$2"\nbody=$(cat)\nfield() { printf '%s' "$body" | ${process.execPath} -e 'let s="";process.stdin.on("data",c=>s+=c).on("end",()=>{const v=JSON.parse(s);process.stdout.write(String(process.argv[1].split(".").reduce((x,k)=>x[k],v)))})' "$1"; }\ncase "$op" in\nworktree-create-preview) printf '${JSON.stringify({ rootKey: "projects", sourceWorkspace: "project", projectWorkspace: "project", targetWorkspace: "project-feature-bundled-deadbeef", commonDir: join(main, ".git"), mainPath: main, targetPath: linked, baseRef: "refs/heads/main", baseCommit: "a".repeat(40), branch: "feature/bundled" })}\\n';;\nworktree-create-apply) mkdir -p '${linked}/.git'; printf '{"rootKey":"projects","workspace":"project-feature-bundled-deadbeef","branch":"feature/bundled","baseCommit":"${"a".repeat(40)}"}\\n';;\nworkspace-resolve) name=$(field workspace); printf '{"rootKey":"projects","workspace":"%s","relativeCwd":"","workspacePath":"${workspaceRoot}/%s","cwd":"${workspaceRoot}/%s","projectKey":"project_${"a".repeat(32)}","projectDisplayName":"project","checkoutDisplayName":"%s"}\\n' "$name" "$name" "$name" "$name";;\nroot-ensure) printf '{"sessionName":"project","workspacePath":"${linked}"}\\n';;\nwindow-inspect) conversation=$(field conversationId); printf '{"conversationId":"%s","exists":false}\\n' "$conversation";;\nwindow-create) conversation=$(field conversationId); printf '{"conversationId":"%s","nonce":"%s"}\\n' "$conversation" "$PI_MANAGED_SESSION_ATTACHMENT_NONCE" > '${record}'; printf '{"conversationId":"%s","sessionName":"project","windowId":"@7","paneId":"%%8","rootKey":"projects","workspace":"project-feature-bundled-deadbeef","relativeCwd":"","role":"conversation"}\\n' "$conversation";;\nwindow-terminate) printf '{"terminated":true}\\n';;\nworktree-remove-preview) printf '${JSON.stringify({ rootKey: "projects", workspace: "project-feature-bundled-deadbeef", projectWorkspace: "project", path: linked, commonDir: join(main, ".git"), mainPath: main, branch: "feature/bundled", head: "a".repeat(40), clean: true, locked: false, mergeTarget: "refs/heads/main", mergeCommit: "b".repeat(40), merged: true })}\\n';;\nworktree-remove-apply) if test ! -e '${removalAttempt}'; then touch '${removalAttempt}'; exit 1; fi; rm -rf '${linked}'; printf '{"rootKey":"projects","workspace":"project-feature-bundled-deadbeef","branch":"feature/bundled","head":"${"a".repeat(40)}","removed":true}\\n';;\nbridge-clear) printf '{"cleared":true}\\n';;\nworktree-branch-delete) printf '{"branch":"feature/bundled","deleted":true}\\n';;\n*) exit 2;;\nesac\n`);
 	await chmod(launcher, 0o700);
-	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") }); await server.start(); t.after(async () => server.close());
 	let retirement: ConversationRetirement;
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc"), onAttachmentDisconnect: async () => { retirement?.kick(); } }); await server.start(); t.after(async () => server.close());
 	const lifecycle = new HostLifecycle({ hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath, registry, matrix, server, environment: { ...process.env },
 		retireConversation: (id) => retirement.retire(id) });
 	retirement = new ConversationRetirement({ registry, matrix, server, windows: lifecycle.exactWindows, matrixAuthenticated: () => true });
@@ -271,18 +271,23 @@ test("bundled worktree conversation creation and cleanup recover forward without
 	const independentPreview = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.preview", rootKey: "projects", workspace: "project-feature-bundled-deadbeef", mergeTarget: "main" }));
 	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.remove.apply", removalKey: independentPreview.removalKey, confirmed: true })), /active managed conversation/);
 	const preview = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.preview", targetConversationId: conversationId, mergeTarget: "main" }));
-	assert.deepEqual(preview.activeConversations, [conversationId]); setTimeout(() => socket.destroy(), 25);
+	assert.deepEqual(preview.activeConversations, [conversationId]);
+	const script = await readFile(launcher, "utf8");
+	await writeFile(launcher, script.replace(`"head":"${"a".repeat(40)}"`, `"head":"${"c".repeat(40)}"`));
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /preview changed/);
+	assert.equal(registry.retirement(conversationId), undefined, "stale worktree preconditions do not retire the conversation");
+	await writeFile(launcher, script); setTimeout(() => socket.destroy(), 25);
 	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /worktree-remove-apply failed/);
-	await writeFile(record, "", "utf8"); const reattaching = attachFromRecord(record, server, registry);
-	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.resume", targetConversationId: conversationId })); const resumedSocket = await reattaching;
-	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true })), /selected conversation resumed/,
-		"a retry cannot remove the checkout after the selected conversation resumes beyond the persisted stop phase");
-	setTimeout(() => resumedSocket.destroy(), 25); await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.stop", targetConversationId: conversationId }));
+	assert.ok(registry.retirement(conversationId), "retirement precedes worktree removal even when removal fails");
+	assert.ok((await stat(linked)).isDirectory(), "failed removal preserves the checkout");
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "conversation.resume", targetConversationId: conversationId })), /not found|retired/,
+		"a failed bundle never restores resumability");
 	await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true }));
-	await retirement.drain(); assert.equal(leaveAttempts, 1);
+	await retirement.drain(); assert.ok(leaveAttempts >= 1);
 	assert.equal(registry.manifestByConversationId(conversationId), undefined, "failed cleanup cannot restore a retired identity");
 	assert.ok(registry.retirement(conversationId)?.cleanup?.some((effect) => effect.kind === "bot_leave" && effect.phase === "blocked"));
-	retirement.kick(); await retirement.drain(); assert.equal(leaveAttempts, 2);
+	allowLeave = true; const attemptsBeforeRetry = leaveAttempts;
+	retirement.kick(); await retirement.drain(); assert.ok(leaveAttempts > attemptsBeforeRetry);
 	const cleaned = await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.conversation.cleanup.apply", removalKey: preview.removalKey, confirmed: true }));
 	assert.deepEqual({ workspaceRemoved: cleaned.workspaceRemoved, bridgeDeleted: cleaned.bridgeDeleted }, { workspaceRemoved: true, bridgeDeleted: true });
 	assert.equal(registry.manifestByConversationId(conversationId), undefined); assert.equal(await readFile(sessionFile, "utf8"), history, "bundled cleanup preserves Pi history");

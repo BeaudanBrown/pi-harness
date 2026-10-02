@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { deriveConversationId, deriveTranscriptEntryId, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
 import type { ExactWindowProof } from "../config/agent/extensions/managed-sessions/exact-window-contracts.js";
+import { ConversationRetirement } from "../config/agent/extensions/managed-sessions/relay/conversation-retirement.js";
 import { HostLifecycle } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
@@ -26,9 +27,10 @@ async function fixture(t: TestContext) {
 	let beforeCreate: (() => Promise<void>) | undefined;
 	const calls: string[] = [];
 	const server = { attachment: () => undefined, sendToAttachment: () => true } as unknown as ManagedSessionIpcServer;
+	const matrix = { operatorUserId: "@operator:example.com", botUserId: "@bot:example.com" } as ManagedMatrixClient;
 	function owner() {
 		const lifecycle = new HostLifecycle({ hostId, launcher: "/fixture", projectSessionDirectory: join(root, "sessions"), socketPath: join(root, "socket"),
-			registry, server, matrix: {} as ManagedMatrixClient, attachmentTimeoutMs: 100 });
+			registry, server, matrix, attachmentTimeoutMs: 100 });
 		(lifecycle as unknown as { invoke: (op: string, request: Record<string, unknown>, env?: NodeJS.ProcessEnv) => Promise<Record<string, unknown>> }).invoke = async (op, request, env = {}) => {
 			calls.push(op);
 			switch (op) {
@@ -60,7 +62,7 @@ async function fixture(t: TestContext) {
 		};
 		return lifecycle;
 	}
-	return { manifest, owner, calls, get registry() { return registry; }, get creates() { return creates; },
+	return { manifest, owner, calls, server, matrix, get registry() { return registry; }, get creates() { return creates; },
 		set attach(value: boolean) { attach = value; }, set unknownCreate(value: boolean) { unknownCreate = value; },
 		set beforeCreate(value: () => Promise<void>) { beforeCreate = value; },
 		set invalidProof(value: boolean) { invalidProof = value; },
@@ -79,8 +81,13 @@ test("normal launch persists exact ownership and stop verifies exit without lega
 	assert.equal(f.creates, 1); assert.equal(f.registry.launchIdentity(f.manifest.conversationId)?.observed, true);
 	assert.ok(f.registry.managedWindow(f.manifest.conversationId)?.ownership?.processBootId);
 	await owner.request(request(f.manifest.conversationId, "conversation.stop"));
-	assert.equal(f.registry.managedWindow(f.manifest.conversationId), null);
+	assert.ok(f.registry.managedWindow(f.manifest.conversationId)?.ownership, "later retirement retains the exited process identity");
 	assert.deepEqual(f.calls.slice(-3), ["window-check-exact", "window-terminate-exact", "window-check-exact"]);
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: owner.exactWindows });
+	try {
+		await retirement.retire(f.manifest.conversationId); await retirement.drain();
+		assert.equal(f.registry.retirement(f.manifest.conversationId)?.cleanup?.find((effect) => effect.kind === "stop")?.phase, "done");
+	} finally { await retirement.close(); }
 });
 
 test("a termination acknowledgement without exit retains the exact binding", async (t) => {
