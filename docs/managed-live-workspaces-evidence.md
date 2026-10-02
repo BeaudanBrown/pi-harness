@@ -732,3 +732,20 @@ Issue-boundary pinned audit (`7d84317`):
 
 No repeated subjective audit was run; the remediation is bounded and does not
 change the reviewed retirement design.
+
+Final #109 source verification passed at `445db23`: `nix run .#verify`, all 12
+canonical groups, including 423 managed-session tests with zero skips and the
+production relay/bridge-chat package builds. Evidence:
+`.pi/tmp/workers/2026-10-02T05-19-57-549Z-retirement-canonical-verified-b999380658ce/`.
+The full gate exposed a missing bridge-chat copy of shared managed-contract
+leaves (fixed in `6d2f22e`) and a stale compatibility assertion (fixed in
+`445db23`, now testing both client and relay refusal). No LSP behavior changed.
+This final evidence addition is documentation-only; executable sources are the
+verified snapshot. No further gate repetition is required for this log entry.
+
+#109 implementation boundary is complete with the declared dependent work above:
+NAS execution and approved frontend/alias assembly are not deployment-ready or
+claimed delivered here. Unknown physical cleanup is deliberately visible and
+non-resumable, not automatically repaired. Both implementation worktrees are
+committed; nothing was pushed or activated. The original nix-dotfiles checkout's
+three unrelated dirty files remain untouched.
