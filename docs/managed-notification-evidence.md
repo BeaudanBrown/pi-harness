@@ -49,5 +49,8 @@ Strengthened replay and recovery assertions then passed 43 focused tests, zero
 skips: `.pi/tmp/workers/2026-10-02T08-13-07-740Z-notification-replay-focused-55f518b3b8a6/`.
 
 Individual subjective review is omitted; the mandatory cumulative epic review
-remains required. Canonical final verification is pending. These are deterministic
-fixtures and packaged tests, not phone push, live TUI or deployed acceptance.
+remains required. Canonical verification passed at `d5188b4`: all 12 groups,
+including 437 managed-session tests with zero skips and production package checks.
+Artifact: `.pi/tmp/workers/2026-10-02T08-15-09-705Z-notification-final-canonical-00e6814d098d/`.
+These are deterministic fixtures and packaged tests, not phone push, live TUI or
+deployed acceptance. No push, deployment, activation or live migration occurred.
