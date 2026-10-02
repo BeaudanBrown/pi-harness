@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
-import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveMatrixTransactionId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveMatrixTransactionId, deriveTranscriptEntryId, type ManagedSessionEnvelope } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
@@ -146,7 +146,11 @@ test("production relay attaches, reports status, and refuses legacy unbinding/de
 	assert.match(statusRequests[0]?.body ?? "", /Saved model:/, "relay composes durable state with the adapter live snapshot");
 	assert.doesNotMatch(statusRequests[0]?.body ?? "", /roomId|workspacePath|matrixEventId/, "status remains redacted");
 	for (let i = 0; i < 200 && requests.filter((request) => request.path.includes("/send/")).length < 4; i++) await new Promise((resolve) => setTimeout(resolve, 5));
-	await assert.rejects(() => replayClient.selfDelete(), /upgraded approved host controls/);
+	await assert.rejects(() => replayClient.selfDelete(), /upgraded approved retirement controls/);
+	// Emulate an older adapter on the wire: the relay must independently refuse it.
+	const legacy = replayClient as unknown as { request(envelope: ManagedSessionEnvelope): Promise<unknown> };
+	await assert.rejects(legacy.request({ protocolVersion: "1.0.0", messageId: "obsolete-self-delete", conversationId,
+		role: "ordinary_adapter", type: "self.delete", payload: { confirmed: true } }), /upgraded approved host controls/);
 	assert.equal(running.registry.snapshot().conversations.length, 1, "unsupported legacy deletion cannot mutate persistence");
 	assert.equal((await replayClient.selfStatus()).payload.conversationState, "active", "an unsupported legacy action does not disconnect an authenticated adapter");
 	await replayClient.close("shutdown");
