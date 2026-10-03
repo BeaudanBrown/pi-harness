@@ -8,8 +8,10 @@ import {
 	MANAGED_SESSION_PROTOCOL_VERSION,
 	MANAGED_SESSION_STATE_VERSION,
 	deriveConversationId,
+	deriveDeliveryId,
 	type ConversationManifest,
 } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 import { bootstrapCoordinator } from "../config/agent/extensions/managed-sessions/relay/coordinator-bootstrap.js";
 import { launchCoordinator } from "../config/agent/extensions/managed-sessions/relay/coordinator-launcher.js";
 import { CoordinatorRouter } from "../config/agent/extensions/managed-sessions/relay/coordinator-router.js";
@@ -143,6 +145,39 @@ test("coordinator launcher receives only fixed host configuration and records ex
 		launcher, manifest, sessionFile: value.sessionFile, workspaceDirectory: value.workspaceDirectory,
 		socketPath: join(value.root, "relay.sock"), registry: value.registry, environment: { PATH: process.env.PATH },
 	}), /invalid managed window/);
+});
+
+test("dormant confirmed reset wakes even without inputs and holds ordinary dispatch until generation activation", async (t) => {
+	for (const count of [0, 2]) {
+		const value = await fixture(); t.after(() => rm(value.root, { recursive: true, force: true }));
+		const conversationId = deriveConversationId(hostId, "coordinator");
+		const manifest: ConversationManifest = { schemaVersion: MANAGED_SESSION_STATE_VERSION, kind: "coordinator", conversationId, ownerHostId: hostId,
+			creationKey: "coordinator", concept: "host coordinator", piSessionId: "session-coordinator", roomId: "!coordinator:example.com",
+			bindingBoundaryEntryId: "entry_00000000000000000000000000000000", createdAt: "2026-08-31T00:00:00.000Z" };
+		await value.registry.createCoordinatorConversation(manifest);
+		const controlId = deriveControlId(conversationId, "$reset");
+		await value.registry.recordPendingControl(conversationId, { controlId, matrixEventId: "$reset", name: "new", argument: "--confirm" });
+		for (let i = 0; i < count; i++) await value.registry.recordAcceptedInput(conversationId, {
+			deliveryId: deriveDeliveryId(conversationId, `$newer-${i}`), matrixEventId: `$newer-${i}`, kind: "prompt", body: "retain after cutoff", status: "accepted" });
+		let launches = 0; const delivered: any[] = [];
+		const router = new CoordinatorRouter(manifest, value.registry, {} as ManagedMatrixClient,
+			{ sendToConversation: (envelope: unknown) => { delivered.push(envelope); return true; } } as ManagedSessionIpcServer, async () => {
+				launches++;
+				const attachmentNonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
+				await value.registry.setAttachmentNonce(conversationId, attachmentNonce);
+				await value.registry.attach({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "reset-attach", conversationId, role: "coordinator_adapter",
+					type: "attachment.attach", payload: { sessionId: manifest.piSessionId, attachmentNonce, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId } }, "reset-connection");
+			});
+		await router.reconcileWake();
+		for (let i = 0; i < 100 && value.registry.conversationState(conversationId) !== "active"; i++) await new Promise(resolve => setTimeout(resolve, 10));
+		assert.equal(launches, 1);
+		await router.attachmentReady(conversationId);
+		assert.ok(delivered.some(envelope => envelope.type === "control.deliver" && envelope.payload.controlId === controlId));
+		assert.equal(delivered.filter(envelope => envelope.type === "input.deliver").length, 0);
+		assert.ok(value.registry.pendingInputs(conversationId).every(input => input.status === "accepted"));
+		assert.deepEqual(value.registry.pendingControls(conversationId)[0]?.cancelDeliveryIds, []);
+		await router.stop();
+	}
 });
 
 test("unprefixed authorized coordinator text is durable before wake and delivered on attachment", async () => {

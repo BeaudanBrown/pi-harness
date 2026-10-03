@@ -526,11 +526,17 @@ export class CoordinatorRouter {
 
 	private async ensureWake(manifest: ConversationManifest): Promise<void> {
 		if (this.registry.isRefreshing(manifest.conversationId)) return;
-		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
+		// A queued confirmed reset needs an adapter to create its durable new
+		// generation. Wake for that control, but keep ordinary dispatch gated.
+		const reset = this.registry.pendingControls(manifest.conversationId)
+			.find((control) => control.name === "new" && control.argument === "--confirm");
+		if (this.registry.hasGenerationTransition(manifest.conversationId) ||
+			(this.registry.hasGenerationBoundary(manifest.conversationId) && !reset)) return;
 		if (this.registry.conversationState(manifest.conversationId) === "active") return;
 		const pending = this.registry.pendingInputs(manifest.conversationId)
 			.find((input) => input.status === "accepted" || input.status === "delivered" || input.status === "persisted");
-		if (!pending) return;
+		if (!pending && !reset) return;
+		const wakeSourceId = reset?.controlId ?? pending!.deliveryId;
 		if (!this.launching.has(manifest.conversationId)) {
 			const launch = (async () => {
 				await this.registry.beginLaunch(manifest.conversationId);
@@ -550,7 +556,7 @@ export class CoordinatorRouter {
 					if (queuedAbort) {
 						await this.registry.cancelPendingInputs(manifest.conversationId);
 						await this.projectNotice(queuedAbort.matrixEventId, manifest, "No active run to abort; managed conversation remains dormant.").catch(() => undefined);
-					} else await this.notifyLaunchFailure(pending.deliveryId, manifest).catch(() => undefined);
+					} else await this.notifyLaunchFailure(wakeSourceId, manifest).catch(() => undefined);
 				}
 			})().finally(() => { this.launching.delete(manifest.conversationId); });
 			this.launching.set(manifest.conversationId, launch);

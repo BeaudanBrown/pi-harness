@@ -271,6 +271,13 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		epic: Type.Integer({ minimum: 1 }), issue: Type.Optional(Type.Integer({ minimum: 1 })), body: boundedString(1_600), timestamp,
 	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.status", {}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "self.recovery.preview", {}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "self.recovery.retire", {
+		deliveryId: DeliveryIdSchema, previewKey: Type.String({ pattern: "^[a-f0-9]{64}$" }), confirmed: Type.Literal(true),
+	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "self.recovery.status", {
+		deliveryId: DeliveryIdSchema, previewKey: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.delete", { confirmed: Type.Literal(true) }),
 	clientEnvelope(Type.Literal("coordinator_adapter"), "lifecycle.request", {
 		request: lifecycleArguments,
@@ -343,6 +350,11 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			status: Type.Literal("ok"),
 			conversationState: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 		}),
+		strictObject({ operation: Type.Literal("self.recovery.retire"), status: Type.Literal("ok"), deliveryId: DeliveryIdSchema }),
+		strictObject({ operation: Type.Literal("self.recovery.status"), status: Type.Literal("ok"), deliveryId: DeliveryIdSchema, retired: Type.Boolean() }),
+		strictObject({ operation: Type.Literal("self.recovery.preview"), status: Type.Literal("ok"),
+			deliveryId: DeliveryIdSchema, newerInputCount: Type.Integer({ minimum: 0, maximum: MAX_PENDING_INPUTS }),
+			previewKey: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
 		strictObject({ operation: Type.Literal("self.delete"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("self.promote"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("control.result"), status: Type.Literal("ok") }),
@@ -490,6 +502,7 @@ const pendingInput = strictObject({
 	body: Type.Optional(boundedString(MAX_INPUT_TEXT_LENGTH)),
 	senderUserId: Type.Optional(MatrixUserIdSchema),
 	piEntryId: Type.Optional(TranscriptEntryIdSchema),
+	recoveryKey: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	status: Type.Union([
 		Type.Literal("accepted"),
 		Type.Literal("delivered"),
@@ -680,7 +693,7 @@ export interface HostRuntimeState {
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string; runtimeId?: string };
 		matrixCursor: { status: "bootstrap" } | { status: "established"; since: string };
-		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string; piEntryId?: string; status: string;
+		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string; piEntryId?: string; recoveryKey?: string; status: string;
 			media?: { blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp"; byteLength: number; width: number; height: number; chunkCount: number } }>;
 		pendingControls: Array<{ controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string; cancelDeliveryIds?: string[] }>;
 		completedControlIds: string[];
@@ -987,6 +1000,9 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			deliveries.add(input.deliveryId);
 			matrixEvents.add(input.matrixEventId);
 			assertInputBody(input.kind, input.body);
+			if (input.recoveryKey && (input.piEntryId || !["delivered", "cancelled"].includes(input.status))) {
+				throw new ManagedSessionContractError("invalid_state", `invalid retirement reservation in ${conversation.conversationId}`);
+			}
 			if (input.media) {
 				if (input.kind !== "prompt" || Math.ceil(input.media.byteLength / (32 * 1024)) !== input.media.chunkCount) {
 					throw new ManagedSessionContractError("invalid_state", `invalid pending media in ${conversation.conversationId}`);

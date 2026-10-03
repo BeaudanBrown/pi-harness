@@ -299,6 +299,23 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					await registry.requestPromotion(attachment.conversationId);
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "self.promote", status: "ok" });
 				}
+				if (envelope.type === "self.recovery.retire" || envelope.type === "self.recovery.status") {
+					if (attachment.role !== "ordinary_adapter") throw new RelayRegistryError("permission_denied", "Recovery requires an ordinary adapter");
+					const deliveryId = String(envelope.payload.deliveryId); const previewKey = String(envelope.payload.previewKey);
+					if (envelope.type === "self.recovery.status") return response(attachment.conversationId, envelope.messageId, "self.result", {
+						operation: "self.recovery.status", status: "ok", deliveryId, retired: registry.retirementStatus(attachment.conversationId, deliveryId, previewKey),
+					});
+					await registry.retireDelivery(attachment.conversationId, deliveryId, previewKey);
+					// Wait for the adapter's subsequent ordinary cancellation receipt to
+					// release successors; an uncertain result reconciles read-only first.
+					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "self.recovery.retire", status: "ok", deliveryId });
+				}
+				if (envelope.type === "self.recovery.preview") {
+					if (attachment.role !== "ordinary_adapter") throw new RelayRegistryError("permission_denied", "Recovery requires an ordinary adapter");
+					return response(attachment.conversationId, envelope.messageId, "self.result", {
+						operation: "self.recovery.preview", status: "ok", ...registry.recoveryPreview(attachment.conversationId),
+					});
+				}
 				if (envelope.type === "self.status") {
 					return response(attachment.conversationId, envelope.messageId, "self.result", {
 						operation: "self.status", status: "ok", conversationState: registry.conversationState(attachment.conversationId),

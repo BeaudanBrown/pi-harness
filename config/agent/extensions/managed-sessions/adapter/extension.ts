@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { readFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -232,8 +233,24 @@ function bootstrapBinding(pi: ExtensionAPI, ctx: ExtensionContext, role: Adapter
 	return binding;
 }
 
+// Pi emits message_end before appendMessage, and a fresh SessionManager may
+// buffer entries until its first assistant message. Branch membership alone is
+// therefore not a persistence receipt.
+export function findPersistedUserEntry(ctx: ExtensionContext, deliveryId: string): string | undefined {
+	const key = findDeliveredUserEntry(ctx.sessionManager.getBranch(), deliveryId);
+	const file = ctx.sessionManager.getSessionFile();
+	if (!key || !file) return undefined;
+	try {
+		const entries: unknown[] = readFileSync(file, "utf8").trimEnd().split("\n").map((line) => JSON.parse(line));
+		const header = entries[0] as { type?: string; id?: string } | undefined;
+		if (header?.type !== "session" || header.id !== ctx.sessionManager.getSessionId()) return undefined;
+		return findDeliveredUserEntry(entries, deliveryId) === key ? key : undefined;
+	} catch { return undefined; } // Missing/incomplete writes never authorize receipt.
+}
+
 export function createManagedSessionAdapterExtension(role: AdapterRole, environment: NodeJS.ProcessEnv = process.env,
-	options: { projectionRetryDelayMs?: (attempt: number) => number; maxClosingActivities?: number } = {}) {
+	options: { projectionRetryDelayMs?: (attempt: number) => number; maxClosingActivities?: number;
+		findPersistedUserEntry?: typeof findPersistedUserEntry } = {}) {
 	const maxClosingActivities = options.maxClosingActivities ?? MAX_CLOSING_ACTIVITIES;
 	if (!Number.isSafeInteger(maxClosingActivities) || maxClosingActivities < 1 || maxClosingActivities > MAX_CLOSING_ACTIVITIES) {
 		throw new ManagedAdapterError("Closing activity limit must be a positive bounded integer");
@@ -268,11 +285,66 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let aloopProjectionWork: Promise<void> = Promise.resolve();
 		const activeDeliveries = new Map<string, string>();
 		const pendingUserPersistence: DeliveryMarker[] = [];
+		let persistenceTimer: NodeJS.Timeout | undefined;
+		const persistedUserEntry = options.findPersistedUserEntry ?? findPersistedUserEntry;
+		function captureUserPersistence(ctx: ExtensionContext): void {
+			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
+				const marker = pendingUserPersistence[index]!;
+				const key = persistedUserEntry(ctx, marker.deliveryId);
+				if (!key) continue;
+				pendingUserPersistence.splice(index, 1); persistExpanded(ctx, marker, key);
+			}
+		}
+		function scheduleUserPersistence(ctx: ExtensionContext): void {
+			if (persistenceTimer || stopped || !binding) return;
+			const epoch = bindingEpoch;
+			persistenceTimer = setTimeout(() => {
+				persistenceTimer = undefined;
+				if (stopped || epoch !== bindingEpoch || binding?.sessionId !== ctx.sessionManager.getSessionId()) return;
+				captureUserPersistence(ctx);
+				if (binding && client?.connected) queueProjection(ctx);
+				if (pendingUserPersistence.length) scheduleUserPersistence(ctx);
+			}, 100);
+			persistenceTimer.unref();
+		}
 		const inFlightDeliveries = new Set<string>();
 		const persistedRecoveryPending = new Set<string>();
 		const expandedRecoveryPending = new Set<string>();
+		const retirementIntents = new Map<string, string>();
+		const retirementEntryType = "managed-session.input-retirement";
 		let activity: BusyActivity | undefined;
 		const closingActivities = new Set<ClosingActivity>();
+		let retirementTimer: NodeJS.Timeout | undefined;
+		function recoveryIdle(ctx: ExtensionContext): boolean {
+			return ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !closingActivities.size &&
+				!activeDeliveries.size && !pendingUserPersistence.length && !inFlightDeliveries.size;
+		}
+		function deferRetirement(ctx: ExtensionContext): void {
+			if (retirementTimer || stopped || !binding) return;
+			const epoch = bindingEpoch;
+			retirementTimer = setTimeout(() => {
+				retirementTimer = undefined;
+				if (stopped || epoch !== bindingEpoch) return;
+				if (!recoveryIdle(ctx) || !client?.connected) { deferRetirement(ctx); return; }
+				void reconcileRetirements(ctx, client).catch(() => deferRetirement(ctx));
+			}, 250);
+			retirementTimer.unref();
+		}
+		async function reconcileRetirements(ctx: ExtensionContext, target: BoundAdapterClient): Promise<void> {
+			const recoveryBinding = binding; const epoch = bindingEpoch;
+			for (const [deliveryId, previewKey] of retirementIntents) {
+				const marker = deliveries.get(deliveryId);
+				if (!marker || !["expanded", "reinjecting"].includes(marker.status)) continue;
+				// Read-only query: an uncommitted intent never reapplies stale approval.
+				const reserved = await target.retirementStatus(deliveryId, previewKey);
+				if (stopped || epoch !== bindingEpoch || client !== target || binding !== recoveryBinding) return;
+				if (!reserved) continue;
+				if (!recoveryIdle(ctx)) { deferRetirement(ctx); continue; }
+				const cancelled: DeliveryMarker = { ...marker, status: "cancelled" };
+				recordDelivery(ctx, cancelled); expandedRecoveryPending.delete(deliveryId);
+				await target.acknowledgeInput(deliveryId, "cancelled");
+			}
+		}
 		let selectedModel: string | undefined;
 		let selectedThinking: string | undefined;
 		const controlResults = new Map<string, ControlResult>();
@@ -507,7 +579,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		const executeRemoteCheckpoint = async (toolCallId: string, params: unknown, ctx: ExtensionContext) => {
 			if (!binding || !client?.connected) throw new ManagedAdapterError("remote_checkpoint requires an active managed Matrix conversation");
 			for (const pending of [...pendingUserPersistence]) {
-				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), pending.deliveryId);
+				const piEntryKey = persistedUserEntry(ctx, pending.deliveryId);
 				if (piEntryKey) {
 					pendingUserPersistence.splice(pendingUserPersistence.indexOf(pending), 1);
 					persistExpanded(ctx, pending, piEntryKey);
@@ -1114,6 +1186,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			try {
 				if (activity) sendActivityUpdate(activity, true);
 				await finishFinalizations([...closingActivities]);
+				await reconcileRetirements(ctx, next);
 				replayAcknowledgements();
 				for (const marker of checkpoints.values()) {
 					if (marker.status === "abandoned") continue;
@@ -1191,7 +1264,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					(event.reason === "startup" ? bootstrapBinding(pi, ctx, role, config) : undefined);
 			}
 			deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
-			controlResults.clear(); controlExecutions.clear(); recoveredControlExecutions.clear();
+			controlResults.clear(); controlExecutions.clear(); recoveredControlExecutions.clear(); retirementIntents.clear();
 			for (const entry of ctx.sessionManager.getBranch()) {
 				if (entry.type !== "custom") continue;
 				if (entry.customType === CONTROL_RESULT_ENTRY_TYPE) {
@@ -1202,6 +1275,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 						throw new ManagedAdapterError("Conflicting durable control result state");
 					}
 					controlResults.set(result.controlId, result);
+				}
+				if (entry.customType === retirementEntryType) {
+					const data = entry.data as Record<string, unknown>;
+					if (!data || data.version !== MANAGED_SESSION_STATE_VERSION || typeof data.deliveryId !== "string" ||
+						!/^delivery_[a-f0-9]{32}$/.test(data.deliveryId) || typeof data.previewKey !== "string" || !/^[a-f0-9]{64}$/.test(data.previewKey) ||
+						Object.keys(data).some(key => !["version", "deliveryId", "previewKey"].includes(key))) throw new ManagedAdapterError("Malformed durable retirement intent");
+					retirementIntents.set(data.deliveryId, data.previewKey);
 				}
 				if (entry.customType === CONTROL_EXECUTION_ENTRY_TYPE) {
 					const execution = parseControlExecution(entry.data);
@@ -1284,30 +1364,17 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("session_compact", () => { if (activity) { activity.compactions += 1; sendActivityUpdate(activity, true); } });
 		pi.on("session_compact_failed", (event) => { if (activity) { if (!event.aborted) activity.requestedOutcome = "failed"; sendActivityUpdate(activity, true); } });
 
-		// Record correlation as soon as the user entry exists, not only after a
-		// potentially long agent run. Explicit receipts remain restart authority.
 		pi.on("message_end", (event, ctx) => {
 			if (event.message.role !== "user") return;
-			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
-				const marker = pendingUserPersistence[index]!;
-				const key = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
-				if (!key) continue;
-				pendingUserPersistence.splice(index, 1); persistExpanded(ctx, marker, key);
-			}
-			// Project a durable local prompt without waiting for the model to finish.
-			// The shared planner excludes Matrix-origin entries and deduplicates retries.
-			if (binding && client?.connected) queueProjection(ctx);
+			// Do not acknowledge inside this pre-append event. Verify on a later
+			// tick, including SDK buffering, without waiting for a long model run.
+			scheduleUserPersistence(ctx);
 		});
 
 		pi.on("agent_settled", async (_event, ctx) => {
 			const finalizations = captureFinalizations(ctx);
-			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
-				const marker = pendingUserPersistence[index]!;
-				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
-				if (!piEntryKey) continue;
-				pendingUserPersistence.splice(index, 1);
-				persistExpanded(ctx, marker, piEntryKey);
-			}
+			captureUserPersistence(ctx);
+			scheduleUserPersistence(ctx);
 			const offeredCheckpointOrigins = new Set([...checkpoints.values()]
 				.filter((marker) => marker.status === "offered").map((marker) => marker.originDeliveryId));
 			for (const [deliveryId, piEntryId] of activeDeliveries) {
@@ -1337,6 +1404,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			clearAloopLifecycle(ctx.sessionManager.getSessionId());
 			await finishFinalizations(captureFinalizations(ctx, activity?.requestedOutcome ?? "interrupted")).catch(() => undefined);
 			if (reconnectTimer) clearTimeout(reconnectTimer);
+			if (persistenceTimer) clearTimeout(persistenceTimer);
+			persistenceTimer = undefined;
+			if (retirementTimer) clearTimeout(retirementTimer);
+			retirementTimer = undefined;
 			if (projectionRetryTimer) clearTimeout(projectionRetryTimer);
 			reconnectTimer = undefined;
 			projectionRetryTimer = undefined;
@@ -1352,6 +1423,52 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			description: role === "ordinary_adapter" ? "Bind, inspect, or delete this managed relay bridge" : "Inspect this coordinator relay bridge",
 			handler: async (args, ctx) => {
 				const input = args.trim();
+				if (input === "recover" || input.startsWith("recover ")) {
+					const match = /^recover(?: --confirm ([a-f0-9]{64}))?$/.exec(input);
+					if (!match) return notify(ctx, "Usage: /remote recover | recover --confirm <preview-key>", "error");
+					const target = client; const recoveryBinding = binding; const epoch = bindingEpoch;
+					const idle = () => recoveryIdle(ctx);
+					if (role !== "ordinary_adapter" || !target?.connected || !recoveryBinding || !idle()) {
+						return notify(ctx, "Recovery requires this attached ordinary Pi session to be idle with no pending work", "error");
+					}
+					let retired = false;
+					try {
+						const preview = (await target.recoveryPreview()).payload;
+						if (binding !== recoveryBinding || client !== target || epoch !== bindingEpoch || !target.connected || !idle()) {
+							throw new ManagedAdapterError("Recovery attachment or idle state changed; preview again");
+						}
+						const deliveryId = String(preview.deliveryId); const marker = deliveries.get(deliveryId);
+						const durableMarker = restoreDeliveries(ctx.sessionManager.getBranch()).get(deliveryId);
+						if (ctx.sessionManager.getSessionId() !== recoveryBinding.sessionId || JSON.stringify(durableMarker) !== JSON.stringify(marker) ||
+							!marker || !expandedRecoveryPending.has(deliveryId) || !["expanded", "reinjecting"].includes(marker.status)) {
+							throw new ManagedAdapterError("Blocking delivery is not a historical ambiguous hold; it was not retired");
+						}
+						const key = createHash("sha256").update("pi-managed-sessions:local-recovery:v1\0")
+							.update(JSON.stringify([preview.previewKey, recoveryBinding, marker])).digest("hex");
+						if (!match[1]) return notify(ctx, `Retire only ${deliveryId} without replay. Preserve Pi history and ${preview.newerInputCount} newer inputs. Historical task completion is unknown. Confirm with /remote recover --confirm ${key}`, "warning");
+						if (match[1] !== key) throw new ManagedAdapterError("Recovery preview changed; preview again");
+						// A non-terminal local intent precedes relay-atomic reservation.
+						// Failed revalidation must not create an unrestricted cancellation.
+						const previewKey = String(preview.previewKey);
+						appendMarker(pi, ctx, retirementEntryType, { version: MANAGED_SESSION_STATE_VERSION, deliveryId, previewKey });
+						retirementIntents.set(deliveryId, previewKey); retired = true;
+						await target.retireDelivery(deliveryId, previewKey);
+						if (stopped || binding !== recoveryBinding || client !== target || epoch !== bindingEpoch) return;
+						if (!idle()) {
+							deferRetirement(ctx);
+							return notify(ctx, "Retirement reserved; Pi became busy. Local cancellation and receipt are deferred until verified idle.", "warning");
+						}
+						const cancelled: DeliveryMarker = { ...marker, status: "cancelled" };
+						recordDelivery(ctx, cancelled); expandedRecoveryPending.delete(deliveryId);
+						await target.acknowledgeInput(deliveryId, "cancelled");
+						notify(ctx, `Retired ${deliveryId}; newer inputs remain queued. No historical task was replayed.`);
+					} catch (error) {
+						if (retired) deferRetirement(ctx);
+						notify(ctx, retired ? "Retirement intent recorded; outcome uncertain or rejected. Read-only reconciliation confirms local cancellation only if reserved and idle. No task is replayed."
+							: error instanceof Error ? error.message : "Recovery failed; nothing was retired", "error");
+					}
+					return;
+				}
 				if (input === "status") {
 					if (!binding) return notify(ctx, "This Pi session is not bound to a managed conversation");
 					if (!client?.connected) return notify(ctx, `Managed conversation ${binding.concept} is offline`, "warning");
@@ -1414,7 +1531,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed binding failed", "error"); }
 					return;
 				}
-				notify(ctx, role === "ordinary_adapter" ? "Usage: /remote on <concept> | status | delete --confirm" : "Usage: /remote status", "warning");
+				notify(ctx, role === "ordinary_adapter" ? "Usage: /remote on <concept> | status | recover | delete --confirm" : "Usage: /remote status", "warning");
 			},
 		});
 	};

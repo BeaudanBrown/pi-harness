@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
-import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveMatrixTransactionId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { MANAGED_SESSION_STATE_VERSION, deriveConversationId, deriveDeliveryId, deriveMatrixTransactionId, deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { startManagedSessionRelay } from "../config/agent/extensions/managed-sessions/relay/main.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 import type { SessionBinding } from "../config/agent/extensions/managed-sessions/adapter/state.js";
@@ -86,6 +86,37 @@ test("production relay attaches, reports status, and deletes only bridge state",
 	assert.equal((await client.offerTranscript(transcript)).payload.status, "projected");
 	assert.equal(running.registry.snapshot().conversations[0]?.projection[0]?.status, "projected");
 	assert.equal((await client.selfStatus()).payload.conversationState, "active");
+	await assert.rejects(() => client.recoveryPreview(), /blocking delivered/);
+	const staleId = deriveDeliveryId(conversationId, "$stale"); const newerId = deriveDeliveryId(conversationId, "$newer");
+	await running.registry.recordAcceptedInput(conversationId, { deliveryId: staleId, matrixEventId: "$stale", kind: "prompt", body: "old ambiguous", status: "accepted" });
+	await running.registry.markInputDelivered(conversationId, staleId);
+	const preview = (await client.recoveryPreview()).payload;
+	assert.equal(preview.deliveryId, staleId); assert.equal(preview.newerInputCount, 0);
+	await running.registry.recordAcceptedInput(conversationId, { deliveryId: newerId, matrixEventId: "$newer", kind: "prompt", body: "retain", status: "accepted" });
+	const changed = (await client.recoveryPreview()).payload;
+	assert.notEqual(changed.previewKey, preview.previewKey); assert.equal(changed.newerInputCount, 1);
+	await assert.rejects(() => client.retireDelivery(staleId, String(preview.previewKey)), /preview changed/);
+	const raceControl = deriveControlId(conversationId, "$recovery-control-race");
+	await running.registry.recordPendingControl(conversationId, { controlId: raceControl, matrixEventId: "$recovery-control-race", name: "model" });
+	await assert.rejects(() => client.retireDelivery(staleId, String(changed.previewKey)), /pending controls/);
+	await running.registry.acknowledgeControlResult(conversationId, raceControl);
+	const approved = (await client.recoveryPreview()).payload;
+	await client.retireDelivery(staleId, String(approved.previewKey));
+	await client.retireDelivery(staleId, String(approved.previewKey)); // Reservation reply loss is idempotent.
+	assert.equal(await client.retirementStatus(staleId, String(approved.previewKey)), true);
+	assert.equal(running.registry.pendingInputs(conversationId).find(input => input.deliveryId === staleId)?.status, "delivered", "reservation holds successors until local retirement receipt");
+	await assert.rejects(() => client.acknowledgeInput(staleId, "persisted", deriveTranscriptEntryId(sessionId, "too-late")), /reserved retirement/);
+	await client.acknowledgeInput(staleId, "cancelled");
+	await client.acknowledgeInput(staleId, "cancelled"); // Lost reply is safe to retry.
+	assert.equal(running.registry.pendingInputs(conversationId).find(input => input.deliveryId === staleId)?.status, "cancelled");
+	assert.equal(running.registry.pendingInputs(conversationId).find(input => input.deliveryId === newerId)?.status, "accepted");
+	await running.registry.markInputDelivered(conversationId, newerId);
+	const beforePersistence = (await client.recoveryPreview()).payload;
+	const persistedId = deriveTranscriptEntryId(sessionId, "newer-user");
+	await client.acknowledgeInput(newerId, "persisted", persistedId);
+	await assert.rejects(() => client.retireDelivery(newerId, String(beforePersistence.previewKey)), /blocking delivered|unfinished work/);
+	assert.equal(running.registry.pendingInputs(conversationId).find(input => input.deliveryId === newerId)?.status, "persisted");
+	await client.acknowledgeInput(newerId, "completed", persistedId);
 	await client.close("shutdown");
 	const controlId = deriveControlId(conversationId, "$control-crash-window");
 	await running.registry.recordPendingControl(conversationId, {

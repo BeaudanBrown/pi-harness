@@ -203,6 +203,24 @@ manual tmux ownership migration, not automatic termination of the old server.
 See [input/runtime operations](../../managed-input-runtime-updates.md) for
 acceptance and crash-boundary evidence.
 
+## Selective input recovery amendment (#124)
+
+Persistence receipts require correlation in both the active Pi branch and its
+session file after the pre-append user event; buffered entries are not receipts.
+Dormant confirmed reset controls may wake an adapter, but ordinary dispatch stays
+blocked until durable generation activation. Ordinary adapters have a self-scoped,
+recovery preview/status operations and snapshot-key-confirmed atomic retirement
+reservation. A local idle-only `/remote recover` command uses explicit operator
+confirmation to retire exactly one restored ambiguous delivery without replay.
+A non-terminal local intent precedes relay reservation; only its durable authority
+permits local cancellation and the existing cancelled receipt. The reserved head
+holds successors until that receipt. Reconnect queries uncertain intent status
+read-only, never applying a stale approval; completed local cancellation retries
+only its receipt. History
+and newer queued inputs are preserved; historical completion is not inferred.
+Deployment and live recovery remain separately approved operations. See
+[selective recovery operations](../../managed-input-recovery.md).
+
 ## Consequences
 
 - Relay, ordinary adapter, coordinator adapter, and tests share one small interface while authority remains relay-enforced.

@@ -43,6 +43,9 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 	switch (request.type) {
 		case "attachment.attach": return { type: "attachment.accepted", fields: [] };
 		case "refresh.result": return { type: "self.result", fields: [["operation", "refresh.result"]] };
+		case "self.recovery.preview": return { type: "self.result", fields: [["operation", "self.recovery.preview"]] };
+		case "self.recovery.retire": return { type: "self.result", fields: [["operation", "self.recovery.retire"], ["deliveryId", String(payload.deliveryId)]] };
+		case "self.recovery.status": return { type: "self.result", fields: [["operation", "self.recovery.status"], ["deliveryId", String(payload.deliveryId)]] };
 		case "input.acknowledge": return { type: "input.result", fields: [["deliveryId", String(payload.deliveryId)], ["status", String(payload.status)]] };
 		case "activity.update": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "updated"]] };
 		case "activity.finalize": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "finalized"]] };
@@ -283,6 +286,23 @@ export class BoundAdapterClient {
 		if (result.type !== "aloop.acknowledge" || result.payload.lifecycleId !== payload.lifecycleId || result.payload.status !== "projected") {
 			throw new ManagedAdapterError("Relay did not confirm aloop lifecycle projection", "invalid_response");
 		}
+	}
+
+	async retireDelivery(deliveryId: string, previewKey: string): Promise<void> {
+		await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("recovery-retire"),
+			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "self.recovery.retire",
+			payload: { deliveryId, previewKey, confirmed: true } });
+	}
+
+	async retirementStatus(deliveryId: string, previewKey: string): Promise<boolean> {
+		const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("recovery-status"),
+			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "self.recovery.status", payload: { deliveryId, previewKey } });
+		return result.payload.retired === true;
+	}
+
+	async recoveryPreview(): Promise<ManagedSessionEnvelope> {
+		return this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("recovery-preview"),
+			conversationId: this.options.binding.conversationId, role: "ordinary_adapter", type: "self.recovery.preview", payload: {} });
 	}
 
 	async selfStatus(): Promise<ManagedSessionEnvelope> {

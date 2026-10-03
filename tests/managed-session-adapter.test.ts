@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -20,7 +21,7 @@ import { BoundAdapterClient, CoordinatorAdapterClient, MAX_NODE_TIMER_DELAY_MS, 
 import { ActivityProjector } from "../config/agent/extensions/managed-sessions/relay/activity-projector.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import type { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
-import { createManagedSessionAdapterExtension, projectedCheckpointHistoryText } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
+import { createManagedSessionAdapterExtension as createAdapter, findPersistedUserEntry, projectedCheckpointHistoryText } from "../config/agent/extensions/managed-sessions/adapter/extension.js";
 import {
 	BINDING_BOUNDARY_ENTRY_TYPE,
 	CHECKPOINT_ENTRY_TYPE,
@@ -177,6 +178,14 @@ function custom(id: string, customType: string, data: unknown) {
 	return { type: "custom", id, parentId: null, timestamp: "2026-08-31T00:00:00.000Z", customType, data };
 }
 
+// Mock session managers model a durable append explicitly. Real SDK fixtures
+// continue to use the disk-verifying production boundary.
+function createManagedSessionAdapterExtension(role: Parameters<typeof createAdapter>[0], environment: NodeJS.ProcessEnv,
+	options: Parameters<typeof createAdapter>[2] = {}) {
+	return createAdapter(role, environment, { findPersistedUserEntry: (ctx, id) =>
+		typeof ctx.sessionManager.getEntries === "function" ? findPersistedUserEntry(ctx, id) : findDeliveredUserEntry(ctx.sessionManager.getBranch(), id), ...options });
+}
+
 class FakeRelay {
 	readonly frames: ManagedSessionEnvelope[] = [];
 	readonly interruptedActivities = new Set<string>();
@@ -240,6 +249,12 @@ class FakeRelay {
 		});
 	}
 
+	dropCancelledReplyOnce = false;
+	dropRetireReplyOnce = false;
+	recoveryPreviewDelayMs = 0;
+	beforeRetire?: () => void;
+	retiredKeys = new Map<string, string>();
+	recoveryPreview = { deliveryId: deriveDeliveryId(conversationId, "$held"), newerInputCount: 2, previewKey: "a".repeat(64) };
 	private respond(socket: Socket, envelope: ManagedSessionEnvelope): void {
 		this.counter += 1;
 		const base = {
@@ -256,6 +271,9 @@ class FakeRelay {
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active", ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (envelope.type === "input.acknowledge") {
+			if (this.dropCancelledReplyOnce && envelope.payload.status === "cancelled") {
+				this.dropCancelledReplyOnce = false; socket.destroy(); return;
+			}
 			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
 				socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "invalid_state", message: "Managed delivery acknowledgement regressed", retryable: false } }));
 				return;
@@ -302,6 +320,20 @@ class FakeRelay {
 			}, this.transcriptDelayMs);
 		} else if (envelope.type === "self.promote") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.promote", status: "ok" } }));
+		} else if (envelope.type === "self.recovery.retire") {
+			this.beforeRetire?.();
+			if (envelope.payload.previewKey !== this.recoveryPreview.previewKey) {
+				socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "invalid_state", message: "Recovery preview changed", retryable: false } })); return;
+			}
+			this.retiredKeys.set(String(envelope.payload.deliveryId), String(envelope.payload.previewKey));
+			if (this.dropRetireReplyOnce) { this.dropRetireReplyOnce = false; socket.destroy(); return; }
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.recovery.retire", status: "ok", deliveryId: envelope.payload.deliveryId } }));
+		} else if (envelope.type === "self.recovery.status") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.recovery.status", status: "ok", deliveryId: envelope.payload.deliveryId,
+				retired: this.retiredKeys.get(String(envelope.payload.deliveryId)) === envelope.payload.previewKey } }));
+		} else if (envelope.type === "self.recovery.preview") {
+			const response = encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.recovery.preview", status: "ok", ...this.recoveryPreview } });
+			setTimeout(() => { if (!socket.destroyed) socket.write(response); }, this.recoveryPreviewDelayMs);
 		} else if (envelope.type === "self.status") {
 			if (this.selfStatusDelayMs >= 0) setTimeout(() => {
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }));
@@ -315,6 +347,106 @@ class FakeRelay {
 		}
 	}
 }
+
+test("receipt waits for post-event durable append and does not mistake buffered branch entries for disk persistence", async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const root = await mkdtemp(join(tmpdir(), "pi-receipt-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const file = join(root, "session.jsonl");
+	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding)];
+	let leaf = "binding"; let sequence = 0; const handlers = new Map<string, (...args: any[]) => any>();
+	const save = () => writeFile(file, [JSON.stringify({ type: "session", id: sessionId }), ...branch.map(entry => JSON.stringify(entry))].join("\n") + "\n");
+	const ctx: any = { hasUI: false, isIdle: () => false, hasPendingMessages: () => false, getContextUsage: () => undefined,
+		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => file, getBranch: () => branch, getLeafId: () => leaf } };
+	const api: any = { on: (name: string, handler: any) => handlers.set(name, handler), registerCommand: () => undefined, registerTool: () => undefined, getCommands: () => [],
+		appendEntry: (type: string, data: unknown) => { const id = `marker-${++sequence}`; branch.push({ ...custom(id, type, data), parentId: leaf }); leaf = id; },
+		sendUserMessage: (text: string, options: any) => {
+			options.onPromptExpanded(text); const message = { role: "user", content: text };
+			handlers.get("message_end")!({ message }, ctx); // Actual Pi ordering.
+			branch.push({ type: "message", id: "user", parentId: leaf, message }); leaf = "user";
+		}, sendMessage: () => undefined };
+	createAdapter("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	await save(); await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const id = deriveDeliveryId(conversationId, "$post-append");
+	relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "post-append", conversationId, role: "relay", type: "input.deliver",
+		payload: { deliveryId: id, matrixEventId: "$post-append", kind: "prompt", body: "held until durable" } });
+	await activityWait(() => branch.some(entry => entry.id === "user"));
+	await new Promise(resolve => setTimeout(resolve, 250));
+	assert.equal(relay.frames.filter(frame => frame.type === "input.acknowledge" && frame.payload.status === "persisted").length, 0);
+	assert.equal(findPersistedUserEntry(ctx, id), undefined);
+	await save();
+	await activityWait(() => relay.frames.some(frame => frame.type === "input.acknowledge" && frame.payload.status === "persisted"));
+	assert.equal(restoreDeliveries(branch).get(id)?.piEntryId, deriveTranscriptEntryId(sessionId, "user"));
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+for (const lost of ["reservation", "receipt", "busy"]) test(`selective recovery rejects busy/stale confirmations and reconciles lost ${lost} replies without replay`, async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close());
+	const root = await mkdtemp(join(tmpdir(), "pi-retirement-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const file = join(root, "session.jsonl");
+	const id = relay.recoveryPreview.deliveryId;
+	const branch: any[] = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }), custom("binding", BINDING_ENTRY_TYPE, binding),
+		custom("held", DELIVERY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION, deliveryId: id, matrixEventId: "$held", kind: "prompt", status: "expanded", expandedText: "ambiguous old task" })];
+	const save = () => writeFileSync(file, [JSON.stringify({ type: "session", id: sessionId }), ...branch.map(entry => JSON.stringify(entry))].join("\n") + "\n");
+	save();
+	let leaf = "held"; let sequence = 0; let idle = true; let injections = 0;
+	const notices: string[] = []; const handlers = new Map<string, (...args: any[]) => any>(); const commands = new Map<string, (...args: any[]) => any>();
+	const api: any = { on: (name: string, handler: any) => handlers.set(name, handler), registerCommand: (name: string, options: any) => commands.set(name, options.handler),
+		registerTool: () => undefined, getCommands: () => [], appendEntry: (type: string, data: unknown) => { const key = `retirement-${++sequence}`;
+			branch.push({ ...custom(key, type, data), parentId: leaf }); leaf = key; save(); }, sendUserMessage: () => { injections++; }, sendMessage: () => { injections++; } };
+	const ctx: any = { hasUI: true, ui: { notify: (text: string) => notices.push(text), setStatus: () => undefined }, isIdle: () => idle, hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => sessionId, getSessionFile: () => file, getBranch: () => branch, getLeafId: () => leaf } };
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	await commands.get("remote")!("recover", ctx);
+	const confirmation = notices.at(-1)!.match(/recover --confirm ([a-f0-9]{64})/)![1]!;
+	assert.equal(restoreDeliveries(branch).get(id)?.status, "expanded");
+	assert.match(notices.at(-1)!, /2 newer inputs/);
+	idle = false; await commands.get("remote")!(`recover --confirm ${confirmation}`, ctx);
+	assert.match(notices.at(-1)!, /idle/); idle = true;
+	relay.recoveryPreviewDelayMs = 100;
+	const count = relay.frames.filter(frame => frame.type === "self.recovery.preview").length;
+	const pending = commands.get("remote")!(`recover --confirm ${confirmation}`, ctx);
+	await activityWait(() => relay.frames.filter(frame => frame.type === "self.recovery.preview").length > count);
+	idle = false; await pending;
+	assert.match(notices.at(-1)!, /idle state changed/);
+	assert.equal(restoreDeliveries(branch).get(id)?.status, "expanded");
+	idle = true; relay.recoveryPreviewDelayMs = 0;
+	relay.recoveryPreview.previewKey = "b".repeat(64);
+	await commands.get("remote")!(`recover --confirm ${confirmation}`, ctx);
+	assert.match(notices.at(-1)!, /preview changed/);
+	assert.equal(restoreDeliveries(branch).get(id)?.status, "expanded");
+	await commands.get("remote")!("recover", ctx);
+	const fresh = notices.at(-1)!.match(/recover --confirm ([a-f0-9]{64})/)![1]!;
+	relay.beforeRetire = () => { relay.recoveryPreview.previewKey = "c".repeat(64); };
+	await commands.get("remote")!(`recover --confirm ${fresh}`, ctx);
+	assert.equal(restoreDeliveries(branch).get(id)?.status, "expanded", "relay rejection creates no terminal local cancellation");
+	assert.equal(relay.frames.filter(frame => frame.type === "input.acknowledge" && frame.payload.status === "cancelled").length, 0);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	assert.equal(restoreDeliveries(branch).get(id)?.status, "expanded", "reconnect only queries an unapplied intent; it cannot bypass revalidation");
+	relay.beforeRetire = undefined;
+	await commands.get("remote")!("recover", ctx);
+	const approved = notices.at(-1)!.match(/recover --confirm ([a-f0-9]{64})/)![1]!;
+	relay.dropCancelledReplyOnce = lost === "receipt"; relay.dropRetireReplyOnce = lost === "reservation";
+	if (lost === "busy") relay.beforeRetire = () => { idle = false; };
+	await commands.get("remote")!(`recover --confirm ${approved}`, ctx);
+	const expected = lost === "receipt" ? "cancelled" : "expanded";
+	assert.equal(restoreDeliveries(readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line))).get(id)?.status, expected);
+	assert.equal(restoreDeliveries(branch).get(id)?.status, expected);
+	assert.equal(injections, 0);
+	assert.equal(relay.frames.filter(frame => frame.type === "input.acknowledge" && frame.payload.status === "cancelled").length, lost === "receipt" ? 1 : 0);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	if (lost === "busy") {
+		assert.equal(restoreDeliveries(branch).get(id)?.status, "expanded", "busy reconnect cannot finalize reservation");
+		assert.equal(relay.frames.filter(frame => frame.type === "input.acknowledge" && frame.payload.status === "cancelled").length, 0);
+		idle = true;
+	}
+	await activityWait(() => relay.frames.filter(frame => frame.type === "input.acknowledge" && frame.payload.status === "cancelled").length >= (lost === "receipt" ? 2 : 1));
+	assert.equal(restoreDeliveries(branch).get(id)?.status, "cancelled");
+	assert.equal(injections, 0);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
 
 test("binding and delivery history restore fail closed without fork inheritance", () => {
 	const entries = [custom("a", BINDING_ENTRY_TYPE, binding)];
