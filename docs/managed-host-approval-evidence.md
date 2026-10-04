@@ -102,5 +102,43 @@ and source contracts. Artifact:
 After the bounded single-pass reference scan and account-identity freezing, the
 final 27 focused owner/hierarchy/ancestor tests passed with zero skips:
 `.pi/tmp/workers/2026-10-04T21-53-02-827Z-live-space-frozen-account-identity-251ee573ac84/`.
-LSP has no errors. This is not #108 completion, deployed Matrix/NAS acceptance,
-or completion of the model-tool frontend. Final issue verification remains due.
+LSP has no errors. These intermediate results do not constitute deployed
+Matrix/NAS acceptance or completion of the model-tool frontend.
+
+## Final acceptance and review
+
+Commit `19062da` adds public-dispatcher consent coverage across creation, launch,
+refresh, destructive bundles, reconciliation and account-operation families, plus
+restart evidence that only live unconsumed consent retains its original expiry.
+The affected packaged managed-session/source-contract gate passed:
+`.pi/tmp/workers/2026-10-04T22-37-35-712Z-approval-issue-boundary-affected-fea3ec9067f6/`.
+Production IPC, native/Matrix origin, denial, cancellation, immutable target,
+response-loss and consumed-no-replay evidence is recorded above and in the
+corresponding host-approval, host-run and owner tests.
+
+One exhaustive two-axis issue-boundary audit inspected HEAD `19062da` and its
+existing #108 foundations and integration:
+`.pi/tmp/reviews/2026-10-04T22-39-04-647Z-audit-19062da7a51e-6c3aedfb9680/`.
+
+### Standards
+
+No findings.
+
+### Spec
+
+One medium dependent finding: explicit approved bridge identities are supported
+by the presenter but cannot yet be configured in production. Tracked on #120,
+whose existing acceptance owns deployment operator/bridge configuration. The
+primary configured operator works; other identities remain denied by default.
+No current-issue remediation was requested.
+
+### Closure scope
+
+#108 covers the approval mechanism and available frozen operation owners, not
+NAS account execution/membership restoration (#112), remaining unified frontend
+registration and aliases (#113), legacy adoption (#117), deployment bridge
+configuration (#120), or live client acceptance (#121). Unavailable dependent
+operations fail closed; account-dependent cleanup retains exact pending authority.
+The mandatory cumulative epic review remains outstanding.
+
+Canonical final verification is pending.
