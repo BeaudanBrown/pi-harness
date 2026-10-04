@@ -2,7 +2,6 @@ import { join } from "node:path";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { MatrixUserIdSchema } from "../identity-contracts.js";
-import type { RetirementTarget } from "./retirement-store.js";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
 import { deriveConversationId, type ConversationManifest } from "../contracts.js";
@@ -22,11 +21,12 @@ const NodeSchema = Type.Union([
 	Type.Object({ ...common, kind: Type.Literal("conversation"), parentKey: identifier, projectKey: stable("project"), checkoutId: stable("checkout"), conversationId: stable("conv") }, { additionalProperties: false }),
 ]);
 type Node = Static<typeof NodeSchema>;
-type AncestorTarget = Extract<RetirementTarget, { kind: "ancestor" }>;
 const SpaceRetirementSchema = Type.Object({ roomId: room, provenance: ManagedProvenanceSchema,
 	operatorUserId: MatrixUserIdSchema, botUserId: MatrixUserIdSchema, complete: Type.Boolean() }, { additionalProperties: false });
 type SpaceRetirement = Static<typeof SpaceRetirementSchema>;
-function spaceIdentity(target: AncestorTarget): Omit<SpaceRetirement, "complete"> {
+export type HierarchySpaceIdentity = Omit<SpaceRetirement, "complete">;
+export interface HierarchyLink { projectKey: string; child: { roomId: string; provenance: ManagedProvenance }; parent: { roomId: string; provenance: ManagedProvenance } }
+function spaceIdentity(target: HierarchySpaceIdentity): HierarchySpaceIdentity {
 	return { roomId: target.roomId, provenance: target.provenance, operatorUserId: target.operatorUserId, botUserId: target.botUserId };
 }
 function successorKey(key: string, roomId: string): string { return `${key}.r.${createHash("sha256").update(roomId).digest("hex").slice(0, 32)}`; }
@@ -170,12 +170,36 @@ export class LiveHierarchy {
 		return { conversationId, checkoutId: conversation.checkoutId, roomId: conversation.roomId!,
 			checkoutSpace: this.node(conversation.checkoutId).roomId!, projectSpace: this.node(conversation.projectKey).roomId!, hostSpace: this.node("host").roomId! };
 	}
+	/** Exact saved identities only. Does not discover, adopt, create or rename rooms. */
+	maintenanceLinks(cleanup = false): HierarchyLink[] {
+		this.assertAvailable();
+		const identities = new Map<string, ManagedProvenance>();
+		for (const node of this.state.nodes) if (node.roomId) identities.set(node.roomId, provenance(this.hostId, node));
+		for (const retired of this.state.retiredSpaces ?? []) identities.set(retired.roomId, retired.provenance);
+		const fences = new Map((this.state.retiredSpaces ?? []).map((item) => [item.roomId, item]));
+		const references = cleanup ? this.referencedRooms(this.isRetired) : undefined;
+		const result: HierarchyLink[] = [];
+		for (const [roomId, proof] of identities) {
+			if (proof.kind === "host_space" || proof.kind === "coordinator" || !("projectKey" in proof) || !("parentRoomId" in proof)) continue;
+			const fenced = fences.get(roomId);
+			if (cleanup) {
+				if (!["project_space", "worktree_space"].includes(proof.kind) || fenced?.complete || references!.has(roomId)) continue;
+			} else {
+				if (fenced || fences.has(proof.parentRoomId) ||
+					(proof.kind === "conversation" && this.isRetired(proof.conversationId))) continue;
+			}
+			const parent = identities.get(proof.parentRoomId); if (!parent) continue;
+			result.push({ projectKey: proof.projectKey, child: { roomId, provenance: proof }, parent: { roomId: proof.parentRoomId, provenance: parent } });
+		}
+		return structuredClone(result.sort((a, b) => a.child.roomId.localeCompare(b.child.roomId)));
+	}
+
 	ancestorProvenance(roomId: string): ManagedProvenance | undefined {
 		this.assertAvailable(); const node = this.state.nodes.find((item) => item.roomId === roomId);
 		return node && (node.kind === "project_space" || node.kind === "worktree_space") ? structuredClone(provenance(this.hostId, node)) : undefined;
 	}
 	/** Call under withProjectCleanup after fresh checks, before the first account mutation. */
-	fenceSpace(target: AncestorTarget): Promise<void> {
+	fenceSpace(target: HierarchySpaceIdentity): Promise<void> {
 		return this.mutate((state) => {
 			const saved = state.retiredSpaces?.find((item) => item.roomId === target.roomId);
 			if (saved) { this.matchSpace(saved, target); return; }
@@ -185,17 +209,17 @@ export class LiveHierarchy {
 			(state.retiredSpaces ??= []).push({ ...structuredClone(spaceIdentity(target)), complete: false });
 		}, true);
 	}
-	completeSpace(target: AncestorTarget): Promise<void> {
+	completeSpace(target: HierarchySpaceIdentity): Promise<void> {
 		return this.mutate((state) => {
 			const saved = state.retiredSpaces?.find((item) => item.roomId === target.roomId);
 			if (!saved) throw Error("Space retirement was not fenced"); this.matchSpace(saved, target); saved.complete = true;
 		}, true);
 	}
-	spaceRetirement(target: AncestorTarget): "pending" | "done" | undefined {
+	spaceRetirement(target: HierarchySpaceIdentity): "pending" | "done" | undefined {
 		this.assertAvailable(); const saved = this.state.retiredSpaces?.find((item) => item.roomId === target.roomId);
 		if (!saved) return undefined; this.matchSpace(saved, target); return saved.complete ? "done" : "pending";
 	}
-	private matchSpace(saved: SpaceRetirement, target: AncestorTarget): void {
+	private matchSpace(saved: SpaceRetirement, target: HierarchySpaceIdentity): void {
 		const { complete: _complete, ...identity } = saved;
 		if (!isDeepStrictEqual(identity, spaceIdentity(target))) throw Error("Retired Space identity changed");
 	}
@@ -209,17 +233,20 @@ export class LiveHierarchy {
 	}
 	/** Includes unpublished reservations; caller supplies permanent conversation retirement authority. */
 	hasReferences(roomId: string, isRetired: (conversationId: string) => boolean): boolean {
-		this.assertAvailable();
+		return this.referencedRooms(isRetired).has(roomId);
+	}
+	private referencedRooms(isRetired: (conversationId: string) => boolean): Set<string> {
+		this.assertAvailable(); const rooms = new Set<string>();
 		const nodes = new Map(this.state.nodes.map((node) => [node.key, node]));
 		for (const node of this.state.nodes) {
 			if (node.kind !== "conversation" || isRetired(node.conversationId)) continue;
 			let current: Node | undefined = node;
 			while (current) {
-				if (current.roomId === roomId) return true;
+				if (current.roomId) rooms.add(current.roomId);
 				current = "parentKey" in current ? nodes.get(current.parentKey) : undefined;
 			}
 		}
-		return false;
+		return rooms;
 	}
 	/** Cleanup is exclusive with reservations/provisioning in this project, not with other projects.
 	 * Callers must use this signal and keep fresh checks and the next mutation inside the callback. */

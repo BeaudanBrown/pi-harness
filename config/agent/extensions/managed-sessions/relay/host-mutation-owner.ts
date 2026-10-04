@@ -4,6 +4,7 @@ import { APPROVAL_LIFETIME_MS, parseHostResponse, type HostAction, type HostRead
 import type { FrozenHostEffects, FrozenJson, HostApprovalRecord, ModelHostRequest } from "./host-approval-record.js";
 import type { HostMutationOwner } from "./host-approval-runtime.js";
 import type { HostLifecycle } from "./host-lifecycle.js";
+import type { LiveSpacePreview } from "./project-reconciliation.js";
 import type { RelayRegistry } from "./registry.js";
 import type { ManagedSessionIpcServer } from "./ipc-server.js";
 import type { ConversationRetirement, RetirementPlan } from "./conversation-retirement.js";
@@ -17,6 +18,7 @@ interface Preview {
 	source: PreviewAction; expiresAt: number; targets: PreviewResult["targets"]; activeRuns: PreviewResult["activeRuns"]; blockers: string[];
 	retirements?: RetirementPlan[]; removal?: Removal;
 	branch?: Awaited<ReturnType<HostLifecycle["branchApprovalPreview"]>>;
+	spaces?: LiveSpacePreview;
 }
 export function isManagedHostPreview(action: HostAction): action is PreviewAction { return action.operation.endsWith(".preview"); }
 const stale = () => new HostControlError("stale_preview", "Frozen targets changed or expired; obtain a new preview and consent");
@@ -74,7 +76,18 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			if (conversations.some((id) => id !== intent.targetConversationId)) preview.blockers.push("Another active conversation uses this worktree");
 			if (intent.mergeTarget && intent.mergeCommit) preview.targets.push({ kind: "branch", checkoutId: removal.checkoutId, branch: intent.branch,
 				tip: intent.head, mergeTarget: intent.mergeTarget, mergeCommit: intent.mergeCommit });
-		} else throw new HostControlError("upgrade_required", "Live Space reconciliation and account cleanup owners are unavailable");
+		} else {
+			const cleanup = source.operation === "space.cleanup.preview";
+			preview.spaces = await this.options.lifecycle.spaceApprovalPreview(cleanup);
+			const targets = new Map<string, PreviewResult["targets"][number]>();
+			for (const link of preview.spaces.links) {
+				const proof = link.child.provenance;
+				targets.set(link.child.roomId, proof.kind === "conversation" ? { kind: "conversation", conversationId: proof.conversationId } : { kind: "space", roomId: link.child.roomId });
+				if (!cleanup) targets.set(link.parent.roomId, { kind: "space", roomId: link.parent.roomId });
+			}
+			preview.targets = [...targets.values()];
+			conversations = preview.targets.flatMap((target) => target.kind === "conversation" ? [target.conversationId] : []);
+		}
 		preview.activeRuns = await this.activeRuns(conversations);
 		const previewId = `preview_${createHash("sha256").update("pi-managed-sessions:preview:live-v1\0").update(this.options.registry.hostId).update("\0").update(JSON.stringify(preview)).digest("hex").slice(0, 32)}`;
 		const result = { previewId, expiresAt: new Date(preview.expiresAt).toISOString(), targets: preview.targets, activeRuns: preview.activeRuns, blockers: preview.blockers };
@@ -97,7 +110,9 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (preview.expiresAt <= this.now() || preview.blockers.length) return false;
 		if (preview.branch && (preview.source.operation !== "worktree.branch.preview" || !isDeepStrictEqual(preview.branch, await this.options.lifecycle.branchApprovalPreview(preview.source)))) return false;
 		if (preview.retirements && !isDeepStrictEqual(preview.retirements, preview.retirements.map((plan) => this.options.retirement.prepare(plan.conversationId)))) return false;
-		if (preview.source.operation === "space.reconcile.preview" || preview.source.operation === "space.cleanup.preview") return false;
+		if (preview.source.operation === "space.reconcile.preview" || preview.source.operation === "space.cleanup.preview") {
+			if (!preview.spaces || !isDeepStrictEqual(preview.spaces, await this.options.lifecycle.spaceApprovalPreview(preview.source.operation === "space.cleanup.preview"))) return false;
+		}
 		if (preview.removal && !isDeepStrictEqual(preview.removal.intent, await this.options.lifecycle.removalApprovalSnapshot(preview.removal.intent.removalKey))) return false;
 		if (!branch) {
 			const ids = preview.removal?.activeConversations ?? preview.targets.filter((target) => target.kind === "conversation").map((target) => target.conversationId);
@@ -143,7 +158,10 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			if (action.operation === "conversation.delete.apply") {
 				for (const plan of preview.retirements!) await this.options.retirement.retirePrepared(plan);
 				pending = true;
-			} else if (action.operation === "space.reconcile.apply" || action.operation === "space.cleanup.apply") throw new HostControlError("upgrade_required", "Live Space mutation owners are unavailable");
+			} else if (action.operation === "space.reconcile.apply" || action.operation === "space.cleanup.apply") {
+				if (!preview.spaces) throw stale();
+				pending = (await this.options.lifecycle.executeSpaceApproval(preview.spaces, action.operation === "space.cleanup.apply")).remaining > 0;
+			}
 			else if (action.operation === "worktree.branch.delete") await this.options.lifecycle.executeBranchApproval(detached(preview.branch));
 			else {
 				const bundled = action.operation === "worktree.conversation.cleanup.apply";

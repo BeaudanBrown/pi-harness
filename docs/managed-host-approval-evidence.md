@@ -70,8 +70,37 @@ skips, and source contracts. Artifact:
 
 Creation/refresh and frozen worktree/bulk retirement translations are assembled;
 remaining focused evidence and the final issue review/gate are still required.
-Modern Space actions deliberately do **not** call the legacy reconciler: its
-cleanup kicks the operator and its two-level hierarchy does not implement live
-workspace ownership. A correct live reconciliation/account-cleanup owner remains
-unfinished, as does account-backed membership restoration. This is not a claim
-that #108, its reconciliation acceptance, or the model-tool frontend is done.
+## Live Space owner integration
+
+Modern Space actions now use a four-level path in the existing `ProjectReconciler`,
+not its legacy two-level migration/cleanup methods. Reconciliation freezes saved
+parent/child provenance and account identities, verifies them read-only, and
+repairs only missing links under project exclusion. It does not discover/adopt
+rooms, create a second migration engine, rename rooms or replay an accepted
+model mutation. Legacy adoption remains #117.
+
+Standalone cleanup selects only exactly owned, empty, unreferenced non-host
+Spaces without other members. It persists the existing permanent Space fence
+before account effects and rechecks scope before mutations. Without the #112
+account port it returns pending without unlinking, kicking or leaving. A lost
+bot-leave acknowledgement is settled by read-only bot/account completion evidence;
+replacement Spaces never become cleanup targets. Membership restoration remains
+account-backed dependent work.
+
+| New boundary | Evidence |
+| --- | --- |
+| New/changed link or account after approval | Frozen owner and reconciler reject stale scope before writes |
+| Foreign proof/member or live/unpublished reference | Refusal/empty eligibility; no adoption, kicks or destructive fallback |
+| No account port after fence | Durable pending fence; no external cleanup |
+| Restart or fresh replacement reservation | Old IDs remain authoritative; replacement links/membership survive |
+| Bot leave accepted, reply lost | Restart performs only verified completion bookkeeping, not another leave |
+| Worktree base moves after outer validation | Lifecycle admission rechecks the frozen plan before apply |
+
+Affected packaged verification passed: **441 managed-session tests, zero skips**,
+and source contracts. Artifact:
+`.pi/tmp/workers/2026-10-04T21-47-04-843Z-live-space-approved-owner-affected-a2697d737b43/`.
+After the bounded single-pass reference scan and account-identity freezing, the
+final 27 focused owner/hierarchy/ancestor tests passed with zero skips:
+`.pi/tmp/workers/2026-10-04T21-53-02-827Z-live-space-frozen-account-identity-251ee573ac84/`.
+LSP has no errors. This is not #108 completion, deployed Matrix/NAS acceptance,
+or completion of the model-tool frontend. Final issue verification remains due.

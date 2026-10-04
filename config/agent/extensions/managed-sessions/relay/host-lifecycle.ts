@@ -26,7 +26,7 @@ import type { FrozenJson } from "./host-approval-record.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
-import { ProjectReconciler } from "./project-reconciliation.js";
+import { ProjectReconciler, type SpaceCleanupAccount, type LiveSpacePreview } from "./project-reconciliation.js";
 import { ProjectSpaces } from "./project-spaces.js";
 import { LiveHierarchy } from "./live-hierarchy.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
@@ -362,6 +362,7 @@ export class HostLifecycle {
 		registry: RelayRegistry;
 		matrix: ManagedMatrixClient;
 		hierarchy?: LiveHierarchy;
+		spaceCleanupAccount?: SpaceCleanupAccount;
 		server: ManagedSessionIpcServer;
 		environment?: NodeJS.ProcessEnv;
 		projectNotice?: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void>;
@@ -379,10 +380,12 @@ export class HostLifecycle {
 		this.exactWindows = new ExactWindowClient((operation, request) => this.invoke(operation, request));
 		this.projectSpaces = new ProjectSpaces(options.registry, options.matrix);
 		this.reconciler = new ProjectReconciler({ registry: options.registry, matrix: options.matrix, intentDirectory: options.projectSessionDirectory,
-			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement) });
+			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement), hierarchy: options.hierarchy, account: options.spaceCleanupAccount });
 	}
 
 	pendingReconciliationCount(): number { return this.reconciler.pendingCount(); }
+	spaceApprovalPreview(cleanup: boolean): Promise<LiveSpacePreview> { return this.reconciler.previewLive(cleanup); }
+	executeSpaceApproval(snapshot: LiveSpacePreview, cleanup: boolean): Promise<{ remaining: number }> { return this.reconciler.applyLive(snapshot, cleanup); }
 
 	async request(envelope: ManagedSessionEnvelope): Promise<Record<string, unknown>> {
 		if (envelope.role !== "coordinator_adapter" || envelope.type !== "lifecycle.request") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle capability is required");
