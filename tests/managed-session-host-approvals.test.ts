@@ -50,6 +50,46 @@ test("public dispatcher waits for independent consent without blocking unrelated
 	assert.equal((await again).ok, true); assert.equal(f.executions(), 2, "a new explicit call requires its own consent");
 });
 
+test("create, launch, refresh, reconciliation and destructive bundles all require independent consent", async (t) => {
+	const f = await fixture(t); const conversationId = `conv_${"b".repeat(32)}`; const previewId = `preview_${"b".repeat(32)}`;
+	const actions: ModelHostRequest["action"][] = [
+		{ operation: "project.create", rootKey: "projects", workspace: "new", creationKey: "project", title: "Project" },
+		{ operation: "conversation.create", creationKey: "conversation", title: "Conversation", placement: { rootKey: "projects", workspace: "main", relativeCwd: "" } },
+		{ operation: "conversation.open", conversationId }, { operation: "conversation.resume", conversationId }, { operation: "conversation.refresh", conversationId, confirmed: true },
+		{ operation: "conversation.delete", conversationId, confirmed: true }, { operation: "conversation.delete.apply", previewId, confirmed: true },
+		{ operation: "worktree.create", rootKey: "projects", workspace: "main", creationKey: "worktree", baseRef: "main", branch: "feature" },
+		{ operation: "worktree.conversation.create", rootKey: "projects", workspace: "main", creationKey: "bundle", baseRef: "main", branch: "feature", title: "Bundle" },
+		{ operation: "worktree.remove.apply", previewId, confirmed: true }, { operation: "worktree.conversation.cleanup.apply", previewId, confirmed: true },
+		{ operation: "worktree.branch.delete", previewId, confirmed: true }, { operation: "space.reconcile.apply", previewId, confirmed: true },
+		{ operation: "space.cleanup.apply", previewId, confirmed: true }, { operation: "coordinator.membership.restore", confirmed: true },
+	];
+	for (const [index, action] of actions.entries()) {
+		const pending = f.dispatch({ ...request(`tool-${index}`), action }); await f.waitPrompt(index + 1);
+		assert.deepEqual(f.store.list()[0].frozen.effects, [action]); assert.equal(f.executions(), 0);
+		f.prompts[index].vote.resolve({ ...approve(), choice: "deny" }); const response = await pending;
+		assert.equal(response.ok, false); if (!response.ok) assert.equal(response.error.code, "denied");
+	}
+	assert.equal(f.executions(), 0); assert.equal(f.store.list().length, 0);
+});
+
+test("restart retains only live unconsumed consent within its original expiry", async (t) => {
+	for (const state of ["live", "expired", "ended"] as const) {
+		const f = await fixture(t); const value = request();
+		const record = prepareHostApproval("host", value, { effects: [value.action], preconditions: {} }, 1000);
+		await f.store.prepare(record);
+		await f.store.transition(record.approvalId, { phase: "presented", presentation: { kind: "local_dialog", id: record.approvalId } });
+		if (state === "expired") f.setNow(record.expiresAt); if (state === "ended") f.setLive(false);
+		const replacement = new HostApprovals(f.options); await replacement.recover();
+		assert.equal(f.executions(), 0); assert.equal(f.store.list().length, state === "live" ? 1 : 0);
+		if (state === "live") {
+			assert.equal(f.store.list()[0].expiresAt, record.expiresAt);
+			const pending = replacement.request(value); await f.waitPrompt(1);
+			f.prompts[0].vote.resolve({ ...approve(), choice: "deny" }); assert.equal((await pending).ok, false);
+		}
+		await replacement.close();
+	}
+});
+
 test("expiry, stopped runs and stale targets never execute; late decisions do not revive them", async (t) => {
 	for (const cause of ["expired", "cancelled", "stale_preview"] as const) {
 		const f = await fixture(t); const pending = f.dispatch(); await f.waitPrompt(1);
