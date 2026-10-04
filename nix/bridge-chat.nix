@@ -9,7 +9,7 @@ let
     PI_MANAGED_SESSIONS_IMAGE_NORMALIZER = "${filePackage}/bin/pi-chat-image";
   };
   settings = pkgs.writeText "pi-chat-transport.json" (builtins.toJSON ({
-    inherit (cfg) homeserver ownerUserId remoteOwnerUserIds roomIds allJoinedRooms workspaceRoomIds;
+    inherit (cfg) homeserver ownerUserId remoteOwnerUserIds roomIds allJoinedRooms workspaceRoomIds managedAccountHosts;
     modelSocket = socket;
   } // lib.optionalAttrs cfg.files.enable { inherit filesDirectory; }));
   workspacePolicy = pkgs.writeText "pi-chat-workspace-policy.json" (builtins.toJSON ({
@@ -67,11 +67,25 @@ in {
       type = lib.types.attrsOf lib.types.str; default = { };
       description = "Descriptions of host-approved named commands; execution argv belongs to workspaceExecutor.commands, not the model or project files.";
     };
+    managedAccountHosts = lib.mkOption {
+      type = lib.types.listOf (lib.types.submodule { options = {
+        hostId = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"; };
+        botUserId = lib.mkOption { type = lib.types.strMatching "@[^[:space:]:]+:[^[:space:]]+"; };
+        deviceId = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._:-]{1,128}"; };
+      }; });
+      default = [ ];
+      description = "Explicit trusted host bot/device pairs for the separate deterministic account consumer. Empty disables account effects. Does not grant model access to owner credentials.";
+    };
     allJoinedRooms = lib.mkOption { type = lib.types.bool; default = false; description = "Explicitly accept commands in all eligible rooms this owner account joins, not just roomIds. Does not grant server-wide access."; };
     remoteOwnerUserIds = lib.mkOption { type = lib.types.listOf (lib.types.strMatching "@[^[:space:]:]+:[^[:space:]]+"); default = [ ]; description = "Exact bridge-controlled puppet MXIDs independently verified to represent this owner. Never derive authority from display names or message metadata."; };
   };
   config = lib.mkIf cfg.enable {
     assertions = [
+      { assertion = builtins.length cfg.managedAccountHosts <= 64
+          && builtins.length (lib.unique (map (h: h.hostId) cfg.managedAccountHosts)) == builtins.length cfg.managedAccountHosts
+          && builtins.length (lib.unique (map (h: h.botUserId) cfg.managedAccountHosts)) == builtins.length cfg.managedAccountHosts
+          && lib.all (h: h.botUserId != cfg.ownerUserId) cfg.managedAccountHosts;
+        message = "Managed account hosts require at most 64 one-to-one host/bot identities, distinct from the owner."; }
       { assertion = privatePath cfg.matrixTokenFile && privatePath cfg.piAgentDirectory && cfg.piAgentDirectory != "/"; message = "Chat credentials and existing Pi auth directory must be absolute runtime paths, never Nix store paths."; }
       { assertion = lib.hasPrefix "https://" cfg.homeserver; message = "Chat transport requires an HTTPS homeserver origin."; }
       { assertion = cfg.allJoinedRooms || cfg.roomIds != [ ]; message = "Chat assistant requires an explicit test-room allowlist or allJoinedRooms approval."; }

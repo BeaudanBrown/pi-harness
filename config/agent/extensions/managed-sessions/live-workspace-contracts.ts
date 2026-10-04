@@ -219,7 +219,8 @@ export const AccountActionSchema = Type.Union([
 		notificationSetup: Type.Union([Type.Literal("new_room"), Type.Literal("preserve")]) }),
 	strict({ ...accountBase, operation: Type.Literal("room.retire"), roomId: room, conversationId: ConversationIdSchema, retirementId: stable("retirement") }),
 	strict({ ...accountBase, operation: Type.Literal("space.retire"), roomId: room, cleanupId: stable("cleanup"), hostSpaceId: room }),
-	strict({ ...accountBase, operation: Type.Literal("coordinator.membership.restore"), roomId: room, conversationId: ConversationIdSchema, hostSpaceId: room }),
+	strict({ ...accountBase, operation: Type.Literal("coordinator.membership.restore"), roomId: room, conversationId: ConversationIdSchema, hostSpaceId: room,
+		departureEventId: Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 }) }),
 ]);
 export type AccountAction = Static<typeof AccountActionSchema>;
 export const AccountAckSchema = strict({ ...accountBase, status: Type.Union([

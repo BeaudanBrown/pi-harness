@@ -1,3 +1,4 @@
+import { accountHosts, type AccountHost } from "./account-store.js";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { MatrixHttp, MatrixError } from "../matrix-shared/http.js";
@@ -8,7 +9,7 @@ import { inspectArtifactBytes } from "../managed-sessions/adapter/artifact-expor
 import { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS } from "./limits.js";
 export { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS };
 export const FAILURE = "I couldn't complete that request. Please send a new !pi command to try again.";
-export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string; workspaceRoomIds?: string[]; filesDirectory?: string };
+export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string; workspaceRoomIds?: string[]; filesDirectory?: string; managedAccountHosts?: AccountHost[] };
 export function object(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid object");
 	return value as Record<string, unknown>;
@@ -22,7 +23,16 @@ export function validateConfig(value: unknown): ChatConfig {
 		(!c.allJoinedRooms && !c.roomIds.length) || typeof c.modelSocket !== "string" || !c.modelSocket.startsWith("/")) throw Error("Invalid chat configuration");
 	if (c.workspaceRoomIds !== undefined && (!Array.isArray(c.workspaceRoomIds) || c.workspaceRoomIds.length > 256 || !c.workspaceRoomIds.every(r => typeof r === "string" && r.startsWith("!") && (c.allJoinedRooms || (c.roomIds as string[]).includes(r))))) throw Error("Invalid workspace room scope");
 	if (c.filesDirectory !== undefined && (typeof c.filesDirectory !== "string" || !c.filesDirectory.startsWith("/") || c.filesDirectory === "/" || c.filesDirectory.includes("\0"))) throw Error("Invalid file staging policy");
+	if (c.managedAccountHosts !== undefined) {
+		c.managedAccountHosts = accountHosts(c.managedAccountHosts);
+		if ((c.managedAccountHosts as AccountHost[]).some(h => h.botUserId === c.ownerUserId)) throw Error("Owner cannot be a managed host bot");
+	}
 	return c as ChatConfig;
+}
+export function assistantPolicyFingerprint(config: ChatConfig, token: string): string {
+	// Account policy must not discard pending questions or reset assistant watermarks.
+	const { managedAccountHosts: _accountPolicy, ...assistantConfig } = config;
+	return createHash("sha256").update("typescript-v1:" + JSON.stringify(assistantConfig) + token).digest("hex");
 }
 export function command(event: unknown, senders: Set<string>, floor: number, now: number): string | undefined {
 	try {
@@ -70,10 +80,10 @@ export class OwnerMatrix implements ChatMatrix {
 			{ msgtype: "m." + file.mediaType, body: file.filename, filename: file.filename, url: upload.content_uri,
 				info: { mimetype: file.mimeType, size: file.byteLength, ...(file.width ? { w: file.width, h: file.height } : {}) }, "m.mentions": {} }, signal);
 	}
-	async sync(cursor: string, senders: string[], pending: number, signal?: AbortSignal): Promise<unknown> {
+	async sync(cursor: string, senders: string[], pending: number, signal?: AbortSignal, accounts = false): Promise<unknown> {
 		const filter = { presence: { types: [] }, account_data: { types: [] }, room: {
-			include_leave: true, account_data: { types: [] }, ephemeral: { types: [] }, state: { types: [] },
-			timeline: { types: ["m.room.message"], senders, limit: 50 },
+			include_leave: true, account_data: { types: [] }, ephemeral: { types: [] }, state: { types: accounts ? ["m.room.member"] : [] },
+			timeline: { types: accounts ? ["m.room.message", "m.room.member"] : ["m.room.message"], senders, limit: 50 },
 		} };
 		const query = new URLSearchParams({ timeout: pending || !cursor ? "0" : "15000", set_presence: "offline", filter: JSON.stringify(filter) });
 		if (cursor) query.set("since", cursor);

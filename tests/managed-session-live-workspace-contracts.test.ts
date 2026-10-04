@@ -123,7 +123,7 @@ test("NAS messages pin hierarchy and narrow capabilities, never endpoints or cre
 		{ ...account, operation: "space.retire", roomId: "!host:example.org", hostSpaceId: "!host:example.org", cleanupId: id("cleanup") },
 	]) assert.throws(() => parseAccountAction(sign(value)));
 	assert.doesNotThrow(() => parseAccountAction(sign({ ...account, operation: "room.retire", roomId: ensure.roomId, conversationId, retirementId: id("retirement") })));
-	assert.doesNotThrow(() => parseAccountAction(sign({ ...account, operation: "coordinator.membership.restore", roomId: "!coordinator:example.org", hostSpaceId: ensure.hostSpaceId, conversationId })));
+	assert.doesNotThrow(() => parseAccountAction(sign({ ...account, operation: "coordinator.membership.restore", roomId: "!coordinator:example.org", hostSpaceId: ensure.hostSpaceId, conversationId, departureEventId: "$departure" })));
 	const ack = { ...account, requestId: ensure.requestId, payloadDigest: ensure.payloadDigest, status: "notification_setup_uncertain" };
 	assert.doesNotThrow(() => parseAccountAck(ack));
 	assert.throws(() => parseAccountAck({ ...ack, token: "secret" }));

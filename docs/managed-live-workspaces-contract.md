@@ -298,8 +298,12 @@ from host/NAS configuration. Payloads are the executable AccountAction/Ack
 schemas, at most 16 KiB. The `payloadDigest` is SHA-256 of compact UTF-8 JSON with
 recursively sorted object keys, excluding requestId and payloadDigest; no
 undefined values or floating-point data occur. The requestId is derived from
-host ID and payload digest. Retries reuse exact content and transaction ID;
-ack echoes hostId/requestId/payloadDigest. Conflicting reuse is rejected.
+host ID and payload digest. Uncertain HTTP retries reuse exact content and transaction ID. Operator-approved
+correction: intentional redelivery after an accepted send uses a fresh persisted
+Matrix transmission ID, retaining the exact account content/request ID and durable
+receiver deduplication. Otherwise Matrix's transaction deduplication would prevent
+re-enqueueing a lost device message. Ack echoes hostId/requestId/payloadDigest;
+conflicting request identity reuse is rejected.
 The authenticated Matrix envelope sender must match the configured host bot
 (or owner account for an ack), never a payload sender string. Trusted host IDs
 must map one-to-one to configured bot MXIDs. No arbitrary recipients, endpoints,
@@ -352,6 +356,11 @@ to reopen retired history. A matching coordinator ensure does not defeat its
 intentional-departure suppression. A separately authorized membership restore
 uses the typed `coordinator.membership.restore` account request and clears only
 that coordinator suppression under its previously verified protected identity.
+Operator-approved correction: the request additionally requires `departureEventId`,
+the exact authenticated Matrix departure event frozen by the host, not supplied by
+a model. It participates in the account request digest. Restoration atomically
+records completion with clearing only that matching suppression; old requests and
+old sync events cannot undo a later departure or a completed restoration.
 
 ### Notification initialization and the operator's uncertainty decision
 
