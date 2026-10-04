@@ -141,4 +141,13 @@ configuration (#120), or live client acceptance (#121). Unavailable dependent
 operations fail closed; account-dependent cleanup retains exact pending authority.
 The mandatory cumulative epic review remains outstanding.
 
-Canonical final verification is pending.
+### Final verification
+
+Canonical `nix run .#verify` passed at `80d637e`: all 12 groups, including
+**443 managed-session tests with zero skips**, TypeScript, schemas, source/module
+contracts, integration checks and production package checks. Artifact:
+`.pi/tmp/workers/2026-10-04T22-43-35-753Z-host-approval-final-canonical-0c2a40cee40e/`.
+
+#108 is complete within the closure scope above. This final documentation-only
+result entry does not change the verified implementation. All changes are locally
+committed; nothing was pushed, deployed, activated or migrated.
