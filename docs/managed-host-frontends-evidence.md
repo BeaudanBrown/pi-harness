@@ -121,4 +121,23 @@ All three findings were accepted and remediated in one batch. Focused checks
 passed **28 tests, zero skips**:
 `.pi/tmp/workers/2026-10-05T06-36-55-179Z-host-frontends-review-remediation-bab9777d2a67/`.
 These are bounded corrections to the reviewed design, not a new review boundary.
-Final canonical verification remains pending.
+
+## Final verification and disposition
+
+Implementation `8c3d101`; review remediation `1ca784e`.
+Final `nix run .#verify` passed all **12 deterministic verification groups**,
+including **464 managed-session tests and 87 bridge-chat tests, zero skips**:
+`.pi/tmp/workers/2026-10-05T06-38-27-237Z-host-frontends-final-canonical-db09f4be49d9/`.
+Packaged relay/coordinator/resources and module/package contracts were built;
+real Pi integration checks passed. LSP reports no errors. Only this evidence text
+changed after the gate, so it was not repeated.
+
+#113 implementation is complete. All three review findings were addressed; no
+current-issue finding remains deferred. Coordinator inventory/open is available,
+while picker UI/handoff remains #118/#119; continuity, title/status, enrollment
+and migration remain their own children. Deployment configuration/activation and
+live-client/cumulative epic acceptance remain #120/#121. Consumed human Matrix
+command capacity requires explicit recovery if exhausted; uncertain commands are
+never automatically replayed. No push, service activation/restart, live account
+traffic or migration occurred. External launcher checkout is unchanged at
+`aec1113`.
