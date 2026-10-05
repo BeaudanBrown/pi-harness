@@ -221,3 +221,29 @@ barrier tests:
 `.pi/tmp/workers/2026-10-05T03-02-46-431Z-account-production-affected-385a4a029039/`.
 The NAS builder SSH connection was unavailable; the authorized local Nix fallback
 completed. No live services or credentials were exercised.
+
+## Final #112 verification and disposition
+
+Implementation: `fda5bf3`, following `68b0600`, `16f4edb` and `674b4d7`.
+The exhaustive two-axis issue audit at `fda5bf3` reported:
+
+- **Standards:** no findings.
+- **Spec:** no verified findings; deployment/live-client acceptance remains #120/#121.
+
+Review artifact:
+`.pi/tmp/reviews/2026-10-05T03-05-41-771Z-audit-fda5bf3e722b-9d94ae40654a/`.
+
+Final `nix run .#verify` passed all **12 deterministic verification groups**, including
+**453 managed-session tests and 87 bridge-chat tests, zero skips**. Packaged relay,
+bridge transport, resources, module/package contracts and real Pi integration
+checks were included. Artifact:
+`.pi/tmp/workers/2026-10-05T03-09-03-912Z-account-final-canonical-d4392e13a500/`.
+Only this evidence text changed after the final gate; no executable code changed.
+
+#112 implementation is complete. Unified user frontends remain #113, legacy
+migration remains #117, deployment configuration/activation remains #120, and
+actual NAS/Matrix/phone acceptance and cumulative epic review remain #121. No
+push, service activation/restart, migration, live retirement or personal-account
+traffic occurred. Existing experimental unversioned/override journals require
+explicit recovery if ever activated; no automatic personal-settings migration is
+claimed. The external launcher checkout remains unchanged at `aec1113`.
