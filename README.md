@@ -251,7 +251,8 @@ The ordinary profile provides `/remote on <concept>` and `/remote status`.
 Legacy `/remote delete` is disabled until approved retirement controls are
 available; it never unbinds a live process. Leaving an individual conversation's
 Matrix room as the configured operator triggers canonical retirement. There is
-no `/remote off` operation and no ordinary host-wide lifecycle tool surface. `/remote on` locally enrolls a persisted, idle
+no `/remote off` operation. Project and coordinator conversations share the typed
+`managed_host` tool; every model mutation requires independent per-call consent. `/remote on` locally enrolls a persisted, idle
 ordinary Pi session: the relay verifies its canonical placement and durable Pi
 identity without waiting for Matrix authentication or provisioning. The same Pi
 continues running while a private pending registration survives relay restarts.
@@ -263,7 +264,7 @@ explicit promotion protocol; managed relaunches receive their private socket and
 one-time attachment nonce from the host-owned launcher.
 
 After binding, adapters classify persisted Pi branch entries and offer only
-terminal-origin text turns and final assistant answers. Matrix-origin users are
+terminal-origin text turns, completed assistant commentary, and final answers. Matrix-origin users are
 mapped to their existing Matrix events rather than echoed; their relay-verified
 sender MXIDs are persisted and included in ordinary model-visible attribution; leading-slash commands retain native Pi dispatch. The relay records
 each offer before sending deterministic, sanitized Markdown chunks with stable
@@ -299,8 +300,14 @@ inaccessible identity or repairs existing Space links. Fresh bootstrap uses
 atomic ownership metadata and durable provisioning phases; uncertain creation
 without a recoverable alias stays pending for explicit reconciliation.
 
-The coordinator-only profile exposes typed workspace, local-project creation,
-and conversation list/status/start/resume/stop/delete tools, plus explicit project-room reconciliation preview/apply and obsolete-Space cleanup tools. Project creation
+The neutral coordinator and managed project profiles expose compact `managed_host`
+controls and the `managed-host` skill. Use `operation: "help"` for the flat typed
+schema. Direct operators use `/host`, `!host`, or `pi-managed-session` with the same
+noun/action grammar; room-local `!start` launches without a prompt and
+`!close --confirm` permanently retires the conversation. Destructive/apply actions
+retain confirmation. Matrix `/host` is routed as Matrix authority, never executed
+as a local slash command. The coordinator stays protected from stop/delete and
+has no engineering tools. See [frontend evidence and migration](docs/managed-host-frontends-evidence.md). Project creation
 accepts only a configured root, safe absent immediate-child name, and creation
 label. The trusted launcher creates no
 scaffold or remote: it initializes local Git on `main`, records a durable retry
@@ -316,7 +323,7 @@ new checkout identity. Non-Git workspaces use a stable immediate-child fallback.
 Host-scoped aliases require exact bot-authored ownership proof before adoption.
 Local hierarchy reservations remain pending during provisioning failures; completed
 hierarchy provisioning alone does not establish operator-account or phone readiness. Existing Space bindings and
-checkpointed provisioning IDs are preserved; see [shared-workspace recovery](docs/managed-matrix-sessions.md#shared-workspaces-across-hosts). Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. The coordinator can preview a bounded host-resolved plan, explicitly apply its stable reconciliation key without replacing rooms or sessions, and separately confirm cleanup of obsolete Spaces. Cleanup refuses referenced, non-empty, inaccessible, or foreign Spaces and removes the operator only from verified obsolete empty Spaces before the bot leaves. The relay resolves placement
+checkpointed provisioning IDs are preserved; see [shared-workspace recovery](docs/managed-matrix-sessions.md#shared-workspaces-across-hosts). Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. Host controls can preview and repair saved modern hierarchy links without replacing rooms or sessions, and separately confirm exact empty-Space cleanup. Legacy hierarchy migration remains a separate implementation boundary. Cleanup refuses referenced, non-empty, inaccessible, or foreign Spaces and removes the operator only from verified obsolete empty Spaces before the bot leaves. The relay resolves placement
 through the fixed launcher, durably creates the Pi session and binding boundary
 before Matrix rooms, and launches the ordinary adapter through the trusted
 `direnv exec`/Pi dispatch. No objective or orientation is lifecycle metadata:
@@ -324,8 +331,10 @@ the first Matrix text is the first task. New-project results include a bounded
 Element X-compatible room link. Managed Pi uses run-scoped project approval and
 never persists trust for unrelated interactive launches. Project room text routes directly
 without host addressing; dormant input resumes the same persisted session.
-Stop terminates only the exact managed window, while confirmed bridge deletion
-leaves the Pi session, process/window, workspace, and project files intact. The relay pins managed tmux operations to `XDG_RUNTIME_DIR`, matching the existing interactive `tmux_project` server. Marked live conversation windows appear as additional candidates in that same launcher and switch the requesting client to the existing Pi process; selection never creates or resumes work, and dormant conversations remain lifecycle-only. A confirmation-gated host operation previews and removes only marked windows from the obsolete `/tmp` tmux socket during the one-time deployment cutover.
+Stop terminates only the exact managed window and leaves the conversation dormant.
+Confirmed deletion permanently retires the identity, stops only proven owned
+processes, and retries exact room/Space cleanup. Saved Pi/Matrix histories,
+workspaces and project files are preserved; this is not unbind-only deletion. The relay pins managed tmux operations to `XDG_RUNTIME_DIR`, matching the existing interactive `tmux_project` server. Marked live conversation windows appear as additional candidates in that same launcher and switch the requesting client to the existing Pi process; selection never creates or resumes work, and dormant conversations remain lifecycle-only. A confirmation-gated host operation previews and removes only marked windows from the obsolete `/tmp` tmux socket during the one-time deployment cutover.
 
 Managed room controls retain Pi's established control semantics while using
 host-owned room routing: ordinary text is an idle prompt or steering input for the active run; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. Status combines a typed live adapter snapshot with relay-authoritative conversation, generation, saved/requested model and thinking, queue, checkpoint, connection, redacted launch-failure, and reconciliation state; it explicitly flags a runtime/requested-model mismatch without exposing paths, credentials, prompts, arguments, output, or reasoning. Only live agent activity starts Matrix typing; control handling and slash-command dispatch do not. Durable per-room inboxes and frozen notice delivery isolate rate-limit failures from other rooms and generation completion; see [Matrix reliability](docs/managed-matrix-reliability.md). State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new --confirm` creates a fresh generation while preserving the room and prior Pi session files. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort

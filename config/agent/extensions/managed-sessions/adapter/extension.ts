@@ -1,4 +1,10 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { dirname, join } from "node:path";
+import { ManagedHostParameters, managedHostAction, managedHostHelp } from "../host-tool.js";
+import { hostCommandAction } from "../host-command.js";
+import { requestHostControl } from "../relay/host-control-client.js";
+import { hostControlHelp } from "../relay/host-cli-args.js";
+import type { HostAction } from "../live-workspace-contracts.js";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
@@ -19,7 +25,6 @@ import { NativeHostRun } from "./host-run.js";
 import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_PROJECTION_ENTRIES,
-	deriveProjectCreationKey,
 	type ManagedAdapterLiveStatus,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
@@ -314,7 +319,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				...(activeDeliveries.size || pendingUserPersistence.length ? ["remote_checkpoint"] : []),
 				...(config.placement && config.workspacePath ? ["remote_artifact_export"] : [])] : names);
 		};
-		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>. Controls never become model prompts.";
+		const CONTROL_HELP = "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !start, !stop, !close --confirm, !host help, !abort, !steer <text>. Controls never become model prompts.";
 		const controlReply = async (controlId: string, status: "ok" | "rejected", message: string, options?: string[], generation?: { model?: string; thinking?: string },
 			selection?: ControlSelection, liveStatus?: ManagedAdapterLiveStatus) => {
 			let result = controlResults.get(controlId);
@@ -434,103 +439,21 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			for (const closing of closings) await sendFinalization(closing);
 		};
 
-		const worktreeCreationKey = (rootKey: string, workspace: string, baseRef: string, branch: string): string =>
-			`worktree-${createHash("sha256").update("pi-managed-sessions:coordinator-worktree:v1\0").update(rootKey).update("\0").update(workspace).update("\0").update(baseRef).update("\0").update(branch).digest("hex").slice(0, 32)}`;
-		const gitRef = Type.String({ minLength: 1, maxLength: 255, pattern: "^[A-Za-z0-9][A-Za-z0-9._/@+/-]*$" });
-		const lifecycle = async (request: Record<string, unknown>) => {
-			if (!binding || !client?.connected) throw new ManagedAdapterError("Coordinator relay connection is unavailable");
-			const coordinatorClient = client;
-			if (!(coordinatorClient instanceof CoordinatorAdapterClient)) throw new ManagedAdapterError("Coordinator lifecycle capability is unavailable");
-			const result = await coordinatorClient.lifecycleRequest(request);
-			return { content: [{ type: "text" as const, text: JSON.stringify(result.payload, null, 2) }], details: result.payload };
+		const managedHost = async (toolCallId: string, action: HostAction | "help") => {
+			if (action === "help") return { content: [{ type: "text" as const, text: managedHostHelp() }], details: {} };
+			if (!binding || !client?.connected || !client.supports("host-control-v1") || !client.supports("approval-v1")) throw new ManagedAdapterError("Managed host controls require an upgraded connected relay");
+			const identity = hostRun.identity(toolCallId);
+			if (!identity) throw new ManagedAdapterError("Managed host tool call has no live native identity");
+			const response = await client.requestHostAction({ ...identity, requestId: `tool-${randomUUID()}`, action });
+			return { content: [{ type: "text" as const, text: JSON.stringify(response) }], details: response, ...(!response.ok ? { isError: true } : {}) };
 		};
-		if (role === "coordinator_adapter") {
-			pi.registerTool({ name: "remote_workspace_list", label: "List Managed Workspaces",
-				description: "List immediate-child workspaces available for managed project conversations.", parameters: Type.Object({}, { additionalProperties: false }),
-				execute: async () => lifecycle({ operation: "workspace.list" }) });
-			pi.registerTool({ name: "remote_session_list", label: "List Managed Conversations",
-				description: "List all host-owned managed conversations and lifecycle states.", parameters: Type.Object({}, { additionalProperties: false }),
-				execute: async () => lifecycle({ operation: "conversation.list" }) });
-			pi.registerTool({ name: "remote_session_status", label: "Managed Conversation Status",
-				description: "Inspect one managed conversation lifecycle state.", parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "conversation.status", targetConversationId: params.conversationId }) });
-			pi.registerTool({ name: "remote_project_reconcile_preview", label: "Preview Managed Project Reconciliation",
-				description: "Preview host-resolved migration of compatibility rooms into stable project Spaces without changing Matrix, manifests, sessions, or workspaces.",
-				parameters: Type.Object({}, { additionalProperties: false }), execute: async () => lifecycle({ operation: "project.reconcile.preview" }) });
-			pi.registerTool({ name: "remote_project_reconcile_apply", label: "Apply Managed Project Reconciliation",
-				description: "Apply exactly one previously previewed reconciliation key. Existing room, Pi session, runtime queue, and workspace identities are preserved.",
-				parameters: Type.Object({ reconciliationKey: Type.String({ pattern: "^reconcile_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "project.reconcile.apply", reconciliationKey: params.reconciliationKey, confirmed: params.confirm }) });
-			pi.registerTool({ name: "remote_project_space_cleanup", label: "Clean Up Obsolete Project Spaces",
-				description: "After completed reconciliation, explicitly leave only verified empty obsolete bot-owned project Spaces. Non-empty, foreign, or referenced Spaces are refused.",
-				parameters: Type.Object({ reconciliationKey: Type.String({ pattern: "^reconcile_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "project.space.cleanup", reconciliationKey: params.reconciliationKey, confirmed: params.confirm }) });
-			pi.registerTool({ name: "remote_project_create", label: "Create Managed Project",
-				description: "Create exactly one new immediate-child local Git repository on main, then start an empty managed conversation in its host-resolved project Space. This never scaffolds files, creates a remote, publishes to GitHub, or transfers coordinator discussion.",
-				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$" }),
-					concept: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
-				execute: async (_toolCallId, params) => lifecycle({ operation: "project.create",
-					creationKey: deriveProjectCreationKey(params.rootKey, params.workspace),
-					rootKey: params.rootKey, workspace: params.workspace, concept: params.concept }) });
-			pi.registerTool({ name: "remote_worktree_list", label: "List Git Worktrees",
-				description: "List host-validated worktrees, branch/head, clean/locked state, and bound conversations for one Git project directly under a configured root.",
-				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "worktree.list", rootKey: params.rootKey, workspace: params.workspace }) });
-			for (const bundled of [false, true] as const) pi.registerTool({
-				name: bundled ? "remote_worktree_conversation_create" : "remote_worktree_create",
-				label: bundled ? "Create Worktree and Conversation" : "Create Git Worktree",
-				description: bundled
-					? "Create a new branch and deterministic sibling worktree from an explicit existing ref, then create an idle managed conversation there. Send the task only after entering the resulting room."
-					: "Create a new branch and deterministic sibling worktree from an explicit existing ref without creating a room or sending a task.",
-				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }), baseRef: gitRef, branch: gitRef,
-					...(bundled ? { concept: Type.String({ minLength: 1, maxLength: 128 }) } : {}) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: bundled ? "worktree.conversation.create" : "worktree.create",
-					creationKey: worktreeCreationKey(params.rootKey, params.workspace, params.baseRef, params.branch), rootKey: params.rootKey, workspace: params.workspace,
-					baseRef: params.baseRef, branch: params.branch, ...(bundled ? { concept: (params as typeof params & { concept: string }).concept } : {}) }),
-			});
-			pi.registerTool({ name: "remote_worktree_remove_preview", label: "Preview Git Worktree Removal",
-				description: "Preview and bind a safe removal key for one linked worktree. No mutation occurs; dirty, ignored, locked, root, active, and merge state are reported or refused.",
-				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }), mergeTarget: Type.Optional(gitRef) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "worktree.remove.preview", ...params }) });
-			pi.registerTool({ name: "remote_worktree_remove_apply", label: "Remove Git Worktree",
-				description: "Remove exactly one clean, unlocked, inactive linked worktree using a stable preview key. The branch and managed conversations are preserved.",
-				parameters: Type.Object({ removalKey: Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "worktree.remove.apply", removalKey: params.removalKey, confirmed: params.confirm }) });
-			pi.registerTool({ name: "remote_worktree_cleanup_preview", label: "Preview Worktree and Conversation Cleanup",
-				description: "Preview bundled exact-process stop, clean linked-worktree removal, and existing bridge deletion while preserving Git/Pi/Matrix server history.",
-				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), mergeTarget: Type.Optional(gitRef) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "worktree.conversation.cleanup.preview", targetConversationId: params.conversationId, ...(params.mergeTarget ? { mergeTarget: params.mergeTarget } : {}) }) });
-			pi.registerTool({ name: "remote_worktree_cleanup_apply", label: "Clean Up Worktree and Conversation",
-				description: "Apply one confirmed bundled cleanup preview with durable forward recovery. Branch deletion remains separate.",
-				parameters: Type.Object({ removalKey: Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "worktree.conversation.cleanup.apply", removalKey: params.removalKey, confirmed: params.confirm }) });
-			pi.registerTool({ name: "remote_worktree_branch_delete", label: "Delete Merged Worktree Branch",
-				description: "Separately confirm deletion of the removed worktree's local branch only when its unchanged tip is fully merged into the explicit previewed target and is checked out nowhere.",
-				parameters: Type.Object({ removalKey: Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "worktree.branch.delete", removalKey: params.removalKey, confirmed: params.confirm }) });
-			pi.registerTool({ name: "remote_session_start", label: "Start Managed Conversation",
-				description: "Create an idle managed Pi conversation in an existing depth-one checkout. The host groups linked Git worktrees by common-directory identity. Do not include an objective or task context; the first Matrix message is the first task.",
-				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }),
-					relativeCwd: Type.Optional(Type.String({ maxLength: 512 })),
-					concept: Type.String({ minLength: 1, maxLength: 128 }) }, { additionalProperties: false }),
-				execute: async (toolCallId, params) => lifecycle({ operation: "conversation.start",
-					creationKey: `coordinator-${createHash("sha256").update("pi-managed-sessions:coordinator-tool-call:v1\0").update(toolCallId).digest("hex").slice(0, 32)}`,
-					concept: params.concept, placement: { rootKey: params.rootKey, workspace: params.workspace, relativeCwd: params.relativeCwd ?? "" } }) });
-			for (const operation of ["resume", "stop"] as const) pi.registerTool({
-				name: `remote_session_${operation}`, label: `${operation === "resume" ? "Resume" : "Stop"} Managed Conversation`,
-				description: `${operation === "resume" ? "Resume the same persisted Pi session in a new managed window" : "Terminate only the exact managed Pi window and leave the conversation dormant"}.`,
-				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: `conversation.${operation}`, targetConversationId: params.conversationId }),
-			});
-			pi.registerTool({ name: "remote_session_refresh", label: "Refresh Managed Conversation",
-				description: "Restart an idle project conversation using freshly resolved installed host configuration. Preserves its room, session history, generation, preferences and queued input. Refuses busy or unresponsive processes; never rebuilds packages.",
-				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "conversation.refresh", targetConversationId: params.conversationId, confirmed: params.confirm }) });
-			pi.registerTool({ name: "remote_session_delete", label: "Delete Managed Bridge",
-				description: "Delete only relay/Matrix bridge state after explicit confirmation. Pi session, process, managed window, workspace, and project files are preserved.",
-				parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
-				execute: async (_id, params) => lifecycle({ operation: "conversation.delete", targetConversationId: params.conversationId, confirmed: params.confirm }) });
-		}
+		pi.registerTool({ name: "managed_host", label: "Managed Host",
+			description: "Manage this host's workspaces, worktrees and conversations. Use operation=help for fields. Reads/previews are free; every model mutation needs independent per-call consent. Exact IDs only; no shell bypass.",
+			parameters: ManagedHostParameters, execute: async (toolCallId, params) => managedHost(toolCallId, managedHostAction(params)) });
+		pi.registerTool({ name: "remote_session_delete", label: "Retire Managed Conversation (legacy alias)",
+			description: "Deprecated: use managed_host conversation.delete. Permanently retire the exact conversation through the same approval gate; preserve files and histories.",
+			parameters: Type.Object({ conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+			execute: async (toolCallId, params) => managedHost(toolCallId, { operation: "conversation.delete", conversationId: params.conversationId, confirmed: params.confirm }) });
 
 		const executeRemoteCheckpoint = async (toolCallId: string, params: unknown, ctx: ExtensionContext) => {
 			if (!binding || !client?.matrixBound) throw new ManagedAdapterError("remote_checkpoint requires an active managed Matrix conversation");
@@ -920,7 +843,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}
 			};
 			const invocation = payload.body.match(/^\/([^\s]+)(?:\s|$)/)?.[1];
-			const extensionCommand = Boolean(invocation && pi.getCommands().some((command) => command.name === invocation && command.source === "extension"));
+			const extensionCommand = invocation === "host" || Boolean(invocation && pi.getCommands().some((command) => command.name === invocation && command.source === "extension"));
+			if (invocation === "host") {
+				recordExpanded(payload.body);
+				if (ctx.hasUI) ctx.ui.notify("Matrix /host delivery cannot use local authority; use !host through an upgraded relay.", "warning");
+				return;
+			}
 			// Preserve Pi's leading-slash command/template dispatch; all ordinary model-visible text is attributed.
 			const deliveredBody = invocation ? payload.body : renderMatrixParticipantInput(payload.senderUserId, payload.body);
 			if (extensionCommand) recordExpanded(payload.body);
@@ -1138,7 +1066,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
-				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1"],
+				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				beforeMatrixBindingReady: () => {
 					if (client !== next || bindingEpoch !== epoch) return;
@@ -1436,6 +1364,18 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			setCheckpointActive(false);
 			currentContext = undefined;
 			setStatus(ctx);
+		});
+
+		pi.registerCommand("host", {
+			description: "Manage this host; /host help lists typed operations",
+			handler: async (args, ctx) => {
+				try {
+					const action = hostCommandAction(args);
+					if (action === "help") { ctx.ui.notify(hostControlHelp().replace("pi-managed-session", "/host"), "info"); return; }
+					const response = await requestHostControl({ socketPath: join(dirname(config.socketPath), "control.sock"), action, requestId: `local-${randomUUID()}` });
+					ctx.ui.notify(JSON.stringify(response), response.ok ? "info" : "error");
+				} catch (error) { ctx.ui.notify(error instanceof Error ? error.message : "Host controls unavailable", "error"); }
+			},
 		});
 
 		pi.registerCommand("remote", {

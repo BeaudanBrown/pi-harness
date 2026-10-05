@@ -1,4 +1,4 @@
-import type { HostAction } from "../live-workspace-contracts.js";
+import type { HostAction, HostRequest } from "../live-workspace-contracts.js";
 import type { ManagedSessionEnvelope } from "../contracts.js";
 import type { AcceptedAttachment } from "./registry.js";
 import type { ManagedMatrixClient } from "./matrix-client.js";
@@ -32,6 +32,7 @@ export class HostApprovalRuntime {
 		matrix: Pick<ManagedMatrixClient, "startPoll" | "endPoll" | "memberJoined" | "checkpointPollAnswer">;
 		owner: HostMutationOwner;
 		read(request: HostReadRequest): Promise<unknown>;
+		humanMutation?: (request: HostRequest) => Promise<unknown>;
 		launch?: (action: Extract<HostAction, { operation: "conversation.open" | "conversation.resume" }>) => Promise<unknown>;
 		attachment(conversationId: string): AcceptedAttachment | undefined;
 		capable(conversationId: string): boolean;

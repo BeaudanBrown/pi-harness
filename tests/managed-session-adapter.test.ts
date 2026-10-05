@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -99,6 +99,40 @@ test("real Pi native events attest a current tool and headless approval fails pr
 	await session.prompt("Probe native host liveness"); assert.equal(probed, true, JSON.stringify(session.agent.state.messages.filter((message: { role: string }) => message.role === "toolResult"))); assert.deepEqual(errors, []);
 	push("host.run.check", { checkId: "native-ended" }, "check-ended"); await wait(() => relay.frames.some((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-ended"));
 	assert.equal(relay.frames.find((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-ended")!.payload.witness, null);
+});
+
+for (const role of ["ordinary_adapter", "coordinator_adapter"] as const) test(`real Pi ${role} executes compact host tools through native identity, including the retirement alias`, { timeout: 15000 }, async t => {
+	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
+	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
+	const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href); const ai = await import(pathToFileURL(join(sdkRoot, "node_modules/@earendil-works/pi-ai/dist/index.js")).href);
+	const relay = await FakeRelay.start(); relay.enableApprovals = true; let session: any; const errors: unknown[] = []; const localRequests: any[] = [];
+	const control = createServer(socket => { let buffer = ""; socket.on("data", chunk => { buffer += chunk.toString(); if (!buffer.includes("\n")) return; const request = JSON.parse(buffer.trim()); localRequests.push(request); socket.end(JSON.stringify({ version: "1.0.0", requestId: request.actor.requestId, ok: true, data: { hostId: "host", relayState: "ready", accountState: "pending", capabilities: [] } }) + "\n"); }); });
+	const controlPath = join(relay.root, "control.sock"); await new Promise<void>(resolve => control.listen(controlPath, resolve)); await chmod(controlPath, 0o600);
+	t.after(async () => { try { if (session) { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); } } finally { await new Promise<void>(resolve => control.close(() => resolve())); await relay.close(); } });
+	const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+	const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(relay.root, "auth.json"), modelsPath: join(relay.root, "models.json"), modelsStorePath: join(relay.root, "store.json") }); await modelRuntime.setRuntimeApiKey("anthropic", "fixture-key");
+	const path = join(relay.root, "host.jsonl"); await writeFile(path, JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: relay.root, timestamp: new Date().toISOString() }) + "\n");
+	const sm = sdk.SessionManager.open(path); const boundary = sm.appendCustomEntry(BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION });
+	sm.appendCustomEntry(BINDING_ENTRY_TYPE, { ...binding, role, sessionId: sm.getSessionId(), bindingBoundaryEntryId: deriveTranscriptEntryId(sm.getSessionId(), boundary) });
+	const loader = new sdk.DefaultResourceLoader({ cwd: relay.root, agentDir: relay.root, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+		extensionFactories: [createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })] });
+	await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
+	({ session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader, settingsManager, sessionManager: sm, modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: ["managed_host", "remote_session_delete"] }));
+	await session.bindExtensions({ onError: (error: unknown) => errors.push(error) }); session.setActiveToolsByName(["managed_host", "remote_session_delete"]); let calls = 0;
+	session.agent.streamFunction = (model: any) => {
+		const stream = ai.createAssistantMessageEventStream(); const n = calls++;
+		queueMicrotask(() => { const reason = n < 3 ? "toolUse" : "stop"; const message = { role: "assistant", content: n < 3 ? [{ type: "toolCall", id: `host-call-${n}`, name: n < 2 ? "managed_host" : "remote_session_delete", arguments: n === 0 ? { operation: "host.status" } : n === 1 ? { operation: "conversation.delete", conversationId, confirmed: true } : { conversationId, confirm: true } }] : [{ type: "text", text: "done" }], api: model.api, provider: model.provider, model: model.id,
+			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: reason, timestamp: Date.now() };
+			stream.push({ type: "done", reason, message }); stream.end(); }); return stream;
+	};
+	await session.prompt("/host host status"); assert.equal(calls, 0, "a local host command never starts a model turn");
+	assert.equal(localRequests.length, 1); assert.equal(localRequests[0].actor.kind, "human_local"); assert.equal(localRequests[0].action.operation, "host.status");
+	await session.prompt("Inspect then request retirement"); const requests = relay.frames.filter(f => f.type === "host.request");
+	assert.equal(requests.length, 3, JSON.stringify(session.agent.state.messages));
+	assert.deepEqual(requests.map(f => (f.payload.action as { operation: string }).operation), ["host.status", "conversation.delete", "conversation.delete"]);
+	assert.equal(new Set(requests.map(f => f.payload.toolCallId)).size, 3); assert.equal(relay.frames.some(f => f.type === "lifecycle.request"), false);
+	for (const frame of requests) { assert.equal("actor" in frame.payload, false); assert.equal("presentation" in frame.payload, false); assert.match(String(frame.payload.toolCallId), /^tool-/); }
+	assert.deepEqual(errors, []);
 });
 
 test("real Pi queue withdrawal cancels managed delivery and releases successor without replay", { timeout: 15_000 }, async (t) => {
@@ -309,12 +343,17 @@ class FakeRelay {
 				...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}) } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : []), ...(this.enableApprovals ? ["approval-v1"] : [])];
+				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : []), ...(this.enableApprovals ? ["approval-v1", "host-control-v1"] : [])];
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active",
 					...(capabilities.length ? { capabilities } : {}), ...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
 		} else if (["host.run.observe", "host.run.confirm", "host.approval.answer"].includes(envelope.type)) {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "host.acknowledge", payload: {} }));
+		} else if (envelope.type === "host.request") {
+			const operation = (envelope.payload.action as { operation: string }).operation;
+			const response = operation === "host.status" ? { version: "1.0.0", requestId: envelope.payload.requestId, ok: true, data: { hostId: "host", relayState: "ready", accountState: "pending", capabilities: ["host-control-v1"] } }
+				: { version: "1.0.0", requestId: envelope.payload.requestId, ok: false, error: { code: "denied", message: "Operator denied this exact call", retryable: false } };
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "host.result", payload: { operation, response } }));
 		} else if (envelope.type === "input.acknowledge") {
 			if (this.cancelledDeliveries.has(String(envelope.payload.deliveryId))) {
 				socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { code: "invalid_state", message: "Managed delivery acknowledgement regressed", retryable: false } }));
@@ -664,7 +703,7 @@ test("binding readiness cannot outrun a failed durable catch-up barrier", async 
 	assert.equal(barrierCalls, 1); assert.equal(readyFrames, 0); assert.equal(client.matrixBindingPending, true);
 });
 
-test("only the coordinator profile exposes the bounded managed lifecycle tools", () => {
+test("project and coordinator expose the same compact host controls without coordinator engineering tools", () => {
 	for (const role of ["ordinary_adapter", "coordinator_adapter"] as const) {
 		const commands = new Map<string, unknown>();
 		const tools: string[] = [];
@@ -677,14 +716,9 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 			on: (event: string) => handlers.push(event),
 		} as unknown as ExtensionAPI;
 		createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: "/tmp/relay.sock" })(api);
-		assert.deepEqual([...commands.keys()], ["remote"]);
+		assert.deepEqual([...commands.keys()], ["host", "remote"]);
 		assert.equal(commands.has("remote-off"), false);
-		assert.deepEqual(tools, role === "ordinary_adapter" ? ["remote_artifact_export", "remote_checkpoint"] : [
-			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_project_reconcile_preview", "remote_project_reconcile_apply",
-			"remote_project_space_cleanup", "remote_project_create", "remote_worktree_list", "remote_worktree_create", "remote_worktree_conversation_create",
-			"remote_worktree_remove_preview", "remote_worktree_remove_apply", "remote_worktree_cleanup_preview", "remote_worktree_cleanup_apply",
-			"remote_worktree_branch_delete", "remote_session_start", "remote_session_resume", "remote_session_stop", "remote_session_refresh", "remote_session_delete",
-		]);
+		assert.deepEqual(tools, ["managed_host", "remote_session_delete", ...(role === "ordinary_adapter" ? ["remote_artifact_export", "remote_checkpoint"] : [])]);
 		assert.deepEqual(entryRenderers, [CHECKPOINT_ENTRY_TYPE]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));
 	}
@@ -822,6 +856,21 @@ test("failed checkpoint projection keeps its origin persisted for reconnect reco
 	assert.equal(restoreDeliveries(branch).get(deliveryId)?.status, "persisted");
 	assert.equal([...restoreCheckpoints(branch).values()].at(-1)?.status, "offered");
 	assert.equal(relay.frames.some((frame) => frame.type === "input.acknowledge" && frame.payload.deliveryId === deliveryId && frame.payload.status === "completed"), false);
+	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
+});
+
+test("Matrix slash host delivery cannot invoke the local human command or start a model prompt", async t => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close()); const branch: any[] = [custom("binding", BINDING_ENTRY_TYPE, binding)];
+	const handlers = new Map<string, (...args: any[]) => any>(); let forwarded = 0;
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => {}, registerTool: () => {}, getCommands: () => [{ name: "host", source: "extension" }],
+		appendEntry: (customType: string, data: unknown) => branch.push(custom(`entry-${branch.length}`, customType, data)), sendUserMessage: () => { forwarded++; } } as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const ctx: any = { hasUI: false, isIdle: () => true, sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding" } };
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const deliveryId = deriveDeliveryId(conversationId, "$slash-host");
+	relay.send({ protocolVersion: "1.0.0", role: "relay", messageId: "slash-host", conversationId, type: "input.deliver", payload: { deliveryId, matrixEventId: "$slash-host", kind: "prompt", body: `/host conversation delete ${conversationId} --confirmed`, senderUserId: "@foreign:test" } });
+	await activityWait(() => restoreDeliveries(branch).get(deliveryId)?.status === "completed"); assert.equal(forwarded, 0);
+	assert.equal(relay.frames.some(frame => frame.type === "host.request" || frame.type === "lifecycle.request"), false);
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 });
 

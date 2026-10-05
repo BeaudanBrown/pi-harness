@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import {
 	HOST_CONTROL_VERSION, isHostReadAction, parseHostRequest, parseHostResponse,
-	type HostActor, type HostAction, type HostReadAction, type HostResponse,
+	type HostActor, type HostAction, type HostReadAction, type HostRequest, type HostResponse,
 } from "../live-workspace-contracts.js";
 import { HostPolicy } from "./host-policy.js";
 import type { ModelHostRequest } from "./host-approval-record.js";
@@ -31,6 +31,7 @@ export class HostDispatcher {
 		read: (request: HostReadRequest) => Promise<unknown>;
 		launch?: (action: Extract<HostAction, { operation: "conversation.open" | "conversation.resume" }>) => Promise<unknown>;
 		approve?: (request: ModelHostRequest) => Promise<HostResponse>;
+		humanMutation?: (request: HostRequest) => Promise<unknown>;
 		now?: () => number; requestCapacity?: number;
 	}) {
 		this.options = { ...options };
@@ -86,7 +87,11 @@ export class HostDispatcher {
 				const data = await this.options.launch(request.action);
 				return structuredClone(parseHostResponse(request.action.operation, { version: HOST_CONTROL_VERSION, requestId: id, ok: true, data }));
 			}
-			if (!isHostReadAction(request.action)) throw new HostControlError("upgrade_required", "This relay does not yet support this mutation through host controls");
+			if (!isHostReadAction(request.action)) {
+				if (request.actor.kind === "model" || !this.options.humanMutation) throw new HostControlError("upgrade_required", "This relay does not yet support this mutation through host controls");
+				const data = await this.options.humanMutation(request);
+				return structuredClone(parseHostResponse(request.action.operation, { version: HOST_CONTROL_VERSION, requestId: id, ok: true, data }));
+			}
 			const data = await this.options.read({ version: request.version, actor: request.actor, action: request.action });
 			return structuredClone(parseHostResponse(request.action.operation, { version: HOST_CONTROL_VERSION, requestId: id, ok: true, data }));
 		} catch (error) { return hostErrorResponse(id, error); }

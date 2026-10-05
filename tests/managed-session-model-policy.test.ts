@@ -52,6 +52,13 @@ test("cloud startup is unchanged and local startup intersects the active tool se
 	assert.deepEqual(local.active(), ["read", "edit", "remote_checkpoint", "remote_artifact_export"]);
 });
 
+test("local models retain typed approved host tools without delegation capabilities", async () => {
+	const harness = policyHarness(["read", "managed_host", "remote_session_delete", "run_worker"]);
+	await harness.emit("session_start", {}, "local-llm"); assert.deepEqual(harness.active(), ["read", "managed_host", "remote_session_delete"]);
+	assert.equal(await harness.emit("tool_call", { toolName: "managed_host" }, "local-llm"), undefined);
+	assert.deepEqual(await harness.emit("tool_call", { toolName: "run_worker" }, "local-llm"), { block: true, terminate: true, reason: "Tool run_worker is unavailable while using local-llm." });
+});
+
 test("model transitions preserve one normal snapshot and current transport state", async () => {
 	const harness = policyHarness(["read", "edit", "web_search", "github_issue_mutate", "remote_checkpoint", "remote_artifact_export"]);
 	await harness.emit("model_select", { model: { provider: "local-llm" } }, "local-llm");

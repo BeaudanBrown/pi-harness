@@ -7,7 +7,8 @@
         (builtins.filter (name: !(builtins.elem name [ "pi-r" "agentgraph" "lsp" ])) profile.extensions)
       ++ lib.concatMap (name:
         if name == "harness" then [ ''--skill "${harnessRoot}/skills"'' ]
-        else if name == "matt-pocock" then [ ''--skill "${mattSkillsRoot}"'' ] else [ ]) profile.skills
+        else if name == "matt-pocock" then [ ''--skill "${mattSkillsRoot}"'' ]
+        else if name == "managed-host" then [ ''--skill "${harnessRoot}/skills/managed-host"'' ] else [ ]) profile.skills
       ++ lib.optional (builtins.elem "harness" profile.prompts) ''--prompt-template "${harnessRoot}/prompts"''
       ++ lib.optional (builtins.elem "harness" profile.themes) ''--theme "${harnessRoot}/themes"''
     );

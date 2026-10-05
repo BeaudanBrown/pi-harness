@@ -424,7 +424,7 @@ export class HostLifecycle {
 			case "conversation.refresh":
 				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Refresh requires explicit confirmation");
 				return this.refresh(String(request.targetConversationId));
-			case "conversation.stop": return this.stop(String(request.targetConversationId));
+			case "conversation.stop": return this.stopConversation(String(request.targetConversationId));
 			case "conversation.delete": {
 				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Conversation bridge deletion requires explicit confirmation");
 				return this.delete(String(request.targetConversationId));
@@ -1301,7 +1301,7 @@ export class HostLifecycle {
 		}
 	}
 
-	private stop(conversationId: string): Promise<Record<string, unknown>> {
+	stopConversation(conversationId: string): Promise<Record<string, unknown>> {
 		const manifest = this.projectManifest(conversationId);
 		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => this.stopOnce(conversationId));
 	}

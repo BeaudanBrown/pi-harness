@@ -146,7 +146,7 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
-export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1"] as const;
+export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1"] as const;
 export type ManagedSessionCapability = typeof MANAGED_SESSION_CAPABILITIES[number];
 const managedCapabilities = Type.Array(Type.Union(MANAGED_SESSION_CAPABILITIES.map((value) => Type.Literal(value))), { maxItems: MANAGED_SESSION_CAPABILITIES.length, uniqueItems: true });
 const matrixBindingState = Type.Union([Type.Literal("pending"), Type.Literal("bound")]);

@@ -260,7 +260,7 @@ export class ManagedSessionIpcServer {
 						if (!this.preserveAttachmentsOnClose) await this.registry.detach(state.id, state.attachment);
 						return;
 					}
-					state.capabilities = (envelope.payload.requestedCapabilities as string[] | undefined)?.filter((capability) => capability !== "approval-v1" || this.hostApprovalsEnabled);
+					state.capabilities = (envelope.payload.requestedCapabilities as string[] | undefined)?.filter((capability) => !["approval-v1", "host-control-v1"].includes(capability) || this.hostApprovalsEnabled);
 					this.attachedSockets.set(state.attachment.conversationId, socket);
 					this.attachedIdentities.set(state.attachment.conversationId, structuredClone(state.attachment));
 					this.attachedCapabilities.set(state.attachment.conversationId, state.capabilities ?? []);

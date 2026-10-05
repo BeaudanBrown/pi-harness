@@ -195,6 +195,7 @@ export class CoordinatorRouter {
 		const members = candidates.size ? await this.matrix.joinedMemberIds(manifest.roomId, signal) : new Set<string>();
 		const events = authorizedRoomEvents(response, manifest.roomId, new Set([...candidates].filter((sender) => members.has(sender))), true);
 		for (const event of events) {
+			if (this.registry.retirement(manifest.conversationId)) return;
 			if (event.kind === "poll_response") {
 				if (publicationFailed) throw new RelayRegistryError("matrix_unavailable", "Poll identity recovery pending; vote retained in inbox");
 				await this.acceptPoll(manifest, event, signal);
@@ -203,7 +204,7 @@ export class CoordinatorRouter {
 			else await this.accept(manifest, event);
 		}
 		if (!events.length && publicationFailed) throw new RelayRegistryError("matrix_unavailable", "Pending poll publication retained for retry");
-		await this.ensureWake(manifest);
+		if (!this.registry.retirement(manifest.conversationId)) await this.ensureWake(manifest);
 	}
 
 	constructor(
@@ -224,6 +225,7 @@ export class CoordinatorRouter {
 		private readonly operatorDeparted: (manifest: ConversationManifest) => Promise<void> = async () => undefined,
 		private readonly hostApprovalVote: (input: { conversationId: string; roomId: string; pollEventId: string; answerId: string; senderUserId: string; eventId: string }) => Promise<boolean> = async () => false,
 		private readonly accountIntake: (response: unknown) => Promise<void> = async () => undefined,
+		private readonly hostCommand: (manifest: ConversationManifest, eventId: string, sender: string, body: string) => Promise<boolean> = async () => false,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -389,7 +391,7 @@ export class CoordinatorRouter {
 				await this.registry.recordPendingControl(manifest.conversationId, { controlId, matrixEventId: eventId, senderUserId, name: "stop" });
 				await this.registry.acknowledgeControlResult(manifest.conversationId, controlId);
 			}
-			let message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !stop, !abort, !steer <text>."
+			let message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !start, !stop, !close --confirm, !host help, !abort, !steer <text>."
 				: "Managed conversation is already dormant.";
 			if (control.name === "status") {
 				const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
@@ -514,6 +516,12 @@ export class CoordinatorRouter {
 			if (stripped === undefined) return;
 			body = stripped;
 		}
+		// Native slash commands cannot relabel Matrix participants as local operators.
+		if (/^\/host(?:\s|$)/.test(body.trim())) {
+			if (!await this.hostCommand(manifest, event.eventId, event.senderUserId, `!host${body.trim().slice(5)}`)) await this.projectNotice(event.eventId, manifest, "Host commands require an upgraded relay; no local command was run.");
+			return;
+		}
+		if (await this.hostCommand(manifest, event.eventId, event.senderUserId, body)) return;
 		const input = inputKind(body);
 		const control = parseTypedRemoteControl(body);
 		if (control) return this.dispatchControl(manifest, event.eventId, event.senderUserId, control);

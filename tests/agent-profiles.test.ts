@@ -63,7 +63,8 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 
 	const coordinator = resolveAgentProfile("managed-coordinator");
 	assert.equal(coordinator.builtinTools, false);
-	assert.ok(coordinator.tools.length > 0 && coordinator.tools.every((tool) => tool.startsWith("remote_")));
+	assert.deepEqual(coordinator.tools, ["managed_host", "remote_session_delete"]);
+	assert.deepEqual(coordinator.skills, ["managed-host"]);
 	assert.equal(coordinator.tools.includes("remote_checkpoint"), false);
 	assert.equal(coordinator.extensions.includes("lsp"), false);
 

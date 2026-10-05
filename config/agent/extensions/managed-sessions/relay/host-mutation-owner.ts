@@ -1,7 +1,7 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { APPROVAL_LIFETIME_MS, parseHostResponse, type HostAction, type HostReadAction, type HostResult } from "../live-workspace-contracts.js";
-import type { FrozenHostEffects, FrozenJson, HostApprovalRecord, ModelHostRequest } from "./host-approval-record.js";
+import { APPROVAL_LIFETIME_MS, parseHostResponse, type HostAction, type HostReadAction, type HostRequest, type HostResult } from "../live-workspace-contracts.js";
+import type { FrozenHostEffects, FrozenJson, HostApprovalRecord } from "./host-approval-record.js";
 import type { HostMutationOwner } from "./host-approval-runtime.js";
 import type { HostLifecycle } from "./host-lifecycle.js";
 import type { LiveSpacePreview } from "./project-reconciliation.js";
@@ -123,7 +123,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		return true;
 	}
 
-	async freeze(request: ModelHostRequest): Promise<FrozenHostEffects> {
+	async freeze(request: { action: HostAction }): Promise<FrozenHostEffects> {
 		const action = request.action;
 		if ("previewId" in action) {
 			const preview = await this.previewFor(action);
@@ -156,10 +156,17 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		} catch { return false; }
 	}
 
+	async executeHuman(request: HostRequest): Promise<unknown> {
+		if (request.actor.kind === "model") throw new HostControlError("forbidden", "Model mutations require independent consent");
+		return this.executeFrozen(request.action, await this.freeze(request), `operation_${randomUUID().replaceAll("-", "")}`);
+	}
+
 	async execute(record: HostApprovalRecord): Promise<unknown> {
-		const action = record.request.action;
+		return this.executeFrozen(record.request.action, record.frozen, `operation_${record.approvalId.slice("approval_".length)}`);
+	}
+	private async executeFrozen(action: HostAction, frozen: FrozenHostEffects, operationId: string): Promise<unknown> {
 		if ("previewId" in action) {
-			const preview = record.frozen.preconditions.preview as unknown as Preview;
+			const preview = frozen.preconditions.preview as unknown as Preview;
 			if (!await this.validPreview(preview, action.operation === "worktree.branch.delete")) throw stale();
 			let pending = false;
 			if (action.operation === "conversation.delete.apply") {
@@ -178,36 +185,34 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 				} : undefined);
 				pending = bundled;
 			}
-			return { operationId: `operation_${record.approvalId.slice("approval_".length)}`, cleanupState: pending ? "pending" : "complete" };
+			return { operationId, cleanupState: pending ? "pending" : "complete" };
 		}
-		if (!isDeepStrictEqual(record.frozen.effects, [action])) throw stale();
+		if (!isDeepStrictEqual(frozen.effects, [action])) throw stale();
 		if (action.operation === "coordinator.membership.restore") {
 			if (!this.options.account) throw new HostControlError("upgrade_required", "Account membership owner is unavailable");
-			return this.options.account.restoreMembership(record.frozen.preconditions.restore as unknown as MembershipRestore);
+			return this.options.account.restoreMembership(frozen.preconditions.restore as unknown as MembershipRestore);
 		}
 		if (action.operation === "conversation.delete") {
-			const plan = record.frozen.preconditions.retirement as unknown as RetirementPlan;
+			const plan = frozen.preconditions.retirement as unknown as RetirementPlan;
 			if (!plan || plan.conversationId !== action.conversationId) throw stale();
 			const retired = await this.options.retirement.retirePrepared(plan);
 			return { conversationId: action.conversationId, retirementId: retired.retirementId,
 				cleanupState: !retired.cleanup ? "complete" : retired.cleanup.some((effect) => effect.phase === "blocked") ? "failed" : "pending" };
 		}
 		if (action.operation === "project.create" || action.operation === "conversation.create" || action.operation === "worktree.create" || action.operation === "worktree.conversation.create") {
-			return this.options.lifecycle.executeCreation(action, record.frozen.preconditions.creation!);
+			return this.options.lifecycle.executeCreation(action, frozen.preconditions.creation!);
 		}
 		if (!["conversation.open", "conversation.resume", "conversation.stop", "conversation.refresh"].includes(action.operation)) throw new HostControlError("upgrade_required", "This host mutation owner is not available yet");
 		const target = action as Extract<HostAction, { operation: "conversation.open" | "conversation.resume" | "conversation.stop" | "conversation.refresh" }>;
 		// Synchronous target recheck and lifecycle admission have no intervening await.
-		if (!isDeepStrictEqual(this.target(target.conversationId), record.frozen.preconditions.target)) throw stale();
+		if (!isDeepStrictEqual(this.target(target.conversationId), frozen.preconditions.target)) throw stale();
 		if (target.operation === "conversation.open") return this.options.lifecycle.openConversation(target.conversationId);
 		if (target.operation === "conversation.resume") return this.options.lifecycle.resumeConversation(target.conversationId);
 		if (target.operation === "conversation.refresh") {
-			const saved = record.frozen.preconditions.target as { attachmentId: string | null };
+			const saved = frozen.preconditions.target as { attachmentId: string | null };
 			return this.options.lifecycle.refreshApproved(target.conversationId, saved.attachmentId ?? undefined);
 		}
-		await this.options.lifecycle.request({ protocolVersion: "1.0.0", messageId: record.approvalId,
-			conversationId: record.request.actor.conversationId, role: "coordinator_adapter", type: "lifecycle.request",
-			payload: { request: { operation: "conversation.stop", targetConversationId: target.conversationId } } });
+		await this.options.lifecycle.stopConversation(target.conversationId);
 		return { conversationId: target.conversationId, runtimeState: "stopped" };
 	}
 }

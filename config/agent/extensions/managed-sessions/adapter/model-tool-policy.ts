@@ -2,7 +2,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 
 export const MANAGED_LOCAL_MODEL_TOOLS_ENV = "PI_MANAGED_LOCAL_MODEL_TOOLS";
 export const RESTRICTED_MODEL_PROVIDER = "local-llm";
-export const MANAGED_TRANSPORT_TOOLS = ["remote_checkpoint", "remote_artifact_export"] as const;
+// Host tools cannot send tasks to another model; mutations retain independent consent.
+export const MANAGED_TRANSPORT_TOOLS = ["remote_checkpoint", "remote_artifact_export", "managed_host", "remote_session_delete"] as const;
 
 const MAX_POLICY_TOOLS = 64;
 const TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;

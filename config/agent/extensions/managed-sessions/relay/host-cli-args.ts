@@ -18,10 +18,13 @@ export function hostControlHelp(): string {
 			return `  ${schema.properties.operation.const.replaceAll(".", " ")} ${args.join(" ")}`.trimEnd();
 		}), "", "Single conversation IDs are exact positionals. Bulk IDs are comma-separated.",
 		"--confirmed is a flag. --relative-cwd defaults to empty. Inventory limit/cursor are optional.",
+		"Legacy delete/close <conversation-id> --confirm aliases perform permanent canonical retirement.",
 		"Host policy and supported capabilities may restrict listed actions."].join("\n");
 }
 
-export function parseHostCliArgs(argv: readonly string[]): { request: HostRequest; json: boolean } | { help: true; json: false } {
+export function parseHostCliArgs(input: readonly string[]): { request: HostRequest; json: boolean } | { help: true; json: false } {
+	// Legacy deletion spellings retain canonical retirement, never unbinding.
+	const argv = input[0] === "delete" || input[0] === "close" ? ["conversation", "delete", ...input.slice(1).map(a => a === "--confirm" ? "--confirmed" : a)] : input;
 	if (argv.length > 256 || argv.reduce((size, value) => size + Buffer.byteLength(value), 0) > 60 * 1024) invalid("Host command exceeds argument bounds");
 	const args: string[] = []; let json = false; let help = false; let requestId: string | undefined;
 	for (let i = 0; i < argv.length; i++) {
