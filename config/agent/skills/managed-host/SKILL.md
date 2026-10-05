@@ -23,6 +23,18 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
   scope requires a new preview and new consent. Branch deletion is separate.
 - Use a fresh creation key for a genuinely new conversation; a retry must retain
   its original identity. Creation is not permission to scaffold or publish files.
+- To split the current project conversation into a new worktree and Matrix room,
+  use `worktree.conversation.fork`. Get the current conversation ID from `help`;
+  use its exact `sourceConversationId`, `rootKey` and `workspace`, a new branch,
+  explicit committed `baseRef`, creation key, title, and concise `summary`.
+  Summarize goals, decisions and relevant context; do not paste raw history,
+  thinking, tool logs, credentials or pending approvals. The summary is visible
+  in Pi and Matrix. No uncommitted files or execution state are copied. The new
+  conversation stays idle until the next message; do not automatically continue
+  its task. This is separate from native `/fork` or a same-room context reset.
+  Consent displays the summary and frozen base/source generation; oversized
+  approval details fail rather than being truncated. Inspect partial results
+  before explicitly retrying the same creation identity with fresh consent.
 - Coordinator membership recovery requires its own explicit confirmed action;
   leaving the coordinator never retires it or authorizes automatic reinvitation.
 

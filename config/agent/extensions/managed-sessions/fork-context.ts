@@ -6,22 +6,26 @@ import { ConversationIdSchema, GenerationIdSchema } from "./identity-contracts.j
 
 export const FORK_CONTEXT_TYPE = "managed-session.fork-context";
 export const FORK_SUMMARY_MAX_BYTES = 8192;
+export const ForkSummarySchema = Type.String({ minLength: 1, maxLength: 4096 });
+export function parseForkSummary(value: unknown): string {
+	if (!Check(ForkSummarySchema, value) || !value.trim() || Buffer.byteLength(value, "utf8") > FORK_SUMMARY_MAX_BYTES || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) throw new Error("Invalid fork context summary");
+	return value;
+}
 export const ForkContextSchema = Type.Object({
 	version: Type.Literal(1),
 	sourceConversationId: ConversationIdSchema,
 	sourceGenerationId: GenerationIdSchema,
 	baseCommit: Type.String({ pattern: "^(?:[a-f0-9]{40}|[a-f0-9]{64})$" }),
-	summary: Type.String({ minLength: 1, maxLength: 4096 }),
+	summary: ForkSummarySchema,
 }, { additionalProperties: false });
 export type ForkContext = Static<typeof ForkContextSchema>;
 
 /** Explicit context only: no source-file reads, binding import, or execution port. */
 export function parseForkContext(value: unknown): ForkContext {
-	if (!Check(ForkContextSchema, value) || !value.summary.trim() ||
-		Buffer.byteLength(value.summary, "utf8") > FORK_SUMMARY_MAX_BYTES ||
-		/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.summary)) {
+	if (!Check(ForkContextSchema, value)) {
 		throw new Error("Invalid fork context");
 	}
+	parseForkSummary(value.summary);
 	return { version: 1, sourceConversationId: value.sourceConversationId, sourceGenerationId: value.sourceGenerationId,
 		baseCommit: value.baseCommit, summary: value.summary };
 }

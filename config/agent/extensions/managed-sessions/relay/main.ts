@@ -392,6 +392,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				coordinator: { launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(),
 					sessionFile: coordinatorValues[1]!.trim(), workspaceDirectory: coordinatorValues[0]!.trim() },
 				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
+				stageForkNotice: (manifest, sourceId, body) => eventProjector.stageForkNotice(manifest, sourceId, body),
 				generationReady: async (conversationId) => coordinatorRouter?.attachmentReady(conversationId),
 				endOperationFeedback: (conversationId, operationId) => activityProjector!.endOperationFeedback(conversationId, operationId),
 				retireConversation: (conversationId) => {

@@ -23,6 +23,21 @@ const request = (previewId: string): ModelHostRequest => ({ version: "1.0.0", ac
 	generationId: `generation_${"a".repeat(32)}`, runId: "run", toolCallId: "tool", presentation: "local_dialog" },
 	action: { operation: "worktree.branch.delete", previewId, confirmed: true } });
 
+test("split fork consent binds source origin, exact summary, generation and committed base", async () => {
+	const action = { operation: "worktree.conversation.fork" as const, creationKey: "fork", rootKey: "projects", workspace: "main", title: "New room", sourceConversationId: conversationId, baseRef: "main", branch: "topic", summary: "Explicit inherited summary" };
+	let generation = `generation_${"a".repeat(32)}`; let executions = 0;
+	const lifecycle = { freezeCreation: async () => ({ context: { version: 1, sourceConversationId: conversationId, sourceGenerationId: generation, baseCommit: "b".repeat(40), summary: action.summary } }), executeCreation: async () => { executions++; return {}; } } as unknown as HostLifecycle;
+	const owner = new ManagedHostMutationOwner({ registry: {} as RelayRegistry, lifecycle, retirement: {} as ConversationRetirement, server: { attachment: () => undefined } });
+	const input: ModelHostRequest = { ...request("unused"), action };
+	await assert.rejects(owner.freeze({ action }), /originate/);
+	await assert.rejects(owner.freeze({ ...input, actor: { ...input.actor, conversationId: `conv_${"f".repeat(32)}` } }), /originate/);
+	const frozen = await owner.freeze(input); const record = prepareHostApproval("host", input, frozen, 1000);
+	const question = hostApprovalQuestion(record); assert.ok(question.includes(action.summary)); assert.ok(question.includes("b".repeat(40))); assert.ok(question.includes(generation)); assert.match(question, /idle until next message/);
+	assert.equal(await owner.revalidate(record), true); generation = `generation_${"c".repeat(32)}`;
+	assert.equal(await owner.revalidate(record), false); assert.equal(executions, 0);
+	await assert.rejects(owner.executeHuman(input), /independent consent/);
+});
+
 test("coordinator recovery freezes the exact fresh self-departure behind independent consent", async t => {
 	const root = await mkdtemp(join(tmpdir(), "account-membership-")); let departure = "$first"; let invitations = 0;
 	const coordinatorId = deriveConversationId("host", "coordinator");

@@ -336,6 +336,17 @@ Confirmed deletion permanently retires the identity, stops only proven owned
 processes, and retries exact room/Space cleanup. Saved Pi/Matrix histories,
 workspaces and project files are preserved; this is not unbind-only deletion. The relay pins managed tmux operations to `XDG_RUNTIME_DIR`, matching the existing interactive `tmux_project` server. Marked live conversation windows appear as additional candidates in that same launcher and switch the requesting client to the existing Pi process; selection never creates or resumes work, and dormant conversations remain lifecycle-only. A confirmation-gated host operation previews and removes only marked windows from the obsolete `/tmp` tmux socket during the one-time deployment cutover.
 
+To split work from a Matrix project conversation, ask its agent to use
+`managed_host` operation `worktree.conversation.fork` with a concise summary,
+explicit committed base ref and new branch/title. Independent approval freezes
+the summary and Git/source identities. This creates a new worktree and room,
+posts the summary as visible initial context, and leaves the new Pi idle until
+another message. Source files/conversation stay untouched; uncommitted changes,
+raw session history and pending execution are not copied. Direct operators can
+also use `pi-managed-session worktree conversation fork` with the same explicit
+fields. This is not native room-preserving `/fork`. See
+[split-fork evidence](docs/managed-split-fork-evidence.md).
+
 Managed room controls retain Pi's established control semantics while using
 host-owned room routing: ordinary text is an idle prompt or steering input for the active run; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. Status combines a typed live adapter snapshot with relay-authoritative conversation, generation, saved/requested model and thinking, queue, checkpoint, connection, redacted launch-failure, and reconciliation state; it explicitly flags a runtime/requested-model mismatch without exposing paths, credentials, prompts, arguments, output, or reasoning. Only live agent activity starts Matrix typing; control handling and slash-command dispatch do not. Durable per-room inboxes and frozen notice delivery isolate rate-limit failures from other rooms and generation completion; see [Matrix reliability](docs/managed-matrix-reliability.md). State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new --confirm` creates a fresh generation while preserving the room and prior Pi session files. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
 queued during wake cancels that wake input. The `remote_checkpoint` tool emits

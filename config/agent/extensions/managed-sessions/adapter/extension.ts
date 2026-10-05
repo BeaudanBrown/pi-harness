@@ -440,7 +440,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		};
 
 		const managedHost = async (toolCallId: string, action: HostAction | "help") => {
-			if (action === "help") return { content: [{ type: "text" as const, text: managedHostHelp() }], details: {} };
+			if (action === "help") return { content: [{ type: "text" as const, text: `${managedHostHelp()}\nCurrent conversation: ${binding?.conversationId ?? "unbound"}` }], details: {} };
 			if (!binding || !client?.connected || !client.supports("host-control-v1") || !client.supports("approval-v1")) throw new ManagedAdapterError("Managed host controls require an upgraded connected relay");
 			const identity = hostRun.identity(toolCallId);
 			if (!identity) throw new ManagedAdapterError("Managed host tool call has no live native identity");

@@ -19,6 +19,9 @@ import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { projectSpaceAlias } from "../config/agent/extensions/managed-sessions/relay/project-spaces.js";
 import { TranscriptProjector } from "../config/agent/extensions/managed-sessions/relay/transcript-projector.js";
+import { RelayEventProjector } from "../config/agent/extensions/managed-sessions/relay/event-projector.js";
+import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
+import { FORK_CONTEXT_TYPE, forkContextText } from "../config/agent/extensions/managed-sessions/fork-context.js";
 
 // Keep the existing workspace/session shell fixtures, but require the production exact ABI.
 // These IPC fixtures model process exit as already observed; race/unknown cases have separate tests.
@@ -303,6 +306,76 @@ test("bundled worktree conversation creation and cleanup recover forward without
 	assert.deepEqual({ workspaceRemoved: cleaned.workspaceRemoved, bridgeDeleted: cleaned.bridgeDeleted }, { workspaceRemoved: true, bridgeDeleted: true });
 	assert.equal(registry.manifestByConversationId(conversationId), undefined); assert.equal(await readFile(sessionFile, "utf8"), history, "bundled cleanup preserves Pi history");
 	assert.equal((await lifecycle.request(lifecycleEnvelope(coordinatorId, { operation: "worktree.branch.delete", removalKey: preview.removalKey, confirmed: true }))).branchDeleted, true);
+});
+
+test("split fork recovers seeded construction into one committed worktree and idle independent room", { timeout: 30000 }, async t => {
+	const realLauncher = process.env.PI_MANAGED_TEST_LAUNCHER; if (!realLauncher) return t.skip("packaged launcher unavailable");
+	const root = await mkdtemp(join(tmpdir(), "split-fork-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const workspaceRoot = join(root, "roots"), main = join(workspaceRoot, "project"), sessions = join(root, "sessions"), record = join(root, "launched.json");
+	await mkdir(main, { recursive: true });
+	const git = (...args: string[]) => execFileSync("git", ["-C", main, ...args], { encoding: "utf8" }).trim();
+	git("init", "-b", "main"); git("config", "user.email", "fixture@example.com"); git("config", "user.name", "Fixture");
+	await writeFile(join(main, "tracked"), "committed"); git("add", "."); git("commit", "-m", "base"); const baseCommit = git("rev-parse", "HEAD");
+	await writeFile(join(main, "tracked"), "staged"); git("add", "."); await writeFile(join(main, "tracked"), "unstaged"); await writeFile(join(main, "untracked"), "private dirty file"); const dirty = git("status", "--porcelain");
+	const registry = new RelayRegistry(hostId, join(root, "runtime"), new ConversationManifestStore(join(root, "manifests"))); await registry.load();
+	const sourceId = deriveConversationId(hostId, "source");
+	const source: ConversationManifest = { schemaVersion: "1.0.0", kind: "project", conversationId: sourceId, ownerHostId: hostId, creationKey: "source", concept: "Source", piSessionId: "source-session", roomId: "!source:example.com", bindingBoundaryEntryId: deriveTranscriptEntryId("source-session", "boundary"), createdAt: new Date().toISOString(), placement: { rootKey: "projects", workspace: "project", relativeCwd: "" } };
+	await registry.createProjectConversation(source, "a".repeat(32));
+	const state = { rooms: ["!fork-space:example.com", "!fork-room:example.com"], createCalls: 0 }; const provisioning = provisioningFixture(matrixConfig.botUserId, state);
+	const sends: Array<{ transaction: string; body: string }> = [];
+	const matrix = new ManagedMatrixClient(matrixConfig, async (input, init) => {
+		const handled = await provisioning(input, init); if (handled) return handled;
+		const path = new URL(String(input)).pathname;
+		if (path.includes("/send/m.room.message/")) sends.push({ transaction: path, body: JSON.parse(String(init?.body)).body });
+		return Response.json({ event_id: "$sent" });
+	}, [], { maxAttempts: 1 });
+	const launcher = join(root, "launcher"); const calls = join(root, "calls.jsonl");
+	await writeFile(launcher, `#!${process.execPath}\nconst fs=require('node:fs'),cp=require('node:child_process');let text='';process.stdin.on('data',c=>text+=c).on('end',()=>{const v=JSON.parse(text),op=process.argv[3],record=${JSON.stringify(record)};fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({op,value:v})+'\\n');let result;
+if(op==='root-resolve') result={sessionName:'project',workspacePath:${JSON.stringify(main)}};
+else if(op==='window-inspect-exact') result=fs.existsSync(record)?{conversationId:v.conversationId,exists:true,ownership:JSON.parse(fs.readFileSync(record)).ownership}:{conversationId:v.conversationId,exists:false};
+else if(op==='window-check-exact') result={state:'match'};
+else if(op==='window-create-exact'){const ownership={conversationId:v.conversationId,launchId:v.launchId,serverId:'123:456:${"a".repeat(32)}',sessionName:'project',windowId:'@7',paneId:'%8',panePid:'789',processBootId:'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',processStartTicks:'123'};fs.writeFileSync(record,JSON.stringify({conversationId:v.conversationId,nonce:process.env.PI_MANAGED_SESSION_ATTACHMENT_NONCE,ownership}));result={conversationId:v.conversationId,sessionName:'project',windowId:'@7',paneId:'%8',rootKey:v.placement.rootKey,workspace:v.placement.workspace,relativeCwd:v.placement.relativeCwd,role:'conversation',ownership};}
+else {try {process.stdout.write(cp.execFileSync(${JSON.stringify(realLauncher)},['managed',op],{input:text,env:process.env}));} catch(error) {fs.appendFileSync(${JSON.stringify(calls)},JSON.stringify({error:String(error.stderr)})+'\\n');throw error;}return;}console.log(JSON.stringify(result));});\n`, { mode: 0o700 });
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "ipc") }); await server.start(); t.after(() => server.close());
+	let projector = new RelayEventProjector(registry, matrix); const outbox = join(root, "notices.json"); await projector.startNoticeOutbox(outbox, () => {}); t.after(() => projector.close());
+	let failAfterStage = true;
+	const options = { hostId, launcher, projectSessionDirectory: sessions, socketPath: server.socketPath, registry, matrix, server,
+		environment: { ...process.env, PI_MANAGED_TEST_WORKSPACE_ROOT: workspaceRoot, PI_MANAGED_TEST_TMUX_SOCKET: `unused-split-fork-${process.pid}`, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: workspaceRoot }) },
+		stageForkNotice: async (manifest: ConversationManifest, id: string, body: string) => { await projector.stageForkNotice(manifest, id, body); if (failAfterStage) throw Error("crash after durable seed and notice, before registration"); } };
+	let lifecycle = new HostLifecycle(options);
+	const action = { operation: "worktree.conversation.fork" as const, creationKey: "split", rootKey: "projects", workspace: "project", sourceConversationId: sourceId, title: "Independent", baseRef: "main", branch: "fork-topic", summary: "Goal: parser. Context only; no task started." };
+	await assert.rejects(lifecycle.executeCreation(action, await lifecycle.freezeCreation(action)), asyncError => {
+		assert.match(String(asyncError), /crash after durable seed/); return true;
+	}).catch(async error => { throw new Error(`${error}\nLauncher fixture log: ${await readFile(calls, "utf8")}`); });
+	await projector.close(); assert.equal(sends.length, 0, "unregistered destination notices are held, not discarded or sent");
+	assert.equal(registry.listManifests().length, 1); assert.equal(state.createCalls, 2);
+	await assert.rejects(lifecycle.freezeCreation({ ...action, summary: "changed after consent" }), /context conflicts/);
+	failAfterStage = false; projector = new RelayEventProjector(registry, matrix); await projector.startNoticeOutbox(outbox, () => {}); lifecycle = new HostLifecycle(options);
+	const attaching = attachFromRecord(record, server, registry); const result = await lifecycle.executeCreation(action, await lifecycle.freezeCreation(action)) as { conversationId: string; roomLink: string }; const socket = await attaching; t.after(() => socket.destroy());
+	assert.notEqual(result.conversationId, sourceId); assert.match(result.roomLink, /fork-room/);
+	assert.deepEqual(registry.manifestByConversationId(sourceId), source); assert.equal(git("rev-parse", "HEAD"), baseCommit); assert.equal(git("status", "--porcelain"), dirty);
+	const target = registry.manifestByConversationId(result.conversationId)!; const targetPath = join(workspaceRoot, target.placement!.workspace);
+	assert.equal(await readFile(join(targetPath, "tracked"), "utf8"), "committed"); await assert.rejects(readFile(join(targetPath, "untracked")), /ENOENT/);
+	assert.deepEqual(registry.pendingInputs(result.conversationId), []);
+	const entries = (await readFile(join(sessions, result.conversationId, "session.jsonl"), "utf8")).trim().split("\n").map(line => JSON.parse(line));
+	const seed = entries.find(entry => entry.customType === FORK_CONTEXT_TYPE); assert.ok(seed); assert.equal(entries.length, 3);
+	assert.equal(seed.details.baseCommit, baseCommit); const { contextId: _contextId, ...inherited } = seed.details; assert.equal(seed.content, forkContextText(inherited));
+	await projector.close(); projector = new RelayEventProjector(registry, matrix); await projector.startNoticeOutbox(outbox, () => {});
+	for (let n = 0; n < 100 && !sends.length; n++) await new Promise(resolve => setTimeout(resolve, 10));
+	assert.equal(sends.length, 1); assert.ok(sends[0].body.includes(action.summary));
+	await lifecycle.executeCreation(action, await lifecycle.freezeCreation(action));
+	assert.equal(state.createCalls, 2); assert.equal(sends.length, 1, "explicit retry does not duplicate initialized context or its notice");
+	const invoked = (await readFile(calls, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+	assert.equal(invoked.filter(call => call.op === "window-create-exact").length, 1);
+	assert.ok(invoked.filter(call => call.op === "worktree-create-apply").every(call => !('context' in call.value) && !('summary' in call.value)), "summary never enters Git launcher authority");
+	const retirement = new ConversationRetirement({ registry, matrix, server, windows: lifecycle.exactWindows, matrixAuthenticated: () => true }); t.after(() => retirement.close());
+	await registry.retireConversation(result.conversationId, retirement.prepare(result.conversationId).targets);
+	const beforeRetiredRetry = (await readFile(calls, "utf8")).split("\n").filter(line => line.includes('"op":"worktree-create-apply"')).length;
+	await assert.rejects(lifecycle.executeCreation(action, await lifecycle.freezeCreation(action)), /retired/);
+	assert.equal((await readFile(calls, "utf8")).split("\n").filter(line => line.includes('"op":"worktree-create-apply"')).length, beforeRetiredRetry, "target tombstone wins before further Git effects");
+	await projector.stageForkNotice(target, "retirement-late-notice", "Do not publish"); await projector.close(); assert.equal(sends.length, 1);
+	await registry.retireConversation(sourceId, retirement.prepare(sourceId).targets);
+	await assert.rejects(lifecycle.freezeCreation(action), /retired|not found/);
 });
 
 test("idempotent Matrix provisioning recovers an uncertain create response without a duplicate Space", async () => {

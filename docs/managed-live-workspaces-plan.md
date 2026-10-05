@@ -81,10 +81,11 @@ the recorded construction/summary effects, without duplicating rooms or summarie
 or replaying a model action. Summary initialization is silent.
 
 No Matrix equivalent of native room-preserving `/fork` is required. #114 retains
-ownership of native navigation; its proposed prepare/commit/recovery IPC amendment
-has not been approved. #125 owns this independent split-fork feature and blocks
-#121 cumulative acceptance. Neither feature is implemented by this amendment;
-no deployment, push or live traffic is authorized.
+ownership of native navigation; its scoped prepare/commit/recovery IPC amendment
+was subsequently approved for implementation under the existing restrictions.
+#125 owns this independent split-fork feature and blocks #121 cumulative acceptance.
+See the contract and issue evidence for implementation status; this amendment
+itself is not verification. No deployment, push or live traffic is authorized.
 
 ## 4. Transcript and notification contract
 

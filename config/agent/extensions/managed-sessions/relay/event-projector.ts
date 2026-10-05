@@ -6,6 +6,7 @@ import {
 	deriveMatrixTransactionId,
 	deriveTranscriptEntryId,
 	type ManagedSessionEnvelope,
+	type ConversationManifest,
 } from "../contracts.js";
 import { renderRemoteCheckpoint, renderRemoteCheckpointPollQuestion, validateRemoteCheckpoint } from "../checkpoint.js";
 import { CheckpointPollPublisher } from "./checkpoint-poll-publisher.js";
@@ -21,7 +22,12 @@ export class RelayEventProjector {
 
 	async startNoticeOutbox(path: string, diagnostic: (message: string) => void): Promise<void> {
 		this.notices = new NoticeOutbox(path, async (notice) => {
-			if (!this.registry.manifestByConversationId(notice.conversationId)) return;
+			const manifest = this.registry.manifestByConversationId(notice.conversationId);
+			if (!manifest) {
+				if (notice.awaitRegistration && !this.registry.retirement(notice.conversationId)) throw new RelayRegistryError("not_found", "Fork destination registration is pending");
+				return;
+			}
+			if (notice.awaitRegistration && manifest.roomId !== notice.roomId) throw new RelayRegistryError("invalid_state", "Fork destination room changed");
 			await this.project(notice.conversationId, notice.piSessionId, notice.roomId, `notice:${notice.sourceId}`, "notice", notice.body, undefined, notice.disposition);
 		}, diagnostic);
 		await this.notices.load(); this.notices.start();
@@ -85,6 +91,12 @@ export class RelayEventProjector {
 				sourceKey, "checkpoint", renderRemoteCheckpoint(checkpoint), payload.originDeliveryId, this.checkpointDisposition());
 		}
 		await this.registry.acknowledgeInput(manifest.conversationId, payload.originDeliveryId, "completed", origin.piEntryId);
+	}
+
+	/** Persist before destination registration: a crash cannot leave a seeded room without its summary notice. */
+	async stageForkNotice(manifest: ConversationManifest, sourceId: string, body: string): Promise<void> {
+		if (!this.notices) throw new RelayRegistryError("invalid_state", "Durable fork summary publication is unavailable");
+		await this.notices.enqueue({ conversationId: manifest.conversationId, sourceId, piSessionId: manifest.piSessionId, roomId: manifest.roomId, body, disposition: "silent", awaitRegistration: true });
 	}
 
 	async projectNotice(conversationId: string, sourceId: string, body: string, disposition: "silent" | "notify" = "silent"): Promise<void> {

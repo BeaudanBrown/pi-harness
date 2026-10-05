@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
 import { ConversationIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
+import { ForkSummarySchema, parseForkSummary } from "./fork-context.js";
 
 export const HOST_CONTROL_VERSION = "1.0.0" as const;
 export const HOST_CONTROL_FRAME_BYTES = 64 * 1024;
@@ -36,6 +37,7 @@ export const HostActionSchema = Type.Union([
 	action("worktree.list", { ...workspace, ...page }),
 	action("worktree.create", { ...workspace, creationKey: identifier, baseRef: gitRef, branch: gitRef }),
 	action("worktree.conversation.create", { ...workspace, ...creation, baseRef: gitRef, branch: gitRef }),
+	action("worktree.conversation.fork", { ...workspace, ...creation, sourceConversationId: ConversationIdSchema, baseRef: gitRef, branch: gitRef, summary: ForkSummarySchema }),
 	action("worktree.remove.preview", { ...workspace, mergeTarget: Type.Optional(gitRef) }),
 	action("worktree.remove.apply", preview),
 	action("worktree.conversation.cleanup.preview", { ...target, mergeTarget: Type.Optional(gitRef) }),
@@ -138,6 +140,7 @@ export const HostResultSchemas = {
 	"worktree.list": listResult(strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout"), branch: Type.Optional(gitRef), locked: Type.Boolean(), availability })),
 	"worktree.create": strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout") }),
 	"worktree.conversation.create": created,
+	"worktree.conversation.fork": strict({ ...created.properties, roomLink: text(512) }),
 	"worktree.remove.preview": previewResult,
 	"worktree.remove.apply": cleanup,
 	"worktree.conversation.cleanup.preview": previewResult,
@@ -195,6 +198,7 @@ export function parseHostAction(value: unknown): HostAction {
 	const result = validate<HostAction>(HostActionSchema, value);
 	const placement = "placement" in result ? result.placement : "workspace" in result ? result : undefined;
 	if (placement) validatePlacement(placement);
+	if (result.operation === "worktree.conversation.fork") parseForkSummary(result.summary);
 	if ("title" in result && /[\u0000-\u001f\u007f]/.test(result.title)) throw new Error("Invalid title");
 	return result;
 }

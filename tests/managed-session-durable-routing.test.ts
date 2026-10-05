@@ -14,6 +14,22 @@ async function until(check: () => boolean): Promise<void> {
 	assert.ok(check(), "condition timed out");
 }
 
+test("staged fork notices preserve exact payload and registration hold across restart", async t => {
+	const root = await mkdtemp(join(tmpdir(), "fork-notice-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const path = join(root, "notices.json");
+	const notice = { conversationId: `conv_${"a".repeat(32)}`, sourceId: "fork-context", piSessionId: "initial-session", roomId: "!fork:test", body: "Summary", disposition: "silent" as const, awaitRegistration: true as const };
+	const first = new NoticeOutbox(path, async () => { throw new RelayRegistryError("not_found", "registration pending"); }, () => {});
+	await first.load(); await first.enqueue(notice); await first.close();
+	assert.equal(JSON.parse(await readFile(path, "utf8")).notices[0].sent, false);
+	let sends = 0;
+	const second = new NoticeOutbox(path, async saved => { assert.equal(saved.awaitRegistration, true); assert.equal(saved.body, notice.body); sends++; }, () => {}); await second.load();
+	await assert.rejects(second.enqueue({ ...notice, body: "Changed" }), /frozen payload/);
+	await assert.rejects(second.enqueue({ ...notice, piSessionId: "later-generation" }), /frozen payload/);
+	await assert.rejects(second.enqueue({ ...notice, awaitRegistration: undefined }), /frozen payload/);
+	await second.enqueue(notice); await second.close(); assert.equal(sends, 1);
+	assert.equal(JSON.parse(await readFile(path, "utf8")).notices[0].sent, true);
+});
+
 test("durable inbox isolates rooms, retains order and resumes accepted work across restart", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "managed-inbox-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const path = join(root, "inbox.json"); const delivered: unknown[] = [];

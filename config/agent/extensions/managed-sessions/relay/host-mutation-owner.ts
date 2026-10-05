@@ -129,8 +129,9 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		return true;
 	}
 
-	async freeze(request: { action: HostAction }): Promise<FrozenHostEffects> {
+	async freeze(request: { action: HostAction; actor?: HostRequest["actor"] }): Promise<FrozenHostEffects> {
 		const action = request.action;
+		if (action.operation === "worktree.conversation.fork" && (!request.actor || request.actor.kind !== "human_local" && request.actor.conversationId !== action.sourceConversationId)) throw new HostControlError("forbidden", "Fork summaries must originate in their source conversation");
 		if ("previewId" in action) {
 			const preview = await this.previewFor(action);
 			if (!await this.validPreview(preview, action.operation === "worktree.branch.delete")) throw stale();
@@ -147,7 +148,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			case "conversation.open": case "conversation.resume": case "conversation.stop": case "conversation.refresh":
 				if (action.operation === "conversation.refresh" && this.options.registry.manifestByConversationId(action.conversationId)?.kind === "coordinator") throw new HostControlError("upgrade_required", "Coordinator refresh is unavailable");
 				return { effects: [action], preconditions: { target: this.target(action.conversationId) } };
-			case "project.create": case "conversation.create": case "worktree.create": case "worktree.conversation.create":
+			case "project.create": case "conversation.create": case "worktree.create": case "worktree.conversation.create": case "worktree.conversation.fork":
 				return { effects: [action], preconditions: { creation: await this.options.lifecycle.freezeCreation(action) } };
 			case "conversation.delete":
 				return { effects: [action], preconditions: { retirement: detached(this.options.retirement.prepare(action.conversationId)) } };
@@ -205,7 +206,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			return { conversationId: action.conversationId, retirementId: retired.retirementId,
 				cleanupState: !retired.cleanup ? "complete" : retired.cleanup.some((effect) => effect.phase === "blocked") ? "failed" : "pending" };
 		}
-		if (action.operation === "project.create" || action.operation === "conversation.create" || action.operation === "worktree.create" || action.operation === "worktree.conversation.create") {
+		if (action.operation === "project.create" || action.operation === "conversation.create" || action.operation === "worktree.create" || action.operation === "worktree.conversation.create" || action.operation === "worktree.conversation.fork") {
 			return this.options.lifecycle.executeCreation(action, frozen.preconditions.creation!);
 		}
 		if (!["conversation.open", "conversation.resume", "conversation.stop", "conversation.refresh"].includes(action.operation)) throw new HostControlError("upgrade_required", "This host mutation owner is not available yet");

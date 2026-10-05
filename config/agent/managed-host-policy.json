@@ -7,6 +7,7 @@
     "worktree.list": { "human": "direct", "model": "direct" },
     "worktree.create": { "human": "direct", "model": "approval" },
     "worktree.conversation.create": { "human": "direct", "model": "approval" },
+    "worktree.conversation.fork": { "human": "direct", "model": "approval" },
     "worktree.remove.preview": { "human": "direct", "model": "direct" },
     "worktree.remove.apply": { "human": "confirmed", "model": "approval" },
     "worktree.conversation.cleanup.preview": { "human": "direct", "model": "direct" },

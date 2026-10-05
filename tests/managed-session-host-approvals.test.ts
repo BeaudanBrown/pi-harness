@@ -59,6 +59,7 @@ test("create, launch, refresh, reconciliation and destructive bundles all requir
 		{ operation: "conversation.delete", conversationId, confirmed: true }, { operation: "conversation.delete.apply", previewId, confirmed: true },
 		{ operation: "worktree.create", rootKey: "projects", workspace: "main", creationKey: "worktree", baseRef: "main", branch: "feature" },
 		{ operation: "worktree.conversation.create", rootKey: "projects", workspace: "main", creationKey: "bundle", baseRef: "main", branch: "feature", title: "Bundle" },
+		{ operation: "worktree.conversation.fork", rootKey: "projects", workspace: "main", creationKey: "fork", sourceConversationId: conversationId, baseRef: "main", branch: "fork", title: "Fork", summary: "Context only" },
 		{ operation: "worktree.remove.apply", previewId, confirmed: true }, { operation: "worktree.conversation.cleanup.apply", previewId, confirmed: true },
 		{ operation: "worktree.branch.delete", previewId, confirmed: true }, { operation: "space.reconcile.apply", previewId, confirmed: true },
 		{ operation: "space.cleanup.apply", previewId, confirmed: true }, { operation: "coordinator.membership.restore", confirmed: true },

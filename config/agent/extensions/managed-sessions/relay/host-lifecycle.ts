@@ -21,7 +21,7 @@ import {
 	type WorkspaceIdentity,
 } from "../contracts.js";
 import { deriveCheckoutId } from "../managed-provenance.js";
-import { FORK_CONTEXT_TYPE, forkContextEntry, parseForkContext, verifyForkContextEntry, type ForkContext } from "../fork-context.js";
+import { FORK_CONTEXT_TYPE, forkContextEntry, forkContextId, forkContextText, parseForkContext, verifyForkContextEntry, type ForkContext } from "../fork-context.js";
 import { parseHostAction, type HostAction, type HostResult } from "../live-workspace-contracts.js";
 import type { FrozenJson } from "./host-approval-record.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
@@ -164,11 +164,12 @@ interface WorktreePlan {
 	targetPath: string; baseRef: string; baseCommit: string; branch: string;
 }
 
-type CreationAction = Extract<HostAction, { operation: "project.create" | "conversation.create" | "worktree.create" | "worktree.conversation.create" }>;
-interface FrozenWorktreeCreation { intent?: WorktreeCreationIntent; plan?: WorktreePlan }
+type CreationAction = Extract<HostAction, { operation: "project.create" | "conversation.create" | "worktree.create" | "worktree.conversation.create" | "worktree.conversation.fork" }>;
+interface FrozenWorktreeCreation { intent?: WorktreeCreationIntent; plan?: WorktreePlan; context?: ForkContext }
+type WorktreeCreationRequest = { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string; context?: ForkContext };
 
 interface WorktreeCreationIntent extends WorktreePlan {
-	creationKey: string; requestedBaseRef: string; worktreeKey: string; phase: "planned" | "created"; concept?: string; conversationCreationKey?: string;
+	creationKey: string; requestedBaseRef: string; worktreeKey: string; phase: "planned" | "created"; concept?: string; conversationCreationKey?: string; context?: ForkContext;
 }
 
 interface WorktreeRemovalIntent {
@@ -202,14 +203,16 @@ function parseWorktreeCreationIntent(value: unknown): WorktreeCreationIntent {
 	const item = value as Record<string, unknown>;
 	const planFields = ["rootKey", "sourceWorkspace", "projectWorkspace", "targetWorkspace", "commonDir", "mainPath", "targetPath", "baseRef", "baseCommit", "branch"];
 	const plan = parseWorktreePlan(Object.fromEntries(planFields.map((field) => [field, item[field]])));
-	const allowed = new Set([...planFields, "creationKey", "requestedBaseRef", "worktreeKey", "phase", "concept", "conversationCreationKey"]);
+	const allowed = new Set([...planFields, "creationKey", "requestedBaseRef", "worktreeKey", "phase", "concept", "conversationCreationKey", "context"]);
 	if (Object.keys(item).some((key) => !allowed.has(key)) || !/^worktree_[a-f0-9]{32}$/.test(String(item.worktreeKey)) ||
 		!["planned", "created"].includes(String(item.phase)) || typeof item.creationKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(item.creationKey) ||
 		typeof item.requestedBaseRef !== "string" || item.requestedBaseRef.length > 255 || typeof item.worktreeKey !== "string" ||
 		[item.concept, item.conversationCreationKey].some((field) => field !== undefined && (typeof field !== "string" || field.length < 1 || field.length > 128 || /[\u0000-\u001f\u007f]/.test(field)))) {
 		throw new RelayRegistryError("invalid_state", "Managed worktree creation intent is malformed");
 	}
-	return { ...plan, creationKey: String(item.creationKey), requestedBaseRef: String(item.requestedBaseRef), worktreeKey: String(item.worktreeKey), phase: item.phase as WorktreeCreationIntent["phase"],
+	const context = item.context === undefined ? undefined : parseForkContext(item.context);
+	if (context && (!item.concept || !item.conversationCreationKey || context.baseCommit !== plan.baseCommit)) throw new RelayRegistryError("invalid_state", "Fork creation intent has inconsistent context");
+	return { ...plan, ...(context ? { context } : {}), creationKey: String(item.creationKey), requestedBaseRef: String(item.requestedBaseRef), worktreeKey: String(item.worktreeKey), phase: item.phase as WorktreeCreationIntent["phase"],
 		...(item.concept ? { concept: String(item.concept) } : {}), ...(item.conversationCreationKey ? { conversationCreationKey: String(item.conversationCreationKey) } : {}) };
 }
 
@@ -377,6 +380,7 @@ export class HostLifecycle {
 		server: ManagedSessionIpcServer;
 		environment?: NodeJS.ProcessEnv;
 		projectNotice?: (sourceId: string, manifest: ConversationManifest, body: string) => Promise<void>;
+		stageForkNotice?: (manifest: ConversationManifest, sourceId: string, body: string) => Promise<void>;
 		generationReady?: (conversationId: string) => Promise<void>;
 		generationRetryMs?: number;
 		attachmentTimeoutMs?: number;
@@ -840,13 +844,25 @@ export class HostLifecycle {
 		if (action.operation === "conversation.create") return JSON.parse(JSON.stringify({ existing: existing ?? null, workspace: await this.resolveWorkspaceIdentity(action.placement) })) as FrozenJson;
 		const file = new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), "worktrees", `${lifecycleDigest("worktree-intent", action.creationKey)}.json`), parseWorktreeCreationIntent);
 		const intent = await readPrivateIntent(file);
+		const fork = action.operation === "worktree.conversation.fork";
+		if (fork && !this.options.stageForkNotice) throw new RelayRegistryError("invalid_state", "Durable fork summary publication is unavailable");
+		const source = fork ? this.forkSource(action.sourceConversationId, action.rootKey, action.workspace) : undefined;
 		if (intent) {
 			if (intent.rootKey !== action.rootKey || intent.sourceWorkspace !== action.workspace || intent.requestedBaseRef !== action.baseRef || intent.branch !== action.branch ||
-				intent.concept !== (action.operation === "worktree.conversation.create" ? action.title : undefined)) throw new RelayRegistryError("invalid_state", "Worktree creation identity conflicts with its saved intent");
-			return JSON.parse(JSON.stringify({ intent })) as FrozenJson;
+				intent.concept !== (action.operation === "worktree.conversation.create" || fork ? action.title : undefined)) throw new RelayRegistryError("invalid_state", "Worktree creation identity conflicts with its saved intent");
+			const context = fork ? parseForkContext({ version: 1, sourceConversationId: source!.conversationId, sourceGenerationId: this.options.registry.activeGeneration(source!).generationId, baseCommit: intent.baseCommit, summary: action.summary }) : undefined;
+			if (!isDeepStrictEqual(intent.context, context)) throw new RelayRegistryError("invalid_state", "Fork creation context conflicts with its saved intent");
+			return JSON.parse(JSON.stringify({ intent, ...(context ? { context } : {}) })) as FrozenJson;
 		}
 		const plan = parseWorktreePlan(await this.invoke("worktree-create-preview", { rootKey: action.rootKey, workspace: action.workspace, baseRef: action.baseRef, branch: action.branch }));
-		return JSON.parse(JSON.stringify({ plan })) as FrozenJson;
+		const context = fork ? parseForkContext({ version: 1, sourceConversationId: source!.conversationId, sourceGenerationId: this.options.registry.activeGeneration(source!).generationId, baseCommit: plan.baseCommit, summary: action.summary }) : undefined;
+		return JSON.parse(JSON.stringify({ plan, ...(context ? { context } : {}) })) as FrozenJson;
+	}
+
+	private forkSource(conversationId: string, rootKey: string, workspace: string): ConversationManifest {
+		const source = this.projectManifest(conversationId);
+		if (source.placement?.rootKey !== rootKey || source.placement.workspace !== workspace || this.options.registry.hasGenerationBoundary(conversationId) || this.options.registry.isRefreshing(conversationId)) throw new RelayRegistryError("invalid_state", "Fork source identity is unavailable or transitioning");
+		return source;
 	}
 
 	async executeCreation(action: CreationAction, frozen: FrozenJson): Promise<unknown> {
@@ -856,8 +872,9 @@ export class HostLifecycle {
 		else if (action.operation === "conversation.create") result = await this.start({ creationKey: action.creationKey, concept: action.title, placement: action.placement });
 		else {
 			result = await this.createWorktree({ creationKey: action.creationKey, rootKey: action.rootKey, workspace: action.workspace,
-				baseRef: action.baseRef, branch: action.branch, ...(action.operation === "worktree.conversation.create" ? { concept: action.title } : {}) },
-				action.operation === "worktree.conversation.create", frozen as FrozenWorktreeCreation);
+				baseRef: action.baseRef, branch: action.branch, ...(action.operation !== "worktree.create" ? { concept: action.title } : {}),
+				...(action.operation === "worktree.conversation.fork" ? { context: (frozen as FrozenWorktreeCreation).context! } : {}) },
+				action.operation !== "worktree.create", frozen as FrozenWorktreeCreation);
 			if (action.operation === "worktree.create") {
 				const workspace = String(result.workspace); const identity = await this.resolveWorkspaceIdentity({ rootKey: action.rootKey, workspace, relativeCwd: "" });
 				return { rootKey: action.rootKey, workspace, checkoutId: deriveCheckoutId(this.options.hostId, identity.projectKey, identity.workspacePath) };
@@ -865,20 +882,21 @@ export class HostLifecycle {
 		}
 		const conversationId = String(result.targetConversationId); const launchId = this.options.registry.launchIdentity(conversationId)?.launchId;
 		if (!launchId) throw new RelayRegistryError("invalid_state", "Created conversation has no managed launch identity");
-		return { conversationId, launchId, setupState: "pending" };
+		return { conversationId, launchId, setupState: "pending", ...(action.operation === "worktree.conversation.fork" ? { roomLink: String(result.roomLink) } : {}) };
 	}
 
-	private createWorktree(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean, frozen?: FrozenWorktreeCreation): Promise<Record<string, unknown>> {
+	private createWorktree(request: WorktreeCreationRequest, bundled: boolean, frozen?: FrozenWorktreeCreation): Promise<Record<string, unknown>> {
 		return this.runWorktreeOperation(`create:${request.creationKey}`, () => this.createWorktreeOnce(request, bundled, frozen), JSON.stringify([request, bundled, frozen]));
 	}
 
-	private async createWorktreeOnce(request: { creationKey: string; rootKey: string; workspace: string; baseRef: string; branch: string; concept?: string }, bundled: boolean, frozen?: FrozenWorktreeCreation): Promise<Record<string, unknown>> {
+	private async createWorktreeOnce(request: WorktreeCreationRequest, bundled: boolean, frozen?: FrozenWorktreeCreation): Promise<Record<string, unknown>> {
 		if (bundled !== Boolean(request.concept)) throw new RelayRegistryError("invalid_state", "Bundled worktree creation requires one conversation concept");
 		const intentPath = join(resolve(this.options.projectSessionDirectory), "worktrees", `${lifecycleDigest("worktree-intent", request.creationKey)}.json`);
 		const file = new AtomicJsonFile(intentPath, parseWorktreeCreationIntent);
 		let intent = await readPrivateIntent(file); const retry = intent !== undefined;
 		if (frozen && !isDeepStrictEqual(intent, frozen.intent)) throw new RelayRegistryError("invalid_state", "Approved worktree intent changed before admission");
 		if (intent) {
+			if (!isDeepStrictEqual(intent.context, request.context)) throw new RelayRegistryError("invalid_state", "Fork creation retry conflicts with its saved context");
 			for (const [field, value] of Object.entries({ creationKey: request.creationKey, rootKey: request.rootKey, sourceWorkspace: request.workspace, requestedBaseRef: request.baseRef, branch: request.branch,
 				...(request.concept ? { concept: request.concept } : {}) })) if ((intent as unknown as Record<string, unknown>)[field] !== value) {
 				throw new RelayRegistryError("invalid_state", "Worktree creation retry conflicts with its durable intent");
@@ -888,17 +906,26 @@ export class HostLifecycle {
 			if (frozen && !isDeepStrictEqual(plan, frozen.plan)) throw new RelayRegistryError("invalid_state", "Approved worktree base or placement changed before admission");
 			const worktreeKey = `worktree_${lifecycleDigest("worktree", this.options.hostId, plan.rootKey, plan.commonDir, plan.branch)}`;
 			const conversationCreationKey = request.concept ? `worktree-conversation-${lifecycleDigest("worktree-conversation", worktreeKey, request.concept)}` : undefined;
-			intent = { ...plan, creationKey: request.creationKey, requestedBaseRef: request.baseRef, worktreeKey, phase: "planned", ...(request.concept ? { concept: request.concept, conversationCreationKey } : {}) };
+			intent = { ...plan, creationKey: request.creationKey, requestedBaseRef: request.baseRef, worktreeKey, phase: "planned", ...(request.concept ? { concept: request.concept, conversationCreationKey } : {}), ...(request.context ? { context: parseForkContext(request.context) } : {}) };
 			await ensureWorktreeIntentCapacity(dirname(intentPath)); await file.write(intent);
 		}
-		const created = await this.runWorktreeOperation(`repository:${intent.commonDir}`, () => this.invoke("worktree-create-apply", { ...intent, resumeExisting: retry }));
+		const admitted = intent;
+		const created = await this.runWorktreeOperation(`repository:${intent.commonDir}`, () => {
+			if (admitted.context) {
+				const source = this.forkSource(admitted.context.sourceConversationId, admitted.rootKey, admitted.sourceWorkspace);
+				if (this.options.registry.activeGeneration(source).generationId !== admitted.context.sourceGenerationId) throw new RelayRegistryError("invalid_state", "Fork source generation changed before admission");
+				this.options.registry.manifestByCreationKey(admitted.conversationCreationKey!); // Retirement fence before Git effects.
+			}
+			const { context: _context, ...launcherIntent } = admitted;
+			return this.invoke("worktree-create-apply", { ...launcherIntent, resumeExisting: retry });
+		});
 		if (created.rootKey !== intent.rootKey || created.workspace !== intent.targetWorkspace || created.branch !== intent.branch || created.baseCommit !== intent.baseCommit ||
 			Object.keys(created).some((field) => !["rootKey", "workspace", "branch", "baseCommit"].includes(field))) throw new RelayRegistryError("launch_failed", "Worktree launcher returned an invalid creation result");
 		if (intent.phase !== "created") { intent = { ...intent, phase: "created" }; await file.write(intent); }
 		if (!bundled) return { operation: "worktree.create", worktreeKey: intent.worktreeKey, rootKey: intent.rootKey, workspace: intent.targetWorkspace, branch: intent.branch, baseCommit: intent.baseCommit };
 		const conversationCreationKey = intent.conversationCreationKey; const concept = intent.concept;
 		if (!conversationCreationKey || !concept) throw new RelayRegistryError("invalid_state", "Bundled worktree creation lost its conversation identity");
-		const started = await this.start({ creationKey: conversationCreationKey, concept, placement: { rootKey: intent.rootKey, workspace: intent.targetWorkspace, relativeCwd: "" } });
+		const started = await this.start({ creationKey: conversationCreationKey, concept, placement: { rootKey: intent.rootKey, workspace: intent.targetWorkspace, relativeCwd: "" }, ...(intent.context ? { context: intent.context } : {}) });
 		const conversationId = String(started.targetConversationId); const manifest = this.projectManifest(conversationId);
 		const roomLink = `https://matrix.to/#/${encodeURIComponent(manifest.roomId)}`;
 		return { operation: "worktree.conversation.create", worktreeKey: intent.worktreeKey, rootKey: intent.rootKey, workspace: intent.targetWorkspace,
@@ -1129,25 +1156,31 @@ export class HostLifecycle {
 			conversationState: this.options.registry.conversationState(manifest.conversationId), roomLink };
 	}
 
-	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
+	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity; context?: ForkContext },
 		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
 		return this.runWorktreeOperation(this.workspaceOperationKey(request.placement), () => this.startOnce(request, provisioned),
-			`create:${deriveConversationId(this.options.hostId, request.creationKey)}:${JSON.stringify([request.concept, request.placement])}`);
+			`create:${deriveConversationId(this.options.hostId, request.creationKey)}:${JSON.stringify([request.concept, request.placement, request.context])}`);
 	}
 
-	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
+	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity; context?: ForkContext },
 		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
 		const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
 		const existing = this.options.registry.manifestByCreationKey(request.creationKey);
 		if (existing) {
 			if (existing.kind !== "project" || existing.conversationId !== conversationId || existing.concept !== request.concept ||
 				JSON.stringify(existing.placement) !== JSON.stringify(request.placement)) throw new RelayRegistryError("invalid_state", "Conversation start retry conflicts with existing identity");
+			if (request.context) {
+				const seed = await durableProjectSession(join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl"), (await this.resolveWorkspaceIdentity(request.placement)).cwd, conversationId, request.creationKey, request.concept, 1, true, request.context);
+				if (!this.options.stageForkNotice) throw new RelayRegistryError("invalid_state", "Fork summary publication is unavailable");
+				await this.options.stageForkNotice({ ...existing, piSessionId: seed.sessionId }, forkContextId(request.context), forkContextText(request.context));
+			}
 			await this.resumeOnce(existing.conversationId);
 			return { operation: "conversation.start", targetConversationId: existing.conversationId, conversationState: this.options.registry.conversationState(existing.conversationId) };
 		}
 		const resolved = await this.resolveWorkspaceIdentity(request.placement);
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
-		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept);
+		if (request.context && !this.options.stageForkNotice) throw new RelayRegistryError("invalid_state", "Fork summary publication is unavailable");
+		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept, 1, false, request.context);
 		const identity = provisioned ?? resolved;
 		const matrixBinding = provisioned ?? await this.provisionConversationMatrix(conversationId, request.concept, resolved, request.creationKey);
 		const { projectSpace, roomId } = matrixBinding;
@@ -1161,6 +1194,7 @@ export class HostLifecycle {
 			...(matrixBinding.checkoutId ? { checkoutId: matrixBinding.checkoutId, checkoutSpace: matrixBinding.checkoutSpace } : {}), bindingBoundaryEntryId: session.boundaryEntryId, createdAt,
 			activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: session.sessionId, bindingBoundaryEntryId: session.boundaryEntryId, createdAt }],
 		};
+		if (request.context) await this.options.stageForkNotice!(manifest, forkContextId(request.context), forkContextText(request.context));
 		await this.options.registry.createProjectConversation(manifest, nonce);
 		await this.launchProject(manifest, nonce, sessionFile);
 		return { operation: "conversation.start", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };

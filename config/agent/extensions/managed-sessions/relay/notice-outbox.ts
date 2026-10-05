@@ -1,12 +1,13 @@
+import { isDeepStrictEqual } from "node:util";
 import { AtomicJsonFile } from "./atomic-json.js";
 import { RelayRegistryError } from "./registry.js";
 
-export type Notice = { conversationId: string; sourceId: string; piSessionId: string; roomId: string; body: string; sent: boolean; disposition?: "silent" | "notify"; blocked?: true };
+export type Notice = { conversationId: string; sourceId: string; piSessionId: string; roomId: string; body: string; sent: boolean; disposition?: "silent" | "notify"; blocked?: true; awaitRegistration?: true };
 type State = { version: 1; notices: Notice[] };
 function parse(value: unknown): State {
 	const state = value as State;
 	if (!state || state.version !== 1 || Object.keys(state).some((key) => !["version", "notices"].includes(key)) || !Array.isArray(state.notices) || state.notices.length > 4096 ||
-		state.notices.some((item) => !item || ["conversationId", "sourceId", "piSessionId", "roomId", "body"].some((key) => typeof item[key as keyof Notice] !== "string") || typeof item.sent !== "boolean" || (item.disposition !== undefined && item.disposition !== "silent" && item.disposition !== "notify") || (item.blocked !== undefined && item.blocked !== true) || Object.keys(item).some((key) => !["conversationId", "sourceId", "piSessionId", "roomId", "body", "sent", "blocked", "disposition"].includes(key))) ||
+		state.notices.some((item) => !item || ["conversationId", "sourceId", "piSessionId", "roomId", "body"].some((key) => typeof item[key as keyof Notice] !== "string") || typeof item.sent !== "boolean" || (item.disposition !== undefined && item.disposition !== "silent" && item.disposition !== "notify") || (item.blocked !== undefined && item.blocked !== true) || (item.awaitRegistration !== undefined && item.awaitRegistration !== true) || Object.keys(item).some((key) => !["conversationId", "sourceId", "piSessionId", "roomId", "body", "sent", "blocked", "disposition", "awaitRegistration"].includes(key))) ||
 		new Set(state.notices.map((item) => JSON.stringify([item.conversationId, item.sourceId]))).size !== state.notices.length || Buffer.byteLength(JSON.stringify(state)) > 16 * 1024 * 1024) throw new Error("Invalid or full managed notice outbox");
 	return state;
 }
@@ -25,7 +26,12 @@ export class NoticeOutbox {
 	async enqueue(notice: Omit<Notice, "sent">): Promise<void> {
 		if (this.stopped) throw new Error("Notice outbox is shutting down; retry after reconnect");
 		await this.mutate((state) => {
-			if (!state.notices.some((item) => item.conversationId === notice.conversationId && item.sourceId === notice.sourceId)) state.notices.push({ ...notice, sent: false });
+			const existing = state.notices.find(item => item.conversationId === notice.conversationId && item.sourceId === notice.sourceId);
+			if (existing && (existing.awaitRegistration || notice.awaitRegistration)) {
+				const { sent: _sent, blocked: _blocked, ...payload } = existing;
+				if (!isDeepStrictEqual(payload, notice)) throw new RelayRegistryError("invalid_state", "Fork initialization notice conflicts with its frozen payload");
+			}
+			if (!existing) state.notices.push({ ...notice, sent: false });
 		});
 		this.drain();
 	}

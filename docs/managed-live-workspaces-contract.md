@@ -450,7 +450,7 @@ approved by the operator for #111.
 
 ## Matrix split-fork amendment (#125; approved 2026-10-05)
 
-This is a new-operation target, not implemented protocol. Matrix fork creates a
+The typed `worktree.conversation.fork` operation creates a
 new branch/worktree from a frozen committed Git base and a new conversation/room,
 with an explicit bounded summary as initial Pi context and a visible destination
 Matrix message. It does not perform native `/fork`, clone the source transcript,
@@ -469,9 +469,28 @@ cannot create another room, duplicate the summary, expand scope or revive retire
 identities. Do not accept target input before context initialization is durable.
 Publish the summary silently, with stable delivery identity.
 
-#125 owns implementation and concrete wire/storage contracts, separate from #114
-native navigation. The proposed native generation-navigation handoff remains
-unapproved. Deployment/live acceptance remains separately gated under #120/#121.
+Fields are `rootKey`, `workspace`, `creationKey`, `title`, `sourceConversationId`,
+`baseRef`, `branch`, and `summary` (4096 characters / 8192 UTF-8 bytes). Model and
+Matrix-human callers must originate in that source conversation; local humans may
+supply an explicit source. The source must be a nontransitioning project at the
+specified checkout. Source generation and base commit are frozen by the owner,
+not supplied as caller authority. Approval shows the literal summary once and
+rejects oversized displays without truncation. Result includes `conversationId`,
+`launchId`, `setupState`, and `roomLink`.
+
+The existing worktree intent stores an optional strict context seed. It is never
+forwarded to the Git launcher. The seed is atomically published as a visible native
+Pi custom-message alongside the new session/binding boundary. A silent notice is
+persisted before registration with `awaitRegistration:true`; unknown registration
+holds that notice, retirement discards it, and an unrelated replacement room is
+refused. No registration exposes a session missing its initial context. Retries
+must match the initial Pi session and exact frozen notice, even after later
+navigation. Existing notices without this field retain their semantics; older
+strict readers are not a supported downgrade.
+
+#125 owns this implementation, separate from #114 native navigation. The operator
+has now approved #114's scoped native handoff; implementation remains separate.
+Deployment/live acceptance remains separately gated under #120/#121.
 
 ## Version and rollout boundary
 

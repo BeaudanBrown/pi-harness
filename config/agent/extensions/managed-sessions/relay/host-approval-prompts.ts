@@ -1,4 +1,6 @@
 import { deriveMatrixTransactionId } from "../contracts.js";
+import { isDeepStrictEqual } from "node:util";
+import { parseForkContext } from "../fork-context.js";
 import type { HostApprovalRecord } from "./host-approval-record.js";
 import type { HostApprovalPresentation } from "./host-approvals.js";
 import { HostControlError } from "./host-control-error.js";
@@ -14,9 +16,14 @@ const answers = [{ id: "approve", text: "Approve" }, { id: "deny", text: "Deny" 
 export function hostApprovalQuestion(record: HostApprovalRecord): string {
 	// JSON quoting plus escaped terminal/bidi controls keeps labels from masquerading as instructions.
 	const effects = record.frozen.effects;
-	const details = record.request.action.operation === "conversation.delete.apply" && effects.every((effect) => effect.operation === "conversation.delete")
+	let details = record.request.action.operation === "conversation.delete.apply" && effects.every((effect) => effect.operation === "conversation.delete")
 		? `${JSON.stringify(record.request.action)}\nDelete these exact conversations:\n${effects.map((effect) => effect.conversationId).join("\n")}`
 		: JSON.stringify({ action: record.request.action, effects, ...(record.frozen.targets ? { targets: record.frozen.targets } : {}) });
+	if (record.request.action.operation === "worktree.conversation.fork") {
+		if (!isDeepStrictEqual(effects, [record.request.action])) throw new HostControlError("unavailable", "Fork approval effects changed", false);
+		const context = parseForkContext((record.frozen.preconditions.creation as { context?: unknown } | undefined)?.context);
+		details = JSON.stringify({ action: record.request.action, baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId, targetBehavior: "New independent room; inherited summary only; idle until next message" });
+	}
 	const safe = details.replace(/[\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 	const question = `Approve this host mutation?\n${safe}\nApproval: ${record.approvalId}\nExpires: ${new Date(record.expiresAt).toISOString()}`;
 	if (question.length > 4096) throw new HostControlError("unavailable", "Approval details exceed the display limit; request a smaller explicit action", false);
