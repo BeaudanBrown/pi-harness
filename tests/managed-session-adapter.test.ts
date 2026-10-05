@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -53,6 +53,47 @@ import {
 	publishAloopLifecycleEvent,
 	registerManagedAloopAbortDelegate,
 } from "../config/agent/extensions/managed-sessions/aloop-lifecycle.js";
+
+test("real Pi blocks saved switches/imports in both bound roles without changing unbound navigation", { timeout: 15000 }, async t => {
+	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
+	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
+	const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
+	for (const bound of [true, false]) for (const role of ["ordinary_adapter", "coordinator_adapter"] as const) {
+		const relay = await FakeRelay.start();
+		let session: any;
+		try {
+			const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+			const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(relay.root, "auth.json"), modelsPath: join(relay.root, "models.json"), modelsStorePath: join(relay.root, "store.json") });
+			const path = join(relay.root, "bound.jsonl"); await writeFile(path, JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: relay.root, timestamp: new Date().toISOString() }) + "\n");
+			const sm = sdk.SessionManager.open(path, relay.root); const boundary = sm.appendCustomEntry(BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION });
+			if (bound) sm.appendCustomEntry(BINDING_ENTRY_TYPE, { ...binding, role, sessionId: sm.getSessionId(), bindingBoundaryEntryId: deriveTranscriptEntryId(sm.getSessionId(), boundary) });
+			const loader = new sdk.DefaultResourceLoader({ cwd: relay.root, agentDir: relay.root, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+				extensionFactories: [createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })] });
+			await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
+			({ session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader, settingsManager, sessionManager: sm,
+				modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: [] }));
+			await session.bindExtensions({});
+			const runtime = new sdk.AgentSessionRuntime(session, { cwd: relay.root, agentDir: relay.root }, async () => { throw Error("A bound session must not be replaced"); });
+			const originalAbort = session.abort.bind(session); let aborts = 0; session.abort = async () => { aborts++; };
+			try {
+				if (!bound) {
+					assert.deepEqual(await runtime.emitBeforeSwitch("resume", join(relay.root, "other.jsonl")), { cancelled: false });
+					assert.deepEqual(await runtime.emitBeforeSwitch("new"), { cancelled: false });
+					continue;
+				}
+				assert.deepEqual(await runtime.switchSession(join(relay.root, "does-not-exist.jsonl")), { cancelled: true }, "native resume veto precedes reading the selected file");
+				const imports = join(relay.root, "imports"); await mkdir(imports); const input = join(imports, "other.jsonl"); await writeFile(input, "must not be imported");
+				assert.deepEqual(await runtime.importFromJsonl(input), { cancelled: true });
+				await assert.rejects(readFile(join(relay.root, "other.jsonl")), /ENOENT/, "import is vetoed before copying history");
+				assert.equal(runtime.session, session); assert.equal(sm.getSessionId(), sessionId); assert.equal(aborts, 0);
+				assert.equal(relay.frames.filter(frame => frame.type === "attachment.detach").length, 0);
+			} finally { session.abort = originalAbort; }
+		} finally {
+			if (session) { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); }
+			await relay.close();
+		}
+	}
+});
 
 test("real Pi native events attest a current tool and headless approval fails promptly without invented consent", { timeout: 15000 }, async (t) => {
 	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");

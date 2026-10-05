@@ -1171,6 +1171,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			setStatus(ctx);
 		}
 
+		// Native hook covers /resume, /sesh, imports and extension/API switches.
+		// Veto before Pi opens/replaces history or aborts the current agent run.
+		pi.on("session_before_switch", (event, ctx) => {
+			if (binding && event.reason === "resume") {
+				notify(ctx, "Saved-session switching is unavailable while bound. Select another managed conversation through the launcher, or open unbound history in a separate local session.", "warning");
+				return { cancel: true };
+			}
+		});
+
 		pi.on("session_start", async (event, ctx) => {
 			closingActivities.clear(); // Session-local feedback never crosses a binding/session switch.
 			const sessionId = ctx.sessionManager.getSessionId();
