@@ -1,7 +1,7 @@
 # Host presentation evidence (#115)
 
-Status: runtime observation, two-way title synchronization and Matrix prefix
-writes implemented; paired review and final canonical verification pending. No deployment or
+Status: #115 implementation, paired review/remediation and deterministic final
+verification complete. Deployment and actual client acceptance remain #120/#121. No deployment or
 live-account traffic is authorized. #114 native handoff remains separately approved.
 
 ## Ownership
@@ -176,8 +176,21 @@ tests, zero skips**.
 `.pi/tmp/workers/2026-10-05T23-24-31-199Z-presentation-final-canonical-7523f82fdab9/`
 `.pi/tmp/workers/2026-10-05T23-25-59-209Z-presentation-bridge-packaging-remediation-49dae3684bd6/`
 
-Remaining: rerun final canonical verification after the packaging correction.
-No #115 completion or live Matrix acceptance is claimed yet.
+## Final verification
+
+After all code, review remediation and packaging fixes, `nix run .#verify` passed
+**all 12 canonical groups**, including **503 managed + 87 bridge tests, zero skips**.
+`.pi/tmp/workers/2026-10-05T23-28-05-267Z-presentation-final-canonical-corrected-758487d622be/`.
+Managed Nix log: `/nix/store/m9qb7jwzc593l3752kicmwmwj2grc9hb-pi-harness-managed-session-tests.drv`;
+bridge Nix log: `/nix/store/ad01paysmbllgbrkhl1jypmk0l9s65k9-pi-bridge-chat-tests.drv`.
+
+Implementation commits: runtime observer `73f2062`, title/presentation `5c7aaf6`,
+review remediation `1a3629e`, bridge packaging `0c2526a`; external read-only
+launcher observation remains `f4c43cf`. No pushes or live-account effects occurred.
+Project source LSP checks were clean; unrelated immutable SDK-example module,
+external Go-workspace and remote settings-schema diagnostics were not changed.
+#115 deterministic completion does not claim Matrix phone/UI notification acceptance,
+deployment, native handoff completion, or epic completion.
 
 The original no-push, no deployment/service restart, no live-account traffic and
 no nix-dotfiles evaluation/build restrictions remain. Direct Go tests and harness
