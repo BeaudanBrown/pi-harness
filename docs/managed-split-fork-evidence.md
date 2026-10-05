@@ -90,8 +90,23 @@ the broader run includes all real-Pi tests. Fixture failures during development
 were missing unused tmux-socket configuration and incorrectly nested exact-launch
 placement fields; both were corrected without weakening production validation.
 
-Issue-boundary review and final canonical gate remain pending. No deployment/live
-traffic or native-navigation code changes occurred. #114's scoped protocol is now
-approved but remains a separate implementation boundary.
+## Review disposition
+
+Exhaustive paired audit at `2b6621b`:
+`.pi/tmp/reviews/2026-10-05T12-39-25-205Z-audit-2b6621b0b077-4099c454dc8b/`.
+
+- **Standards:** two medium/current-issue findings, both accepted and fixed in one
+  batch. Context identities now use the prescribed length-framed live-v1 domain
+  and 32-hex suffix, pinned by a golden vector. Earlier unreleased experimental
+  seeds require explicit recovery rather than automatic history/transaction
+  rewriting. Approval now displays the summary once as literal text rather than
+  JSON escapes; unsafe control/format characters are rejected at validation.
+- **Spec:** no findings. Actual Matrix/phone acceptance remains deployment-only.
+
+Remediation checks passed **15 tests, zero skips**, including real Pi idle context:
+`.pi/tmp/workers/2026-10-05T12-45-09-719Z-split-fork-review-remediation-b63e4941cc1d/`.
+These are bounded corrections, not a changed design requiring routine re-review.
+Final canonical gate remains pending. No deployment/live traffic or native-navigation
+code changes occurred. #114's scoped protocol is now approved but remains separate.
 Final canonical gate runs after implementation/review remediation. Deterministic
 Pi/IPC/Git/Matrix-port fixtures are not actual Matrix/phone acceptance.

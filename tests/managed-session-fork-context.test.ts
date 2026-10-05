@@ -17,12 +17,14 @@ test("fork context is explicit, bounded and cannot import execution state", () =
 	assert.notEqual(parseForkContext(context), context, "return a detached value");
 	for (const value of [null, { ...context, binding: {} }, { ...context, approvals: [] }, { ...context, summary: " " },
 		{ ...context, summary: "x".repeat(4097) }, { ...context, summary: "界".repeat(3000) }, { ...context, summary: "hidden\u0000text" },
-		{ ...context, baseCommit: "main" }, { ...context, sourceGenerationId: "latest" }]) assert.throws(() => parseForkContext(value), /Invalid fork context/);
+		{ ...context, baseCommit: "main" }, { ...context, sourceGenerationId: "latest" },
+		...["\u0085", "\u202e", "\u2066", "\u200f", "\r", "\ud800"].map(control => ({ ...context, summary: `unsafe${control}summary` }))]) assert.throws(() => parseForkContext(value), /Invalid fork context/);
 	assert.equal(parseForkContext({ ...context, summary: "界".repeat(2000) }).summary.length, 2000);
 });
 
 test("fork context content and seed identity are frozen without normalizing away differences", () => {
 	const reordered = { summary: context.summary, baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId, sourceConversationId: context.sourceConversationId, version: 1 as const };
+	assert.equal(forkContextId(context), "fork_context_d78f2e7fbbe8ebf4ff58f00bbac14f04", "length-framed live-v1 identity vector");
 	assert.equal(forkContextId(context), forkContextId(reordered));
 	for (const change of [{ summary: `${context.summary}\n` }, { baseCommit: "d".repeat(40) }, { sourceGenerationId: `generation_${"e".repeat(32)}` }, { sourceConversationId: `conv_${"f".repeat(32)}` }]) {
 		assert.notEqual(forkContextId(context), forkContextId({ ...context, ...change }));
@@ -30,6 +32,7 @@ test("fork context content and seed identity are frozen without normalizing away
 	const entry = forkContextEntry(context, "fresh-boundary", timestamp);
 	assert.equal(entry.content, forkContextText(context)); assert.equal(entry.display, true);
 	verifyForkContextEntry(JSON.parse(JSON.stringify(entry)), context, "fresh-boundary");
+	assert.throws(() => verifyForkContextEntry({ ...entry, id: `fork_context_${"a".repeat(64)}` }, context, "fresh-boundary"), /conflicts/, "unreleased legacy seeds require explicit recovery, never automatic rewriting");
 	for (const change of [{ content: "replacement" }, { display: false }, { parentId: "old-binding" }, { details: {} }, { extra: true }]) {
 		assert.throws(() => verifyForkContextEntry({ ...entry, ...change }, context, "fresh-boundary"), /conflicts/);
 	}

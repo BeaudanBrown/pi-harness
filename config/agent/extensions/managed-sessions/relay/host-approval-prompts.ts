@@ -22,7 +22,10 @@ export function hostApprovalQuestion(record: HostApprovalRecord): string {
 	if (record.request.action.operation === "worktree.conversation.fork") {
 		if (!isDeepStrictEqual(effects, [record.request.action])) throw new HostControlError("unavailable", "Fork approval effects changed", false);
 		const context = parseForkContext((record.frozen.preconditions.creation as { context?: unknown } | undefined)?.context);
-		details = JSON.stringify({ action: record.request.action, baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId, targetBehavior: "New independent room; inherited summary only; idle until next message" });
+		const { summary, ...scope } = record.request.action;
+		if (summary !== context.summary || scope.sourceConversationId !== context.sourceConversationId) throw new HostControlError("unavailable", "Fork approval context changed", false);
+		details = JSON.stringify({ action: scope, baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId, targetBehavior: "New independent room; inherited summary only; idle until next message" }) +
+			`\n\nInherited summary (context only):\n${summary}\n\nEnd inherited summary.`;
 	}
 	const safe = details.replace(/[\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 	const question = `Approve this host mutation?\n${safe}\nApproval: ${record.approvalId}\nExpires: ${new Date(record.expiresAt).toISOString()}`;

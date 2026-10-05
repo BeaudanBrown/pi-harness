@@ -8,7 +8,7 @@ export const FORK_CONTEXT_TYPE = "managed-session.fork-context";
 export const FORK_SUMMARY_MAX_BYTES = 8192;
 export const ForkSummarySchema = Type.String({ minLength: 1, maxLength: 4096 });
 export function parseForkSummary(value: unknown): string {
-	if (!Check(ForkSummarySchema, value) || !value.trim() || Buffer.byteLength(value, "utf8") > FORK_SUMMARY_MAX_BYTES || /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value)) throw new Error("Invalid fork context summary");
+	if (!Check(ForkSummarySchema, value) || !value.trim() || Buffer.byteLength(value, "utf8") > FORK_SUMMARY_MAX_BYTES || /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029]|\p{Cf}|\p{Cs}/u.test(value)) throw new Error("Invalid fork context summary");
 	return value;
 }
 export const ForkContextSchema = Type.Object({
@@ -32,8 +32,9 @@ export function parseForkContext(value: unknown): ForkContext {
 
 export function forkContextId(value: ForkContext): string {
 	const context = parseForkContext(value);
-	return `fork_context_${createHash("sha256").update("pi-managed-sessions:fork-context:v1\0")
-		.update(JSON.stringify([context.sourceConversationId, context.sourceGenerationId, context.baseCommit, context.summary])).digest("hex")}`;
+	const hash = createHash("sha256").update("pi-managed-sessions:fork-context:live-v1\0");
+	for (const part of [context.sourceConversationId, context.sourceGenerationId, context.baseCommit, context.summary]) hash.update(`${Buffer.byteLength(part, "utf8")}:`).update(part);
+	return `fork_context_${hash.digest("hex").slice(0, 32)}`;
 }
 
 /** The same literal content is used in Pi and the destination's silent notice. */

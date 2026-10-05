@@ -470,7 +470,15 @@ identities. Do not accept target input before context initialization is durable.
 Publish the summary silently, with stable delivery identity.
 
 Fields are `rootKey`, `workspace`, `creationKey`, `title`, `sourceConversationId`,
-`baseRef`, `branch`, and `summary` (4096 characters / 8192 UTF-8 bytes). Model and
+`baseRef`, `branch`, and `summary` (4096 characters / 8192 UTF-8 bytes). Summary
+text rejects display-unsafe control/format characters and malformed Unicode;
+ordinary newlines and tabs remain literal. Its `fork_context_` identity uses
+length-framed source conversation, source generation, base commit and exact summary
+under `pi-managed-sessions:fork-context:live-v1\0`, with a 32-hex digest suffix.
+Pre-release experimental seeds using the earlier JSON/full-digest identity are not
+a supported deployed baseline: encountering one requires explicit recovery, never
+automatic rewriting of saved history or notice transactions. No deployed state
+has been migrated as part of this implementation. Model and
 Matrix-human callers must originate in that source conversation; local humans may
 supply an explicit source. The source must be a nontransitioning project at the
 specified checkout. Source generation and base commit are frozen by the owner,
