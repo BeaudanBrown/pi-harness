@@ -275,7 +275,28 @@ and are discarded on source generation/launch/window/attachment changes. Unsuppo
 launchers produce unknown, not inferred liveness from a retained window.
 Manual title and Pi `/name` observations serialize to a monotonic title revision;
 strip only the harness-owned status prefix, suppress self-echo by accepted event
-identity, and never use title collisions as identity.
+identity, and never use title collisions as identity. Portable `title` and
+`titleRevision` are an optional paired projection; immutable `concept` remains the
+construction/retry label. Negotiated `title-v1` carries metadata-only `title.read`,
+sequence-bearing `title.observe` and revision-bearing `title.changed`; existing
+attachment/session authority binds the source. No new messages reach old adapters.
+Native custom metadata persists pending sequences and suppresses programmatic name
+echoes; initial/cached names and copied-session metadata are not fresh observations.
+
+The private title owner journals accepted revisions before portable projection and
+serializes per-room intents independently of background HTTP. After a current-state
+baseline, the latest incremental human Matrix name is durably accepted before cursor
+advancement, even during an older PUT. Initial sync history is not imported as new
+renames. Startup/reconnect and uncertain writes reread current room state; bot echoes
+never replace the canonical title. Name PUTs use one-attempt transport and silent
+notification metadata, never modify push rules, and are changed-only with one-second
+per-room/200-ms shared write admission and at most four workers. Unknown retains the
+last marker across title changes; failed launches use `○` without claiming process
+death. Detailed status exposes pending synchronization. Presentation IO failure
+cannot block prompt intake; unaccepted edits remain subject to Matrix's last-writer
+race (there is no state compare-and-swap). Accepted newer revisions survive older
+in-flight writes. Missing/corrupt bounded title authority requires explicit recovery,
+not automatic journal reset. Titles grant no lifecycle or model-action authority.
 
 Retirement takes precedence over launch, input, generation transition and
 unaccepted approvals. Under the conversation lock, persist retirement and exact

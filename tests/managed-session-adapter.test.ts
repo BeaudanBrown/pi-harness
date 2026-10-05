@@ -95,6 +95,36 @@ test("real Pi blocks saved switches/imports in both bound roles without changing
 	}
 });
 
+test("real Pi session names synchronize through negotiated IPC without echoes, history prompts or model calls", { timeout: 15000 }, async t => {
+	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
+	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
+	const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
+	const relay = await FakeRelay.start(); relay.enableTitles = true; let session: any; let modelCalls = 0;
+	try {
+		const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+		const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(relay.root, "auth.json"), modelsPath: join(relay.root, "models.json"), modelsStorePath: join(relay.root, "store.json") });
+		const path = join(relay.root, "bound.jsonl"); await writeFile(path, JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: relay.root, timestamp: new Date().toISOString() }) + "\n");
+		const sm = sdk.SessionManager.open(path, relay.root); const boundary = sm.appendCustomEntry(BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION });
+		sm.appendCustomEntry(BINDING_ENTRY_TYPE, { ...binding, sessionId: sm.getSessionId(), bindingBoundaryEntryId: deriveTranscriptEntryId(sm.getSessionId(), boundary) });
+		sm.appendSessionInfo("Old cached name");
+		const loader = new sdk.DefaultResourceLoader({ cwd: relay.root, agentDir: relay.root, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+			extensionFactories: [createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })] });
+		await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
+		({ session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader, settingsManager, sessionManager: sm,
+			modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: [] }));
+		session.agent.streamFn = () => { modelCalls++; throw Error("Naming must never invoke a model"); };
+		await session.bindExtensions({}); await activityWait(() => sm.getSessionName() === "Host title", 3000);
+		assert.equal(relay.frames.filter(frame => frame.type === "title.observe").length, 0);
+		session.setSessionName("Native /name"); await activityWait(() => relay.title === "Native /name", 3000);
+		await activityWait(() => sm.getEntries().some((entry: any) => entry.customType === "managed-session.title" && entry.data.accepted?.title === "Native /name" && !entry.data.pending), 3000);
+		relay.title = "Matrix title"; relay.titleRevision++;
+		relay.send({ protocolVersion: "1.0.0", role: "relay", messageId: "matrix-title", conversationId, type: "title.changed", payload: { title: relay.title, revision: relay.titleRevision } });
+		await activityWait(() => sm.getSessionName() === "Matrix title", 3000); await new Promise(resolve => setTimeout(resolve, 30));
+		assert.equal(relay.frames.filter(frame => frame.type === "title.observe").length, 1);
+		assert.equal(modelCalls, 0); assert.equal(sm.getEntries().filter((entry: any) => entry.type === "message").length, 0);
+	} finally { if (session) { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); } await relay.close(); }
+});
+
 test("real Pi native events attest a current tool and headless approval fails promptly without invented consent", { timeout: 15000 }, async (t) => {
 	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
 	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
@@ -311,6 +341,9 @@ class FakeRelay {
 	enableCommentary = false;
 	enableDisposition = false;
 	enableRecovery = false;
+	enableTitles = false;
+	title = "Host title";
+	titleRevision = 1;
 	enableApprovals = false;
 	enableLocal = false;
 	matrixPending = false;
@@ -384,7 +417,7 @@ class FakeRelay {
 				...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}) } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : []), ...(this.enableApprovals ? ["approval-v1", "host-control-v1"] : [])];
+				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : []), ...(this.enableApprovals ? ["approval-v1", "host-control-v1"] : []), ...(this.enableTitles ? ["title-v1"] : [])];
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active",
 					...(capabilities.length ? { capabilities } : {}), ...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
@@ -411,6 +444,10 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "media.result", payload: { deliveryId: envelope.payload.deliveryId, blobId: envelope.payload.blobId, status: "rejected" } }));
 		} else if (envelope.type === "refresh.result") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "refresh.result", status: "ok" } }));
+		} else if (envelope.type === "title.read" || envelope.type === "title.observe") {
+			if (envelope.type === "title.observe") { this.title = envelope.payload.title as string; this.titleRevision++; }
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: envelope.type, title: this.title, revision: this.titleRevision,
+				...(envelope.type === "title.observe" ? { sequence: envelope.payload.sequence } : {}) } }));
 		} else if (envelope.type === "control.result") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "control.result", status: "ok" } }));
 		} else if (envelope.type === "activity.update" || envelope.type === "activity.finalize") {

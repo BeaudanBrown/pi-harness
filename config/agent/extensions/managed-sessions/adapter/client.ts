@@ -49,6 +49,8 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 		case "input.acknowledge": return { type: "input.result", fields: [["deliveryId", String(payload.deliveryId)], ["status", String(payload.status)]] };
 		case "activity.update": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "updated"]] };
 		case "activity.finalize": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "finalized"]] };
+		case "title.read": return { type: "self.result", fields: [["operation", "title.read"]] };
+		case "title.observe": return { type: "self.result", fields: [["operation", "title.observe"], ["sequence", Number(payload.sequence)]] };
 		case "control.result": return { type: "self.result", fields: [["operation", "control.result"], ["status", "ok"]] };
 		case "artifact.begin":
 		case "artifact.chunk": return { type: "artifact.acknowledge", fields: [["uploadId", String(payload.uploadId)]] };
@@ -221,6 +223,15 @@ export class BoundAdapterClient {
 		}
 	}
 
+	async title(sequence?: number, title?: string): Promise<{ title: string; revision: number }> {
+		if (!this.supports("title-v1")) throw new ManagedAdapterError("Title capability was not negotiated");
+		const type = sequence === undefined ? "title.read" : "title.observe";
+		const result = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("title"),
+			conversationId: this.options.binding.conversationId, role: this.options.role, type,
+			payload: sequence === undefined ? {} : { sequence, title } });
+		return { title: result.payload.title as string, revision: result.payload.revision as number };
+	}
+
 	async confirmRecovery(requestId: string, ready: boolean, checkpointId: string | null): Promise<void> {
 		if (!this.supports("recovery-attention-v1")) throw new ManagedAdapterError("Recovery capability was not negotiated");
 		await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("recovery-confirm"),
@@ -386,7 +397,7 @@ export class BoundAdapterClient {
 			: timeoutMs ?? this.options.timeouts?.requestMs ?? REQUEST_TIMEOUT_MS;
 		const socket = this.#socket;
 		if (!socket || socket.destroyed) return Promise.reject(new ManagedAdapterError("Relay connection is unavailable"));
-		if (this.#matrixBindingPending && !["attachment.attach", "self.status", "control.result", "refresh.result", "host.request", "host.run.observe", "host.run.confirm", "host.approval.answer"].includes(envelope.type)) {
+		if (this.#matrixBindingPending && !["attachment.attach", "self.status", "title.read", "title.observe", "control.result", "refresh.result", "host.request", "host.run.observe", "host.run.confirm", "host.approval.answer"].includes(envelope.type)) {
 			return Promise.reject(new ManagedAdapterError("Local conversation is active; Matrix binding is pending", "matrix_unavailable"));
 		}
 		if (this.#pending.size >= MAX_PENDING_REQUESTS) return Promise.reject(new ManagedAdapterError("Relay request capacity was reached", "capacity_reached"));

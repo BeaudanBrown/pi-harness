@@ -1,4 +1,6 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { AdapterTitleSync, TITLE_ENTRY } from "./title-sync.js";
+import { parseConversationTitle } from "../title-contracts.js";
 import { dirname, join } from "node:path";
 import { ManagedHostParameters, managedHostAction, managedHostHelp } from "../host-tool.js";
 import { hostCommandAction } from "../host-command.js";
@@ -258,6 +260,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			return;
 		}
 		let binding: SessionBinding | undefined;
+		let titleSync: AdapterTitleSync | undefined;
 		let client: BoundAdapterClient | undefined;
 		let currentContext: ExtensionContext | undefined;
 		let reconnectTimer: NodeJS.Timeout | undefined;
@@ -522,7 +525,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		function setStatus(ctx: ExtensionContext): void {
 			if (!ctx.hasUI) return;
-			ctx.ui.setStatus("managed-session", binding ? `${!client?.connected ? "managed · relay offline" : client.matrixBindingPending ? "managed · Matrix pending" : "managed"}: ${binding.concept}` : undefined);
+			ctx.ui.setStatus("managed-session", binding ? `${!client?.connected ? "managed · relay offline" : client.matrixBindingPending ? "managed · Matrix pending" : "managed"}: ${(titleSync ? pi.getSessionName?.() : undefined) ?? binding.concept}` : undefined);
 		}
 
 		function recordDelivery(ctx: ExtensionContext, marker: DeliveryMarker): string {
@@ -980,6 +983,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (await hostRun.receive(envelope)) return;
 			const ctx = currentContext;
 			if (!ctx || !binding) throw new ManagedAdapterError("Session context is unavailable");
+			if (envelope.type === "title.changed") {
+				if (!client?.supports("title-v1")) throw new ManagedAdapterError("Unnegotiated title update");
+				titleSync?.receive(parseConversationTitle(envelope.payload)); return;
+			}
 			if (envelope.type === "binding.status") {
 				if (client) void recoverBoundConnection(ctx, client, bindingEpoch).catch((error) => notify(ctx, String(error), "warning"));
 				return;
@@ -1066,7 +1073,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
-				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1"],
+				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1", "title-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				beforeMatrixBindingReady: () => {
 					if (client !== next || bindingEpoch !== epoch) return;
@@ -1098,6 +1105,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				binding.sessionId !== attemptBinding.sessionId || !next.connected) {
 				await next.close("shutdown").catch(() => undefined);
 				return;
+			}
+			if (next.supports("title-v1")) {
+				try { titleSync ??= new AdapterTitleSync({ conversationId: attemptBinding.conversationId, sessionId: attemptBinding.sessionId,
+					entries: ctx.sessionManager.getEntries(), persist: state => pi.appendEntry(TITLE_ENTRY, state), client: () => client,
+					valid: () => !stopped && bindingEpoch === epoch && binding?.sessionId === ctx.sessionManager.getSessionId(),
+					currentName: () => pi.getSessionName(), setName: name => pi.setSessionName(name) });
+				titleSync.connected();
+				} catch { notify(ctx, "Managed title metadata needs explicit recovery; session input remains available.", "warning"); }
 			}
 			if (next.placement) config.placement = next.placement;
 			reconnectAttempt = 0;
@@ -1180,7 +1195,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 		});
 
+		pi.on("session_info_changed", (event, ctx) => { titleSync?.onName(event.name); setStatus(ctx); });
 		pi.on("session_start", async (event, ctx) => {
+			titleSync?.close(); titleSync = undefined;
 			closingActivities.clear(); // Session-local feedback never crosses a binding/session switch.
 			const sessionId = ctx.sessionManager.getSessionId();
 			const sessionChanged = !currentContext || currentContext.sessionManager.getSessionId() !== sessionId;
@@ -1357,7 +1374,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			hostRun.reset();
-			stopped = true;
+			stopped = true; titleSync?.close();
 			bindingEpoch += 1;
 			unsubscribeAloopLifecycle();
 			unregisterAloopCheckpointDelegate();

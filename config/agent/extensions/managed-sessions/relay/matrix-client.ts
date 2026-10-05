@@ -514,6 +514,22 @@ export class ManagedMatrixClient {
 		this.assertManagedRoom(roomId); try { await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.create/`, undefined, signal); return true; }
 		catch (error) { if (error instanceof ManagedMatrixError && (error.status === 403 || error.status === 404)) return false; throw error; }
 	}
+	async conversationName(roomId: string, signal?: AbortSignal): Promise<import("./conversation-titles.js").MatrixNameEvent | undefined> {
+		this.assertManagedRoom(roomId);
+		const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, undefined, signal);
+		if (!Array.isArray(state) || state.length > 4096) throw new ManagedMatrixError("invalid_response", "Room name state is unavailable");
+		const names = state.filter(event => event?.type === "m.room.name" && event?.state_key === "");
+		if (names.length > 1) throw new ManagedMatrixError("invalid_response", "Room name state is ambiguous");
+		return names[0];
+	}
+	async setConversationName(roomId: string, name: string, writeId: string, signal?: AbortSignal): Promise<string> {
+		this.assertManagedRoom(roomId);
+		if (this.#http.retry.maxAttempts !== 1) throw new Error("Name reconciliation requires one-attempt transport");
+		const result = await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.name/`, { name, "lol.bepis.pi.presentation.v1": writeId,
+			"lol.bepis.pi.notification": { version: 1, disposition: "silent" }, "m.mentions": {} }, signal);
+		if (!result || typeof result !== "object" || typeof (result as JsonObject).event_id !== "string") throw new ManagedMatrixError("invalid_response", "Room name acknowledgement is unavailable");
+		return (result as JsonObject).event_id as string;
+	}
 	async setRoomName(roomId: string, name: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.name/`, { name }, signal); }
 	async sendText(roomId: string, transactionId: string, body: string, formattedBody?: string, signal?: AbortSignal,
 		disposition?: "silent" | "notify"): Promise<string> {

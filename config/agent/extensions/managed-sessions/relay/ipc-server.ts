@@ -280,6 +280,7 @@ export class ManagedSessionIpcServer {
 					continue;
 				}
 				this.registry.assertAuthorized(envelope, state.id, state.attachment);
+				if (envelope.type.startsWith("title.") && !state.capabilities?.includes("title-v1")) throw new RelayRegistryError("permission_denied", "Title capability was not negotiated");
 				if (envelope.type.startsWith("host.") && !state.capabilities?.includes("approval-v1")) throw new RelayRegistryError("permission_denied", "Host approval capability was not negotiated");
 				if (envelope.type === "host.request") {
 					if (state.hostRequests >= 8) throw new RelayRegistryError("capacity_reached", "Too many active host requests on this attachment");

@@ -41,6 +41,7 @@ import { HostDispatcher } from "./host-dispatcher.js";
 import { HostApprovalRuntime } from "./host-approval-runtime.js";
 import { HostApprovalStore } from "./host-approval-store.js";
 import { ManagedHostMutationOwner, isManagedHostPreview } from "./host-mutation-owner.js";
+import { ConversationTitles } from "./conversation-titles.js";
 import { HostRuntimeObserver } from "./runtime-observer.js";
 import { HostReadModel } from "./host-read-model.js";
 import { HostMatrixCommands } from "./host-matrix-commands.js";
@@ -93,6 +94,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let localEnrollments: LocalEnrollmentReconciler | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let runtimeObserver: HostRuntimeObserver | undefined;
+	let titles: ConversationTitles | undefined;
 	let retirement: ConversationRetirement | undefined;
 	let hostApprovals: HostApprovalRuntime | undefined;
 	let account: HostAccountOwner | undefined;
@@ -100,7 +102,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
 	let closeNotices = async (): Promise<void> => undefined;
-	const presentation = (id: string): ManagedStatusPresentation => ({ runtime: runtimeObserver?.snapshot().get(id), account: account?.client.setupState(id) ?? "unavailable" });
+	const presentation = (id: string): ManagedStatusPresentation => ({ runtime: runtimeObserver?.snapshot().get(id), account: account?.client.setupState(id) ?? "unavailable", titleSync: titles?.status(id) ?? "unavailable" });
 	try {
 		await prepareRelayStateDirectory(hostId, stateDirectory, runtimeDirectory, manifestStore);
 		await registry.load();
@@ -113,13 +115,20 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string });
 		await healthFile.write({ status: "starting", lastSuccessfulSyncAt, runtimeBuild });
 		const syncHealth = async (healthy: boolean): Promise<void> => {
-			if (healthy && !matrixHealthy) runtimeObserver?.kick();
+			const reconnected = healthy && !matrixHealthy;
 			matrixHealthy = healthy;
+			if (reconnected) { runtimeObserver?.kick(); titles?.reconnect(); }
 			await recoveryMonitor?.health(healthy);
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
 			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt, runtimeBuild });
 		};
 		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, [...new Set([...registry.managedRoomIds(), ...registry.retirementRoomIds()])], { maxAttempts: 1 });
+		titles = new ConversationTitles({ root: resolve(stateDirectory, "titles"), hostId, botUserId: matrix.botUserId, registry,
+			runtime: () => runtimeObserver?.snapshot() ?? new Map(), ready: () => matrixAuthenticated && matrixHealthy,
+			readName: (roomId, signal) => matrix.conversationName(roomId, signal), writeName: (roomId, name, id, signal) => matrix.setConversationName(roomId, name, id, signal),
+			changed: (id, value) => { if (server?.supports(id, "title-v1")) server.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
+				messageId: `title-${randomUUID()}`, conversationId: id, role: "relay", type: "title.changed", payload: value as unknown as Record<string, unknown> }); } });
+		titles.start();
 		const spool = new BlobSpool(resolve(stateDirectory, "media-spool"));
 		const media = new ManagedImageTransport(spool, matrix);
 		await media.initialize(registry.liveMediaBlobIds());
@@ -210,7 +219,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					if (!hostApprovals) throw new RelayRegistryError("invalid_state", "Host approvals are unavailable");
 					return hostApprovals.handle(envelope, attachment);
 				}
-				if (!registry.manifestByConversationId(attachment.conversationId) && !["self.status", "control.result", "refresh.result"].includes(envelope.type)) {
+				if (!registry.manifestByConversationId(attachment.conversationId) && !["self.status", "title.read", "title.observe", "control.result", "refresh.result"].includes(envelope.type)) {
 					throw new RelayRegistryError("matrix_unavailable", "Local conversation is active; Matrix binding is pending");
 				}
 				if (envelope.type === "recovery.confirm") {
@@ -360,6 +369,16 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					await registry.requestPromotion(attachment.conversationId);
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "self.promote", status: "ok" });
 				}
+				if (envelope.type === "title.read" || envelope.type === "title.observe") {
+					if (!titles) throw new RelayRegistryError("invalid_state", "Title owner is unavailable");
+					const id = attachment.conversationId;
+					const sessionId = registry.registeredConversation(id)?.piSessionId;
+					if (!sessionId) throw new RelayRegistryError("not_found", "Title source is unavailable");
+					const value = envelope.type === "title.read" ? await titles.read(id) : await titles.observe(id, sessionId,
+						envelope.payload.sequence as number, envelope.payload.title as string, () => server?.attachment(id)?.attachmentId === attachment.attachmentId);
+					return response(id, envelope.messageId, "self.result", { operation: envelope.type, ...value,
+						...(envelope.type === "title.observe" ? { sequence: envelope.payload.sequence } : {}) });
+				}
 				if (envelope.type === "self.status") {
 					return response(attachment.conversationId, envelope.messageId, "self.result", {
 						operation: "self.status", status: "ok", conversationState: registry.conversationState(attachment.conversationId),
@@ -506,7 +525,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			async (manifest) => {
 				if (manifest.kind === "coordinator") await registry.recordCoordinatorDeparture(manifest.conversationId);
 				else await retirement!.retire(manifest.conversationId);
-			}, (vote) => hostApprovals?.vote(vote) ?? Promise.resolve(false), response => account?.client.ingest(response) ?? Promise.resolve(),
+			}, (vote) => hostApprovals?.vote(vote) ?? Promise.resolve(false), async (response, initialSync) => { await account?.client.ingest(response); await titles?.ingest(response, initialSync); },
 			(manifest, eventId, sender, body) => matrixHostCommands?.accept(manifest, eventId, sender, body) ?? Promise.resolve(false), presentation);
 			await coordinatorRouter.loadInbox(resolve(stateDirectory, "inbox.json"));
 			coordinatorRouter.start();
@@ -532,6 +551,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await account?.close().catch(() => undefined);
 		await controlServer?.close().catch(() => undefined);
 		await hostApprovals?.close().catch(() => undefined);
+		await titles?.close().catch(() => undefined);
 		await runtimeObserver?.close().catch(() => undefined);
 		await retirement?.close().catch(() => undefined);
 		const enrollmentClosing = localEnrollments?.close();
@@ -556,6 +576,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await account?.close().catch(() => undefined);
 			await controlServer?.close().catch(() => undefined);
 			await hostApprovals?.close().catch(() => undefined);
+			await titles?.close().catch(() => undefined);
 			await runtimeObserver?.close().catch(() => undefined);
 			await retirement?.close().catch(() => undefined);
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
@@ -591,6 +612,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await matrixHostCommands?.close();
 			await account?.close();
 			await hostApprovals?.close();
+			await titles?.close();
 			await runtimeObserver?.close();
 			await retirement?.close();
 			const enrollmentClosing = localEnrollments?.close();

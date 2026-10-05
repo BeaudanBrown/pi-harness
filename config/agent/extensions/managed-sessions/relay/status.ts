@@ -1,7 +1,7 @@
 import type { ConversationManifest, HostRuntimeState, ManagedAdapterLiveStatus, SessionGeneration } from "../contracts.js";
 
 import type { RuntimeObservation } from "./runtime-observer.js";
-export interface ManagedStatusPresentation { runtime?: RuntimeObservation; account?: "ready" | "pending" | "notification_setup_uncertain" | "unavailable" }
+export interface ManagedStatusPresentation { titleSync?: "ready" | "pending" | "unavailable"; runtime?: RuntimeObservation; account?: "ready" | "pending" | "notification_setup_uncertain" | "unavailable" }
 
 type RuntimeConversation = HostRuntimeState["conversations"][number];
 
@@ -24,12 +24,13 @@ export function renderManagedConversationStatus(
 	const pendingInputs = runtime.pendingInputs.filter((input) => input.status !== "completed" && input.status !== "cancelled").length;
 	const checkpoint = runtime.activeCheckpointPoll ?? runtime.publishingCheckpointPoll;
 	const lines = [
-		`Conversation: ${manifest.concept} (${manifest.kind})`,
+		`Conversation: ${manifest.title ?? manifest.concept} (${manifest.kind})`,
 		...(manifest.projectDisplayName ? [`Project: ${manifest.projectDisplayName}`] : []),
 		...(manifest.checkoutDisplayName ? [`Checkout: ${manifest.checkoutDisplayName}`] : []),
 		`State: ${runtime.state}; Pi ${live?.state ?? "unavailable"}; adapter ${runtime.attachment ? "connected" : "disconnected"}`,
 		`Process (last observed): ${presentation.runtime?.runtimeState ?? "unknown"}; launch ${presentation.runtime?.launchState ?? "unknown"}`,
 		`Account setup: ${presentation.account ?? "unavailable"}`,
+		`Title sync: ${presentation.titleSync ?? "unavailable"}`,
 		`Generation: ${generation?.ordinal ?? 1}/${manifest.generations?.length ?? 1}`,
 		...(manifest.kind === "project" && desiredRuntimeId ? [`Tooling update: ${runtime.attachment?.runtimeId === desiredRuntimeId ? "current" : runtime.state === "dormant" ? "next launch" : "pending — waiting for verified idle adapter"}`] : []),
 		...(runtime.generationTransition ? [`Generation transition: ${runtime.generationTransition.phase}; queued input retained${runtime.generationTransition.failure ? `; latest failure ${runtime.generationTransition.failure.code}` : ""}`] : []),

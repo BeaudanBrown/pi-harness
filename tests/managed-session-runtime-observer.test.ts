@@ -41,11 +41,13 @@ test("observer batches own host only and requires matching generation/launch own
 });
 
 test("unknown, dead retained pane and failed launch are not reported running from attachment alone", async () => {
-	const row = source(); let unavailable = false; let state: "stopped" | "unknown" = "stopped";
+	const row = source(); let unavailable = false; let state: "running" | "stopped" | "unknown" = "stopped";
 	const observer = new HostRuntimeObserver({ hostId: "host", sources: () => [row], windows: { observe: async proofs => { if (unavailable) throw Error("old launcher"); return observed([...proofs], state); } } });
 	observer.kick(); await observer.settled(); assert.equal(observer.snapshot().get(row.conversationId)?.runtimeState, "stopped");
 	state = "unknown"; observer.kick(); await observer.settled(); assert.equal(observer.snapshot().get(row.conversationId)?.runtimeState, "unknown");
-	row.failed = true; unavailable = true; observer.kick(); await observer.settled(); assert.deepEqual(observer.snapshot().get(row.conversationId), { runtimeState: "unknown", launchState: "failed" }); await observer.close();
+	row.failed = true; unavailable = true; observer.kick(); await observer.settled(); assert.deepEqual(observer.snapshot().get(row.conversationId), { runtimeState: "unknown", launchState: "failed" });
+	unavailable = false; state = "running"; observer.kick(); await observer.settled();
+	assert.deepEqual(observer.snapshot().get(row.conversationId), { runtimeState: "unknown", launchState: "failed" }, "a retained failed launch shell is not a healthy running Pi"); await observer.close();
 });
 
 test("late observations cannot cross attachment, generation, retirement or exact-window changes", async () => {

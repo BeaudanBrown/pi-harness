@@ -57,7 +57,7 @@ export class HostRuntimeObserver {
 		return new Map(rows.map(row => {
 			const saved = this.cache.get(row.conversationId);
 			const fresh = !this.closed && saved && saved.key === key(row) && now >= saved.at && now - saved.at < 20_000;
-			return [row.conversationId, { runtimeState: fresh ? saved.state : "unknown", launchState: launchState(row) }];
+			return [row.conversationId, { runtimeState: fresh && !(row.failed && saved.state === "running") ? saved.state : "unknown", launchState: launchState(row) }];
 		}));
 	}
 	private async collect(): Promise<void> {

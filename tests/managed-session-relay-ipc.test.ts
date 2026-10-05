@@ -21,6 +21,7 @@ import { peerUidFromHelper } from "../config/agent/extensions/managed-sessions/r
 import { RelayRegistry, RelayRegistryError } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { hostRelayLockPath, HostRelayLock } from "../config/agent/extensions/managed-sessions/relay/relay-lock.js";
 import { BoundAdapterClient } from "../config/agent/extensions/managed-sessions/adapter/client.js";
+import { ConversationTitles } from "../config/agent/extensions/managed-sessions/relay/conversation-titles.js";
 import { deriveGenerationId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 
 const hostId = "ipc-host";
@@ -77,6 +78,31 @@ function readEnvelope(socket: Socket): Promise<ManagedSessionEnvelope> {
 		socket.on("close", onClose);
 	});
 }
+
+test("title metadata requires negotiated capability and uses the live attached conversation over real IPC", async t => {
+	let owner!: ConversationTitles; let accepted = 0;
+	const f = await setup(undefined, async (envelope, attachment) => {
+		accepted++; const source = f.registry.registeredConversation(attachment.conversationId)!;
+		const title = envelope.type === "title.read" ? await owner.read(source.conversationId) : await owner.observe(source.conversationId, source.piSessionId,
+			envelope.payload.sequence as number, envelope.payload.title as string, () => f.server.attachment(source.conversationId)?.attachmentId === attachment.attachmentId);
+		return { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay", messageId: "title-response", conversationId: source.conversationId, inReplyTo: envelope.messageId, type: "self.result",
+			payload: { operation: envelope.type, ...title, ...(envelope.type === "title.observe" ? { sequence: envelope.payload.sequence } : {}) } };
+	});
+	owner = new ConversationTitles({ root: join(f.root, "titles"), hostId, botUserId: "@bot:example.com", registry: f.registry, runtime: () => new Map(),
+		readName: async () => { throw Error("No Matrix traffic expected"); }, writeName: async () => { throw Error("No Matrix traffic expected"); }, changed: () => undefined });
+	t.after(async () => { await owner.close(); await f.server.close(); await rm(f.root, { recursive: true, force: true }); });
+	const legacy = await openSocket(f.server.socketPath); t.after(() => legacy.destroy());
+	let reply = readEnvelope(legacy); legacy.write(encodeNdjsonEnvelope(attach(f.values[0]!, "legacy"))); await reply;
+	reply = readEnvelope(legacy); legacy.write(encodeNdjsonEnvelope({ protocolVersion: "1.0.0", role: "ordinary_adapter", messageId: "legacy-title", conversationId: f.values[0]!.conversationId, type: "title.observe", payload: { sequence: 1, title: "unnegotiated" } }));
+	assert.equal((await reply).payload.code, "permission_denied"); assert.equal(accepted, 0);
+	const value = f.values[1]!; const client = new BoundAdapterClient({ socketPath: f.server.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, requestedCapabilities: ["title-v1"], onEnvelope: async () => undefined,
+		binding: { version: MANAGED_SESSION_STATE_VERSION, role: "ordinary_adapter", conversationId: value.conversationId, concept: value.concept, sessionId: value.piSessionId, bindingBoundaryEntryId: value.bindingBoundaryEntryId } });
+	t.after(() => client.close()); await client.connect(); assert.ok(client.supports("title-v1"));
+	assert.equal((await client.title()).title, value.concept);
+	assert.equal((await client.title(1, "Current title")).title, "Current title");
+	assert.equal(f.registry.registeredConversation(value.conversationId)?.title, "Current title");
+	assert.equal(f.registry.registeredConversation(f.values[0]!.conversationId)?.title, undefined);
+});
 
 test("exact attachment shutdown survives registry retirement but rejects changed attachment/generation", async (t) => {
 	let disconnects = 0; const f = await setup(undefined, undefined, false, () => { disconnects++; });

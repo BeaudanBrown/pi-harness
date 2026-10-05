@@ -15,6 +15,20 @@ const config = {
 	operatorUserId: "@operator:example.com",
 };
 
+test("conversation name state writes carry silent metadata and never touch account notification settings", async () => {
+	const calls: Array<{ method?: string; path: string; body?: any }> = [];
+	const client = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname; const body = init?.body ? JSON.parse(String(init.body)) : undefined; calls.push({ method: init?.method, path, body });
+		if (init?.method === "PUT") return Response.json({ event_id: "$name" });
+		return Response.json([{ type: "m.room.name", state_key: "", event_id: "$name", sender: config.botUserId, content: { name: "● Title" } }]);
+	}, ["!known:example.com"], { maxAttempts: 1 });
+	assert.equal(await client.setConversationName("!known:example.com", "● Title", "write-id"), "$name");
+	assert.deepEqual(calls[0]!.body, { name: "● Title", "lol.bepis.pi.presentation.v1": "write-id", "lol.bepis.pi.notification": { version: 1, disposition: "silent" }, "m.mentions": {} });
+	assert.equal((await client.conversationName("!known:example.com"))?.event_id, "$name");
+	await assert.rejects(client.setConversationName("!foreign:example.com", "wrong", "write-id"), /not owned/);
+	assert.equal(calls.length, 2); assert.ok(calls.every(call => call.path.includes("/state")));
+});
+
 test("self membership observation survives departure without granting discovered rooms mutation authority", async () => {
 	let rooms: unknown = ["!known:example.com", "!unrelated:example.com"]; const calls: string[] = [];
 	const client = new ManagedMatrixClient(config, async (input, init) => {

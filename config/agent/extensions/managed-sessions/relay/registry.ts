@@ -24,6 +24,7 @@ import {
 	parseHostRuntimeState,
 	parsePersistenceBundle,
 } from "../contracts.js";
+import { parseConversationTitle, type ConversationTitle } from "../title-contracts.js";
 import type { RuntimeObservationSource } from "./runtime-observer.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ConversationManifestStore } from "./manifest-store.js";
@@ -491,7 +492,7 @@ export class RelayRegistry {
 		return [...this.manifests.values()].map((manifest) => {
 			const state = runtime.get(manifest.conversationId);
 			return {
-				conversationId: manifest.conversationId, kind: manifest.kind, title: manifest.concept,
+				conversationId: manifest.conversationId, kind: manifest.kind, title: manifest.title ?? manifest.concept,
 				activeGenerationId: this.activeGeneration(manifest).generationId,
 				attached: Boolean(this.liveConnections.has(manifest.conversationId) && state?.state === "active" && state.attachment?.sessionId === manifest.piSessionId),
 				matrixBound: hasMatrixBinding(manifest),
@@ -501,6 +502,26 @@ export class RelayRegistry {
 					...(manifest.checkoutDisplayName ? { checkoutDisplayName: manifest.checkoutDisplayName } : {}),
 				} : {}),
 			};
+		});
+	}
+
+	titleInventory(): Array<{ conversationId: string; sessionId: string; concept: string; title?: string; titleRevision?: number; roomId?: string }> {
+		this.retirements.assertAvailable();
+		return [...this.manifests.values()].filter(row => !this.retirements.has(row.conversationId)).map(row => ({ conversationId: row.conversationId, sessionId: row.piSessionId, concept: row.concept,
+			...(row.title === undefined ? {} : { title: row.title, titleRevision: row.titleRevision }), ...(hasMatrixBinding(row) ? { roomId: row.roomId } : {}) }));
+	}
+
+	async updateConversationTitle(conversationId: string, value: ConversationTitle): Promise<void> {
+		const title = parseConversationTitle(value);
+		await this.mutate(async () => {
+			const manifest = this.registeredConversation(conversationId);
+			if (!manifest) throw new RelayRegistryError("not_found", "Conversation title target is unavailable");
+			if ((manifest.titleRevision ?? 0) > title.revision || manifest.titleRevision === title.revision && manifest.title !== title.title) throw new RelayRegistryError("invalid_state", "Conversation title revision conflicts");
+			if (manifest.titleRevision === title.revision) return;
+			const next = { ...manifest, title: title.title, titleRevision: title.revision };
+			if (hasMatrixBinding(next)) await this.manifestStore.write(parseConversationManifest(next));
+			else { parsePendingLocalConversation(next); const index = this.state.localConversations!.findIndex(row => row.conversationId === conversationId); this.state.localConversations![index] = next; }
+			this.manifests.set(conversationId, next);
 		});
 	}
 
@@ -662,7 +683,7 @@ export class RelayRegistry {
 	listConversations(): Array<{ conversationId: string; concept: string; kind: "project" | "coordinator"; state: "starting" | "active" | "dormant" }> {
 		this.retirements.assertAvailable();
 		return [...this.manifests.values()].map((manifest) => ({
-			conversationId: manifest.conversationId, concept: manifest.concept, kind: manifest.kind,
+			conversationId: manifest.conversationId, concept: manifest.title ?? manifest.concept, kind: manifest.kind,
 			state: this.runtimeConversation(manifest.conversationId).state,
 		}));
 	}

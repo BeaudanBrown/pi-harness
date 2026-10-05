@@ -1,3 +1,4 @@
+import { ConversationTitleSchema, TitleRevisionSchema, parseConversationTitle } from "./title-contracts.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { isAbsolute } from "node:path";
@@ -146,7 +147,7 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
-export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1"] as const;
+export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1", "title-v1"] as const;
 export type ManagedSessionCapability = typeof MANAGED_SESSION_CAPABILITIES[number];
 const managedCapabilities = Type.Array(Type.Union(MANAGED_SESSION_CAPABILITIES.map((value) => Type.Literal(value))), { maxItems: MANAGED_SESSION_CAPABILITIES.length, uniqueItems: true });
 const matrixBindingState = Type.Union([Type.Literal("pending"), Type.Literal("bound")]);
@@ -173,6 +174,8 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			Type.Literal("bridge_delete"),
 		]),
 	}),
+	clientEnvelope(adapterRole, "title.read", {}),
+	clientEnvelope(adapterRole, "title.observe", { sequence: TitleRevisionSchema, title: Type.String({ maxLength: 4096 }) }),
 	clientEnvelope(adapterRole, "session.change", {
 		attachmentId: identifier,
 		oldSessionId: identifier,
@@ -305,6 +308,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		state: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 	}),
 	relayEnvelope("binding.status", { matrixBinding: Type.Literal("bound") }),
+	relayEnvelope("title.changed", { title: ConversationTitleSchema, revision: TitleRevisionSchema }),
 	relayEnvelope("control.deliver", {
 		controlId: stableId("control"),
 		name: Type.Union([
@@ -370,6 +374,8 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		strictObject({ operation: Type.Literal("self.delete"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("self.promote"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("control.result"), status: Type.Literal("ok") }),
+		strictObject({ operation: Type.Literal("title.read"), title: ConversationTitleSchema, revision: TitleRevisionSchema }),
+		strictObject({ operation: Type.Literal("title.observe"), title: ConversationTitleSchema, revision: TitleRevisionSchema, sequence: TitleRevisionSchema }),
 		strictObject({ operation: Type.Literal("refresh.result"), status: Type.Literal("ok") }),
 	])),
 	relayEnvelopeWithPayload("lifecycle.result", Type.Union([
@@ -471,6 +477,7 @@ const projectManifest = strictObject({
 	ownerHostId: identifier,
 	creationKey: identifier,
 	concept: boundedString(128),
+	title: Type.Optional(ConversationTitleSchema), titleRevision: Type.Optional(TitleRevisionSchema),
 	piSessionId: identifier,
 	roomId: boundedString(255),
 	placement: WorkspaceIdentitySchema,
@@ -493,6 +500,7 @@ const coordinatorManifest = strictObject({
 	ownerHostId: identifier,
 	creationKey: identifier,
 	concept: boundedString(128),
+	title: Type.Optional(ConversationTitleSchema), titleRevision: Type.Optional(TitleRevisionSchema),
 	piSessionId: identifier,
 	roomId: boundedString(255),
 	hostSpace: Type.Optional(boundedString(255)),
@@ -687,6 +695,7 @@ export interface ConversationManifest {
 	ownerHostId: string;
 	creationKey: string;
 	concept: string;
+	title?: string; titleRevision?: number;
 	piSessionId: string;
 	roomId: string;
 	placement?: WorkspaceIdentity;
@@ -964,6 +973,8 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 		throw new ManagedSessionContractError("unsupported_version", "unsupported conversation manifest version");
 	}
 	assertSchema(ConversationManifestSchema, value, "conversation manifest");
+	const titled = value as ConversationManifest;
+	if (titled.title !== undefined || titled.titleRevision !== undefined) parseConversationTitle({ title: titled.title, revision: titled.titleRevision });
 	const manifest = value as ConversationManifest;
 	validateLogicalConversation(manifest);
 	if ((manifest.checkoutId === undefined) !== (manifest.checkoutSpace === undefined) ||
@@ -976,6 +987,7 @@ export function parseConversationManifest(value: unknown): ConversationManifest 
 export function parsePendingLocalConversation(value: unknown): PendingLocalConversation {
 	assertSchema(PendingLocalConversationSchema, value, "pending local conversation");
 	const manifest = value as PendingLocalConversation;
+	if (manifest.title !== undefined || manifest.titleRevision !== undefined) parseConversationTitle({ title: manifest.title, revision: manifest.titleRevision });
 	validateLogicalConversation(manifest);
 	if (manifest.verifiedBinding) {
 		const rooms = Object.values(manifest.verifiedBinding);
