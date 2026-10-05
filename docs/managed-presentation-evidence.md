@@ -169,8 +169,15 @@ source epochs, runtime states and title races.
 `.pi/tmp/workers/2026-10-05T23-23-30-625Z-titles-review-remediation-4ecbdf5a0c18/`.
 No design-invalidating remediation or second subjective review was needed.
 
-Remaining: final canonical verification. No #115 completion or live Matrix
-acceptance is claimed yet.
+The initial canonical run caught a missing transitive `title-contracts.ts` copy
+in the independently packaged bridge worker. Added that source to its fixed
+package input list; focused bridge packaging/account verification passed **87
+tests, zero skips**.
+`.pi/tmp/workers/2026-10-05T23-24-31-199Z-presentation-final-canonical-7523f82fdab9/`
+`.pi/tmp/workers/2026-10-05T23-25-59-209Z-presentation-bridge-packaging-remediation-49dae3684bd6/`
+
+Remaining: rerun final canonical verification after the packaging correction.
+No #115 completion or live Matrix acceptance is claimed yet.
 
 The original no-push, no deployment/service restart, no live-account traffic and
 no nix-dotfiles evaluation/build restrictions remain. Direct Go tests and harness
