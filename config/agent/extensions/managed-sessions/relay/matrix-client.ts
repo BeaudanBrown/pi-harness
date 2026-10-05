@@ -627,6 +627,18 @@ export class ManagedMatrixClient {
 			throw new ManagedMatrixError("invalid_response", "Matrix self membership is unavailable or oversized");
 		return rooms.includes(roomId);
 	}
+	async operatorMembershipEvent(roomId: string, signal?: AbortSignal): Promise<{ eventId: string; sender: string; membership: string }> {
+		this.assertManagedRoom(roomId);
+		const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, undefined, signal);
+		if (!Array.isArray(state)) throw Error("Membership proof unavailable");
+		const events = state.filter(e => e && e.type === "m.room.member" && e.state_key === this.operatorUserId);
+		const event = events[0];
+		if (events.length !== 1 || typeof event.event_id !== "string" || !/^\$\S{1,254}$/.test(event.event_id) || typeof event.sender !== "string" || typeof event.content?.membership !== "string") throw Error("Membership proof unavailable");
+		return { eventId: event.event_id, sender: event.sender, membership: event.content.membership };
+	}
+	async inviteOperator(roomId: string, signal?: AbortSignal): Promise<void> {
+		this.assertManagedRoom(roomId); await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, { user_id: this.operatorUserId }, signal);
+	}
 	async leaveRoom(roomId: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {}, signal); this.#managedRoomIds.delete(roomId); }
 	private assertManagedRoom(roomId: string): void { if (!this.#managedRoomIds.has(roomId)) throw new ManagedMatrixError("invalid_response", "Matrix room is not owned by this relay"); }
 	private parseMxc(value: string): { serverName: string; mediaId: string } {

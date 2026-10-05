@@ -42,6 +42,8 @@ import { HostApprovalRuntime } from "./host-approval-runtime.js";
 import { HostApprovalStore } from "./host-approval-store.js";
 import { ManagedHostMutationOwner, isManagedHostPreview } from "./host-mutation-owner.js";
 import { HostReadModel } from "./host-read-model.js";
+import { HostAccountClient } from "./host-account-client.js";
+import { HostAccountOwner } from "./host-account-owner.js";
 import { ConversationRetirement } from "./conversation-retirement.js";
 import { HostControlServer } from "./host-control-server.js";
 
@@ -90,6 +92,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let hostLifecycle: HostLifecycle | undefined;
 	let retirement: ConversationRetirement | undefined;
 	let hostApprovals: HostApprovalRuntime | undefined;
+	let account: HostAccountOwner | undefined;
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
 	let closeNotices = async (): Promise<void> => undefined;
@@ -375,10 +378,15 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				() => registry.listManifests().find((manifest) => manifest.kind === "coordinator"),
 				(conversationId) => Boolean(registry.retirement(conversationId)));
 			await hierarchy.load();
+			const accountDevice = environment.PI_MANAGED_ACCOUNT_DEVICE_ID?.trim();
+			if (accountDevice) {
+				account = new HostAccountOwner(new HostAccountClient(resolve(stateDirectory, "account"), hostId, matrix.operatorUserId, accountDevice, matrix), registry, matrix, hierarchy);
+				await account.initialize();
+			}
 			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(stateDirectory, "project-sessions");
 			hostLifecycle = new HostLifecycle({
 				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
-				socketPath: server.socketPath, registry, matrix, hierarchy, server, environment,
+				socketPath: server.socketPath, registry, matrix, hierarchy, server, environment, spaceCleanupAccount: account,
 				coordinator: { launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(),
 					sessionFile: coordinatorValues[1]!.trim(), workspaceDirectory: coordinatorValues[0]!.trim() },
 				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
@@ -390,17 +398,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				},
 			});
 		}
-		retirement = new ConversationRetirement({ registry, matrix, hierarchy, server,
+		retirement = new ConversationRetirement({ registry, matrix, hierarchy, server, account,
 			matrixAuthenticated: () => matrixAuthenticated,
 			windows: hostLifecycle?.exactWindows ?? { check: async () => { throw Error("Exact launcher is unavailable"); }, terminate: async () => { throw Error("Exact launcher is unavailable"); } },
 			cancelApprovals: (conversationId) => hostApprovals?.cancelRun(conversationId),
 			onFailure: () => process.stderr.write("pi-managed-session-relay: retirement cleanup is pending\n") });
 		if (hostPolicy) {
-			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), matrixReady: () => {
+			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
 			} });
-			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server,
+			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server, account,
 				activeRun: async (id) => {
 					const witness = await hostApprovals!.controls.proofs.request(id);
 					if (!witness) throw new Error("Active target run observation is unavailable");
@@ -481,9 +489,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			async (manifest) => {
 				if (manifest.kind === "coordinator") await registry.recordCoordinatorDeparture(manifest.conversationId);
 				else await retirement!.retire(manifest.conversationId);
-			}, (vote) => hostApprovals?.vote(vote) ?? Promise.resolve(false));
+			}, (vote) => hostApprovals?.vote(vote) ?? Promise.resolve(false), response => account?.client.ingest(response) ?? Promise.resolve());
 			await coordinatorRouter.loadInbox(resolve(stateDirectory, "inbox.json"));
 			coordinatorRouter.start();
+			account?.start(id => retirement!.retire(id));
 			await hostLifecycle!.reconcileGenerationTransitions();
 			if (registry.conversationState(identity.manifest.conversationId) === "active") await coordinatorRouter.attachmentReady(identity.manifest.conversationId);
 		}
@@ -501,6 +510,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			localEnrollments.start();
 		}
 	} catch (error) {
+		await account?.close().catch(() => undefined);
 		await controlServer?.close().catch(() => undefined);
 		await hostApprovals?.close().catch(() => undefined);
 		await retirement?.close().catch(() => undefined);
@@ -521,6 +531,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			.then(() => hostLifecycle?.recoverTerminalPromotions())
 			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
+			await account?.close().catch(() => undefined);
 			await controlServer?.close().catch(() => undefined);
 			await hostApprovals?.close().catch(() => undefined);
 			await retirement?.close().catch(() => undefined);
@@ -554,6 +565,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle?.stopRuntimeUpdates();
 			await runtimeUpdate;
 			clearTimeout(reconciliationTimer);
+			await account?.close();
 			await hostApprovals?.close();
 			await retirement?.close();
 			const enrollmentClosing = localEnrollments?.close();

@@ -72,6 +72,23 @@ for (const initial of [false, true]) test(`operator departure routes to terminal
 	assert.ok(registry.retirement(project.conversationId)?.cleanup?.some((item) => item.kind === "operator_leave_forget"));
 });
 
+for (const initial of [false, true]) test(`account intake commits before ${initial ? "initial" : "incremental"} host cursor`, async t => {
+	const root = await mkdtemp(join(tmpdir(), "account-cursor-")); const store = new ConversationManifestStore(join(root, "manifests"));
+	const coordinator = manifest("coordinator", "coordinator"); await store.write(coordinator); const registry = new RelayRegistry("host", root, store); await registry.load();
+	if (!initial) await registry.setMatrixCursor(coordinator.conversationId, "before");
+	let intake = false; let release!: () => void; const hold = new Promise<void>(resolve => { release = resolve; }); let sent = false;
+	const matrix = new ManagedMatrixClient({ homeserver: "https://matrix.example.com", accessToken: "bot", botUserId: "@bot:example.com", operatorUserId: operator }, async (_input, init) => {
+		if (!sent) { sent = true; return Response.json({ next_batch: "after", to_device: { events: [] } }); }
+		return new Promise<Response>((_resolve, reject) => { if (init?.signal?.aborted) reject(Error("aborted")); else init?.signal?.addEventListener("abort", () => reject(Error("aborted")), { once: true }); });
+	}, [coordinator.roomId]);
+	const router = new CoordinatorRouter(coordinator, registry, matrix, { attachment: () => undefined } as unknown as ManagedSessionIpcServer, async () => {},
+		undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined, undefined,
+		async () => { intake = true; await hold; });
+	t.after(async () => { release(); await router.stop(); await rm(root, { recursive: true, force: true }); }); await router.loadInbox(join(root, "inbox.json")); router.start();
+	await until(() => intake); assert.notDeepEqual(registry.snapshot().conversations.find(c => c.conversationId === coordinator.conversationId)!.matrixCursor, { status: "established", since: "after" });
+	release(); await until(() => { const cursor = registry.snapshot().conversations.find(c => c.conversationId === coordinator.conversationId)!.matrixCursor; return cursor.status === "established" && cursor.since === "after"; });
+});
+
 test("coordinator departure preserves identity and persists the no-automatic-reinvite marker", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "coordinator-departure-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const store = new ConversationManifestStore(join(root, "manifests")); const coordinator = manifest("coordinator", "coordinator"); const project = manifest("project");

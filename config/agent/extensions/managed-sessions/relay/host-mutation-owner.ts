@@ -8,6 +8,7 @@ import type { LiveSpacePreview } from "./project-reconciliation.js";
 import type { RelayRegistry } from "./registry.js";
 import type { ManagedSessionIpcServer } from "./ipc-server.js";
 import type { ConversationRetirement, RetirementPlan } from "./conversation-retirement.js";
+import type { HostAccountOwner, MembershipRestore } from "./host-account-owner.js";
 import { HostControlError } from "./host-control-error.js";
 
 const detached = (value: unknown): FrozenJson => JSON.parse(JSON.stringify(value)) as FrozenJson;
@@ -29,6 +30,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 	private readonly now: () => number;
 	constructor(private readonly options: {
 		registry: RelayRegistry; lifecycle: HostLifecycle; retirement: ConversationRetirement; server: Pick<ManagedSessionIpcServer, "attachment">;
+		account?: Pick<HostAccountOwner, "freezeMembership" | "restoreMembership">;
 		activeRun?: (conversationId: string) => Promise<{ runId: string } | undefined>; now?: () => number;
 	}) { this.now = options.now ?? Date.now; }
 
@@ -131,6 +133,11 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			return { effects, targets: preview.targets, preconditions: { preview: detached(preview) } };
 		}
 		switch (action.operation) {
+			case "coordinator.membership.restore": {
+				if (!this.options.account) throw new HostControlError("upgrade_required", "Account membership owner is unavailable");
+				const restore = await this.options.account.freezeMembership();
+				return { effects: [action], targets: [{ kind: "conversation", conversationId: restore.conversationId }], preconditions: { restore: detached(restore) } };
+			}
 			case "conversation.open": case "conversation.resume": case "conversation.stop": case "conversation.refresh":
 				if (action.operation === "conversation.refresh" && this.options.registry.manifestByConversationId(action.conversationId)?.kind === "coordinator") throw new HostControlError("upgrade_required", "Coordinator refresh is unavailable");
 				return { effects: [action], preconditions: { target: this.target(action.conversationId) } };
@@ -174,6 +181,10 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			return { operationId: `operation_${record.approvalId.slice("approval_".length)}`, cleanupState: pending ? "pending" : "complete" };
 		}
 		if (!isDeepStrictEqual(record.frozen.effects, [action])) throw stale();
+		if (action.operation === "coordinator.membership.restore") {
+			if (!this.options.account) throw new HostControlError("upgrade_required", "Account membership owner is unavailable");
+			return this.options.account.restoreMembership(record.frozen.preconditions.restore as unknown as MembershipRestore);
+		}
 		if (action.operation === "conversation.delete") {
 			const plan = record.frozen.preconditions.retirement as unknown as RetirementPlan;
 			if (!plan || plan.conversationId !== action.conversationId) throw stale();

@@ -1,4 +1,10 @@
 import assert from "node:assert/strict";
+import { HostAccountClient } from "../config/agent/extensions/managed-sessions/relay/host-account-client.js";
+import { HostAccountOwner } from "../config/agent/extensions/managed-sessions/relay/host-account-owner.js";
+import { AccountStore } from "../config/agent/extensions/bridge-chat/account-store.js";
+import { AccountWorker, type AccountMatrixPort } from "../config/agent/extensions/bridge-chat/account-worker.js";
+import { retirementId, retirementEffectId, type RetirementRecord } from "../config/agent/extensions/managed-sessions/relay/retirement-store.js";
+import type { AccountAction } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
 import { mkdir, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -70,6 +76,51 @@ class MatrixFixture {
 		this.effect(`link:${kind}`, () => this.links.add(`${parent}/${room}`));
 	}
 }
+
+test("host hierarchy producer and NAS consumer roundtrip preserves existing rules, reports readiness, and completes exact retirement", async t => {
+	const root = await mkdtemp(join(tmpdir(), "account-hierarchy-")); const matrix = new MatrixFixture(); const retired = new Set<string>();
+	const hierarchy = new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator, id => retired.has(id)); await hierarchy.load();
+	const first = await hierarchy.prepare(placement); const old = await hierarchy.provision(first.conversationId);
+	matrix.rooms.set(coordinator.roomId, { version: 1, hostId, kind: "coordinator", creationKey: "coordinator", conversationId: coordinator.conversationId, parentRoomId: coordinator.hostSpace! }); matrix.links.add(`${coordinator.hostSpace}/${coordinator.roomId}`);
+	let pending: RetirementRecord[] = []; let active = [coordinator]; let now = 1000; let release = () => {};
+	const registry = { hostId, listManifests: () => active, manifestByConversationId: (id: string) => active.find(m => m.conversationId === id), retirement: (id: string) => retired.has(id) ? {} : undefined, pendingRetirements: () => pending } as unknown as RelayRegistry;
+	const nas = new AccountStore(join(root, "nas.sqlite"), matrix.operatorUserId); const joined = new Set<string>(); const forgotten: string[] = []; let rules = 0;
+	let worker!: AccountWorker;
+	const client = new HostAccountClient(join(root, "host"), hostId, matrix.operatorUserId, "NAS", { sendAccountRequest: async (recipient, device, _txn, action: AccountAction) => {
+		assert.equal(recipient, matrix.operatorUserId); assert.equal(device, "NAS");
+		worker.ingest({ to_device: { events: [{ type: "lol.bepis.pi.account.request.v1", sender: matrix.botUserId, content: action }] }, rooms: { invite: Object.fromEntries([...matrix.rooms.keys()].filter(id => !joined.has(id)).map(id => [id, { invite_state: { events: [{ type: "m.room.member", state_key: matrix.operatorUserId, sender: matrix.botUserId, content: { membership: "invite" } }] } }])) } });
+	} }, () => now);
+	const port: AccountMatrixPort = {
+		joined: async id => joined.has(id), join: async id => { joined.add(id); }, leave: async id => { joined.delete(id); }, forget: async id => { forgotten.push(id); }, cleanupEligible: async () => true,
+		state: async id => {
+			const proof = matrix.rooms.get(id); assert.ok(proof);
+			return [{ type: "m.room.create", sender: matrix.botUserId, state_key: "", content: { "m.federate": false, ...(proof.kind.endsWith("_space") ? { type: "m.space" } : {}) } },
+				{ type: "m.room.join_rules", sender: matrix.botUserId, state_key: "", content: { join_rule: "invite" } },
+				{ type: "lol.bepis.pi.managed.v1", sender: matrix.botUserId, state_key: "", content: proof },
+				...[...matrix.links].filter(link => link.startsWith(`${id}/`)).map(link => ({ type: "m.space.child", sender: matrix.botUserId, state_key: link.slice(id.length + 1), content: { via: ["test"] } }))];
+		},
+		toDevice: async (type, recipient, device, _txn, content) => { assert.equal(recipient, matrix.botUserId); assert.equal(device, "HOST"); await client.ingest({ to_device: { events: [{ type, sender: matrix.operatorUserId, content }] } }); },
+	};
+	worker = new AccountWorker(nas, [{ hostId, botUserId: matrix.botUserId, deviceId: "HOST" }], matrix.operatorUserId, port, { read: async () => undefined, put: async () => { rules++; } });
+	const account = new HostAccountOwner(client, registry, matrix as unknown as ManagedMatrixClient, hierarchy); await account.initialize();
+	t.after(async () => { release(); await account.close(); nas.close(); await hierarchy.close(); await rm(root, { recursive: true, force: true }); });
+	const second = await hierarchy.prepare({ ...placement, creationKey: "new-account-room" }); const fresh = await hierarchy.provision(second.conversationId);
+	active = [coordinator, { ...coordinator, kind: "project", conversationId: second.conversationId, roomId: fresh.roomId, creationKey: "new-account-room" }];
+	await account.provision();
+	const pump = async () => { for (let i = 0; i < 30; i++) { now += 31000; await client.flush(new AbortController().signal); await worker.step(new AbortController().signal); await worker.flush(new AbortController().signal); } };
+	await pump(); assert.equal(client.setupState(first.conversationId), "ready"); assert.equal(client.setupState(second.conversationId), "ready"); assert.equal(rules, 1, "only the new room initializes rules");
+	joined.delete(fresh.roomId);
+	worker.ingest({ rooms: { leave: { [fresh.roomId]: { timeline: { events: [{ type: "m.room.member", state_key: matrix.operatorUserId, sender: matrix.operatorUserId, event_id: "$departed", content: { membership: "leave" } }] } } } } });
+	await worker.step(new AbortController().signal); await worker.flush(new AbortController().signal);
+	let finish!: () => void; const departed = new Promise<void>(resolve => { finish = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
+	account.start(async id => { assert.equal(id, second.conversationId); retired.add(id); active = [coordinator]; finish(); await hold; }); await departed;
+	const id = retirementId(hostId, second.conversationId), target = { kind: "operator_leave_forget" as const, roomId: fresh.roomId, userId: matrix.operatorUserId };
+	const effect = { ...target, phase: "pending" as const, effectId: retirementEffectId(id, target) };
+	pending = [{ version: 1, hostId, conversationId: second.conversationId, creationKey: "new-account-room", retirementId: id, retiredAt: now, cleanup: [effect] }];
+	assert.equal(await account.leaveAndForget(effect, new AbortController().signal), false); await pump();
+	assert.equal(await account.completed(effect, new AbortController().signal), true, await readFile(join(root, "host", "account.json"), "utf8")); assert.ok(forgotten.includes(fresh.roomId)); assert.ok(joined.has(old.roomId)); assert.equal(joined.has(fresh.roomId), false);
+	await assert.rejects(account.leaveAndForget({ ...effect, userId: "@foreign:test" }, new AbortController().signal));
+});
 
 test("live reconciliation repairs only frozen proven links, rejects new scope, and never adopts foreign ownership", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "hierarchy-reconcile-")); const matrix = new MatrixFixture();

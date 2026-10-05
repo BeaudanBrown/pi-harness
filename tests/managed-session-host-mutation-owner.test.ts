@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { HostAccountOwner } from "../config/agent/extensions/managed-sessions/relay/host-account-owner.js";
+import { HostAccountClient } from "../config/agent/extensions/managed-sessions/relay/host-account-client.js";
+import { deriveConversationId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import test from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -19,6 +22,24 @@ const branchAction = { operation: "worktree.branch.preview" as const, rootKey: "
 const request = (previewId: string): ModelHostRequest => ({ version: "1.0.0", actor: { kind: "model", requestId: "request", conversationId,
 	generationId: `generation_${"a".repeat(32)}`, runId: "run", toolCallId: "tool", presentation: "local_dialog" },
 	action: { operation: "worktree.branch.delete", previewId, confirmed: true } });
+
+test("coordinator recovery freezes the exact fresh self-departure behind independent consent", async t => {
+	const root = await mkdtemp(join(tmpdir(), "account-membership-")); let departure = "$first"; let invitations = 0;
+	const coordinatorId = deriveConversationId("host", "coordinator");
+	const manifest = { kind: "coordinator", conversationId: coordinatorId, creationKey: "coordinator", roomId: "!coordinator:test", hostSpace: "!host:test" };
+	const registry = { hostId: "host", listManifests: () => [manifest], manifestByConversationId: (id: string) => id === coordinatorId ? manifest : undefined } as unknown as RelayRegistry;
+	const matrix = { botUserId: "@bot:test", operatorUserId: "@owner:test", assertManagedProvenance: async (room: string, proof: unknown) => { assert.equal(room, manifest.roomId); assert.deepEqual(proof, { version: 1, hostId: "host", kind: "coordinator", creationKey: "coordinator", conversationId: coordinatorId, parentRoomId: "!host:test" }); }, operatorMembershipEvent: async () => ({ eventId: departure, sender: "@owner:test", membership: "leave" }), inviteOperator: async (room: string) => { assert.equal(room, manifest.roomId); invitations++; } } as unknown as ManagedMatrixClient;
+	const client = new HostAccountClient(root, "host", "@owner:test", "NAS", { sendAccountRequest: async () => {} }); const account = new HostAccountOwner(client, registry, matrix); await account.initialize();
+	t.after(async () => { await account.close(); await rm(root, { recursive: true, force: true }); });
+	const owner = new ManagedHostMutationOwner({ registry, lifecycle: {} as HostLifecycle, retirement: {} as ConversationRetirement, server: { attachment: () => undefined }, account });
+	const input: ModelHostRequest = { ...request("unused"), action: { operation: "coordinator.membership.restore", confirmed: true } };
+	const record = prepareHostApproval("host", input, await owner.freeze(input), 1000); assert.equal(invitations, 0);
+	assert.equal(await owner.revalidate(record), true); departure = "$second";
+	assert.equal(await owner.revalidate(record), false); await assert.rejects(owner.execute(record), /scope changed/); assert.equal(invitations, 0);
+	const fresh = prepareHostApproval("host", input, await owner.freeze(input), 1001);
+	assert.deepEqual(await owner.execute(fresh), { conversationId: coordinatorId, setupState: "pending" }); assert.equal(invitations, 1);
+	const saved = JSON.parse(await readFile(join(root, "account.json"), "utf8")); assert.equal(saved.records[0].action.departureEventId, "$second");
+});
 
 test("branch consent uses a separate expiring preview, displays public targets and rejects changed tips", async () => {
 	let now = 1000; let head = "a".repeat(40); let executed = 0;

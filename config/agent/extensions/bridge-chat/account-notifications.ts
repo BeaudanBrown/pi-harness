@@ -11,7 +11,7 @@ export class AccountRules implements AccountRulePort {
 	constructor(private readonly http: MatrixHttp) {
 		if (http.retry.maxAttempts !== 1) throw Error("Account rule writes require a single-attempt transport");
 	}
-	private endpoint(id: string): string { return `/_matrix/client/v3/pushrules/global/override/${encodeURIComponent(id)}`; }
+	private endpoint(id: string): string { return `/_matrix/client/v3/pushrules/global/underride/${encodeURIComponent(id)}`; }
 	async read(id: string, signal?: AbortSignal): Promise<unknown | undefined> {
 		try { return await this.http.request("GET", this.endpoint(id), undefined, signal); }
 		catch (error) { if (error instanceof MatrixError && error.status === 404) return; throw error; }
@@ -23,12 +23,13 @@ export class AccountRules implements AccountRulePort {
 }
 
 /** Silent managed traffic is suppressed; attention uses native Matrix mentions/defaults.
- * This rule never adds a notify override that could defeat an operator's room mute.
+ * Underride priority lets manual room/content/sender rules win, including an
+ * explicit All Messages choice. It also never defeats an operator's room mute.
  * Call only for a verified new conversation, never migration, reconnect or resume.
  */
 export function silentRule(roomId: string, botUserId: string): { ruleId: string; payload: unknown } {
 	const hash = createHash("sha256").update(JSON.stringify([roomId, botUserId])).digest("hex");
-	return { ruleId: `pi-managed-silent-${hash}`, payload: {
+	return { ruleId: `pi-managed-silent-underride-${hash}`, payload: {
 		conditions: [{ kind: "event_property_is", key: "room_id", value: roomId }, { kind: "event_property_is", key: "sender", value: botUserId },
 			{ kind: "event_property_is", key: "content.lol\\.bepis\\.pi\\.notification.disposition", value: "silent" }], actions: ["dont_notify"],
 	} };

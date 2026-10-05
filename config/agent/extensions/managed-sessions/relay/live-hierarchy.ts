@@ -171,6 +171,20 @@ export class LiveHierarchy {
 			checkoutSpace: this.node(conversation.checkoutId).roomId!, projectSpace: this.node(conversation.projectKey).roomId!, hostSpace: this.node("host").roomId! };
 	}
 	/** Exact saved identities only. Does not discover, adopt, create or rename rooms. */
+	accountInventory(): Array<{ roomId?: string; provenance: ManagedProvenance; hostSpaceId?: string; project?: { projectKey: string; spaceId: string }; checkout?: { checkoutId: string; spaceId: string } }> {
+		if (this.poisoned) throw Error("Hierarchy authority unavailable");
+		const nodes = new Map(this.state.nodes.map(node => [node.key, node]));
+		return this.state.nodes.filter(n => n.kind !== "conversation" || !this.isRetired(n.conversationId)).flatMap(node => {
+			if (node.kind !== "host_space" && !node.parentRoomId) return [];
+			if (node.roomId && this.state.retiredSpaces?.some(s => s.roomId === node.roomId)) return [];
+			const project = "projectKey" in node ? nodes.get(node.projectKey) : undefined;
+			const checkout = "checkoutId" in node ? nodes.get(node.checkoutId) : undefined;
+			return [{ ...(node.linked && node.roomId ? { roomId: node.roomId } : {}), provenance: provenance(this.hostId, node), hostSpaceId: nodes.get("host")?.roomId,
+				...(project?.roomId && "projectKey" in project ? { project: { projectKey: project.projectKey, spaceId: project.roomId } } : {}),
+				...(checkout?.roomId && "checkoutId" in checkout ? { checkout: { checkoutId: checkout.checkoutId, spaceId: checkout.roomId } } : {}) }];
+		});
+	}
+	accountBaseline(): string[] { return this.state.nodes.map(n => `${n.kind}:${n.creationKey}`); }
 	maintenanceLinks(cleanup = false): HierarchyLink[] {
 		this.assertAvailable();
 		const identities = new Map<string, ManagedProvenance>();

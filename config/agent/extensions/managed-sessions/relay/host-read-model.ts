@@ -15,7 +15,7 @@ export class HostReadModel {
 	private readonly loading = new Map<string, Promise<unknown[]>>();
 	private readonly now: () => number;
 	constructor(private readonly options: {
-		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean;
+		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean; accountState?: () => "ready" | "pending" | "unavailable"; accountSetup?: (id: string) => "ready" | "pending" | "notification_setup_uncertain";
 		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; now?: () => number;
 	}) { this.options = { ...options }; this.now = options.now ?? (() => performance.now()); this.pages = new HostInventoryPages(options.hostId, this.now); }
 
@@ -23,7 +23,7 @@ export class HostReadModel {
 		const action = request.action;
 		switch (action.operation) {
 			case "host.status": return { hostId: this.options.hostId, relayState: this.options.matrixReady() ? "ready" : "disconnected",
-				capabilities: this.options.windowFirstOpen ? ["host-control-v1", "window-first-open-v1"] : ["host-control-v1"], accountState: "unavailable" } satisfies HostResult<"host.status">;
+				capabilities: this.options.windowFirstOpen ? ["host-control-v1", "window-first-open-v1"] : ["host-control-v1"], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
 			case "conversation.list": return this.pages.page(action, this.conversations());
 			case "conversation.status": {
 				const retired = this.options.registry.retirement(action.conversationId);
@@ -68,7 +68,7 @@ export class HostReadModel {
 		return this.options.registry.conversationMetadata().map((item): HostConversationSummary => {
 			const common = { conversationId: item.conversationId, title: item.title, activeGenerationId: item.activeGenerationId,
 				runtimeState: item.attached ? "running" as const : "unknown" as const, launchState: item.attached ? "attached" as const : "none" as const,
-				setupState: !item.matrixBound || this.options.matrixReady() ? "pending" as const : "disconnected" as const,
+				setupState: !item.matrixBound ? "pending" as const : !this.options.matrixReady() ? "disconnected" as const : this.options.accountSetup?.(item.conversationId) ?? "pending" as const,
 				capabilities: ["host-control-v1" as const] };
 			const summary: HostConversationSummary = item.kind === "coordinator" ? { ...common, kind: "coordinator" } : {
 				...common, kind: "project", ...(item.placement ? { placement: { ...item.placement } } : {}), ...this.displays(item),

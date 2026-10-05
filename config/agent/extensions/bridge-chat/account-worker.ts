@@ -49,7 +49,7 @@ export class AccountWorker {
 		for (const section of [object(rooms.join), object(rooms.leave)]) {
 			if (Object.keys(section).length > 10000) throw Error("Account membership observation exceeds bounds");
 			for (const [roomId, raw] of Object.entries(section)) {
-				if (!this.store.room(roomId)) continue;
+				if (!this.store.tracksMembership(roomId)) continue;
 				const r = object(raw), membership = [...events(object(r.state).events ?? []), ...events(object(r.timeline).events ?? [])]
 					.map(object).filter(e => e.type === "m.room.member" && e.state_key === this.owner);
 				for (const e of fresh ? membership.slice(-1) : membership) {

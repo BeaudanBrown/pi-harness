@@ -302,8 +302,14 @@ host ID and payload digest. Uncertain HTTP retries reuse exact content and trans
 correction: intentional redelivery after an accepted send uses a fresh persisted
 Matrix transmission ID, retaining the exact account content/request ID and durable
 receiver deduplication. Otherwise Matrix's transaction deduplication would prevent
-re-enqueueing a lost device message. Ack echoes hostId/requestId/payloadDigest;
-conflicting request identity reuse is rejected.
+re-enqueueing a lost device message. Ack echoes hostId/requestId/payloadDigest.
+Operator-approved ordering correction: every ack requires a positive safe-integer
+`revision`, assigned durably and monotonically per request by the NAS. Identical
+progress retains its revision; changed progress increments it. Invalidation must
+retain the counter. Hosts retain the high-water mark across restart and coordinator
+restoration, ignore older revisions, and reject conflicting reuse of a revision.
+Unversioned persisted acknowledgements require explicit recovery rather than a
+silent counter reset. Conflicting request identity reuse is rejected.
 The authenticated Matrix envelope sender must match the configured host bot
 (or owner account for an ack), never a payload sender string. Trusted host IDs
 must map one-to-one to configured bot MXIDs. No arbitrary recipients, endpoints,
@@ -377,6 +383,12 @@ expected rule, but absent/changed rules after an attempted write **never** trigg
 automatic writes: the operator may have deliberately removed or changed it.
 Multiple rule steps track separate attempted markers, and uncertainty does not
 justify rewriting earlier steps. Existing/migrated rooms use preserved state.
+The host freezes a private preservation baseline before starting account producers;
+restarts do not reclassify old reservations or reset room preferences. The silent
+rule uses the `underride` category so manual room/override rules take priority;
+attention relies on normal mention/default rules, not a notify override. Existing
+experimental override-rule journals require explicit recovery, never automatic
+removal or rewriting of personal account settings.
 
 Matrix push-rule PUT has neither a transaction ID nor a specified conditional
 compare-and-set update. GET-then-PUT cannot eliminate races with client changes.

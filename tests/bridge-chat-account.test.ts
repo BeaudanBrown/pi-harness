@@ -58,7 +58,7 @@ test("owner account HTTP effects use fixed endpoints and require positive forget
 	assert.equal(await port.joined("!room:test", signal), true);
 	await port.join("!room:test", signal); await port.leave("!room:test", signal); await port.forget("!room:test", signal);
 	forgetStatus = 404; await assert.rejects(port.forget("!room:test", signal));
-	const action = ensure(); const ack = { version: action.version, hostId: action.hostId, requestId: action.requestId, payloadDigest: action.payloadDigest, status: "complete" };
+	const action = ensure(); const ack = { version: action.version, hostId: action.hostId, requestId: action.requestId, payloadDigest: action.payloadDigest, revision: 1, status: "complete" };
 	await port.toDevice("lol.bepis.pi.account.ack.v1", bot, "HOST", "transmission", ack, signal);
 	assert.deepEqual(calls.at(-1)!.body, { messages: { [bot]: { HOST: ack } } });
 	assert.ok(calls.slice(1, 5).every(c => c.path.startsWith("/_matrix/client/v3/rooms/!room%3Atest/")));
@@ -261,11 +261,24 @@ test("departure is durable negative authority; foreign kicks do not retire and S
 	assert.equal(f.store.room(project.roomId)?.retired, false); assert.equal(f.effects.filter(e => e.startsWith("leave:")).length, 0);
 });
 
+test("departures after a trusted invitation but before attestation persist without joining or touching unrelated rooms", async t => {
+	const f = await workerFixture(t); const action = ensure();
+	f.worker.ingest({ rooms: { invite: { [action.roomId]: { invite_state: { events: [{ type: "m.room.member", sender: bot, state_key: owner, content: { membership: "invite" } }] } } } } });
+	f.worker.ingest(leaveBatch(action.roomId, "$before-attestation")); f.restart();
+	f.worker.ingest(leaveBatch(action.roomId, "$latest-before-attestation"));
+	f.worker.ingest(leaveBatch("!unrelated:test", "$unrelated")); assert.equal(f.store.tracksMembership("!unrelated:test"), false);
+	f.ingest(action); await f.step();
+	assert.equal(f.store.room(action.roomId)?.retired, true); assert.equal(f.store.room(action.roomId)?.departure, "$latest-before-attestation");
+	assert.equal(f.effects.some(e => e.startsWith("join:")), false); assert.equal(f.matrixRules.writes(), 0);
+});
+
 test("coordinator restoration is bound to one departure; replay cannot clear a later leave", async t => {
 	const { project: _project, checkout: _checkout, ...base } = ensure();
 	const action = signed({ ...base, kind: "coordinator", roomId: "!coordinator:test" }) as EnsureRoom;
 	const f = await workerFixture(t, action); f.ingest(action); await f.step();
 	f.joined.delete(action.roomId); f.worker.ingest(leaveBatch(action.roomId, "$first"));
+	await f.step(); const firstRevision = f.store.get(action.requestId)!.ack!.revision;
+	f.ingest(action); assert.equal(f.store.get(action.requestId)!.ack!.revision, firstRevision, "identical redelivery keeps the progress revision");
 	const restore = (event: string) => signed({ version: "1.0.0", hostId: "host", operation: "coordinator.membership.restore", roomId: action.roomId, hostSpaceId: action.hostSpaceId, conversationId: action.conversationId, departureEventId: event });
 	const first = restore("$first"); f.ingest(first); for (let i = 0; i < 3; i++) await f.step();
 	assert.equal(f.store.get(first.requestId)?.ack?.status, "complete"); assert.equal(f.store.room(action.roomId)?.departure, undefined);
@@ -273,6 +286,7 @@ test("coordinator restoration is bound to one departure; replay cannot clear a l
 	f.joined.delete(action.roomId); f.worker.ingest(leaveBatch(action.roomId, "$second")); f.ingest(first); await f.step();
 	assert.equal(f.store.room(action.roomId)?.departure, "$second"); assert.equal(f.joined.has(action.roomId), false);
 	const second = restore("$second"); assert.notEqual(first.requestId, second.requestId); f.ingest(second); for (let i = 0; i < 3; i++) await f.step();
-	assert.equal(f.store.get(second.requestId)?.ack?.status, "complete"); assert.equal(f.store.room(action.roomId)?.retired, false);
+	assert.equal(f.store.get(second.requestId)?.ack?.status, "complete");
+	f.ingest(action); await f.step(); assert.ok(f.store.get(action.requestId)!.ack!.revision > firstRevision, "ack invalidation and restart retain a monotonic high-water mark"); assert.equal(f.store.room(action.roomId)?.retired, false);
 	assert.throws(() => signed({ ...second, departureEventId: undefined }));
 });

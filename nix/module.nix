@@ -538,6 +538,7 @@ in
       homeserver = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
       botUserId = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
       operatorUserId = lib.mkOption { type = lib.types.nullOr lib.types.nonEmptyStr; default = null; };
+      accountDeviceId = lib.mkOption { type = lib.types.nullOr (lib.types.strMatching "[A-Za-z0-9._:-]{1,128}"); default = null; description = "Dedicated NAS owner-account device receiving narrow account requests. Null disables account transport; no owner token is supplied to the host."; };
       ignoredSenderUserIds = lib.mkOption {
         type = lib.types.listOf lib.types.nonEmptyStr;
         default = [ ];
@@ -740,6 +741,7 @@ in
         PI_MATRIX_HOMESERVER = nonNullString cfg.managedSessions.homeserver;
         PI_MATRIX_BOT_USER_ID = nonNullString cfg.managedSessions.botUserId;
         PI_MATRIX_OPERATOR_USER_ID = nonNullString cfg.managedSessions.operatorUserId;
+        PI_MANAGED_ACCOUNT_DEVICE_ID = nonNullString cfg.managedSessions.accountDeviceId;
         PI_MATRIX_IGNORED_SENDER_USER_IDS = builtins.toJSON cfg.managedSessions.ignoredSenderUserIds;
       };
       serviceConfig = {

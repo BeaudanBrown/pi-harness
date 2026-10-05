@@ -223,6 +223,7 @@ export class CoordinatorRouter {
 		private readonly syncHealth: (healthy: boolean) => Promise<void> = async () => undefined,
 		private readonly operatorDeparted: (manifest: ConversationManifest) => Promise<void> = async () => undefined,
 		private readonly hostApprovalVote: (input: { conversationId: string; roomId: string; pollEventId: string; answerId: string; senderUserId: string; eventId: string }) => Promise<boolean> = async () => false,
+		private readonly accountIntake: (response: unknown) => Promise<void> = async () => undefined,
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -270,6 +271,7 @@ export class CoordinatorRouter {
 				const cursor = runtime.matrixCursor;
 				const established = cursor.status === "established";
 				const sync = await this.matrix.sync(cursor.status === "established" ? cursor.since : undefined, signal);
+				await this.accountIntake(sync.response); // Durable before either bootstrap or incremental cursor advance.
 				// Initial sync is a deliberate no-replay boundary, not an incremental gap.
 				// A limited retained timeline is normal here and must not prevent startup.
 				if (!established) {

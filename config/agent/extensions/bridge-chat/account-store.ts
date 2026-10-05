@@ -45,10 +45,15 @@ export class AccountStore {
 			this.atomic(() => {
 				const columns = this.db.prepare("PRAGMA table_info(account_requests)").all().map(row => row.name);
 				if (!columns.includes("ack")) this.db.exec("ALTER TABLE account_requests ADD COLUMN ack TEXT");
+				if (!columns.includes("revision")) {
+					if (this.db.prepare("SELECT 1 FROM account_requests WHERE ack IS NOT NULL LIMIT 1").get()) throw Error("Unversioned account progress requires explicit recovery");
+					this.db.exec("ALTER TABLE account_requests ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
+				}
 				if (!columns.includes("attempt")) this.db.exec("ALTER TABLE account_requests ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0");
 				const saved = this.db.prepare("SELECT owner FROM identity").get();
 				if (saved && saved.owner !== ownerUserId) throw Error("Managed account owner changed; explicit recovery required");
 				if (!saved) this.db.prepare("INSERT INTO identity VALUES (?)").run(ownerUserId);
+				if (this.db.prepare("SELECT 1 FROM notification_rules WHERE id GLOB 'pi-managed-silent-[0-9a-f]*' LIMIT 1").get()) throw Error("Legacy notification override requires explicit recovery");
 				this.db.exec("UPDATE notification_rules SET state='uncertain' WHERE state='attempted'");
 			});
 		} catch (error) { this.db.close(); throw error; }
@@ -94,7 +99,7 @@ export class AccountStore {
 	/** Negative authority may precede verification; it never grants cleanup authority. */
 	private freezeRetirements(roomId: string): void {
 		const room = this.room(roomId); if (!room || room.action.kind === "coordinator" || room.action.kind === "host_space") return;
-		if (room.retired) { this.invalidateEnsures(roomId); return; }
+		if (room.retired) return;
 		for (const row of this.db.prepare("SELECT payload,sender FROM account_requests WHERE json_extract(payload,'$.roomId')=?").all(roomId)) {
 			const action = parseAccountAction(JSON.parse(String(row.payload)));
 			if (row.sender !== room.sender || action.hostId !== room.action.hostId) continue;
@@ -140,8 +145,12 @@ export class AccountStore {
 			const request = this.get(requestId); if (!request || request.action.hostId !== host.hostId || request.sender !== host.botUserId) throw Error("Account acknowledgement scope changed");
 			const { version, payloadDigest, hostId } = request.action;
 			const departureEventId = code === "departed" ? this.room(request.action.roomId)?.departure : undefined;
-			const ack = parseAccountAck({ version, requestId, payloadDigest, hostId, status, ...(code ? { code } : {}), ...(departureEventId ? { departureEventId } : {}) });
-			this.db.prepare("UPDATE account_requests SET ack=? WHERE id=?").run(JSON.stringify(ack), requestId); this.queueAck(ack, host);
+			const previous = Number(this.db.prepare("SELECT revision FROM account_requests WHERE id=?").get(requestId)!.revision);
+			if (!Number.isSafeInteger(previous) || previous < 0) throw Error("Invalid account progress revision");
+			const next = { version, requestId, payloadDigest, hostId, status, ...(code ? { code } : {}), ...(departureEventId ? { departureEventId } : {}) };
+			const unchanged = request.ack && isDeepStrictEqual(request.ack, { ...next, revision: previous });
+			const ack = parseAccountAck({ ...next, revision: unchanged ? previous : previous + 1 });
+			this.db.prepare("UPDATE account_requests SET ack=?,revision=? WHERE id=?").run(JSON.stringify(ack), ack.revision, requestId); this.queueAck(ack, host);
 	}
 	transmission(hosts?: readonly AccountHost[]): AccountTransmission | undefined {
 		if (hosts && !hosts.length) return;
@@ -177,19 +186,23 @@ export class AccountStore {
 				return old;
 			}
 			if (Number(this.db.prepare("SELECT count(*) AS n FROM account_rooms").get()!.n) >= 8192) throw Error("Managed account room capacity exhausted");
-			this.db.prepare("INSERT INTO account_rooms(room,payload,sender) VALUES (?,?,?)").run(action.roomId, JSON.stringify(action), sender);
+			const departure = this.db.prepare("SELECT event FROM account_departures WHERE room=? ORDER BY rowid DESC LIMIT 1").get(action.roomId)?.event;
+			this.db.prepare("INSERT INTO account_rooms(room,payload,sender,departure,retired) VALUES (?,?,?,?,?)").run(action.roomId, JSON.stringify(action), sender, departure ?? null, departure && action.kind === "conversation" ? 1 : 0);
 			this.freezeRetirements(action.roomId);
 			return this.room(action.roomId)!;
 		});
 	}
 	verified(roomId: string): void { this.atomic(() => this.db.prepare("UPDATE account_rooms SET verified=1 WHERE room=?").run(roomId)); }
+	tracksMembership(roomId: string): boolean {
+		return Boolean(this.room(roomId) || this.invite(roomId) || this.db.prepare("SELECT 1 FROM account_departures WHERE room=? LIMIT 1").get(roomId));
+	}
 	departed(roomId: string, eventId: string): void {
 		if (!/^\$[^\s]{1,254}$/.test(eventId)) throw Error("Invalid account departure event");
 		this.atomic(() => {
-			const room = this.room(roomId); if (!room || this.db.prepare("SELECT 1 FROM account_departures WHERE event=?").get(eventId)) return;
+			const room = this.room(roomId); if (!this.tracksMembership(roomId) || this.db.prepare("SELECT 1 FROM account_departures WHERE event=?").get(eventId)) return;
 			if (Number(this.db.prepare("SELECT count(*) AS n FROM account_departures").get()!.n) >= 16384) throw Error("Account departure capacity exhausted");
 			this.db.prepare("INSERT INTO account_departures VALUES (?,?)").run(eventId, roomId);
-			this.db.prepare("UPDATE account_rooms SET departure=?, retired=? WHERE room=?").run(eventId, room.action.kind === "conversation" || room.retired ? 1 : 0, roomId);
+			if (room) this.db.prepare("UPDATE account_rooms SET departure=?, retired=? WHERE room=?").run(eventId, room.action.kind === "conversation" || room.retired ? 1 : 0, roomId);
 			this.db.prepare("DELETE FROM account_invites WHERE room=?").run(roomId);
 			this.invalidateEnsures(roomId);
 		});

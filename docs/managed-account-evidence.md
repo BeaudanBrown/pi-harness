@@ -164,3 +164,60 @@ hierarchy/coordinator ensure producers, ack ingestion before host cursor advance
 readiness reporting, exact cleanup and approved membership-restore ports, then
 full #112 review and final canonical verification. These are transport/fixture and
 package results, not a claim of end-to-end host assembly or live acceptance.
+
+
+## Approved progress revisions and host production assembly
+
+The operator approved mandatory monotonic per-request acknowledgement revisions.
+NAS counters survive acknowledgement invalidation; identical redelivery retains
+its revision. Host journals preserve the high-water mark across restoration and
+restart, ignore older progress, and reject conflicting same-revision content.
+Unversioned saved acknowledgements fail closed for explicit recovery.
+
+The production host now composes hierarchy/coordinator producers, account intake
+before both initial and incremental cursor advancement, per-conversation setup
+status, exact retirement/Space cleanup ports and independently approved coordinator
+membership restoration. Restoration freezes a fresh authenticated self-departure,
+rechecks it before the one caller-owned bot invitation, and sends the departure-bound
+NAS request. The background worker never retries that model-owned invitation.
+Only exact active conversation departure notices enter canonical host retirement.
+
+A private baseline preserves existing rooms/reservations across restarts. New-room
+suppression uses an underride (superseding the experimental override described in
+the earlier foundation section), allowing manual room/override preferences to win.
+Experimental override journals require explicit recovery rather than automatic
+personal-account edits. Trusted invitations followed by a self-leave *before*
+host attestation now retain a negative observation; later attestation cannot revive
+them. Unrelated rooms do not enter this journal.
+
+Retired host ensures are cancelled. Their saved attestation may be redelivered
+only after a matching NAS pending/unverified retirement acknowledgement proves
+negative intake is durable; this cannot authorize joining a retired room. Unknown
+or unverifiable ownership remains pending, not adopted or guessed. Account worker
+HTTP and new setup failures do not occupy local IPC or running Pi work.
+
+| New boundary | Recovery / evidence |
+|---|---|
+| baseline before producers | atomic private snapshot; restart never reclassifies old reservations |
+| progress before ack transmission | counter/ack/outbox transaction; restart and reorder regression |
+| restored ensure high-water mark | superseded marker retains revision; delayed negatives ignored |
+| trusted invite before attestation | self-leave survives restart and suppresses later join |
+| host intake before cursor | initial and incremental router barrier tests |
+| approved restore before invite | exact fresh self-departure rechecked; lost invitation reply stays uncertain |
+| retired positive ensure | cancelled durably; supplemental proof requires negative NAS receipt |
+| host/NAS cleanup exchange | real JSON/SQLite journals with deterministic Matrix ports; positive forget acknowledgement |
+
+Focused account/runtime checks passed **48 tests, zero skips**:
+`.pi/tmp/workers/2026-10-05T02-57-44-206Z-account-runtime-final-focused-3fe1217b385f/`.
+This includes a production hierarchy/account-owner to NAS-consumer roundtrip over
+real journals, preservation/new-room rules, departure-triggered retirement and
+exact cleanup. Matrix effects in that roundtrip are deterministic port fixtures,
+not a live homeserver, NAS login, phone or deployment test. Full affected checks,
+issue-boundary review and canonical verification are still pending at this entry.
+
+Affected packaged checks subsequently passed **453 managed-session tests and 87
+bridge-chat tests, zero skips**, plus source contracts, including both host cursor
+barrier tests:
+`.pi/tmp/workers/2026-10-05T03-02-46-431Z-account-production-affected-385a4a029039/`.
+The NAS builder SSH connection was unavailable; the authorized local Nix fallback
+completed. No live services or credentials were exercised.

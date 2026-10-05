@@ -154,6 +154,31 @@ establish a new discard-only watermark and discard pending work. The TypeScript
 upgrade does so once too, retaining compatible SQLite state/tombstones without
 replaying the old Python client's events.
 
+## Optional managed-account automation
+
+The existing transport can also consume narrow managed-room account requests.
+`services.pi-harness.bridgeChat.assistant.managedAccountHosts` defaults to `[]`;
+entries pin one-to-one `{ hostId, botUserId, deviceId }` identities. The host's
+`managedSessions.accountDeviceId` must identify this transport's dedicated owner
+login device. Both mappings are explicit; wildcards and arbitrary endpoints are
+not supported. This is configuration support, not authorization to activate it.
+
+The separate `managed-account.sqlite` journal owns verified membership,
+leave/forget, departure suppression and once-only silent underride rules. Account
+configuration changes do not reset `!pi` watermarks or replay assistant requests.
+Owner credentials stay in this transport; the host only uses its existing bot
+credential. Account HTTP work is independent of model execution. Durable account
+intake precedes the shared sync cursor; an account integrity/storage failure holds
+that cursor rather than dropping uncommitted account messages. Existing local Pi
+execution and the separate file service do not depend on NAS account readiness.
+
+Existing rooms and reservations retain their notification policy. New rules never
+overwrite manual room rules. Lost rule PUT replies remain uncertain and are only
+checked by reads. Pre-revision acknowledgement journals and experimental silent
+*override* rule journals require explicit recovery, not automatic rule deletion,
+rewrites, or counter reset. See [account evidence](managed-account-evidence.md)
+and [the protocol contract](managed-live-workspaces-contract.md).
+
 ## Acceptance-to-evidence matrix
 
 | Requirement | Deterministic proof | Live gate |

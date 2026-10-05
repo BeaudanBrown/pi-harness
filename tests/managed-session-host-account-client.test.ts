@@ -9,7 +9,7 @@ import type { AccountAction, AccountAck } from "../config/agent/extensions/manag
 const owner = "@owner:test";
 const body: AccountActionBody = { operation: "room.ensure", kind: "coordinator", roomId: "!coordinator:test", hostSpaceId: "!host:test", creationKey: "coordinator", conversationId: `conv_${"a".repeat(32)}`, notificationSetup: "preserve" };
 function ack(action: AccountAction, status: AccountAck["status"] = "complete", extra = {}): AccountAck {
-	return { version: action.version, hostId: action.hostId, requestId: action.requestId, payloadDigest: action.payloadDigest, status, ...extra };
+	return { version: action.version, hostId: action.hostId, requestId: action.requestId, payloadDigest: action.payloadDigest, revision: status === "pending" ? 1 : status === "rejected" ? 3 : 2, status, ...extra };
 }
 function event(content: AccountAck, sender = owner): unknown { return { to_device: { events: [{ type: "lol.bepis.pi.account.ack.v1", sender, content }] } }; }
 async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
@@ -51,14 +51,38 @@ test("host only accepts authenticated matching acknowledgements and never regres
 
 test("coordinator restore clears only matching departure acknowledgement and delayed old negatives cannot undo it", async t => {
 	const f = await fixture(t); const ensure = await f.client.request(body);
-	const departure = (id: string) => event(ack(ensure, "rejected", { code: "departed", departureEventId: id }));
+	const departure = (id: string) => event(ack(ensure, "rejected", { code: "departed", departureEventId: id, revision: id === "$first" ? 3 : 5 }));
 	await f.client.ingest(departure("$first"));
 	const restore = await f.client.request({ operation: "coordinator.membership.restore", roomId: body.roomId, hostSpaceId: "!host:test", conversationId: `conv_${"a".repeat(32)}`, departureEventId: "$first" });
 	await f.client.ingest(event(ack(restore))); assert.equal(f.client.ack(ensure.requestId), undefined);
 	await f.restart(); await f.client.ingest(departure("$first")); assert.equal(f.client.ack(ensure.requestId), undefined);
-	await f.client.ingest(event(ack(ensure))); assert.equal(f.client.ack(ensure.requestId)?.status, "complete");
+	await f.client.ingest(event(ack(ensure, "complete", { revision: 4 }))); assert.equal(f.client.ack(ensure.requestId)?.status, "complete");
 	await f.client.ingest(departure("$second")); await f.client.ingest(event(ack(restore)));
 	assert.equal(f.client.ack(ensure.requestId)?.departureEventId, "$second");
+});
+
+test("monotonic revisions reject delayed different departures, conflicting reuse, and survive restart", async t => {
+	const f = await fixture(t); const action = await f.client.request(body);
+	await f.client.ingest(event(ack(action, "rejected", { revision: 7, code: "departed", departureEventId: "$second" })));
+	await f.restart();
+	await f.client.ingest(event(ack(action, "rejected", { revision: 6, code: "departed", departureEventId: "$first" })));
+	assert.equal(f.client.ack(action.requestId)?.departureEventId, "$second");
+	await assert.rejects(f.client.ingest(event(ack(action, "rejected", { revision: 7, code: "departed", departureEventId: "$conflict" }))), /Conflicting/);
+	assert.equal(f.client.ack(action.requestId)?.departureEventId, "$second");
+});
+
+test("baseline preserves old reservations and cancellation requires a durable negative receipt before supplemental attestation", async t => {
+	const f = await fixture(t); await f.client.initializeBaseline(["coordinator:coordinator", "conversation:old"]);
+	assert.equal(f.client.notificationSetup("conversation", "old"), "preserve");
+	assert.equal(f.client.notificationSetup("conversation", "new"), "new_room");
+	await f.restart(); await f.client.initializeBaseline(["conversation:new"]);
+	assert.equal(f.client.notificationSetup("conversation", "new"), "new_room", "restart never resets initial policy");
+	const ensure = await f.client.request({ ...body, kind: "conversation", project: { projectKey: `project_${"a".repeat(32)}`, spaceId: "!project:test" }, checkout: { checkoutId: `checkout_${"a".repeat(32)}`, spaceId: "!checkout:test" } });
+	await f.client.cancelRetired(() => true); await f.client.flush(new AbortController().signal); assert.equal(f.sent.length, 0);
+	const retirement = await f.client.request({ operation: "room.retire", roomId: ensure.roomId, conversationId: `conv_${"a".repeat(32)}`, retirementId: `retirement_${"a".repeat(32)}` });
+	await f.client.ingest(event(ack(retirement, "pending", { code: "unverified" })));
+	for (let i = 0; i < 3; i++) { f.advance(); await f.client.flush(new AbortController().signal); }
+	assert.ok(f.sent.some(v => v.action.requestId === ensure.requestId));
 });
 
 test("completed cleanup is not retransmitted and slow sends do not hold acknowledgement intake", async t => {

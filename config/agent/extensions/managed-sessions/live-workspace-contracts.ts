@@ -223,7 +223,7 @@ export const AccountActionSchema = Type.Union([
 		departureEventId: Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 }) }),
 ]);
 export type AccountAction = Static<typeof AccountActionSchema>;
-export const AccountAckSchema = strict({ ...accountBase, status: Type.Union([
+export const AccountAckSchema = strict({ ...accountBase, revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), status: Type.Union([
 	Type.Literal("pending"), Type.Literal("complete"), Type.Literal("notification_setup_uncertain"), Type.Literal("rejected"),
 ]), code: Type.Optional(Type.Union([Type.Literal("departed"), Type.Literal("unsupported_encryption"), Type.Literal("unverified"), Type.Literal("conflict")])),
 	departureEventId: Type.Optional(Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 })) });
