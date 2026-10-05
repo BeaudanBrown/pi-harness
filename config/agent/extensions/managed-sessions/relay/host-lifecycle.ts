@@ -21,6 +21,7 @@ import {
 	type WorkspaceIdentity,
 } from "../contracts.js";
 import { deriveCheckoutId } from "../managed-provenance.js";
+import { FORK_CONTEXT_TYPE, forkContextEntry, parseForkContext, verifyForkContextEntry, type ForkContext } from "../fork-context.js";
 import { parseHostAction, type HostAction, type HostResult } from "../live-workspace-contracts.js";
 import type { FrozenJson } from "./host-approval-record.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
@@ -270,7 +271,9 @@ async function readPrivateIntent<T>(file: AtomicJsonFile<T>): Promise<T | undefi
 	return value;
 }
 
-async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1, mustExist = false): Promise<{ sessionId: string; boundaryEntryId: string }> {
+export async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1, mustExist = false, forkContext?: ForkContext): Promise<{ sessionId: string; boundaryEntryId: string }> {
+	const context = forkContext === undefined ? undefined : parseForkContext(forkContext);
+	if (context && (ordinal !== 1 || context.sourceConversationId === conversationId)) throw new RelayRegistryError("invalid_state", "Fork context requires an independent initial generation");
 	try {
 		const info = await lstat(path);
 		if (!info.isFile() || info.isSymbolicLink() || (process.getuid?.() !== undefined && info.uid !== process.getuid!())) {
@@ -287,6 +290,11 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 			(ordinal > 1 && (data.ordinal !== ordinal || data.generationId !== deriveGenerationId(conversationId, ordinal)))) {
 			throw new RelayRegistryError("invalid_state", "Existing project Pi session does not match its durable binding identity");
 		}
+		if (context) {
+			const seeds = lines.filter(entry => entry.type === "custom_message" && entry.customType === FORK_CONTEXT_TYPE);
+			if (seeds.length !== 1) throw new RelayRegistryError("invalid_state", "Existing project Pi session has no unique fork context");
+			verifyForkContextEntry(seeds[0], context, boundary.id);
+		}
 		if ((info.mode & 0o077) !== 0) await chmod(path, 0o600);
 		return { sessionId: header.id, boundaryEntryId: deriveTranscriptEntryId(header.id, boundary.id) };
 	} catch (error) {
@@ -302,10 +310,13 @@ async function durableProjectSession(path: string, cwd: string, conversationId: 
 		{ type: "custom", id: boundaryKey, parentId: null, timestamp: now, customType: "managed-session.binding-boundary",
 			data: { version: MANAGED_SESSION_STATE_VERSION, creationKey, concept, sessionId, ...(ordinal > 1 ? { ordinal, generationId: deriveGenerationId(conversationId, ordinal) } : {}) } },
 	];
+	// Seed context in the same atomic publication as the fresh session/boundary.
+	// Never append a seed into an existing session, which may already have a writer.
+	const sessionEntries = context ? [...entries, forkContextEntry(context, boundaryKey, now)] : entries;
 	const temporary = `${path}.${process.pid}.${randomBytes(8).toString("hex")}.tmp`;
 	const file = await open(temporary, "wx", 0o600);
 	try {
-		await file.writeFile(`${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
+		await file.writeFile(`${sessionEntries.map((entry) => JSON.stringify(entry)).join("\n")}\n`, "utf8");
 		await file.sync();
 	} catch (error) {
 		await file.close();

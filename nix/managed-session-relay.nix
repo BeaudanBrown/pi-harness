@@ -22,6 +22,7 @@ stdenv.mkDerivation {
     cp config/agent/extensions/managed-sessions/identity-contracts.ts source/managed-sessions/identity-contracts.ts
     cp config/agent/extensions/managed-sessions/host-run-contracts.ts source/managed-sessions/host-run-contracts.ts
     cp config/agent/extensions/managed-sessions/host-tool.ts source/managed-sessions/host-tool.ts
+    cp config/agent/extensions/managed-sessions/fork-context.ts source/managed-sessions/fork-context.ts
     cp config/agent/extensions/managed-sessions/host-command.ts source/managed-sessions/host-command.ts
     cp config/agent/extensions/managed-sessions/exact-window-contracts.ts source/managed-sessions/exact-window-contracts.ts
     cp config/agent/extensions/managed-sessions/live-workspace-contracts.ts source/managed-sessions/live-workspace-contracts.ts
