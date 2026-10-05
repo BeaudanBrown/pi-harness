@@ -28,7 +28,7 @@ import { migrateManagedSessionStoresV1ToV2 } from "./v2-migration.js";
 import { BlobSpool } from "./blob-spool.js";
 import { ManagedImageTransport } from "./image-media.js";
 import { ManagedArtifactExporter } from "./artifact-export.js";
-import { renderManagedConversationStatus } from "./status.js";
+import { renderManagedConversationStatus, type ManagedStatusPresentation } from "./status.js";
 import { prepareRelayStateDirectory } from "./state-directory.js";
 import { AtomicJsonFile } from "./atomic-json.js";
 import { retryMatrixStartup } from "./startup-retry.js";
@@ -41,6 +41,7 @@ import { HostDispatcher } from "./host-dispatcher.js";
 import { HostApprovalRuntime } from "./host-approval-runtime.js";
 import { HostApprovalStore } from "./host-approval-store.js";
 import { ManagedHostMutationOwner, isManagedHostPreview } from "./host-mutation-owner.js";
+import { HostRuntimeObserver } from "./runtime-observer.js";
 import { HostReadModel } from "./host-read-model.js";
 import { HostMatrixCommands } from "./host-matrix-commands.js";
 import { HostAccountClient } from "./host-account-client.js";
@@ -91,6 +92,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let hierarchy: LiveHierarchy | undefined;
 	let localEnrollments: LocalEnrollmentReconciler | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
+	let runtimeObserver: HostRuntimeObserver | undefined;
 	let retirement: ConversationRetirement | undefined;
 	let hostApprovals: HostApprovalRuntime | undefined;
 	let account: HostAccountOwner | undefined;
@@ -98,6 +100,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let activityProjector: ActivityProjector | undefined;
 	let closeArtifactExporter = async (): Promise<void> => undefined;
 	let closeNotices = async (): Promise<void> => undefined;
+	const presentation = (id: string): ManagedStatusPresentation => ({ runtime: runtimeObserver?.snapshot().get(id), account: account?.client.setupState(id) ?? "unavailable" });
 	try {
 		await prepareRelayStateDirectory(hostId, stateDirectory, runtimeDirectory, manifestStore);
 		await registry.load();
@@ -110,6 +113,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			resolve(runtimeDirectory, "sync-health.json"), (value) => value as { status: "starting" | "healthy" | "blocked"; lastSuccessfulSyncAt: string | null; runtimeBuild: string });
 		await healthFile.write({ status: "starting", lastSuccessfulSyncAt, runtimeBuild });
 		const syncHealth = async (healthy: boolean): Promise<void> => {
+			if (healthy && !matrixHealthy) runtimeObserver?.kick();
 			matrixHealthy = healthy;
 			await recoveryMonitor?.health(healthy);
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
@@ -252,7 +256,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 							const runtime = registry.snapshot().conversations.find((item) => item.conversationId === attachment.conversationId);
 							if (!runtime) throw new RelayRegistryError("not_found", "Managed runtime status is unavailable");
 							projectedMessage = renderManagedConversationStatus(manifest, runtime, payload.liveStatus,
-								registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, payload.controlId);
+								registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, payload.controlId, undefined, presentation(manifest.conversationId));
 						}
 						if (payload.options?.length) {
 							if (!source || (source.name !== "model" && source.name !== "thinking")) {
@@ -401,13 +405,18 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				},
 			});
 		}
+		if (hostLifecycle) {
+			runtimeObserver = new HostRuntimeObserver({ hostId, windows: hostLifecycle.exactWindows,
+				sources: () => registry.runtimeObservationSources(), subscribe: listener => registry.onRuntimeObservationChange(listener) });
+			runtimeObserver.start();
+		}
 		retirement = new ConversationRetirement({ registry, matrix, hierarchy, server, account,
 			matrixAuthenticated: () => matrixAuthenticated,
 			windows: hostLifecycle?.exactWindows ?? { check: async () => { throw Error("Exact launcher is unavailable"); }, terminate: async () => { throw Error("Exact launcher is unavailable"); } },
 			cancelApprovals: (conversationId) => hostApprovals?.cancelRun(conversationId),
 			onFailure: () => process.stderr.write("pi-managed-session-relay: retirement cleanup is pending\n") });
 		if (hostPolicy) {
-			const reads = new HostReadModel({ hostId, registry, lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
+			const reads = new HostReadModel({ hostId, registry, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
 			} });
@@ -498,7 +507,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				if (manifest.kind === "coordinator") await registry.recordCoordinatorDeparture(manifest.conversationId);
 				else await retirement!.retire(manifest.conversationId);
 			}, (vote) => hostApprovals?.vote(vote) ?? Promise.resolve(false), response => account?.client.ingest(response) ?? Promise.resolve(),
-			(manifest, eventId, sender, body) => matrixHostCommands?.accept(manifest, eventId, sender, body) ?? Promise.resolve(false));
+			(manifest, eventId, sender, body) => matrixHostCommands?.accept(manifest, eventId, sender, body) ?? Promise.resolve(false), presentation);
 			await coordinatorRouter.loadInbox(resolve(stateDirectory, "inbox.json"));
 			coordinatorRouter.start();
 			account?.start(id => retirement!.retire(id));
@@ -523,6 +532,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await account?.close().catch(() => undefined);
 		await controlServer?.close().catch(() => undefined);
 		await hostApprovals?.close().catch(() => undefined);
+		await runtimeObserver?.close().catch(() => undefined);
 		await retirement?.close().catch(() => undefined);
 		const enrollmentClosing = localEnrollments?.close();
 		await hierarchy?.close().catch(() => undefined);
@@ -546,6 +556,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await account?.close().catch(() => undefined);
 			await controlServer?.close().catch(() => undefined);
 			await hostApprovals?.close().catch(() => undefined);
+			await runtimeObserver?.close().catch(() => undefined);
 			await retirement?.close().catch(() => undefined);
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
 			const enrollmentClosing = localEnrollments?.close();
@@ -580,6 +591,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await matrixHostCommands?.close();
 			await account?.close();
 			await hostApprovals?.close();
+			await runtimeObserver?.close();
 			await retirement?.close();
 			const enrollmentClosing = localEnrollments?.close();
 			await hierarchy?.close();

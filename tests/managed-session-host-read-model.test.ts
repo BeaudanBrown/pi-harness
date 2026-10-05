@@ -43,11 +43,19 @@ test("retired status reports cleanup without exposing receipts or returning a re
 	const result = await read(model, { operation: "conversation.list" }); assert.ok(result.ok); assert.deepEqual(result.data.items, []);
 });
 
+test("host reads share one observation snapshot and never override exact stopped or unknown evidence", async () => {
+	let snapshots = 0;
+	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => [base], retirement: () => undefined }, matrixReady: () => true,
+		runtimeObservations: () => { snapshots++; return new Map([[base.conversationId, { runtimeState: "stopped", launchState: "failed" }]]); } });
+	const result = await read(model, { operation: "conversation.list" }); assert.ok(result.ok);
+	assert.equal(result.data.items[0].runtimeState, "stopped"); assert.equal(result.data.items[0].launchState, "failed"); assert.equal(snapshots, 1);
+});
+
 test("host read model includes roomless and unresolved rows without inventing runtime or account readiness", async () => {
 	let rows: RegistryConversationMetadata[] = [base, { ...base, conversationId: id("conv", "b"), attached: false, matrixBound: true, checkoutId: undefined }];
 	const model = new HostReadModel({ hostId: "host", registry: { conversationMetadata: () => structuredClone(rows), retirement: () => undefined }, matrixReady: () => false });
 	const result = await read(model, { operation: "conversation.list" }); assert.ok(result.ok);
-	assert.equal(result.data.items[0].runtimeState, "running"); assert.equal(result.data.items[0].setupState, "pending");
+	assert.equal(result.data.items[0].runtimeState, "unknown", "an attachment alone is not an exact managed-window observation"); assert.equal(result.data.items[0].setupState, "pending");
 	assert.equal(result.data.items[1].runtimeState, "unknown"); assert.equal(result.data.items[1].setupState, "disconnected");
 	assert.ok("reconciliationRequired" in result.data.items[1]); assert.ok(!("checkoutId" in result.data.items[1]));
 	assert.equal(result.data.items[0].kind, "project");

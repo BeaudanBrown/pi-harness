@@ -263,6 +263,16 @@ keeps last-known presentation with honest detailed status. Typing indicates
 active model work only. Reconcile all host-owned conversations on reconnect,
 attachment changes and every 10 seconds through a shared bounded local snapshot;
 coalesce requests and update Matrix only on changes. No cross-host heartbeat.
+The approved read-only launcher `window-observe-exact` accepts 1–64 unique exact
+proofs in `{proofs:[...]}` and returns ordered
+`{observations:[{conversationId,launchId,state}]}`, where state is `running`,
+`stopped`, or `unknown`. Reuse one tmux inventory per batch and validate original
+process/birth evidence. Exact dead retained panes are stopped; changed ownership
+is unknown unless the original process is independently proven gone. These
+observations are presentation only, never stop/adoption authority; existing exact
+check/terminate semantics remain unchanged. Host snapshots expire after 20 seconds
+and are discarded on source generation/launch/window/attachment changes. Unsupported
+launchers produce unknown, not inferred liveness from a retained window.
 Manual title and Pi `/name` observations serialize to a monotonic title revision;
 strip only the harness-owned status prefix, suppress self-echo by accepted event
 identity, and never use title collisions as identity.

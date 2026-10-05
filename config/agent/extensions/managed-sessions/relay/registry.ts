@@ -24,6 +24,7 @@ import {
 	parseHostRuntimeState,
 	parsePersistenceBundle,
 } from "../contracts.js";
+import type { RuntimeObservationSource } from "./runtime-observer.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ConversationManifestStore } from "./manifest-store.js";
 import { redactManagedValue } from "./redaction.js";
@@ -78,6 +79,8 @@ export class RelayRegistry {
 	private readonly liveConnections = new Map<string, string>();
 	private operations: Promise<void> = Promise.resolve();
 	private restartReconciling = false;
+	private readonly runtimeObservers = new Set<() => void>();
+	private runtimeObservationKey?: string;
 
 	constructor(
 		readonly hostId: string,
@@ -499,6 +502,37 @@ export class RelayRegistry {
 				} : {}),
 			};
 		});
+	}
+
+	/** Bounded metadata projection, deliberately excluding queues, history and secrets. */
+	runtimeObservationSources(): RuntimeObservationSource[] {
+		this.retirements.assertAvailable();
+		const runtime = new Map(this.state.conversations.map(row => [row.conversationId, row]));
+		return [...this.manifests.values()].filter(manifest => manifest.ownerHostId === this.hostId && !this.retirements.has(manifest.conversationId)).flatMap(manifest => {
+			const row = runtime.get(manifest.conversationId); if (!row) return [];
+			return [{ hostId: this.hostId, conversationId: manifest.conversationId, generationId: this.activeGeneration(manifest).generationId,
+				piSessionId: manifest.piSessionId, state: row.state,
+				attached: Boolean(this.liveConnections.has(manifest.conversationId) && row.state === "active" && row.attachment?.sessionId === manifest.piSessionId),
+				...(row.attachment ? { attachmentId: row.attachment.attachmentId } : {}),
+				...(row.launch ? { launch: { launchId: row.launch.launchId, generationId: row.launch.generationId } } : {}),
+				...(row.managedWindow?.ownership ? { window: structuredClone(row.managedWindow.ownership) } : {}),
+				managedWindow: Boolean(row.managedWindow), failed: Boolean(row.lastLaunchError), transitioning: Boolean(row.generationTransition && row.generationTransition.phase !== "attached"),
+			}];
+		});
+	}
+
+	onRuntimeObservationChange(listener: () => void): () => void {
+		this.runtimeObservationKey = JSON.stringify(this.runtimeObservationSources());
+		this.runtimeObservers.add(listener);
+		return () => { this.runtimeObservers.delete(listener); if (!this.runtimeObservers.size) this.runtimeObservationKey = undefined; };
+	}
+
+	private notifyRuntimeObservers(): void {
+		if (!this.runtimeObservers.size) return;
+		const next = JSON.stringify(this.runtimeObservationSources());
+		if (next === this.runtimeObservationKey) return;
+		this.runtimeObservationKey = next;
+		for (const listener of this.runtimeObservers) { try { listener(); } catch { /* Presentation cannot roll back committed authority. */ } }
 	}
 
 	conversationState(conversationId: string): "starting" | "active" | "dormant" {
@@ -1279,6 +1313,7 @@ export class RelayRegistry {
 		});
 		this.operations = run.catch(() => undefined);
 		await run;
+		try { this.notifyRuntimeObservers(); } catch { /* Observers fail closed independently of committed mutations. */ }
 		if (failure) throw failure;
 		return result;
 	}

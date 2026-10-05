@@ -30,6 +30,16 @@ test("managed status combines relay authority with live adapter state", () => {
 	assert.doesNotMatch(result, /roomId|workspacePath|matrixEventId/);
 });
 
+test("managed status exposes process evidence and account setup without conflating attachment with running", () => {
+	const result = renderManagedConversationStatus(manifest, runtime(), undefined, 2, undefined, undefined,
+		{ runtime: { runtimeState: "stopped", launchState: "failed" }, account: "notification_setup_uncertain" });
+	assert.match(result, /adapter connected/);
+	assert.match(result, /Process \(last observed\): stopped; launch failed/);
+	assert.match(result, /Account setup: notification_setup_uncertain/);
+	assert.match(result, /Project reconciliation pending: 2/);
+	assert.match(renderManagedConversationStatus(manifest, runtime(), undefined, 0), /Process \(last observed\): unknown/);
+});
+
 test("managed status makes requested/runtime model disagreement visible", () => {
 	const result = renderManagedConversationStatus(manifest, runtime(), { state: "idle", model: "openai/default", thinking: "medium" }, 0);
 	assert.match(result, /Model match: NO — runtime differs from requested model/);

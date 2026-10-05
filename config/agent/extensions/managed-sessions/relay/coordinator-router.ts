@@ -12,7 +12,7 @@ import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 import { type MatrixImageEvent, ManagedImageTransport } from "./image-media.js";
-import { renderManagedConversationStatus } from "./status.js";
+import { renderManagedConversationStatus, type ManagedStatusPresentation } from "./status.js";
 import { DurableInbox } from "./durable-inbox.js";
 
 interface MatrixTextEvent {
@@ -226,6 +226,7 @@ export class CoordinatorRouter {
 		private readonly hostApprovalVote: (input: { conversationId: string; roomId: string; pollEventId: string; answerId: string; senderUserId: string; eventId: string }) => Promise<boolean> = async () => false,
 		private readonly accountIntake: (response: unknown) => Promise<void> = async () => undefined,
 		private readonly hostCommand: (manifest: ConversationManifest, eventId: string, sender: string, body: string) => Promise<boolean> = async () => false,
+		private readonly presentation: (conversationId: string) => ManagedStatusPresentation = () => ({}),
 	) {
 		if (manifest.kind !== "coordinator") throw new Error("Coordinator router requires the coordinator manifest");
 	}
@@ -377,7 +378,7 @@ export class CoordinatorRouter {
 		if (this.registry.hasGenerationTransition(manifest.conversationId) && (control.name === "status" || control.name === "help")) {
 			const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId)!;
 			await this.projectNotice(eventId, manifest, renderManagedConversationStatus(manifest, runtime, undefined,
-				this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length));
+				this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, undefined, undefined, this.presentation(manifest.conversationId)));
 			return;
 		}
 		if (this.registry.hasGenerationTransition(manifest.conversationId)) {
@@ -397,7 +398,7 @@ export class CoordinatorRouter {
 				const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
 				if (!runtime) throw new RelayRegistryError("not_found", "Managed runtime status is unavailable");
 				message = renderManagedConversationStatus(manifest, runtime, undefined,
-					this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length);
+					this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, undefined, undefined, this.presentation(manifest.conversationId));
 			}
 			await this.projectNotice(eventId, manifest, message); return;
 		}

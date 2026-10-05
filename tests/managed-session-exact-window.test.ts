@@ -50,6 +50,34 @@ test("exact observation distinguishes disappearance from changed ownership witho
 	assert.throws(() => parseExactWindowProof({ ...proof, serverId: `2147483648:456:${"a".repeat(32)}` }));
 });
 
+test("batched presentation observations freeze input and correlate every bounded result", async () => {
+	const input = structuredClone(proof);
+	const client = new ExactWindowClient(async (operation, request) => {
+		assert.equal(operation, "window-observe-exact"); assert.deepEqual(request, { proofs: [proof] });
+		input.launchId = `launch_${"c".repeat(32)}`;
+		(request as any).proofs[0].conversationId = "changed";
+		return { observations: [{ conversationId, launchId: proof.launchId, state: "running" }] };
+	});
+	assert.deepEqual(await client.observe([input]), [{ conversationId, launchId: proof.launchId, state: "running" }]);
+	let calls = 0; const unused = new ExactWindowClient(async () => { calls++; return {}; });
+	for (const values of [[], [proof, proof], Array.from({ length: 65 }, () => proof), [{ ...proof, panePid: "0" }]]) await assert.rejects(unused.observe(values));
+	assert.equal(calls, 0);
+	const batch = Array.from({ length: 64 }, (_, i) => ({ ...proof, conversationId: deriveConversationId(hostId, `observe-${i}`) }));
+	const bounded = new ExactWindowClient(async (_, request) => ({ observations: (request as any).proofs.map((p: ExactWindowProof) => ({ conversationId: p.conversationId, launchId: p.launchId, state: "unknown" })) }));
+	assert.equal((await bounded.observe(batch)).length, 64);
+});
+
+test("presentation observations reject partial, reordered, foreign or extended results without fallback", async () => {
+	const row = { conversationId, launchId: proof.launchId, state: "stopped" };
+	for (const response of [{}, { observations: [] }, { observations: [row, row] }, { observations: [row], extra: true },
+		...[{ ...row, state: "match" }, { ...row, state: ["running"] }, { ...row, conversationId: "foreign" }, { ...row, launchId: "foreign" }, { ...row, extra: true }, null].map(value => ({ observations: [value] }))]) {
+		await assert.rejects(new ExactWindowClient(async () => response).observe([proof]));
+	}
+	const other = { ...proof, conversationId: deriveConversationId(hostId, "other") };
+	await assert.rejects(new ExactWindowClient(async () => ({ observations: [{ ...row, conversationId: other.conversationId }, row] })).observe([proof, other]));
+	await assert.rejects(new ExactWindowClient(async () => { throw Error("unsupported"); }).observe([proof]), /unsupported/);
+});
+
 test("exact creation binds the reserved launch and workspace to the returned ownership", async () => {
 	const placement = { rootKey: "projects", workspace: "workspace", relativeCwd: "" };
 	const reply = { ...placement, conversationId, sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, role: "conversation", ownership: proof };
@@ -79,7 +107,16 @@ test("private runtime ownership survives reload and rejects a mismatched binding
 		bindingBoundaryEntryId: deriveTranscriptEntryId("session", "boundary"), createdAt: "2026-10-01T00:00:00.000Z" };
 	await manifests.write(manifest); const registry = new RelayRegistry(hostId, root, manifests); await registry.load();
 	const window = { sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, ownership: proof };
-	await registry.setManagedWindow(conversationId, window);
+	let changes = 0;
+	const unsubscribe = registry.onRuntimeObservationChange(() => { changes++; });
+	const brokenSubscriber = registry.onRuntimeObservationChange(() => { throw Error("presentation failure must not roll back authority"); });
+	await registry.setMatrixCursor(conversationId, "cursor"); assert.equal(changes, 0, "intake cursor is not a runtime observation change");
+	await registry.setManagedWindow(conversationId, window); assert.equal(changes, 1);
+	await registry.setManagedWindow(conversationId, window); assert.equal(changes, 1, "identical observation does not retrigger a scan");
+	const sources = registry.runtimeObservationSources(); assert.equal(sources[0]!.hostId, hostId);
+	assert.doesNotMatch(JSON.stringify(sources), /pendingInputs|attachmentNonceHash|roomId|projection|matrixCursor/);
+	sources[0]!.window!.paneId = "%99"; assert.deepEqual(registry.managedWindow(conversationId), window);
+	unsubscribe(); brokenSubscriber();
 	await assert.rejects(registry.setManagedWindow(conversationId, { ...window, paneId: "%99" }), /ownership conflicts/);
 	const recovered = new RelayRegistry(hostId, root, manifests); await recovered.load(); assert.deepEqual(recovered.managedWindow(conversationId), window);
 	const accountTargets = [{ kind: "operator_leave_forget" as const, roomId: manifest.roomId, userId: "@operator:example.com" },

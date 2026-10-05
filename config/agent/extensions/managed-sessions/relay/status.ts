@@ -1,5 +1,8 @@
 import type { ConversationManifest, HostRuntimeState, ManagedAdapterLiveStatus, SessionGeneration } from "../contracts.js";
 
+import type { RuntimeObservation } from "./runtime-observer.js";
+export interface ManagedStatusPresentation { runtime?: RuntimeObservation; account?: "ready" | "pending" | "notification_setup_uncertain" | "unavailable" }
+
 type RuntimeConversation = HostRuntimeState["conversations"][number];
 
 function activeGeneration(manifest: ConversationManifest): SessionGeneration | undefined {
@@ -13,6 +16,7 @@ export function renderManagedConversationStatus(
 	pendingReconciliation: number,
 	currentControlId?: string,
 	desiredRuntimeId = process.env.PI_MANAGED_PROJECT_RUNTIME_ID,
+	presentation: ManagedStatusPresentation = {},
 ): string {
 	const generation = activeGeneration(manifest);
 	const requestedModel = manifest.selectedModel ?? generation?.model;
@@ -24,6 +28,8 @@ export function renderManagedConversationStatus(
 		...(manifest.projectDisplayName ? [`Project: ${manifest.projectDisplayName}`] : []),
 		...(manifest.checkoutDisplayName ? [`Checkout: ${manifest.checkoutDisplayName}`] : []),
 		`State: ${runtime.state}; Pi ${live?.state ?? "unavailable"}; adapter ${runtime.attachment ? "connected" : "disconnected"}`,
+		`Process (last observed): ${presentation.runtime?.runtimeState ?? "unknown"}; launch ${presentation.runtime?.launchState ?? "unknown"}`,
+		`Account setup: ${presentation.account ?? "unavailable"}`,
 		`Generation: ${generation?.ordinal ?? 1}/${manifest.generations?.length ?? 1}`,
 		...(manifest.kind === "project" && desiredRuntimeId ? [`Tooling update: ${runtime.attachment?.runtimeId === desiredRuntimeId ? "current" : runtime.state === "dormant" ? "next launch" : "pending — waiting for verified idle adapter"}`] : []),
 		...(runtime.generationTransition ? [`Generation transition: ${runtime.generationTransition.phase}; queued input retained${runtime.generationTransition.failure ? `; latest failure ${runtime.generationTransition.failure.code}` : ""}`] : []),

@@ -366,7 +366,7 @@ export class HostLifecycle {
 	}
 	private readonly reconciler: ProjectReconciler;
 	private readonly projectSpaces: ProjectSpaces;
-	readonly exactWindows: Pick<ExactWindowClient, "inspect" | "check" | "terminate">;
+	readonly exactWindows: Pick<ExactWindowClient, "inspect" | "check" | "terminate" | "observe">;
 
 	constructor(private readonly options: {
 		hostId: string;

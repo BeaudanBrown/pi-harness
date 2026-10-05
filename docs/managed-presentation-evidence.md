@@ -1,6 +1,7 @@
 # Host presentation evidence (#115)
 
-Status: preflight; implementation and verification pending. No deployment or
+Status: runtime-observation implementation in progress; title synchronization,
+Matrix prefix writes and final issue verification pending. No deployment or
 live-account traffic is authorized. #114 native handoff remains separately approved.
 
 ## Ownership
@@ -35,7 +36,7 @@ lifecycle operations or identify a conversation.
 | Host stops abruptly | No new observation | Last-known indicator may remain stale; no cross-host heartbeat or remote inference |
 | Concurrent retirement | Existing tombstone authority | Stop new writes; do not adopt or recreate a retired room |
 
-## Protocol preflight requiring approval
+## Approved protocol preflight
 
 The existing launcher `window-check-exact` returns only `match`, `gone`, or
 `changed`. `managed_exact.go` rejects `pane_dead != 0` while parsing an exact
@@ -46,7 +47,8 @@ Repeated single-window calls also rescan the tmux inventory for every conversati
 The current host read model separately treats a live attachment as running without
 consulting an exact-window observation.
 
-Proposed scoped additions, not implemented or approved yet:
+The operator approved these scoped additions. The first is implemented; the second
+remains pending:
 
 1. A **read-only bounded batch observation** operation in the existing Go launcher,
    with at most 64 frozen exact proofs per request. Reuse one tmux inventory within
@@ -61,6 +63,43 @@ Proposed scoped additions, not implemented or approved yet:
    messages. Initial/restored cached titles are not fresh observations; metadata
    echoes never become human renames. This adds no model host-mutation action and
    no completed model-action receipts or automatic action replay.
+
+## Runtime-observation implementation and evidence
+
+- Existing Go launcher now implements `window-observe-exact`; legacy check and
+  terminate implementations are unchanged. Direct Go suite: **35 tests, zero
+  skips**, including genuine disposable tmux/pidfd tests. Synthetic batch cost:
+  **one tmux command queue and 64 process probes for 64 proofs**. No model benchmark
+  or live Matrix/client acceptance was performed.
+  `.pi/tmp/workers/2026-10-05T21-58-10-236Z-exact-observer-go-bc26456ba7f1/`.
+- Harness client freezes input, bounds batches and validates complete ordered
+  response identities/states. No fallback to legacy authority.
+- `HostRuntimeObserver` coalesces startup, registry metadata, reconnect and 10-second
+  triggers outside prompt lanes. It captures private metadata only, batches at 64,
+  revalidates source generation/launch/window/attachment after observation, discards
+  retired or changed sources and expires evidence after 20 seconds. Reads reuse
+  the snapshot. Unknown is never converted to stopped or running by guesswork.
+- Host read model and connected/dormant `!status` now use process observations;
+  detailed status additionally exposes account setup. Matrix names are **not yet
+  written** by this slice. No typing or notification-policy changes were made.
+- Focused harness checks initially passed **22 tests, zero skips** (before the
+  additional detailed-status assertion):
+  `.pi/tmp/workers/2026-10-05T22-09-10-027Z-presentation-observer-focused-0754e594c718/`.
+  LSP has no code errors; external Go files are outside its active build and were
+  checked by the direct Go suite instead.
+
+Affected packaged gate passed **481 managed tests, zero skips**, plus source
+contracts (including the added detailed-status assertion):
+`.pi/tmp/workers/2026-10-05T22-12-54-810Z-presentation-observer-affected-8bc108718f1c/`.
+External launcher implementation is committed at `f4c43cf`. Its Git hook was
+bypassed to respect the explicit no nix-dotfiles evaluation/build restriction;
+Go formatting, direct Go tests and `git diff --check` passed. No Nix source was
+changed in that checkout. Canonical gate and review await the full issue.
+
+Remaining: negotiated Pi title observations, durable title revision/own-echo
+correlation, serialized changed-only/rate-limited Matrix name writes, real-SDK name
+and rename-race evidence, affected/final verification and issue-boundary review.
+No #115 completion is claimed.
 
 The original no-push, no deployment/service restart, no live-account traffic and
 no nix-dotfiles evaluation/build restrictions remain. Direct Go tests and harness

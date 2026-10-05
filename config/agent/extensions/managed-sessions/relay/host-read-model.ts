@@ -1,4 +1,5 @@
 import { HOST_CONTROL_VERSION, parseHostResponse, type HostConversationSummary, type HostResult } from "../live-workspace-contracts.js";
+import type { RuntimeObservation } from "./runtime-observer.js";
 import { HostControlError } from "./host-control-error.js";
 import { HostInventoryPages } from "./host-inventory-pages.js";
 import type { HostReadRequest } from "./host-dispatcher.js";
@@ -16,7 +17,7 @@ export class HostReadModel {
 	private readonly now: () => number;
 	constructor(private readonly options: {
 		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean; accountState?: () => "ready" | "pending" | "unavailable"; accountSetup?: (id: string) => "ready" | "pending" | "notification_setup_uncertain";
-		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; now?: () => number;
+		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; now?: () => number; runtimeObservations?: () => ReadonlyMap<string, RuntimeObservation>;
 	}) { this.options = { ...options }; this.now = options.now ?? (() => performance.now()); this.pages = new HostInventoryPages(options.hostId, this.now); }
 
 	async read(request: HostReadRequest): Promise<unknown> {
@@ -65,9 +66,11 @@ export class HostReadModel {
 	}
 
 	private conversations(): HostConversationSummary[] {
+		const observations = this.options.runtimeObservations?.();
 		return this.options.registry.conversationMetadata().map((item): HostConversationSummary => {
+			const observation = observations?.get(item.conversationId);
 			const common = { conversationId: item.conversationId, title: item.title, activeGenerationId: item.activeGenerationId,
-				runtimeState: item.attached ? "running" as const : "unknown" as const, launchState: item.attached ? "attached" as const : "none" as const,
+				runtimeState: observation?.runtimeState ?? "unknown" as const, launchState: observation?.launchState ?? (item.attached ? "attached" as const : "none" as const),
 				setupState: !item.matrixBound ? "pending" as const : !this.options.matrixReady() ? "disconnected" as const : this.options.accountSetup?.(item.conversationId) ?? "pending" as const,
 				capabilities: ["host-control-v1" as const] };
 			const summary: HostConversationSummary = item.kind === "coordinator" ? { ...common, kind: "coordinator" } : {

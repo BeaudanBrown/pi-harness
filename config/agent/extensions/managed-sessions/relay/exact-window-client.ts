@@ -3,6 +3,9 @@ import { Check } from "typebox/value";
 import { ConversationIdSchema, WorkspaceIdentitySchema } from "../identity-contracts.js";
 import type { WorkspaceIdentity } from "../contracts.js";
 
+export type ExactWindowObservation = { conversationId: string; launchId: string; state: "running" | "stopped" | "unknown" };
+export const MAX_EXACT_OBSERVATIONS = 64;
+
 /** No fallback to reusable tmux IDs or bridge-clear. The launcher owns kernel-lifetime pinning and never signals by reusable PID. */
 export class ExactWindowClient {
 	constructor(private readonly invoke: (operation: string, request: object) => Promise<Record<string, unknown>>) {}
@@ -32,6 +35,20 @@ export class ExactWindowClient {
 		const result = await this.invoke("window-check-exact", parseExactWindowProof(value));
 		if (Object.keys(result).length !== 1 || typeof result.state !== "string" || !["match", "gone", "changed"].includes(result.state)) throw Error("Exact window state is unknown");
 		return result.state as "match" | "gone" | "changed";
+	}
+	/** Last-known presentation only; never termination/adoption authority. */
+	async observe(values: readonly ExactWindowProof[]): Promise<ExactWindowObservation[]> {
+		if (values.length < 1 || values.length > MAX_EXACT_OBSERVATIONS) throw Error("Invalid exact observation batch size");
+		const proofs = values.map(value => structuredClone(parseExactWindowProof(value)));
+		if (new Set(proofs.map(value => value.conversationId)).size !== proofs.length) throw Error("Duplicate exact observation identity");
+		const result = await this.invoke("window-observe-exact", { proofs: structuredClone(proofs) });
+		if (Object.keys(result).length !== 1 || !Array.isArray(result.observations) || result.observations.length !== proofs.length) throw Error("Invalid exact observation result");
+		return result.observations.map((row, index) => {
+			const proof = proofs[index]!;
+			if (!row || typeof row !== "object" || Object.keys(row).length !== 3 || row.conversationId !== proof.conversationId || row.launchId !== proof.launchId ||
+				!["running", "stopped", "unknown"].includes(row.state)) throw Error("Exact observation identity or state changed");
+			return { conversationId: row.conversationId, launchId: row.launchId, state: row.state };
+		});
 	}
 	async terminate(value: ExactWindowProof): Promise<boolean> {
 		const proof = parseExactWindowProof(value);
