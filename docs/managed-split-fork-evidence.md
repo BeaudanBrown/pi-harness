@@ -1,6 +1,6 @@
 # Matrix split-fork evidence (#125)
 
-Status: implementation in progress; no deployment or live acceptance.
+Status: implementation and deterministic acceptance complete; no deployment or live acceptance.
 
 ## Scope
 
@@ -106,7 +106,18 @@ Exhaustive paired audit at `2b6621b`:
 Remediation checks passed **15 tests, zero skips**, including real Pi idle context:
 `.pi/tmp/workers/2026-10-05T12-45-09-719Z-split-fork-review-remediation-b63e4941cc1d/`.
 These are bounded corrections, not a changed design requiring routine re-review.
-Final canonical gate remains pending. No deployment/live traffic or native-navigation
-code changes occurred. #114's scoped protocol is now approved but remains separate.
+## Final gate and handoff
+
+Foundation `9a6bec4`, runtime integration `2b6621b`, review remediation `dd3730a`.
+Final `nix run .#verify` passed all **12 deterministic groups**, including **471
+managed tests and 87 bridge tests, zero skips**:
+`.pi/tmp/workers/2026-10-05T12-46-01-913Z-split-fork-final-canonical-3563968ed77c/`.
+Packaged relay, bridge, resources and module/package contracts were included.
+Only evidence text changed after the final gate, so it was not repeated.
+
+No current-issue finding remains deferred. #125 is complete within its deterministic
+implementation boundary; real Matrix/phone acceptance stays open under #121.
+No push, deployment, service restart, live traffic or native-navigation code changes
+occurred. #114's scoped protocol is approved and is the next independent boundary.
 Final canonical gate runs after implementation/review remediation. Deterministic
 Pi/IPC/Git/Matrix-port fixtures are not actual Matrix/phone acceptance.
