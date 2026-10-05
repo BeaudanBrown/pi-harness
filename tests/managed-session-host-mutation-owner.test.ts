@@ -41,6 +41,22 @@ test("coordinator recovery freezes the exact fresh self-departure behind indepen
 	const saved = JSON.parse(await readFile(join(root, "account.json"), "utf8")); assert.equal(saved.records[0].action.departureEventId, "$second");
 });
 
+test("coordinator destructive previews are readable blocked scopes, never executable subsets", async () => {
+	const coordinatorId = deriveConversationId("host", "coordinator"); let effects = 0;
+	const owner = new ManagedHostMutationOwner({ registry: { hostId: "host" } as RelayRegistry, server: { attachment: () => undefined }, lifecycle: {} as HostLifecycle,
+		retirement: { prepare: (id: string) => { assert.notEqual(id, coordinatorId); return { conversationId: id }; }, retirePrepared: async () => { effects++; } } as unknown as ConversationRetirement });
+	for (const [source, apply] of [
+		[{ operation: "conversation.delete.preview", conversationIds: [coordinatorId, conversationId] }, "conversation.delete.apply"],
+		[{ operation: "worktree.conversation.cleanup.preview", conversationId: coordinatorId }, "worktree.conversation.cleanup.apply"],
+	] as const) {
+		const preview = await owner.preview(source as Parameters<typeof owner.preview>[0]); assert.ok(preview.blockers.some(b => b.includes("coordinator")));
+		assert.ok(preview.targets.some(target => target.kind === "conversation" && target.conversationId === coordinatorId));
+		await assert.rejects(owner.freeze({ action: { operation: apply, previewId: preview.previewId, confirmed: true } }), /Frozen targets/);
+		await assert.rejects(owner.executeHuman({ version: "1.0.0", actor: { kind: "human_local", requestId: "blocked" }, action: { operation: apply, previewId: preview.previewId, confirmed: true } }), /Frozen targets/);
+	}
+	assert.equal(effects, 0);
+});
+
 test("branch consent uses a separate expiring preview, displays public targets and rejects changed tips", async () => {
 	let now = 1000; let head = "a".repeat(40); let executed = 0;
 	const options: ConstructorParameters<typeof ManagedHostMutationOwner>[0] = {

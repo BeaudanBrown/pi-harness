@@ -7,6 +7,7 @@ export const MANAGED_TRANSPORT_TOOLS = ["remote_checkpoint", "remote_artifact_ex
 
 const MAX_POLICY_TOOLS = 64;
 const TOOL_NAME = /^[a-z][a-z0-9_]{0,127}$/;
+const delegatesModelWork = (name: string) => ["run_worker", "review_agents"].includes(name) || /^(?:agentgraph|aloop)(?:_|$)/.test(name);
 
 export function parseManagedLocalModelTools(value: string | undefined): string[] {
 	if (!value) throw new Error(`${MANAGED_LOCAL_MODEL_TOOLS_ENV} is required`);
@@ -20,6 +21,7 @@ export function parseManagedLocalModelTools(value: string | undefined): string[]
 		|| parsed.some((tool) => typeof tool !== "string" || !TOOL_NAME.test(tool))) {
 		throw new Error(`${MANAGED_LOCAL_MODEL_TOOLS_ENV} must contain 1-${MAX_POLICY_TOOLS} valid tool names`);
 	}
+	if (parsed.some(delegatesModelWork)) throw new Error(`${MANAGED_LOCAL_MODEL_TOOLS_ENV} cannot enable worker or model delegation`);
 	if (new Set(parsed).size !== parsed.length) throw new Error(`${MANAGED_LOCAL_MODEL_TOOLS_ENV} must not contain duplicate tool names`);
 	return parsed;
 }
@@ -37,7 +39,7 @@ export function registerManagedModelToolPolicy(
 	configuredTools = parseManagedLocalModelTools(process.env[MANAGED_LOCAL_MODEL_TOOLS_ENV]),
 ): void {
 	const transportTools = new Set<string>(MANAGED_TRANSPORT_TOOLS);
-	const permittedTools = new Set([...configuredTools, ...MANAGED_TRANSPORT_TOOLS]);
+	const permittedTools = new Set([...parseManagedLocalModelTools(JSON.stringify(configuredTools)), ...MANAGED_TRANSPORT_TOOLS]);
 	let unrestrictedSnapshot: string[] | undefined;
 
 	const restore = (): void => {

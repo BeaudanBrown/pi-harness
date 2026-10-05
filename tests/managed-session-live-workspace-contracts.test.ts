@@ -143,6 +143,10 @@ test("coordinator stop/delete are forbidden before approval for every actor", ()
 		{ kind: "model", requestId: "3", conversationId, generationId: id("generation"), runId: "run", toolCallId: "call", presentation: "local_dialog" },
 	];
 	for (const actorValue of actors) {
+		for (const action of [parseHostAction({ operation: "conversation.delete.preview", conversationIds: [coordinator] }), parseHostAction({ operation: "worktree.conversation.cleanup.preview", conversationId: coordinator })]) {
+			const { actor } = parseHostRequest({ version: "1.0.0", actor: actorValue, action });
+			assert.equal(hostActionPolicy(action, actor, coordinator), "direct", "read-only protected previews remain free and expose blockers");
+		}
 		for (const operation of ["conversation.stop", "conversation.delete"]) {
 			const action = parseHostAction({ operation, conversationId: coordinator, ...(operation.endsWith("delete") ? { confirmed: true } : {}) });
 			const { actor } = parseHostRequest({ version: "1.0.0", actor: actorValue, action });

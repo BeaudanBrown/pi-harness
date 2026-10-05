@@ -93,9 +93,8 @@ export function requiresModelApproval(action: HostAction): boolean { return isHo
 
 // protectedConversationId is resolved by the host, never supplied by the model.
 export function hostActionPolicy(action: HostAction, actor: HostActor, protectedConversationId: string): "forbidden" | "approval" | "direct" {
-	const destructive = ["conversation.stop", "conversation.delete", "worktree.conversation.cleanup.preview"];
-	if ((destructive.includes(action.operation) && "conversationId" in action && action.conversationId === protectedConversationId) ||
-		(action.operation === "conversation.delete.preview" && action.conversationIds.includes(protectedConversationId))) return "forbidden";
+	const destructive = ["conversation.stop", "conversation.delete"];
+	if (destructive.includes(action.operation) && "conversationId" in action && action.conversationId === protectedConversationId) return "forbidden";
 	// Preview-based apply also revalidates all resolved targets before execution.
 	return actor.kind === "model" && isHostMutation(action) ? "approval" : "direct";
 }

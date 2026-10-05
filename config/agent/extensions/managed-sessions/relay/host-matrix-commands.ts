@@ -49,14 +49,14 @@ export class HostMatrixCommands {
 	private async acceptOnce(manifest: ConversationManifest, eventId: string, sender: string, body: string): Promise<boolean> {
 		if (!/^!(?:host|start|stop|close)(?:\s|$)/.test(body.trim())) return false;
 		if (sender !== this.operator) return true;
-		let action;
-		try { action = roomHostCommand(body, manifest.conversationId); }
-		catch { await this.reply(eventId, manifest, "Invalid host command. Use !host help; closing requires !close --confirm."); return true; }
-		if (!action) return false;
 		const id = createHash("sha256").update(JSON.stringify([this.hostId, manifest.roomId, eventId])).digest("hex");
 		// A replay after a crash is never permission to retry a human mutation.
 		// The absence of a reply is uncertain: inspect, then issue a fresh command.
 		if (!await this.consume(id)) return true;
+		let action;
+		try { action = roomHostCommand(body, manifest.conversationId); }
+		catch { await this.reply(eventId, manifest, "Invalid host command. Use !host help; closing requires !close --confirm."); return true; }
+		if (!action) return false;
 		if (action === "help") { await this.reply(eventId, manifest, `${hostControlHelp().replace("pi-managed-session", "!host")}\nRoom-local: !start, !stop, !close --confirm. No prompt is submitted.`); return true; }
 		const actor: HostActor = { kind: "human_matrix", conversationId: manifest.conversationId, requestId: `matrix-${id}`, roomId: manifest.roomId, eventId, senderUserId: sender };
 		const result = await this.dispatcher.dispatch({ version: HOST_CONTROL_VERSION, actor, action }, actor);

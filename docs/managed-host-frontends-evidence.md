@@ -101,4 +101,24 @@ socket `/host` command invocation without starting a model turn:
 `.pi/tmp/workers/2026-10-05T06-19-51-636Z-host-command-native-final-565e405a4665/`.
 Matrix previews exceeding the display bound now show neither partial targets nor
 an apply token; callers must request a smaller preview or use the local CLI.
-Review and the final canonical gate remain pending.
+
+## Review disposition
+
+Exhaustive issue audit at `8c3d101`:
+`.pi/tmp/reviews/2026-10-05T06-29-20-976Z-audit-8c3d101b0279-3a55a4d71be7/`.
+
+- **Standards:** one low/current-issue finding. Malformed operator commands now
+  consume their event IDs before any error/help reply; a lost reply cannot cause
+  another effect after restart.
+- **Spec:** two medium/current-issue findings. Coordinator cleanup/deletion
+  previews are now free reads returning explicit blockers and the protected
+  target, while all destructive apply paths reject the blocked scope without
+  executing a nonprotected subset. Known worker/model-delegation tools are now
+  rejected even in explicit local-model configuration (including programmatic
+  configuration), not merely excluded from defaults.
+
+All three findings were accepted and remediated in one batch. Focused checks
+passed **28 tests, zero skips**:
+`.pi/tmp/workers/2026-10-05T06-36-55-179Z-host-frontends-review-remediation-bab9777d2a67/`.
+These are bounded corrections to the reviewed design, not a new review boundary.
+Final canonical verification remains pending.

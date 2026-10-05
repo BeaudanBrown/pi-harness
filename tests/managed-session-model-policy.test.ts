@@ -40,6 +40,10 @@ test("managed local-model tool configuration is strict and bounded", () => {
 		assert.throws(() => parseManagedLocalModelTools(value), new RegExp(MANAGED_LOCAL_MODEL_TOOLS_ENV));
 	}
 	assert.throws(() => parseManagedLocalModelTools(JSON.stringify(Array.from({ length: 65 }, (_, index) => `tool_${index}`))), /1-64/);
+	for (const name of ["run_worker", "review_agents", "agentgraph", "agentgraph_run", "aloop", "aloop_submit_patch_result"]) {
+		assert.throws(() => parseManagedLocalModelTools(JSON.stringify(["read", name])), /delegation/);
+		assert.throws(() => registerManagedModelToolPolicy({} as ExtensionAPI, [name]), /delegation/, "explicit programmatic configuration cannot bypass the guard");
+	}
 });
 
 test("cloud startup is unchanged and local startup intersects the active tool set", async () => {

@@ -52,6 +52,14 @@ test("Matrix command effects do not hold intake and shutdown drains admitted wor
 	release(); await stopping; await closing; assert.equal(closed, true);
 });
 
+test("malformed operator commands are consumed before an uncertain help reply", async t => {
+	const root = await mkdtemp(join(tmpdir(), "host-invalid-command-")); t.after(() => rm(root, { recursive: true, force: true })); let replies = 0;
+	const dispatcher = {} as HostDispatcher; const make = () => new HostMatrixCommands(join(root, "intake.json"), "host", "@owner:test", dispatcher, async () => { replies++; throw Error("reply accepted but response lost"); });
+	let commands = make(); await commands.load(); const manifest = { conversationId, roomId: "!room:test" } as ConversationManifest;
+	await assert.rejects(commands.accept(manifest, "$invalid", "@owner:test", "!close"), /response lost/); await commands.close();
+	commands = make(); await commands.load(); assert.equal(await commands.accept(manifest, "$invalid", "@owner:test", "!close"), true); assert.equal(replies, 1); await commands.close();
+});
+
 test("human Matrix host actions authenticate, protect coordinator, consume before effects and never replay uncertainty", async t => {
 	const root = await mkdtemp(join(tmpdir(), "host-frontends-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const policy = new HostPolicy(JSON.parse(await readFile("config/agent/managed-host-policy.json", "utf8")));

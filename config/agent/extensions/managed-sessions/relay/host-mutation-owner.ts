@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { deriveConversationId } from "../contracts.js";
 import { APPROVAL_LIFETIME_MS, parseHostResponse, type HostAction, type HostReadAction, type HostRequest, type HostResult } from "../live-workspace-contracts.js";
 import type { FrozenHostEffects, FrozenJson, HostApprovalRecord } from "./host-approval-record.js";
 import type { HostMutationOwner } from "./host-approval-runtime.js";
@@ -59,9 +60,14 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (this.previews.size >= 128) throw new HostControlError("busy", "Too many pending previews; retry after expiry");
 		const preview: Preview = { source: structuredClone(source), expiresAt: this.now() + APPROVAL_LIFETIME_MS, targets: [], activeRuns: [], blockers: [] };
 		let conversations: string[] = [];
-		if (source.operation === "conversation.delete.preview") {
+		const coordinatorId = deriveConversationId(this.options.registry.hostId, "coordinator");
+		if (source.operation === "worktree.conversation.cleanup.preview" && source.conversationId === coordinatorId) {
+			conversations = [coordinatorId]; preview.targets = [{ kind: "conversation", conversationId: coordinatorId }];
+			preview.blockers.push("The protected coordinator cannot be retired or included in destructive cleanup");
+		} else if (source.operation === "conversation.delete.preview") {
 			conversations = [...source.conversationIds].sort();
-			preview.retirements = conversations.map((id) => this.options.retirement.prepare(id));
+			if (conversations.includes(coordinatorId)) preview.blockers.push("The protected coordinator cannot be retired");
+			preview.retirements = conversations.filter(id => id !== coordinatorId).map((id) => this.options.retirement.prepare(id));
 			preview.targets = conversations.map((conversationId) => ({ kind: "conversation", conversationId }));
 		} else if (source.operation === "worktree.branch.preview") {
 			const branch = preview.branch = await this.options.lifecycle.branchApprovalPreview(source); const plan = branch.plan;
