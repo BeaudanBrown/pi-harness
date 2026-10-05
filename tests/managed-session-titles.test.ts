@@ -107,6 +107,20 @@ test("manual sync names are accepted during an older in-flight PUT and the lates
 	assert.equal(f.current()?.content.name, "○ Manual 1");
 });
 
+test("a malformed trailing event or own echo cannot consume an unaccepted human rename", async t => {
+	for (const trailing of ["malformed", "own-echo"] as const) {
+		const f = await fixture(t); await f.tick(); const human = event(`Human ${trailing}`, 600);
+		const tail = trailing === "own-echo" ? f.current()! : { ...event("invalid", 601), content: { name: 42 } };
+		const response = { rooms: { join: { [room]: { timeline: { events: [human, tail] } } } } };
+		await f.owner().ingest(response); assert.equal(f.source()?.title, human.content.name);
+		await f.owner().settled(); await f.tick(); assert.equal(f.current()?.content.name, `● ${human.content.name}`);
+		const revision = f.source()?.titleRevision; await f.owner().ingest(response); await f.tick();
+		assert.equal(f.source()?.titleRevision, revision, "the accepted event is still idempotent");
+		await f.owner().ingest({ rooms: { join: { [room]: { timeline: { events: [event("older unseen", 599), human] } } } } });
+		assert.equal(f.source()?.titleRevision, revision, "an already accepted newer human event fences older unseen history");
+	}
+});
+
 test("initial sync history is not imported over a newer current room name", async t => {
 	const f = await fixture(t); await f.tick(); await f.owner().observe(id, "pi-session", 1, "Newest"); await f.tick();
 	await f.owner().ingest({ rooms: { join: { [room]: { timeline: { events: [event("Historical title", 700)] } } } } }, true);

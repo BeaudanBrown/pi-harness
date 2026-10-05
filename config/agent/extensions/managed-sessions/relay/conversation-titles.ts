@@ -39,6 +39,10 @@ function parseRow(value: unknown): Row {
 	return row;
 }
 
+function statusPrefix(runtime: RuntimeObservation | undefined, lastPrefix?: string, knownName?: string): string {
+	return runtime?.launchState === "failed" ? "○ " : runtime?.runtimeState === "running" ? "● " : runtime?.runtimeState === "stopped" ? "○ " : lastPrefix ?? /^[●○] /u.exec(knownName ?? "")?.[0] ?? "";
+}
+
 /** Title metadata journal, not a model action/receipt store. Network work never owns the admission lane. */
 export class ConversationTitles {
 	private readonly lanes = new Map<string, Promise<unknown>>();
@@ -137,7 +141,8 @@ export class ConversationTitles {
 			if (!events.length) continue;
 			try { await this.lane(source.conversationId, async row => {
 				if (!events.some(event => !row.seen.includes(event.event_id))) return;
-				const parsed = events.map(event => { try { return parseMatrixNameEvent(event); } catch { return undefined; } }); const latest = parsed.at(-1);
+				const parsed = events.map(event => { try { return parseMatrixNameEvent(event); } catch { return undefined; } });
+				const latest = parsed.filter((event): event is MatrixNameEvent => Boolean(event && event.sender !== this.options.botUserId)).at(-1);
 				const baseline = !initialSync && this.baselined.has(source.conversationId);
 				if (baseline && latest && latest.sender !== this.options.botUserId && !row.seen.includes(latest.event_id)) {
 					this.rename(row, latest.content.name ?? "");
@@ -152,8 +157,8 @@ export class ConversationTitles {
 		if (this.failures.has(id) || this.refresh.has(id) || !this.initialized.has(id)) return "pending";
 		const source = this.options.registry.titleInventory().find(row => row.conversationId === id);
 		if (!source?.roomId) return "pending";
-		const name = this.lastName.get(id); const runtime = this.options.runtime().get(id); const state = runtime?.runtimeState;
-		const prefix = runtime?.launchState === "failed" ? "○ " : state === "running" ? "● " : state === "stopped" ? "○ " : this.lastPrefix.get(id) ?? /^[●○] /u.exec(name ?? "")?.[0] ?? "";
+		const name = this.lastName.get(id);
+		const prefix = statusPrefix(this.options.runtime().get(id), this.lastPrefix.get(id), name);
 		return name === prefix + (source.title ?? source.concept) ? "ready" : "pending";
 	}
 	reconnect(): void { for (const source of this.options.registry.titleInventory()) this.refresh.add(source.conversationId); this.kick(); }
@@ -196,8 +201,7 @@ export class ConversationTitles {
 			}
 			const prepared = await this.lane(id, async row => {
 				if (this.closed || !row.initialized || row.needRead || row.pending || row.retryAt > this.now() || this.nextWrite > this.now()) return;
-				const runtime = this.options.runtime().get(id); const state = runtime?.runtimeState;
-				const prefix = runtime?.launchState === "failed" ? "○ " : state === "running" ? "● " : state === "stopped" ? "○ " : row.lastPrefix ?? /^[●○] /u.exec(row.knownName ?? "")?.[0] ?? "";
+				const prefix = statusPrefix(this.options.runtime().get(id), row.lastPrefix, row.knownName);
 				if (prefix && row.lastPrefix !== prefix) { row.lastPrefix = prefix as Row["lastPrefix"]; await this.save(row); }
 				const name = prefix + row.title;
 				if (name === row.knownName || this.nextWrite > this.now()) return;

@@ -151,8 +151,26 @@ Additional manual-rename race and initial-history regression checks passed in th
 broader packaged gate: **502 managed tests, zero skips**, plus source contracts.
 `.pi/tmp/workers/2026-10-05T23-15-55-249Z-titles-manual-race-affected-b68401125be0/`
 
-Remaining: paired issue-boundary review, accepted remediation and final canonical
-verification. No #115 completion or live Matrix acceptance is claimed yet.
+## Paired review and remediation
+
+Pinned audit at `5c7aaf6`:
+`.pi/tmp/reviews/2026-10-05T23-18-39-674Z-audit-5c7aaf645770-f7e9eb7ac4a2/`.
+
+- **Standards:** no verified hard violations; one low subjective duplication
+  finding. Both readers now share one private status-prefix resolver.
+- **Spec:** one medium current-issue finding: a malformed trailing name event could
+  hide a valid human observation while marking it seen. Intake now selects the last
+  valid human observation, not the last raw event; later malformed events or bot
+  echoes cannot mask it. An already accepted newer human event still fences older
+  unseen history. Added malformed/own-echo/replay regression coverage.
+
+Batched remediation focused gate: **24 tests, zero skips**, including metadata,
+source epochs, runtime states and title races.
+`.pi/tmp/workers/2026-10-05T23-23-30-625Z-titles-review-remediation-4ecbdf5a0c18/`.
+No design-invalidating remediation or second subjective review was needed.
+
+Remaining: final canonical verification. No #115 completion or live Matrix
+acceptance is claimed yet.
 
 The original no-push, no deployment/service restart, no live-account traffic and
 no nix-dotfiles evaluation/build restrictions remain. Direct Go tests and harness
