@@ -61,6 +61,31 @@ Revalidate stable tmux window/pane IDs and conversation markers immediately befo
 - Titles follow `/name` and manual Matrix renames. Status prefixes are presentation, not part of the saved title. Serialize observed title changes, suppress self-echo loops, and preserve the last accepted title.
 - Use a short unique human-readable fallback until named. Display-name collisions must never create identity collisions.
 
+### Matrix split-fork amendment (#125; approved 2026-10-05)
+
+Matrix fork is a separate operation from native room-preserving `/fork`: create a
+new branch/worktree from an explicit committed Git ref and a **new conversation,
+Pi session and Matrix room**. Leave the source conversation and uncommitted files
+unchanged. A bounded summary is sufficient; do not clone native session history.
+Persist the summary as visible initial context and post it in the destination
+room, then **stay idle until the next authorized message**. Initialization and
+recovery never trigger a target model turn.
+
+Reuse validated creation, typed host controls and per-call model approval. Freeze
+the summary and exact source/target/base identities before effects. Inherit no
+bindings, approvals, pending input or execution; never inspect source transcripts
+from the relay to generate a summary. The existing source agent can supply the
+summary through the explicit request. This narrowly authorized context seed is
+not general initial-task injection on ordinary creation operations. Recover only
+the recorded construction/summary effects, without duplicating rooms or summaries
+or replaying a model action. Summary initialization is silent.
+
+No Matrix equivalent of native room-preserving `/fork` is required. #114 retains
+ownership of native navigation; its proposed prepare/commit/recovery IPC amendment
+has not been approved. #125 owns this independent split-fork feature and blocks
+#121 cumulative acceptance. Neither feature is implemented by this amendment;
+no deployment, push or live traffic is authorized.
+
 ## 4. Transcript and notification contract
 
 Project persisted local-user messages promptly, completed assistant commentary messages as they occur, final answers, explicit checkpoints, and existing bounded activity summaries. Map Matrix-origin user entries to their original events without echo. Do not project thinking, tool arguments/results, raw logs, partial token streams, internal/compaction entries, or pre-binding history. Tools remain visible only through existing bounded activity/status presentation.

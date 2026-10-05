@@ -448,6 +448,31 @@ inspect saved Pi transcripts from the relay to obtain this confirmation. Ordinar
 synchronization continues independently. This freshness boundary was explicitly
 approved by the operator for #111.
 
+## Matrix split-fork amendment (#125; approved 2026-10-05)
+
+This is a new-operation target, not implemented protocol. Matrix fork creates a
+new branch/worktree from a frozen committed Git base and a new conversation/room,
+with an explicit bounded summary as initial Pi context and a visible destination
+Matrix message. It does not perform native `/fork`, clone the source transcript,
+change the source conversation, or transfer uncommitted changes. The destination
+stays idle until subsequent authorized input: summary persistence, publication,
+attachment and recovery must not trigger a model turn.
+
+Use existing host creation/approval authority. Consent freezes exact source and
+target identities, the base commit, and summary content. A summary supplied by the
+existing source agent is intentional inherited context, not relay transcript
+inspection or a background summarization service. This is a narrow exception to
+ordinary creation's no-initial-content rule, not arbitrary task injection. No
+binding, input receipt, approval or unfinished execution is inherited. Persist
+operation-specific construction and summary effects before execution; retries
+cannot create another room, duplicate the summary, expand scope or revive retired
+identities. Do not accept target input before context initialization is durable.
+Publish the summary silently, with stable delivery identity.
+
+#125 owns implementation and concrete wire/storage contracts, separate from #114
+native navigation. The proposed native generation-navigation handoff remains
+unapproved. Deployment/live acceptance remains separately gated under #120/#121.
+
 ## Version and rollout boundary
 
 At baseline 9893e0f, `contracts.ts` advertises adapter/state `1.0.0` and carries
