@@ -1,3 +1,4 @@
+import { parseAccountAction, type AccountAction } from "../live-workspace-contracts.js";
 import { isDeepStrictEqual } from "node:util";
 import { deriveConversationId, type ConversationManifest } from "../contracts.js";
 import { MANAGED_PROVENANCE_EVENT, managedRoomAlias, parseManagedProvenance, safeManagedTitle, type ManagedProvenance } from "../managed-provenance.js";
@@ -120,6 +121,11 @@ export class ManagedMatrixClient {
 		this.#retry = this.#http.retry;
 	}
 
+	async sendAccountRequest(ownerUserId: string, ownerDeviceId: string, transactionId: string, action: AccountAction, signal: AbortSignal): Promise<void> {
+		if (ownerUserId !== this.operatorUserId || !/^[A-Za-z0-9._:-]{1,128}$/.test(ownerDeviceId) || !/^pi-account-[a-f0-9-]{36}$/.test(transactionId)) throw Error("Invalid account request route");
+		await this.request("PUT", `/_matrix/client/v3/sendToDevice/lol.bepis.pi.account.request.v1/${encodeURIComponent(transactionId)}`,
+			{ messages: { [ownerUserId]: { [ownerDeviceId]: parseAccountAction(action) } } }, signal);
+	}
 	async whoami(signal?: AbortSignal): Promise<string> { return requiredString(await this.request("GET", "/_matrix/client/v3/account/whoami", undefined, signal), "user_id"); }
 	async sync(since?: string, signal?: AbortSignal): Promise<{ nextBatch: string; response: unknown }> {
 		const query = new URLSearchParams({ timeout: "30000" }); if (since) query.set("since", since);

@@ -361,6 +361,10 @@ the exact authenticated Matrix departure event frozen by the host, not supplied 
 a model. It participates in the account request digest. Restoration atomically
 records completion with clearing only that matching suppression; old requests and
 old sync events cannot undo a later departure or a completed restoration.
+Departure acknowledgements may echo `departureEventId` (only with `code=departed`)
+so a delayed notice for the restored departure can be ignored. Restoration also
+invalidates the NAS's old ensure acknowledgement before publishing completion.
+Coordinator membership notices alone are not retirement authority.
 
 ### Notification initialization and the operator's uncertainty decision
 

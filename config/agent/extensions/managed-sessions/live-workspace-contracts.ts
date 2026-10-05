@@ -225,7 +225,8 @@ export const AccountActionSchema = Type.Union([
 export type AccountAction = Static<typeof AccountActionSchema>;
 export const AccountAckSchema = strict({ ...accountBase, status: Type.Union([
 	Type.Literal("pending"), Type.Literal("complete"), Type.Literal("notification_setup_uncertain"), Type.Literal("rejected"),
-]), code: Type.Optional(Type.Union([Type.Literal("departed"), Type.Literal("unsupported_encryption"), Type.Literal("unverified"), Type.Literal("conflict")])) });
+]), code: Type.Optional(Type.Union([Type.Literal("departed"), Type.Literal("unsupported_encryption"), Type.Literal("unverified"), Type.Literal("conflict")])),
+	departureEventId: Type.Optional(Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 })) });
 export type AccountAck = Static<typeof AccountAckSchema>;
 function canonical(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
@@ -267,6 +268,7 @@ export function parseAccountAction(value: unknown): AccountAction {
 export function parseAccountAck(value: unknown): AccountAck {
 	checkAccountFrame(value);
 	const ack = validate<AccountAck>(AccountAckSchema, value);
+	if (ack.departureEventId !== undefined && ack.code !== "departed") throw new Error("Unexpected account departure evidence");
 	if (ack.requestId !== accountRequestId(ack.hostId, ack.payloadDigest)) throw new Error("Account acknowledgement identity mismatch");
 	return ack;
 }

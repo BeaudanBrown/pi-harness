@@ -139,7 +139,8 @@ export class AccountStore {
 	private writeAck(requestId: string, host: AccountHost, status: AccountAck["status"], code?: AccountAck["code"]): void {
 			const request = this.get(requestId); if (!request || request.action.hostId !== host.hostId || request.sender !== host.botUserId) throw Error("Account acknowledgement scope changed");
 			const { version, payloadDigest, hostId } = request.action;
-			const ack = parseAccountAck({ version, requestId, payloadDigest, hostId, status, ...(code ? { code } : {}) });
+			const departureEventId = code === "departed" ? this.room(request.action.roomId)?.departure : undefined;
+			const ack = parseAccountAck({ version, requestId, payloadDigest, hostId, status, ...(code ? { code } : {}), ...(departureEventId ? { departureEventId } : {}) });
 			this.db.prepare("UPDATE account_requests SET ack=? WHERE id=?").run(JSON.stringify(ack), requestId); this.queueAck(ack, host);
 	}
 	transmission(hosts?: readonly AccountHost[]): AccountTransmission | undefined {
@@ -212,6 +213,7 @@ export class AccountStore {
 			const room = this.room(roomId);
 			if (!room?.verified || room.action.kind !== "coordinator" || room.retired || room.departure !== departure) throw Error("Coordinator departure changed");
 			this.db.prepare("UPDATE account_rooms SET departure=NULL WHERE room=?").run(roomId);
+			this.invalidateEnsures(roomId);
 			this.writeAck(requestId, host, "complete");
 		});
 	}

@@ -129,3 +129,38 @@ Host request/ack production, account readiness reporting and cleanup/restore por
 integration still remain, followed by full #112 review and canonical verification.
 #112 is not complete. No services were activated, no personal-account traffic was
 sent, and nothing was pushed or deployed.
+
+## Host account transport foundation
+
+Added a bounded host-private request/ack journal and the fixed bot-side to-device
+HTTP method. Requests and transmission identities are durable before HTTP;
+uncertain attempts retain their IDs across restart, accepted-send redelivery gets
+a new ID, and completed cleanup is not periodically retransmitted. Ensures can be
+polled for saved NAS progress without replaying completed NAS effects. Recipient
+identity changes fail closed for explicit recovery. A slow send never holds the
+journal's acknowledgement lane, and shutdown cancels/drains the bounded send.
+The host stores no owner credential and reads no owner push rules.
+
+Acknowledgements must come from the configured owner and match a saved host,
+request ID and digest. Pending responses cannot regress terminal progress. Only
+conversation departure records are exposed as candidates for irreversible host
+retirement; coordinator membership is not retirement authority.
+
+The departure binding now also accompanies NAS departure acknowledgements. A
+completed coordinator restoration invalidates its old ensure response atomically;
+the host can ignore a delayed notice for that restored departure without clearing
+a different departure. This implements the approved departure-specific correction,
+not a new model argument or a broader account capability. Mutable coordinator
+membership still requires the owner's fresh scope checks when runtime wiring lands.
+
+Focused host/NAS/protocol checks passed **29 tests**:
+`.pi/tmp/workers/2026-10-05T00-24-10-485Z-host-account-transport-focused-56869adf62df/`.
+Affected packaged checks passed **447 managed-session tests and 86 bridge-chat
+tests, zero skips**, plus source contracts:
+`.pi/tmp/workers/2026-10-05T00-25-12-123Z-host-account-transport-affected-05274a94102d/`.
+
+The host client is not yet assembled into the production relay. Remaining work:
+hierarchy/coordinator ensure producers, ack ingestion before host cursor advance,
+readiness reporting, exact cleanup and approved membership-restore ports, then
+full #112 review and final canonical verification. These are transport/fixture and
+package results, not a claim of end-to-end host assembly or live acceptance.
