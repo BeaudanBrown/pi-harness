@@ -2,6 +2,8 @@
 
 Status: implementation in progress. Scoped prepare/commit/recovery and durable
 branch-boundary protocol approved by the operator; no deployment/live acceptance.
+A newly reproduced SDK persistence limitation requires an additional SDK-scope
+decision before completing native new/assistant-free fork adoption.
 
 ## Ownership and implementation boundaries
 
@@ -60,6 +62,40 @@ hooks remain uncancelled. Focused test passed, zero skips:
 Affected packaged checks passed **472 managed tests, zero skips**, and source
 contracts:
 `.pi/tmp/workers/2026-10-05T13-01-36-796Z-native-navigation-guard-affected-9b3938450dfa/`.
+
+## Additional SDK persistence preflight
+
+After #115 completion, the native successor preflight found a boundary not solved
+by the already approved IPC handoff alone. Pi 0.85.0 creates a fresh session manager
+with deferred persistence. `appendCustomEntry` and `appendSessionInfo` do not create
+the JSONL file until the first assistant response. `createBranchedSession` likewise
+defers a fork containing no assistant messages, even when its source file exists.
+The extension's documented `ReadonlySessionManager` exposes no explicit persistence
+hook; native `/new` supplies no extension-controlled mutable setup callback.
+
+A disposable, real SDK probe ran without model/network traffic:
+`node .pi/tmp/native-persistence-preflight.mjs`.
+`.pi/tmp/workers/2026-10-05T23-39-05-900Z-native-persistence-preflight-b6c6c9e754c0/`.
+The intentionally red persistence assertion reproduced:
+
+- Fresh native metadata file exists: **false**.
+- Assistant-free fork file exists: **false**.
+- Writing the file externally while the live manager still considers it unflushed
+  causes **EEXIST** at the first subsequent fixture assistant append.
+
+Thus blindly seeding a live native successor from the adapter/relay is not safe.
+Waiting for a model response is also incompatible with durable ownership and input
+receipts before model work. Fabricating an assistant message or mutating private
+SDK fields is not an acceptable workaround. Existing launcher-created sessions do
+not have this problem because their seed files exist before SessionManager opens
+and owns them; this does not extend to native in-process replacement.
+
+Recommended decision: authorize a small public metadata-persistence hook in the
+Nix-distributed Pi SDK, used only by managed navigation, preserving ordinary native
+behavior. Its implementation and real-SDK regression tests would precede the
+handoff. This is additional SDK scope, not a request to reapprove the already
+approved native protocol, and does not authorize deployment or external Nix builds.
+No SDK patch or private-field workaround has been made pending that decision.
 
 The handoff, successor validation, generation-aware session-file selection,
 branch-boundary projection, recovery/concurrency tests, issue review and final
