@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { classifyLaunchMode, type LaunchModeContext } from "../config/agent/extensions/managed-sessions/launch/mode.js";
 import { inspectSavedHistory, resolveNativeSessionPath } from "../config/agent/extensions/managed-sessions/launch/history.js";
-import { managedInvocationArguments } from "../config/agent/extensions/managed-sessions/launch/arguments.js";
+import { assertBasicManagedInvocation } from "../config/agent/extensions/managed-sessions/launch/arguments.js";
 
 const interactive: LaunchModeContext = { configured: true, localOnly: false, stdinIsTTY: true, stdoutIsTTY: true,
 	trustedDispatch: false, internalWorker: false, experimentsEnabled: false };
@@ -120,35 +120,27 @@ test("saved history inspection uses real SDK parsing and refuses concealed or un
 	assert.throws(() => inspectSavedHistory(encode(header), sdk.parseSessionEntries, NaN), /Unsupported SDK/);
 });
 
-test("managed argument encoding round-trips literal values through the real parser without transferring selection", async t => {
+test("basic managed invocation accepts bare Pi and literal resume selectors without rewriting", async t => {
 	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
-	const argv = ["--session", "source.jsonl", "--session-dir", "/source files",
-		"--provider", "fixture", "--model", "literal model ; $(no-exec)", "--thinking", "high", "--name", "title \"quoted\"",
-		"--system-prompt", "literal\nmultiline", "--append-system-prompt", "first", "--append-system-prompt", "--session",
-		"--extension", "./literal plugin.ts", "--extension", "--print", "--skill", "./skills", "--prompt-template", "./prompts", "--theme", "./theme",
-		"--models", "one, two", "--tools", "read,bash", "--exclude-tools", "edit", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
-		"--no-context-files", "--no-builtin-tools", "--no-tools", "--no-approve", "--offline", "--verbose", "--use-theme", "dark", "--tui-mode", "fullscreen", "--mode", "text",
-		"--custom-boolean", "--custom-string=--session", "@literal file", "--", "--session", "literal prompt ; $(no-exec)"];
-	const parsed = sdk.parseArgs(argv); const original = structuredClone(parsed);
-	const encoded = managedInvocationArguments(parsed);
-	const roundTrip = sdk.parseArgs(["--session", "/owner/fixed.jsonl", ...encoded]);
-	const expected = { ...parsed, session: "/owner/fixed.jsonl" };
-	for (const key of ["continue", "resume", "sessionId", "fork", "sessionDir"]) delete expected[key];
-	assert.deepEqual(roundTrip, expected);
-	assert.deepEqual(parsed, original, "no mutation of the caller's parsed arguments");
-	assert.equal(encoded.includes("source.jsonl"), false);
-	for (const selection of [["--continue"], ["--resume"], ["--session-id", randomUUID()], ["--fork", "other.jsonl"]]) {
-		assert.deepEqual(sdk.parseArgs(["--session", "/owner/fixed.jsonl", ...managedInvocationArguments(sdk.parseArgs(selection))]), sdk.parseArgs(["--session", "/owner/fixed.jsonl"]));
+	for (const argv of [[], ["-c"], ["-r"], ["--session", "literal ; $(no-exec).jsonl"], ["--session-id", randomUUID()], ["-r", "--session-dir", "/saved histories"]]) {
+		const parsed = sdk.parseArgs(argv); const original = structuredClone(parsed);
+		assert.doesNotThrow(() => assertBasicManagedInvocation(parsed));
+		assert.deepEqual(parsed, original);
+	}
+	for (const argv of [["--session", ""], ["--session", "invalid\0path"], ["--session-id", randomUUID(), "-r"], ["--session-dir", "/new storage"]]) {
+		assert.throws(() => assertBasicManagedInvocation(sdk.parseArgs(argv)));
 	}
 });
 
-test("managed argument encoding refuses secrets, noninteractive modes and ambiguous core unknown flags", async t => {
+test("basic managed invocation refuses overrides without echoing secrets or silently dropping values", async t => {
 	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
-	for (const argv of [["--api-key", "fixture-secret"], ["--mode", "rpc"], ["--mode", "json"], ["--no-session"], ["--print"], ["--export", "saved.jsonl"], ["--help"],
-		["--session=source.jsonl"], ["--export"], ["--system-prompt"], ["--thinking", "invalid"]]) {
-		assert.throws(() => managedInvocationArguments(sdk.parseArgs(argv)), error => error instanceof Error && !error.message.includes("fixture-secret"));
+	for (const argv of [["--api-key", "fixture-secret"], ["--model", "fixture-model"], ["--thinking", "high"], ["--name", "title"],
+		["--extension", "plugin.ts"], ["--skill", "skills"], ["--theme", "theme"], ["@notes.md"], ["prompt"], ["-r", "prompt"],
+		["--append-system-prompt", "scratch prompt"], ["--no-context-files"], ["--fork", "source.jsonl"], ["--mode", "text"],
+		["--session=source.jsonl"], ["--custom"], ["--", "--session"], ["--system-prompt"], ["--thinking", "invalid"]]) {
+		assert.throws(() => assertBasicManagedInvocation(sdk.parseArgs(argv)), error => error instanceof Error && error.message.includes("pi-local-only") && !error.message.includes("fixture-secret"));
 	}
-	assert.throws(() => managedInvocationArguments(sdk.parseArgs(["--", "invalid\0prompt"])), /NUL/);
+	assert.throws(() => assertBasicManagedInvocation({ ...sdk.parseArgs([]), futureOption: true }), /pi-local-only/);
 });
 
 test("native path normalization agrees with public SessionManager without modifying fixture history",  async t => {

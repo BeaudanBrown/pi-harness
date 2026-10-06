@@ -20,6 +20,22 @@ live-account traffic or nix-dotfiles Nix evaluation/build is authorized.
 worker profile. It must preserve normal engineering resources with experiments
 still default-off. Dedicated `pi-r-local` stays separate.
 
+## Approved scope: basic invocation, not general startup forwarding
+
+The operator confirmed bare `pi` is their normal usage and approved avoiding
+unnecessary forwarding complexity. Read-only source inspection of both
+nix-dotfiles checkouts found bare Pi in the managed tmux launcher, a separate
+base-package `LLM` scratch launcher, and `pi-local` through dedicated `pi-r-local`.
+Preserve those separate paths; no dotfiles evaluation/build was run.
+
+Automatic managed admission supports bare Pi and explicit saved-session
+selection only. Startup prompts, resource/input-file overrides, model/title or
+other startup overrides are refused before managed effects with `pi-local-only`
+guidance, never silently dropped. Configured/project-discovered engineering
+resources remain intact. This does not authorize a new general argv payload,
+startup-prompt journal, or exception to host path authority. Selection is not
+ownership proof, and cannot create a requested arbitrary managed session ID.
+
 ## Acceptance-to-evidence plan
 
 | Acceptance | Intended seam | Required evidence |
@@ -28,7 +44,7 @@ still default-off. Dedicated `pi-r-local` stays separate.
 | Explicit resume reuses live exact target or dormant saved binding | Read-only SDK session resolution before opening a writable Pi session; existing exact-window/open authority | CLI/session flag matrix, active/dormant and concurrent resume, no second writer |
 | Retired history resumes only under a new identity | Existing irreversible retirement authority plus explicit history resume boundary | Old conversation never revived, old file/history retained, no backfill |
 | Git and linked-worktree eligibility only inside configured roots | Trusted host launcher/workspace resolver, not caller path assertions | Canonical cwd, nested cwd, validated linked worktree, symlink/ambiguous/non-Git/out-of-root cases |
-| Preserve resources and trusted dispatch; no recursion | Package/module wrapper and existing managed dispatcher | Literal argv/cwd/resource preservation, inherited private PATH/identity, nested/internal invocations |
+| Preserve resources and trusted dispatch; no recursion | Package/module wrapper and existing managed dispatcher | Bare/resume admission, unsupported-override refusal, cwd/configured-resource preservation, inherited private PATH/identity, nested/internal invocations |
 | Exclude SDK/review/diagnostic/eval/headless/experiments | Public Pi argument parsing and explicit internal dispatch/mode boundaries | Both packaged SDK and current SDK flag probes, workers/evals/RPC and deliberate managed RPC tests |
 | Matrix/NAS outage keeps local relay-owned work running | Existing roomless local enrollment/provisioning retry, reused by launch owner | Local process/session survives failed setup; pending status and eventual catch-up without duplicate room/window |
 | Local relay outage refuses eligible managed launch | Frontend reports failure with explicit local-only alternative | No silent fallback/new unmanaged writer; ineligible ordinary local invocation remains usable |
@@ -160,9 +176,9 @@ in-memory format migration before publishing a fresh owned file. No private SDK
 field or persistence patch is needed. Argument rewriting must remain parser-backed
 and preserve literal values and resources, including `--` and extension flags.
 
-## Partial implementation: parser-backed argument encoding
+## Superseded prototype: parser-backed argument encoding
 
-`launch/arguments.ts` exhaustively maps the pinned public argument type to a
+Before the operator narrowed scope, `launch/arguments.ts` exhaustively maps the pinned public argument type to a
 canonical argument vector. It preserves literal values, repeated resource order,
 file arguments, prompt text after `--`, and extension flag values; it does not
 promise identical spelling/order of equivalent flags. Selection fields are
@@ -183,6 +199,24 @@ and packaged helper validation:
 `.pi/tmp/workers/2026-10-06T04-30-32-849Z-default-launch-argument-history-final-focused-7ed85aa40fd1/`.
 The same pass tightened offline inspection: unknown binding schemas/versions
 cannot prove a foreign scope. No issue review or final canonical gate yet.
+
+## Partial implementation: basic argument admission
+
+The generic encoder has been removed, not wired into a transport. Its replacement
+`assertBasicManagedInvocation` accepts only bare invocation and resume-selection
+fields from the public SDK parser. It rejects prompts, file inputs, unknown or
+future options, credential/resource overrides, malformed selectors, conflicting
+session-ID selection, and a custom directory for fresh owned storage. It never
+echoes argument values, mutates the parser result, or forwards a startup argv.
+Apply it to user arguments only, after candidate classification and before managed
+effects; injected harness resources are not user overrides.
+
+Eight focused helper checks passed on **each** actual SDK 0.84.4 and 0.85.0, zero
+skips, with the packaged workspace helper:
+`.pi/tmp/workers/2026-10-06T05-09-29-130Z-default-launch-basic-policy-complete-sdk-f410cb25ee5f/`.
+An earlier run omitted the launcher environment and skipped one test on each SDK;
+the complete rerun above supersedes it. These remain helper tests, not default
+launch integration or live acceptance.
 
 ## Partial implementation: owned roomless launch admission
 
@@ -209,7 +243,8 @@ This is not the final canonical gate or a complete automatic-launch path. No #11
 subjective review has run yet. Private-state compatibility/rollback must preserve
 or refuse the new origin marker, never silently discard it.
 
-Saved-session selection/full ownership guards, argument-transport policy,
-local-first lifecycle and launcher wiring remain to be implemented and verified. Preflight findings are
+Saved-session selection/full ownership guards, local-first lifecycle and launcher
+wiring remain to be implemented and verified. General startup transport is out of
+scope under the approved simplification. Preflight findings are
 not acceptance of #116. These plans do not authorize live account effects or
 deployment.

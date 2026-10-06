@@ -1,65 +1,27 @@
 import type { parseArgs } from "@earendil-works/pi-coding-agent";
 
 type NativeArguments = ReturnType<typeof parseArgs>;
-type Kind = "scalar" | "boolean" | "list" | "repeat" | "trust" | "mode" | "selection" | "forbidden";
-type Option = Exclude<keyof NativeArguments, "messages" | "fileArgs" | "unknownFlags" | "diagnostics">;
-
-// Exhaustive over the pinned public API: SDK additions require a deliberate
-// transport decision rather than silently forwarding a new authority selector.
-const OPTIONS = {
-	provider: ["--provider", "scalar"], model: ["--model", "scalar"], apiKey: ["--api-key", "forbidden"],
-	systemPrompt: ["--system-prompt", "scalar"], appendSystemPrompt: ["--append-system-prompt", "repeat"], thinking: ["--thinking", "scalar"],
-	continue: ["--continue", "selection"], resume: ["--resume", "selection"], session: ["--session", "selection"],
-	sessionId: ["--session-id", "selection"], fork: ["--fork", "selection"], sessionDir: ["--session-dir", "selection"],
-	help: ["--help", "forbidden"], version: ["--version", "forbidden"], noSession: ["--no-session", "forbidden"],
-	print: ["--print", "forbidden"], export: ["--export", "forbidden"], listModels: ["--list-models", "forbidden"],
-	mode: ["--mode", "mode"], name: ["--name", "scalar"], models: ["--models", "list"],
-	tools: ["--tools", "list"], excludeTools: ["--exclude-tools", "list"], noTools: ["--no-tools", "boolean"], noBuiltinTools: ["--no-builtin-tools", "boolean"],
-	extensions: ["--extension", "repeat"], noExtensions: ["--no-extensions", "boolean"],
-	skills: ["--skill", "repeat"], noSkills: ["--no-skills", "boolean"],
-	promptTemplates: ["--prompt-template", "repeat"], noPromptTemplates: ["--no-prompt-templates", "boolean"],
-	themes: ["--theme", "repeat"], useTheme: ["--use-theme", "scalar"], noThemes: ["--no-themes", "boolean"],
-	noContextFiles: ["--no-context-files", "boolean"], offline: ["--offline", "boolean"],
-	tuiMode: ["--tui-mode", "scalar"], verbose: ["--verbose", "boolean"], projectTrustOverride: ["--approve", "trust"],
-} as const satisfies Record<Option, readonly [string, Kind]>;
-const RESERVED = new Set([...Object.values(OPTIONS).map(([flag]) => flag.slice(2)), "no-approve"]);
+const SELECTION = new Set<string>(["continue", "resume", "session", "sessionId", "sessionDir"]);
+const PARSER_FIELDS = new Set<string>(["messages", "fileArgs", "unknownFlags", "diagnostics"]);
+const UNSUPPORTED = "Managed launch supports bare pi and explicit resume only; use pi-local-only for startup overrides";
 
 /**
- * Canonical argv for an already-resolved new/dormant managed invocation. This
- * preserves parsed literal values, not spelling/order of equivalent CLI flags.
- * Session selection is deliberately absent: the owner supplies its fixed file.
- * Do not use this as ownership/admission validation or replay startup prompts.
+ * Apply only to human interactive candidates, before any managed side effect.
+ * Input is the public parser result for USER arguments, not injected harness
+ * resources. Selection still requires read-only resolution and host ownership
+ * checks. No prompts, resource paths or other startup arguments are forwarded.
  */
-export function managedInvocationArguments(parsed: NativeArguments): string[] {
-	if (parsed.diagnostics.length) throw new Error("Resolve native CLI diagnostics before a managed launch");
-	const result: string[] = [];
-	for (const key of Object.keys(OPTIONS) as Option[]) {
-		const [flag, kind]: readonly [string, Kind] = OPTIONS[key]; const value = parsed[key];
-		if (value === undefined || kind === "selection") continue;
-		if (kind === "forbidden") throw new Error(`Managed launch does not forward ${flag}; use pi-local-only when appropriate`);
-		if (kind === "trust") { result.push(value ? "--approve" : "--no-approve"); continue; }
-		if (kind === "boolean") { if (value) result.push(flag); continue; }
-		if (kind === "mode" && value !== "text") throw new Error("Managed automatic launch requires interactive mode");
-		if (kind === "list" || kind === "repeat") {
-			if (!Array.isArray(value) || value.some(item => typeof item !== "string")) throw new Error("Invalid native array option");
-			if (kind === "list") result.push(flag, value.join(","));
-			else for (const item of value) result.push(flag, item);
-		} else {
-			if (typeof value !== "string") throw new Error("Invalid native scalar option");
-			result.push(flag, value);
-		}
+export function assertBasicManagedInvocation(parsed: NativeArguments): void {
+	if (parsed.diagnostics.length || parsed.messages.length || parsed.fileArgs.length || parsed.unknownFlags.size) throw new Error(UNSUPPORTED);
+	for (const [key, value] of Object.entries(parsed)) {
+		if (value === undefined || PARSER_FIELDS.has(key)) continue;
+		if (!SELECTION.has(key)) throw new Error(UNSUPPORTED);
+		if (typeof value === "string" && (!value || value.includes("\0"))) throw new Error("Managed resume requires a nonempty valid selector");
 	}
-	for (const [name, value] of parsed.unknownFlags) {
-		// A missing core value or --session=... is reported as unknown by Pi.
-		// Re-emitting that as a bare flag could consume our fixed session option.
-		if (RESERVED.has(name)) throw new Error("Incomplete or assignment-style core options cannot be forwarded; use native flag/value syntax");
-		if (value === true) result.push(`--${name}`);
-		else if (typeof value === "string") result.push(`--${name}=${value}`);
-		else throw new Error("Invalid native extension flag");
+	if (parsed.sessionId !== undefined && (parsed.session !== undefined || parsed.continue || parsed.resume)) {
+		throw new Error("--session-id cannot be combined with other resume selectors");
 	}
-	// Pi collects files and messages separately even when interleaved in argv.
-	// A delimiter preserves option-looking prompt text and unknown boolean flags.
-	result.push("--", ...parsed.fileArgs.map(path => `@${path}`), ...parsed.messages);
-	if (result.some(value => value.includes("\0"))) throw new Error("Native arguments cannot contain NUL bytes");
-	return result;
+	if (parsed.sessionDir !== undefined && !(parsed.session !== undefined || parsed.sessionId !== undefined || parsed.continue || parsed.resume)) {
+		throw new Error("Managed session storage is host-owned; use pi-local-only for a custom new-session directory");
+	}
 }
