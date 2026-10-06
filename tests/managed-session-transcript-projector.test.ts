@@ -46,7 +46,7 @@ async function registryFixture(): Promise<{ root: string; store: ConversationMan
 	return { root, store, registry };
 }
 
-function offer(piEntryKey: string, body: string, kind: "local_user" | "assistant_final" | "assistant_commentary" = "assistant_final"): ManagedSessionEnvelope {
+function offer(piEntryKey: string, body: string, kind: "local_user" | "assistant_final" | "assistant_commentary" | "branch_marker" = "assistant_final"): ManagedSessionEnvelope {
 	return {
 		protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 		messageId: `offer-${piEntryKey}`,
@@ -63,6 +63,18 @@ const matrixConfig = {
 	botUserId: "@bot:example.com",
 	operatorUserId: "@operator:example.com",
 };
+
+test("branch markers are silent notices and replay exact transaction bytes after a lost acknowledgement", async () => {
+	const { root, store, registry } = await registryFixture(); const sends: Array<{ url: string; body: string }> = [];
+	const matrix = new ManagedMatrixClient(matrixConfig, async (url, init) => { sends.push({ url: String(url), body: String(init?.body) }); return Response.json({ event_id: "$branch" }); }, [roomId]);
+	const marker = offer("branch-boundary", "Pi switched branches in this session. Earlier Matrix history is unchanged.", "branch_marker"); marker.payload.disposition = "silent";
+	registry.markProjectionChunkSent = async () => { throw Error("lost acknowledgement"); };
+	await assert.rejects(new TranscriptProjector(registry, matrix).project(marker), /lost acknowledgement/);
+	const restarted = new RelayRegistry(hostId, join(root, "runtime"), store); await restarted.load(); await new TranscriptProjector(restarted, matrix).project(marker);
+	assert.equal(sends.length, 2); assert.deepEqual(sends[0], sends[1]); const content = JSON.parse(sends[0]!.body);
+	assert.equal(content.msgtype, "m.notice"); assert.deepEqual(content["m.mentions"], {}); assert.equal(content["lol.bepis.pi.notification"].disposition, "silent");
+	await assert.rejects(new TranscriptProjector(restarted, matrix).project({ ...marker, payload: { ...marker.payload, disposition: "notify" } }), /Only final transcript/);
+});
 
 test("accepted recovery alert retries exact Matrix bytes after relay restart without another liveness decision", async () => {
 	const { root, store, registry } = await registryFixture();

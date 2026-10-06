@@ -47,6 +47,14 @@ test("retirement removes ordinary discovery and rejects stale nonce, attachment,
 	assert.equal(replacement.pendingRetirements()[0].retirementId, retired.retirementId);
 });
 
+test("retirement during a tree fence rejects late completion and cannot revive the binding", async t => {
+	const f = await fixture(t); await f.registry.prepareTreeChange(f.first.conversationId, "tree-before-retirement");
+	await f.registry.retireConversation(f.first.conversationId, f.targets);
+	await assert.rejects(f.registry.completeTreeChange(f.first.conversationId, "tree-before-retirement"), /retired|not found/);
+	await assert.rejects(f.registry.prepareTreeChange(f.first.conversationId, "late-tree"), /retired|not found/);
+	assert.equal(f.registry.registeredConversation(f.first.conversationId), undefined);
+});
+
 test("new identity can reuse preserved Pi history with a fresh room and projection boundary", async (t) => {
 	const f = await fixture(t); await f.registry.retireConversation(f.first.conversationId, f.targets);
 	const fresh = { ...manifest("resumed"), piSessionId: f.first.piSessionId,

@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 export const MAX_MATRIX_TRANSCRIPT_CHUNK_BYTES = 8_000;
 export const MAX_MATRIX_TRANSCRIPT_CHUNKS = 64;
-export type TranscriptKind = "local_user" | "assistant_final" | "assistant_commentary";
+export type TranscriptKind = "local_user" | "assistant_final" | "assistant_commentary" | "branch_marker";
 
 export interface RenderedTranscriptChunk {
 	body: string;

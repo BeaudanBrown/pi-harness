@@ -85,6 +85,7 @@ test("real Pi guards bound new/fork/saved switches/imports without changing unbo
 				const beforeEntries = structuredClone(sm.getEntries()); const beforeFile = await readFile(path, "utf8");
 				assert.deepEqual(await runtime.newSession(), { cancelled: true });
 				assert.deepEqual(await runtime.fork(boundary, { position: "at" }), { cancelled: true });
+				assert.equal((await session.navigateTree(boundary)).cancelled, true, "legacy relay without branch capability cannot change a bound tree");
 				assert.deepEqual(sm.getEntries(), beforeEntries); assert.equal(await readFile(path, "utf8"), beforeFile);
 				assert.deepEqual(await runtime.switchSession(join(relay.root, "does-not-exist.jsonl")), { cancelled: true }, "native resume veto precedes reading the selected file");
 				const imports = join(relay.root, "imports"); await mkdir(imports); const input = join(imports, "other.jsonl"); await writeFile(input, "must not be imported");
@@ -127,6 +128,52 @@ test("real Pi session names synchronize through negotiated IPC without echoes, h
 		await activityWait(() => sm.getSessionName() === "Matrix title", 3000); await new Promise(resolve => setTimeout(resolve, 30));
 		assert.equal(relay.frames.filter(frame => frame.type === "title.observe").length, 1);
 		assert.equal(modelCalls, 0); assert.equal(sm.getEntries().filter((entry: any) => entry.type === "message").length, 0);
+	} finally { if (session) { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); } await relay.close(); }
+});
+
+test("real Pi tree revisits retain the binding and emit only fresh silent branch markers", { timeout: 15000 }, async t => {
+	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
+	const sdk = await import(pathToFileURL(join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js")).href);
+	const relay = await FakeRelay.start(); relay.enableBranches = true; relay.enableCommentary = true; relay.enableDisposition = true;
+	let session: any; let modelCalls = 0;
+	try {
+		const settingsManager = sdk.SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } });
+		const modelRuntime = await sdk.ModelRuntime.create({ authPath: join(relay.root, "auth.json"), modelsPath: join(relay.root, "models.json"), modelsStorePath: join(relay.root, "store.json") });
+		const file = join(relay.root, "tree.jsonl"); await writeFile(file, JSON.stringify({ type: "session", version: 3, id: sessionId, cwd: relay.root, timestamp: new Date().toISOString() }) + "\n");
+		const sm = sdk.SessionManager.open(file, relay.root);
+		sm.appendMessage({ role: "user", content: "Old terminal history must not be echoed", timestamp: Date.now() });
+		const target = sm.appendCustomEntry("fixture.anchor", {});
+		const boundary = sm.appendCustomEntry(BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION });
+		sm.appendCustomEntry(BINDING_ENTRY_TYPE, { ...binding, bindingBoundaryEntryId: deriveTranscriptEntryId(sessionId, boundary) });
+		const loader = new sdk.DefaultResourceLoader({ cwd: relay.root, agentDir: relay.root, settingsManager, noExtensions: true, noSkills: true, noPromptTemplates: true, noThemes: true,
+			extensionFactories: [createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })] });
+		await loader.reload(); assert.deepEqual(loader.getExtensions().errors, []);
+		({ session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader, settingsManager, sessionManager: sm,
+			modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: [] }));
+		session.agent.streamFn = () => { modelCalls++; throw Error("Plain tree navigation must not call a model"); };
+		const notices: string[] = [];
+		await session.bindExtensions({ uiContext: { notify: (text: string) => notices.push(text), setStatus: () => undefined } });
+		for (let count = 1; count <= 2; count++) {
+			let result: any;
+			for (let retry = 0; retry < 20; retry++) { result = await session.navigateTree(target); if (!result.cancelled) break; await new Promise(resolve => setTimeout(resolve, 20)); }
+			assert.equal(result.cancelled, false, JSON.stringify({ count, notices, frames: relay.frames.map(frame => ({ type: frame.type, payload: frame.payload })), tree: sm.getEntries().filter((entry: any) => entry.customType === "managed-session.tree") }));
+			await activityWait(() => relay.frames.filter(frame => frame.type === "transcript.offer" && frame.payload.kind === "branch_marker").length === count, 3000);
+			assert.ok(sm.getBranch().some((entry: any) => entry.customType === BINDING_ENTRY_TYPE));
+		}
+		const offers = relay.frames.filter(frame => frame.type === "transcript.offer");
+		assert.equal(offers.length, 2); assert.ok(offers.every(frame => frame.payload.kind === "branch_marker" && frame.payload.disposition === "silent"));
+		assert.notEqual(offers[0]!.payload.entryId, offers[1]!.payload.entryId);
+		assert.equal(sm.getSessionId(), sessionId); assert.equal(sm.getSessionFile(), file); assert.equal(modelCalls, 0);
+		assert.equal(relay.frames.filter(frame => frame.type === "attachment.attach").length, 1);
+		await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); session = undefined; await loader.reload();
+		const reopened = sdk.SessionManager.open(file);
+		({ session } = await sdk.createAgentSession({ cwd: relay.root, agentDir: relay.root, resourceLoader: loader, settingsManager, sessionManager: reopened,
+			modelRuntime, model: modelRuntime.getModel("anthropic", "claude-sonnet-4-5"), tools: [] }));
+		session.agent.streamFn = () => { modelCalls++; throw Error("Restart must not invoke a model"); }; await session.bindExtensions({});
+		await activityWait(() => relay.frames.filter(frame => frame.type === "attachment.attach").length === 2);
+		await activityWait(() => relay.frames.filter(frame => frame.type === "branch.complete").length === 3);
+		assert.equal(relay.frames.filter(frame => frame.type === "transcript.offer").length, 2, "restart retains marker receipts without replay");
+		assert.equal(reopened.getSessionId(), sessionId); assert.equal(modelCalls, 0);
 	} finally { if (session) { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); } await relay.close(); }
 });
 
@@ -347,6 +394,7 @@ class FakeRelay {
 	enableDisposition = false;
 	enableRecovery = false;
 	enableTitles = false;
+	enableBranches = false;
 	title = "Host title";
 	titleRevision = 1;
 	enableApprovals = false;
@@ -422,7 +470,7 @@ class FakeRelay {
 				...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}) } }));
 		} else if (envelope.type === "attachment.attach") {
 			setTimeout(() => {
-				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : []), ...(this.enableApprovals ? ["approval-v1", "host-control-v1"] : []), ...(this.enableTitles ? ["title-v1"] : [])];
+				const capabilities = [...(this.enableCommentary && envelope.payload.requestedCapabilities ? ["commentary-v1", ...(this.enableDisposition ? ["notification-disposition-v1"] : []), ...(this.enableRecovery ? ["recovery-attention-v1"] : [])] : []), ...(local ? ["local-enrollment-v1"] : []), ...(this.enableApprovals ? ["approval-v1", "host-control-v1"] : []), ...(this.enableTitles ? ["title-v1"] : []), ...(this.enableBranches ? ["branch-v1"] : [])];
 				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "attachment.accepted", payload: { attachmentId: "attachment-1", state: "active",
 					...(capabilities.length ? { capabilities } : {}), ...(local ? { matrixBinding: this.matrixPending ? "pending" : "bound" } : {}), ...(this.placement ? { placement: this.placement } : {}) } }));
 			}, this.attachmentDelayMs);
@@ -449,6 +497,8 @@ class FakeRelay {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "media.result", payload: { deliveryId: envelope.payload.deliveryId, blobId: envelope.payload.blobId, status: "rejected" } }));
 		} else if (envelope.type === "refresh.result") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "refresh.result", status: "ok" } }));
+		} else if (envelope.type === "branch.prepare" || envelope.type === "branch.complete") {
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: envelope.type, operationId: envelope.payload.operationId, status: "ok" } }));
 		} else if (envelope.type === "title.read" || envelope.type === "title.observe") {
 			if (envelope.type === "title.observe") { this.title = envelope.payload.title as string; this.titleRevision++; }
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: envelope.type, title: this.title, revision: this.titleRevision,

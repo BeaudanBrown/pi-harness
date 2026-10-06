@@ -9,6 +9,7 @@ import {
 	MANAGED_SESSION_STATE_VERSION,
 	MAX_NDJSON_FRAME_BYTES,
 	deriveConversationId,
+	deriveDeliveryId,
 	deriveTranscriptEntryId,
 	encodeNdjsonEnvelope,
 	parseNdjsonEnvelope,
@@ -78,6 +79,36 @@ function readEnvelope(socket: Socket): Promise<ManagedSessionEnvelope> {
 		socket.on("close", onClose);
 	});
 }
+
+test("tree IPC fences input durably, rejects competing transitions and completes only its own operation", async t => {
+	let f!: Awaited<ReturnType<typeof setup>>;
+	f = await setup(undefined, async (envelope, attachment) => {
+		const id = attachment.conversationId; const operationId = String(envelope.payload.operationId);
+		if (envelope.type === "branch.prepare") await f.registry.prepareTreeChange(id, operationId);
+		else await f.registry.completeTreeChange(id, operationId, envelope.payload.cancelled === true);
+		return { protocolVersion: "1.0.0", messageId: `reply-${envelope.messageId}`, role: "relay", conversationId: id, inReplyTo: envelope.messageId, type: "self.result", payload: { operation: envelope.type, operationId, status: "ok" } };
+	});
+	t.after(async () => { await f.server.close(); await rm(f.root, { recursive: true, force: true }); });
+	const value = f.values[0]!;
+	const client = new BoundAdapterClient({ socketPath: f.server.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, requestedCapabilities: ["branch-v1"], onEnvelope: () => undefined,
+		binding: { version: "1.0.0", role: "ordinary_adapter", conversationId: value.conversationId, concept: value.concept, sessionId: value.piSessionId, bindingBoundaryEntryId: value.bindingBoundaryEntryId } });
+	t.after(() => client.close()); await client.connect();
+	await client.treeChange("tree-one", "prepare"); await client.treeChange("tree-one", "prepare");
+	assert.equal(f.registry.hasDeliveryBoundary((value.conversationId)), true);
+	await assert.rejects(client.treeChange("tree-other", "prepare"), /Another tree/);
+	await f.registry.recordAcceptedInput(value.conversationId, { deliveryId: deriveDeliveryId(value.conversationId, "$during-tree"), matrixEventId: "$during-tree", kind: "prompt", body: "queued during navigation", status: "accepted" });
+	await assert.rejects(client.treeChange("tree-other", "complete", true), /Tree transition changed/);
+	assert.equal(f.registry.hasDeliveryBoundary((value.conversationId)), true);
+	await client.treeChange("tree-one", "complete"); await client.treeChange("tree-one", "complete");
+	assert.equal(f.registry.hasDeliveryBoundary((value.conversationId)), false);
+	assert.equal(f.registry.pendingInputs(value.conversationId)[0]?.status, "accepted", "completion does not consume or replay accepted input");
+	await assert.rejects(client.treeChange("tree-next", "prepare"), /pending managed input/);
+	await f.registry.cancelPendingInputs(value.conversationId); await client.treeChange("tree-next", "prepare");
+	await client.close(); await client.connect(); assert.equal(client.pendingTreeOperation, "tree-next", "attachment advertises durable fencing even if native metadata was lost");
+	await client.close(); await f.server.close();
+	const reloaded = new RelayRegistry(hostId, join(f.root, "runtime"), new ConversationManifestStore(join(f.root, "manifests"))); await reloaded.load();
+	assert.equal(reloaded.hasDeliveryBoundary((value.conversationId)), true, "relay restart cannot silently release a branch fence");
+});
 
 test("title metadata requires negotiated capability and uses the live attached conversation over real IPC", async t => {
 	let owner!: ConversationTitles; let accepted = 0;

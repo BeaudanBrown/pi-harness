@@ -581,6 +581,36 @@ export class RelayRegistry {
 		return conversation.generationTransition != null || conversation.pendingControls.some((control) => control.name === "new" && control.argument === "--confirm");
 	}
 
+	pendingTreeOperation(conversationId: string): string | undefined { return this.runtimeConversation(conversationId).treeTransition?.operationId; }
+
+	hasDeliveryBoundary(conversationId: string): boolean {
+		return Boolean(this.runtimeConversation(conversationId).treeTransition) || this.hasGenerationBoundary(conversationId);
+	}
+
+	/** In-place branch navigation fences delivery, not process/generation ownership. */
+	async prepareTreeChange(conversationId: string, operationId: string): Promise<void> {
+		await this.mutate(async () => {
+			const row = this.runtimeConversation(conversationId); const manifest = this.manifests.get(conversationId);
+			if (!manifest || !this.isActiveGenerationAttached(conversationId)) throw new RelayRegistryError("invalid_state", "Tree source is not attached");
+			if (row.treeTransition) {
+				if (row.treeTransition.operationId !== operationId || row.treeTransition.sessionId !== manifest.piSessionId) throw new RelayRegistryError("invalid_state", "Another tree transition is pending");
+				return;
+			}
+			if (row.completedTreeOperation === operationId || this.isRefreshing(conversationId) || this.hasGenerationBoundary(conversationId) || row.pendingControls.length || row.activeCheckpointPoll || row.publishingCheckpointPoll || row.activeControlPoll || row.publishingControlPoll ||
+				row.pendingInputs.some(input => input.status !== "completed" && input.status !== "cancelled")) throw new RelayRegistryError("invalid_state", "Wait for pending managed input and controls before changing branches");
+			row.treeTransition = { operationId, sessionId: manifest.piSessionId };
+		});
+	}
+	async completeTreeChange(conversationId: string, operationId: string, cancelled = false): Promise<void> {
+		await this.mutate(async () => {
+			const row = this.runtimeConversation(conversationId); const manifest = this.manifests.get(conversationId);
+			if (!manifest || !this.isActiveGenerationAttached(conversationId)) throw new RelayRegistryError("invalid_state", "Tree source is not attached");
+			if (!row.treeTransition && (row.completedTreeOperation === operationId || cancelled)) return;
+			if (row.treeTransition?.operationId !== operationId || row.treeTransition.sessionId !== manifest.piSessionId) throw new RelayRegistryError("invalid_state", "Tree transition changed");
+			delete row.treeTransition; row.completedTreeOperation = operationId;
+		});
+	}
+
 	isActiveGenerationAttached(conversationId: string): boolean {
 		const conversation = this.runtimeConversation(conversationId); const manifest = this.manifests.get(conversationId);
 		return Boolean(manifest && this.liveConnections.has(conversationId) && conversation.state === "active" && conversation.attachment?.sessionId === manifest.piSessionId);
@@ -649,7 +679,8 @@ export class RelayRegistry {
 			const live = this.runtimeConversation(conversationId).generationTransition;
 			if (!live || live.transitionId !== transitionId) throw new RelayRegistryError("invalid_state", "Generation transition changed during activation");
 			this.manifests.set(conversationId, replacement); this.liveConnections.delete(conversationId);
-			const runtime = this.runtimeConversation(conversationId); runtime.attachment = null; runtime.state = "starting"; live.phase = "activated"; delete live.failure;
+			const runtime = this.runtimeConversation(conversationId); runtime.attachment = null; runtime.state = "starting";
+			delete runtime.treeTransition; delete runtime.completedTreeOperation; live.phase = "activated"; delete live.failure;
 			return structuredClone(replacement);
 		});
 	}

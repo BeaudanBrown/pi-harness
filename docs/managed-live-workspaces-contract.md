@@ -449,6 +449,21 @@ with supported reset/conversation guidance. Block saved-session switching while
 bound; unbound navigation is unchanged. Transition/input/stop/retirement serialize on the
 same conversation authority and invalidate stale attachment generations.
 
+`branch-v1` is an in-place delivery fence, **not** a successor handoff. Authenticated
+`branch.prepare` / `branch.complete` use a session-scoped operation ID; attachment
+acceptance advertises an outstanding `branchOperationId` only to negotiated clients.
+A missing/mismatched native journal cannot silently release that fence. Native
+`managed-session.tree` entries persist intent, commit/cancellation and the new
+projection boundary; repeated visits create distinct silent `branch_marker` notices.
+No process, generation, file or room is replaced, and no model-action receipt is
+introduced. Text and image bytes remain relay-owned while held; status and stop
+remain available. Pending checkpoint/control polls prevent navigation rather than
+transferring old answers. Cancellation needs an unchanged persisted source and a
+reliable public SDK idle fence, or restart; ambiguous partial navigation stays held
+for explicit recovery. Older SDKs without that idle fence may require restart after
+an interrupted/vetoed tree operation. Confirmed process replacement clears an old
+fence only when its fresh generation activates. No SDK patch/private field is used.
+
 Freeze `{sourceId, generationId, branchId, disposition, attentionId?, chunks}`
 before first network send; `disposition` is silent/notify. Local text/commentary,
 activity and housekeeping are silent. Finals, unanswered checkpoints, approval

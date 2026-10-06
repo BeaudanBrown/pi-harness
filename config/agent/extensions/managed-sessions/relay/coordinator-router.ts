@@ -456,7 +456,7 @@ export class CoordinatorRouter {
 	private async deliverRecordedInput(manifest: ConversationManifest, _input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
 		const id = manifest.conversationId;
 		if (this.delivering.has(id)) { this.deliveryAgain.add(id); return; }
-		if (this.registry.isRefreshing(id) || this.registry.hasGenerationBoundary(id) ||
+		if (this.registry.isRefreshing(id) || this.registry.hasDeliveryBoundary(id) ||
 			this.registry.pendingControls(id).some((control) => control.name === "stop")) return;
 		this.delivering.add(id);
 		try {
@@ -471,12 +471,12 @@ export class CoordinatorRouter {
 			}
 			await this.registry.markInputDelivered(id, input.deliveryId);
 			const current = this.registry.pendingInputs(id).find((item) => item.deliveryId === input.deliveryId);
-			if (!current || current.status !== "delivered" || this.registry.hasGenerationBoundary(id) || this.registry.isRefreshing(id)) return;
+			if (!current || current.status !== "delivered" || this.registry.hasDeliveryBoundary(id) || this.registry.isRefreshing(id)) return;
 			if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(id, input.deliveryId);
 			// Feedback can await disk/Matrix work. Cancellation or a reset accepted
 			// during it must win before any native slash-command dispatch.
 			if (this.registry.pendingInputs(id).find((item) => item.deliveryId === input.deliveryId)?.status !== "delivered" ||
-				this.registry.hasGenerationBoundary(id) || this.registry.isRefreshing(id) ||
+				this.registry.hasDeliveryBoundary(id) || this.registry.isRefreshing(id) ||
 				this.registry.pendingControls(id).some((control) => control.name === "stop")) return;
 			if (input.media) await this.media?.deliver(this.server, id, input);
 			else this.server.sendToConversation(this.deliveryEnvelope(id, input));
@@ -575,7 +575,7 @@ export class CoordinatorRouter {
 
 	private async ensureWake(manifest: ConversationManifest): Promise<void> {
 		if (this.registry.isRefreshing(manifest.conversationId)) return;
-		if (this.registry.hasGenerationBoundary(manifest.conversationId)) return;
+		if (this.registry.hasDeliveryBoundary(manifest.conversationId)) return;
 		if (this.registry.conversationState(manifest.conversationId) === "active") return;
 		const pending = this.registry.pendingInputs(manifest.conversationId)
 			.find((input) => input.status === "accepted" || input.status === "delivered" || input.status === "persisted");

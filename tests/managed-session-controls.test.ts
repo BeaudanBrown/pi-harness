@@ -16,6 +16,8 @@ import { ConversationManifestStore } from "../config/agent/extensions/managed-se
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { CheckpointPollPublisher } from "../config/agent/extensions/managed-sessions/relay/checkpoint-poll-publisher.js";
 import { ControlPollPublisher } from "../config/agent/extensions/managed-sessions/relay/control-poll-publisher.js";
+import { BlobSpool } from "../config/agent/extensions/managed-sessions/relay/blob-spool.js";
+import { ManagedImageTransport } from "../config/agent/extensions/managed-sessions/relay/image-media.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { deriveControlId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 
@@ -63,6 +65,41 @@ async function readMany(socket: Socket, count: number): Promise<ManagedSessionEn
 		socket.once("error", reject);
 	});
 }
+
+test("tree fencing queues text and image bytes while status stays usable, then delivers only after completion", { timeout: 10000 }, async t => {
+	const { root, registry, manifest } = await fixture(); const id = manifest.conversationId;
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "tree-routing") }); await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const seen: ManagedSessionEnvelope[] = []; let buffer = Buffer.alloc(0);
+	socket.on("data", chunk => { buffer = Buffer.concat([buffer, chunk]); while (buffer.includes(10)) { const end = buffer.indexOf(10); seen.push(parseNdjsonEnvelope(buffer.subarray(0, end + 1))); buffer = buffer.subarray(end + 1); } });
+	const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=", "base64"); let syncs = 0;
+	const matrix = new ManagedMatrixClient(config, async (input, init) => {
+		const path = new URL(String(input)).pathname;
+		if (path.endsWith("/joined_members")) return Response.json({ joined: { [config.operatorUserId]: {} } });
+		if (path.includes("/media/download/")) return new Response(png);
+		if (path.endsWith("/sync")) {
+			if (++syncs === 1) return Response.json(sync([event("$tree-text", "fresh input"), { ...event("$tree-image", "photo.png"), content: { msgtype: "m.image", body: "photo.png", url: "mxc://example.com/image" } }, event("$tree-status", "!status")]));
+			return new Promise<Response>((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(Object.assign(Error("cancelled"), { name: "AbortError" })), { once: true }));
+		}
+		return Response.json({ event_id: "$sent" });
+	}, [manifest.roomId]);
+	const media = new ManagedImageTransport(new BlobSpool(join(root, "spool")), matrix); await media.initialize(new Set());
+	const router = new CoordinatorRouter(manifest, registry, matrix, server, async () => { throw Error("Tree fence must not launch a process"); }, undefined, undefined, undefined, undefined, undefined, media);
+	t.after(() => router.stop()); await registry.prepareTreeChange(id, "tree-routing"); router.start();
+	const wait = async (predicate: () => boolean) => { for (let attempt = 0; attempt < 300 && !predicate(); attempt++) await new Promise(resolve => setTimeout(resolve, 5)); assert.ok(predicate(), JSON.stringify(seen)); };
+	await wait(() => seen.some(frame => frame.type === "control.deliver" && frame.payload.name === "status"));
+	assert.equal(registry.hasGenerationBoundary(id), false, "tree fencing must not discard media like a generation cutoff");
+	assert.deepEqual(registry.pendingInputs(id).map(row => row.status), ["accepted", "accepted"]);
+	assert.equal(seen.some(frame => frame.type === "input.deliver" || frame.type === "media.begin"), false);
+	await registry.acknowledgeControlResult(id, deriveControlId(id, "$tree-status"));
+	await registry.completeTreeChange(id, "tree-routing"); await router.attachmentReady(id);
+	await wait(() => seen.some(frame => frame.type === "input.deliver"));
+	assert.equal(seen.filter(frame => frame.type === "input.deliver").length, 1);
+	await registry.acknowledgeInput(id, deriveDeliveryId(id, "$tree-text"), "persisted", deriveTranscriptEntryId(manifest.piSessionId, "fresh-text"));
+	await registry.acknowledgeInput(id, deriveDeliveryId(id, "$tree-text"), "completed", deriveTranscriptEntryId(manifest.piSessionId, "fresh-text")); await router.attachmentReady(id);
+	await wait(() => seen.some(frame => frame.type === "media.chunk"));
+	assert.equal(seen.find(frame => frame.type === "media.chunk")?.payload.data, png.toString("base64"));
+});
 
 test("delivery waits for persistence and terminal receipts prevent replay into a fresh attachment", async (t) => {
 	const { root, registry, manifest } = await fixture();

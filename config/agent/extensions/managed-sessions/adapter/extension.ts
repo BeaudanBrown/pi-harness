@@ -1,4 +1,7 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
+import { AdapterTree } from "./tree.js";
+import { latestTreeChange, treeBoundaryIndex } from "./tree-boundary.js";
 import { AdapterTitleSync, TITLE_ENTRY } from "./title-sync.js";
 import { parseConversationTitle } from "../title-contracts.js";
 import { dirname, join } from "node:path";
@@ -261,6 +264,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 		let binding: SessionBinding | undefined;
 		let titleSync: AdapterTitleSync | undefined;
+		let tree: AdapterTree | undefined;
+		let treeFault = false;
+		let compacting = false;
+		pi.on("input", (_event, ctx) => {
+			if (!binding || !(tree?.pending || treeFault)) return;
+			notify(ctx, "Managed branch transition is pending; input is held until its boundary is safe. Restart this same session to recover an interrupted change.", "warning");
+			return { action: "handled" };
+		});
 		let client: BoundAdapterClient | undefined;
 		let currentContext: ExtensionContext | undefined;
 		let reconnectTimer: NodeJS.Timeout | undefined;
@@ -649,7 +660,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			for (const entry of plan.entries) {
-				if (entry.kind !== "local_user" && (isAloopLifecycleActive(projectionBinding.sessionId) || privateAloopEntries.has(entry.sourcePiEntryKey ?? entry.piEntryKey))) {
+				if (entry.kind !== "local_user" && entry.kind !== "branch_marker" && (isAloopLifecycleActive(projectionBinding.sessionId) || privateAloopEntries.has(entry.sourcePiEntryKey ?? entry.piEntryKey))) {
 					recordProjectionMarker(ctx, { version: MANAGED_SESSION_STATE_VERSION, entryId: entry.entryId, piEntryKey: entry.piEntryKey,
 						kind: entry.kind, status: "blocked", reason: "aloop_private" });
 					continue;
@@ -717,6 +728,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		}
 
 		function queueProjection(ctx: ExtensionContext): void {
+			if (treeFault || tree?.pending) return;
 			projectionRequestedContext = ctx;
 			if (projectionRun) return;
 			projectionRun = (async () => {
@@ -889,6 +901,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					return controlReply(payload.controlId, "rejected", "Thinking selection may have completed before interruption; the native mutation was not repeated during recovery. Check !status before retrying with a new control.");
 				}
 			}
+			if (payload.name === "new" && tree?.navigating) return controlReply(payload.controlId, "rejected", "Native tree navigation has no completed boundary; finish it or restart for recovery before resetting.");
+			if (["model", "thinking", "compact"].includes(payload.name) && (tree?.pending || treeFault)) return controlReply(payload.controlId, "rejected", "Managed branch transition is pending; no context change was applied.");
 			if (["model", "thinking", "compact", "new"].includes(payload.name) && !ctx.isIdle()) {
 				return controlReply(payload.controlId, "rejected", `Cannot change ${payload.name} while Pi is busy; the active run was not altered.`);
 			}
@@ -1006,7 +1020,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			if (envelope.type === "refresh.request") {
-				const idle = () => ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !closingActivities.size && !inFlightDeliveries.size && !pendingUserPersistence.length;
+				const idle = () => !tree?.pending && !treeFault && ctx.isIdle() && !ctx.hasPendingMessages() && !activity && !closingActivities.size && !inFlightDeliveries.size && !pendingUserPersistence.length;
 				if (role !== "ordinary_adapter" || !client) throw new ManagedAdapterError("Refresh requires a managed project");
 				const ready = client.matrixBound && idle();
 				await client.refreshResult(String(envelope.payload.refreshId), ready ? "ready" : "busy");
@@ -1016,7 +1030,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			if (envelope.type === "control.deliver") return handleControl(envelope, ctx);
-			if (envelope.type === "input.deliver") return handleDelivery(envelope, ctx);
+			if (envelope.type === "input.deliver") {
+				if (envelope.payload.kind !== "abort") { const scope = binding; const boundary = tree; await boundary?.ready(); if (stopped || treeFault || binding !== scope || tree !== boundary) return; }
+				return handleDelivery(envelope, ctx);
+			}
 			if (envelope.type === "termination.request") {
 				const reason = String(envelope.payload.reason);
 				if (reason === "bridge_delete") {
@@ -1073,14 +1090,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
-				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1", "title-v1"],
+				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1", "title-v1", "branch-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				beforeMatrixBindingReady: () => {
 					if (client !== next || bindingEpoch !== epoch) return;
 					projectionRecovering = true; recordProjectionRecovery(ctx); projectionRecovering = false;
 				},
 				onEnvelope: (envelope) => { if (client === next && bindingEpoch === epoch) return handleEnvelope(envelope); },
-				onMedia: (image) => handleMedia(image, ctx),
+				onMedia: async (image) => { const boundary = tree; await boundary?.ready(); if (!stopped && !treeFault && binding === attemptBinding && tree === boundary) await handleMedia(image, ctx); },
 				onDisconnect: () => {
 					if (client !== next || bindingEpoch !== epoch) return;
 					client = undefined;
@@ -1106,6 +1123,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				await next.close("shutdown").catch(() => undefined);
 				return;
 			}
+			await tree?.recover(client?.pendingTreeOperation);
 			if (next.supports("title-v1")) {
 				try { titleSync ??= new AdapterTitleSync({ conversationId: attemptBinding.conversationId, sessionId: attemptBinding.sessionId,
 					entries: ctx.sessionManager.getEntries(), persist: state => pi.appendEntry(TITLE_ENTRY, state), client: () => client,
@@ -1188,6 +1206,22 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		// Native hook covers /resume, /sesh, imports and extension/API switches.
 		// Veto before Pi opens/replaces history or aborts the current agent run.
+		function createTree(ctx: ExtensionContext, scope: SessionBinding): AdapterTree {
+			return new AdapterTree({ binding: scope, entries: () => ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch(), branch: () => ctx.sessionManager.getBranch(),
+				append: (kind, data) => appendMarker(pi, ctx, kind, data),
+				ensureBinding: () => {
+					const branch = ctx.sessionManager.getBranch(); const boundary = treeBoundaryIndex(branch, scope);
+					const restored = restoreSessionBinding(branch.slice(boundary + 1), scope.sessionId, role);
+					if (restored?.conversationId !== scope.conversationId || restored.bindingBoundaryEntryId !== scope.bindingBoundaryEntryId) {
+						appendMarker(pi, ctx, BINDING_ENTRY_TYPE, scope); deliveries.clear(); checkpoints.clear();
+					}
+				},
+				request: async (id, phase, cancelled) => { if (!client?.connected) throw Error("Relay is offline"); await client.treeChange(id, phase, cancelled); },
+				valid: () => !stopped && binding === scope && currentContext?.sessionManager.getSessionId() === scope.sessionId,
+				idle: () => ctx.isIdle(), onReady: () => queueProjection(ctx),
+				diagnostic: () => notify(ctx, "Managed tree boundary is pending relay reconciliation; input remains held.", "warning") });
+		}
+
 		pi.on("session_before_switch", (event, ctx) => {
 			if (binding && event.reason === "new") {
 				notify(ctx, role === "ordinary_adapter"
@@ -1207,9 +1241,34 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			return { cancel: true };
 		});
 
+		pi.on("session_before_tree", async (event, ctx) => {
+			if (!binding) return;
+			const file = ctx.sessionManager.getSessionFile();
+			const reasons = [treeFault && "metadata recovery required", !tree && "tree owner unavailable", tree?.pending && "earlier tree change pending",
+				!client?.matrixBound && "Matrix binding offline/pending", (!client?.supports("branch-v1") || !client.supports("notification-disposition-v1")) && "relay upgrade required",
+				(!file || !existsSync(file)) && "session file not persisted", typeof ctx.sessionManager.getEntries !== "function" && "SDK history view unavailable",
+				// Pi marks its own tree operation as compacting before this hook; isIdle() would veto every tree change.
+				(ctx.hasPendingMessages() || activity || closingActivities.size || compacting) && "Pi is busy",
+				(projectionRun || [...checkpoints.values()].some(marker => marker.status === "offered")) && "projection in progress", (activeDeliveries.size || inFlightDeliveries.size || pendingUserPersistence.length) && "input is pending",
+				isAloopLifecycleActive(binding.sessionId) && "workflow is active"].filter(Boolean);
+			if (reasons.length || !tree || !client) { notify(ctx, `Tree change unavailable: ${reasons.join("; ")}. Wait for synchronization or use an upgraded relay.`, "warning"); return { cancel: true }; }
+			try {
+				const backfill = planTranscriptBackfill(ctx.sessionManager.getBranch(), binding, deliveries, projections, client.supports("commentary-v1"));
+				if (backfill.entries.length || backfill.excessiveCount) {
+					queueProjection(ctx); notify(ctx, "Wait for pending transcript projection before changing branches.", "warning"); return { cancel: true };
+				}
+				return { cancel: !(await tree.prepare(event.preparation.oldLeafId, event.preparation.targetId, event.signal, !ctx.isIdle())) };
+			} catch { treeFault = true; notify(ctx, "Managed tree preparation failed; input is held for explicit recovery.", "error"); return { cancel: true }; }
+		});
+		pi.on("session_tree", async (event, ctx) => {
+			if (!binding) return;
+			try { await tree!.committed(event.oldLeafId); queueProjection(ctx); }
+			catch { treeFault = true; notify(ctx, "Managed tree completion is uncertain; input is held for recovery.", "error"); }
+		});
+
 		pi.on("session_info_changed", (event, ctx) => { titleSync?.onName(event.name); setStatus(ctx); });
 		pi.on("session_start", async (event, ctx) => {
-			titleSync?.close(); titleSync = undefined;
+			titleSync?.close(); titleSync = undefined; tree?.close(); tree = undefined; treeFault = false; compacting = false;
 			closingActivities.clear(); // Session-local feedback never crosses a binding/session switch.
 			const sessionId = ctx.sessionManager.getSessionId();
 			const sessionChanged = !currentContext || currentContext.sessionManager.getSessionId() !== sessionId;
@@ -1233,6 +1292,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				binding = restoreSessionBinding(ctx.sessionManager.getBranch(), sessionId, role) ??
 					(event.reason === "startup" ? bootstrapBinding(pi, ctx, role, config) : undefined);
 			}
+			let recoveryBinding = binding;
+			try {
+				const allEntries = () => ctx.sessionManager.getEntries?.() ?? ctx.sessionManager.getBranch();
+				const candidate = recoveryBinding = binding ?? restoreSessionBinding(allEntries(), sessionId, role);
+				if (!binding && candidate && latestTreeChange(allEntries(), candidate)) binding = candidate;
+				if (binding) tree = createTree(ctx, binding);
+			} catch { binding ??= recoveryBinding; treeFault = true; notify(ctx, "Invalid managed tree metadata; input is held for explicit recovery.", "error"); }
 			deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
 			controlResults.clear(); controlExecutions.clear(); recoveredControlExecutions.clear();
 			for (const entry of ctx.sessionManager.getBranch()) {
@@ -1333,9 +1399,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const name = activity.activeTools.get(event.toolCallId) ?? (isAloopLifecycleActive(currentContext?.sessionManager.getSessionId() ?? "") ? "aloop" : boundedToolName(activity, event.toolName)); activity.activeTools.delete(event.toolCallId);
 			if (event.isError) { activity.toolErrors += 1; activity.failedTools.add(name); } sendActivityUpdate(activity);
 		});
-		pi.on("session_before_compact", () => { if (activity) sendActivityUpdate(activity, true, "compaction"); });
-		pi.on("session_compact", () => { if (activity) { activity.compactions += 1; sendActivityUpdate(activity, true); } });
-		pi.on("session_compact_failed", (event) => { if (activity) { if (!event.aborted) activity.requestedOutcome = "failed"; sendActivityUpdate(activity, true); } });
+		pi.on("session_before_compact", (event, ctx) => {
+			if (binding && (tree?.pending || treeFault)) { notify(ctx, "Wait for the managed tree boundary before compacting.", "warning"); return { cancel: true }; }
+			compacting = true; event.signal?.addEventListener("abort", () => { compacting = false; }, { once: true });
+			if (activity) sendActivityUpdate(activity, true, "compaction");
+		});
+		pi.on("session_compact", () => { compacting = false; if (activity) { activity.compactions += 1; sendActivityUpdate(activity, true); } });
+		pi.on("session_compact_failed", (event) => { compacting = false; if (activity) { if (!event.aborted) activity.requestedOutcome = "failed"; sendActivityUpdate(activity, true); } });
 
 		// Record correlation as soon as the user entry exists, not only after a
 		// potentially long agent run. Explicit receipts remain restart authority.
@@ -1386,7 +1456,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 
 		pi.on("session_shutdown", async (event, ctx) => {
 			hostRun.reset();
-			stopped = true; titleSync?.close();
+			stopped = true; titleSync?.close(); tree?.close();
 			bindingEpoch += 1;
 			unsubscribeAloopLifecycle();
 			unregisterAloopCheckpointDelegate();
@@ -1460,12 +1530,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 						if (!binding) {
 							binding = { version: MANAGED_SESSION_STATE_VERSION, conversationId, concept, sessionId, bindingBoundaryEntryId, role };
 							appendMarker(pi, ctx, BINDING_ENTRY_TYPE, binding);
+							tree = createTree(ctx, binding);
 						}
 						deliveries = restoreDeliveries(ctx.sessionManager.getBranch());
 						await connectBinding(ctx);
 						if (!client?.connected) throw new ManagedAdapterError("Local enrollment was saved; relay attachment will retry");
 						notify(ctx, `Managed locally: ${concept}${client.matrixBindingPending ? "; Matrix binding pending" : ""}`);
-					} catch (error) { notify(ctx, error instanceof Error ? error.message : "Managed binding failed", "error"); }
+					} catch (error) { if (binding && !tree) treeFault = true; notify(ctx, error instanceof Error ? error.message : "Managed binding failed", "error"); }
 					return;
 				}
 				notify(ctx, role === "ordinary_adapter" ? "Usage: /remote on <concept> | status" : "Usage: /remote status", "warning");

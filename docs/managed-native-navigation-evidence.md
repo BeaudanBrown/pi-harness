@@ -41,8 +41,78 @@ including existing confirmed Matrix reset/generation protection tests:
 The first affected run identified the now-obsolete RPC expectation; it was updated
 to verify actual veto responses rather than weakening the test.
 
-Safe tree projection and the final #114 issue boundary remain pending. This guard
-slice is not completion of #114 or the epic.
+The guard slice alone is not completion of #114 or the epic. The tree implementation
+below is under final affected-suite and review verification.
+
+### Current tree acceptance/crash plan
+
+| Boundary | Implementation/evidence target |
+| --- | --- |
+| Before native tree change | Idle/queue checks; persisted session-local intent; retain the live attachment, hold incoming text locally without acknowledging it |
+| Native change completes | Append scoped branch projection boundary and retain binding; project one stable silent metadata marker before new activity |
+| Revisit older branch | Fresh boundary excludes all inherited messages; no replay or timeline rewrite |
+| Cancellation or crash | Abort is only a request: cancel after an SDK idle fence and unchanged persisted source, or after restart proves the source unchanged. Otherwise hold for recovery |
+| Input/control race | Deferred input remains relay-owned until completion; reject conflicting context controls, preserve stop/retirement authority |
+| Marker response lost | Existing durable transcript projection identity/transaction deduplicates retry; no new daemon or SDK API |
+
+Tests must exercise real SDK tree navigation, branch-before-binding, revisit/restart,
+held input and cancellation, legacy capability rejection, silent metadata, and
+existing Matrix reset behavior. Native new/fork handoff remains out of scope.
+
+### Implemented in-place tree boundary
+
+This is **not a native successor handoff**: no generation, process, session file,
+room or SDK implementation is replaced. `branch-v1` negotiates a private delivery
+fence with the existing relay; session-local `managed-session.tree` metadata records
+intent and the completed projection boundary. Binding is restored on branches before
+the original binding entry only through this scoped journal. Native metadata is not
+model context. Each revisit gets its own silent `m.notice`, empty mentions and stable
+transaction identity; historical messages and delivery receipts stay excluded.
+
+Outstanding input, controls, checkpoint/control polls, compaction, projection and
+workflow activity prevent admission. Text/media arriving during the boundary waits;
+completion wakes existing relay routing without acknowledging or replaying input.
+Retirement still wins. Successful confirmed process-replacement reset clears obsolete
+tree fencing when the fresh generation activates; unproven native navigation cannot
+be reset mid-flight. No existing reset confirmation or exact-process authority is
+removed.
+
+Pi 0.85 marks even plain tree navigation as compacting before its before-hook, so
+checking `ctx.isIdle()` there would veto every change. The packaged 0.84 SDK has a
+different idle contract. Both support successful tree navigation unchanged. Only an
+SDK that exposed its own busy tree fence can prove live cancellation; on older SDKs,
+a vetoed/interrupted tree may hold input until restart. Restart cancels only with
+an unchanged persisted source; ambiguous partial navigation stays held rather than
+guessing. No private SDK fields or persistence hook are used.
+
+Focused coverage includes genuine Pi 0.85 revisit/reopen with two unique notices and
+no historical replay/model call; adapter gate/lost-ack/crash/legacy-idle tests; real
+IPC durable fence, competing operation, queued input and relay restart; retirement;
+and exact silent Matrix transaction replay. Focused remediation: **20 tests plus
+one real-SDK lifecycle test, no skips**:
+`.pi/tmp/workers/2026-10-06T02-00-47-762Z-tree-focused-compatibility-remediation-8fd57243ab89/`.
+The earlier standalone IPC run had one unavailable packaged-lock-helper skip; that
+is not canonical acceptance. Initial affected run found the SDK idle-contract
+difference, the need for actual `m.notice` rendering (not merely silent `m.text`),
+and a pre-existing fixed-delay reconnect test race. The latter now waits for the
+real reconnect and durable projection receipt before closing the RPC process.
+Further crash/routing checks keep tree delivery fencing distinct from generation
+cutoff: photos are durably queued, not discarded, and status remains usable. The
+attachment advertises a pending operation so missing native metadata fails closed.
+Real IPC/HTTP-port routing, SDK reopen and journal tests passed in
+`.pi/tmp/workers/2026-10-06T02-23-40-193Z-tree-routing-and-sdk-focused-197ad57563a6/`
+(three unavailable packaged-launcher cases were skipped in that standalone run).
+
+Corrected affected gate: **518 managed tests, zero skips**, and source contracts:
+`.pi/tmp/workers/2026-10-06T02-24-12-035Z-tree-affected-corrected-dc84a21d86fe/`.
+This includes packaged SDK compatibility, complete launcher/reset coverage and the
+RPC reconnect condition instead of a fixed sleep. Final focused guard/revisit/reopen
+checks also passed against both actual SDK 0.84.4 and 0.85.0, including explicit
+legacy-relay tree rejection (four checks, no skips):
+`.pi/tmp/workers/2026-10-06T02-28-43-582Z-tree-final-sdk-guards-92d5d2f70be0/`.
+Final review and canonical
+evidence remain pending; these are deterministic tests, not live Matrix/phone
+acceptance.
 
 ## Original ownership and implementation boundaries (superseded)
 

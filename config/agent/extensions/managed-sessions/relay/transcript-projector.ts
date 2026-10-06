@@ -12,7 +12,7 @@ interface TranscriptOffer {
 	entryId: string;
 	piSessionId: string;
 	piEntryKey: string;
-	kind: "local_user" | "assistant_final" | "assistant_commentary";
+	kind: "local_user" | "assistant_final" | "assistant_commentary" | "branch_marker";
 	disposition?: "silent" | "notify";
 	body: string;
 }
@@ -50,9 +50,10 @@ export class TranscriptProjector {
 			if (chunkState.status === "sent") continue;
 			const chunk = rendered[index];
 			if (!chunk) throw new RelayRegistryError("invalid_state", "Transcript chunk plan changed during recovery");
-			await this.matrix.sendText(manifest.roomId, chunkState.transactionId, chunk.body, chunk.formattedBody, undefined,
+			if (payload.kind === "branch_marker") await this.matrix.sendNotice(manifest.roomId, chunkState.transactionId, chunk.body, undefined, "silent");
+			else await this.matrix.sendText(manifest.roomId, chunkState.transactionId, chunk.body, chunk.formattedBody, undefined,
 				projection.disposition === "notify" ? (index === 0 ? "notify" : "silent") :
-					projection.disposition ?? (payload.kind === "assistant_commentary" ? "silent" : undefined));
+					projection.disposition ?? (["assistant_commentary", "branch_marker"].includes(payload.kind) ? "silent" : undefined));
 			await this.registry.markProjectionChunkSent(manifest.conversationId, payload.entryId, chunkState.chunkId);
 		}
 	}

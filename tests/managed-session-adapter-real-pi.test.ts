@@ -23,7 +23,7 @@ const deliveryId = deriveDeliveryId(conversationId, "$probe-event");
 const normalDeliveryId = deriveDeliveryId(conversationId, "$normal-event");
 const nonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
 
-async function rpc(child: ReturnType<typeof spawn>, commands: Array<Record<string, unknown>>): Promise<Array<Record<string, unknown>>> {
+async function rpc(child: ReturnType<typeof spawn>, commands: Array<Record<string, unknown>>, settled: () => Promise<void> = async () => undefined): Promise<Array<Record<string, unknown>>> {
 	const stdin = child.stdin;
 	const stdout = child.stdout;
 	const stderrStream = child.stderr;
@@ -35,7 +35,7 @@ async function rpc(child: ReturnType<typeof spawn>, commands: Array<Record<strin
 		let stderr = "";
 		const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new Error(`real Pi adapter probe timed out: ${stderr}`)); }, 15_000);
 		const sendNext = () => {
-			if (next === commands.length) stdin.end();
+			if (next === commands.length) void settled().then(() => stdin.end(), error => { child.kill("SIGKILL"); reject(error); });
 			else stdin.write(`${JSON.stringify(commands[next])}\n`);
 		};
 		stdout.setEncoding("utf8");
@@ -229,8 +229,16 @@ export default function (pi) {
 		{ id: "resume", type: "switch_session", sessionPath },
 		{ id: "wait-resume", type: "prompt", message: "/adapter-wait 1" },
 		{ id: "fork", type: "fork", entryId: "abcd1234" },
-		{ id: "wait-fork", type: "prompt", message: "/adapter-wait 1100" },
-	]);
+		{ id: "wait-fork", type: "prompt", message: "/adapter-wait 1" },
+	], async () => {
+		for (let attempt = 0; attempt < 500; attempt++) {
+			const entries = (await readFile(sessionPath, "utf8")).trim().split("\n").map(line => JSON.parse(line));
+			if (frames.filter(frame => frame.type === "attachment.attach").length === 2 &&
+				entries.some(entry => entry.customType === "managed-session.projection" && entry.data.status === "projected")) return;
+			await new Promise(resolve => setTimeout(resolve, 10));
+		}
+		throw Error("Reconnect and durable projection did not settle");
+	});
 	const commandResponse = events.find((event) => event.type === "response" && event.id === "commands") as { data?: { commands?: Array<{ name: string }> } } | undefined;
 	const commands = commandResponse?.data?.commands?.map((command) => command.name) ?? [];
 	assert.ok(commands.includes("remote"));

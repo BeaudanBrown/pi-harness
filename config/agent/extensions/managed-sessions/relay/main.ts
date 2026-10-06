@@ -369,6 +369,12 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					await registry.requestPromotion(attachment.conversationId);
 					return response(attachment.conversationId, envelope.messageId, "self.result", { operation: "self.promote", status: "ok" });
 				}
+				if (envelope.type === "branch.prepare" || envelope.type === "branch.complete") {
+					const id = attachment.conversationId; const operationId = String(envelope.payload.operationId);
+					if (envelope.type === "branch.prepare") await registry.prepareTreeChange(id, operationId);
+					else { await registry.completeTreeChange(id, operationId, envelope.payload.cancelled === true); setImmediate(() => { void coordinatorRouter?.attachmentReady(id).catch(() => undefined); }); }
+					return response(id, envelope.messageId, "self.result", { operation: envelope.type, operationId, status: "ok" });
+				}
 				if (envelope.type === "title.read" || envelope.type === "title.observe") {
 					if (!titles) throw new RelayRegistryError("invalid_state", "Title owner is unavailable");
 					const id = attachment.conversationId;

@@ -273,6 +273,7 @@ export class ManagedSessionIpcServer {
 						inReplyTo: envelope.messageId,
 						payload: { attachmentId: state.attachment.attachmentId, state: "active", generation: state.attachment.generation,
 							...(state.capabilities ? { capabilities: state.capabilities } : {}),
+							...(state.capabilities?.includes("branch-v1") && this.registry.pendingTreeOperation(state.attachment.conversationId) ? { branchOperationId: this.registry.pendingTreeOperation(state.attachment.conversationId) } : {}),
 							...(state.capabilities?.includes("local-enrollment-v1") ? { matrixBinding: this.registry.manifestByConversationId(state.attachment.conversationId) ? "bound" : "pending" } : {}),
 							...(state.attachment.role === "ordinary_adapter" ? { placement: this.registry.registeredConversation(state.attachment.conversationId)!.placement } : {}) },
 					});
@@ -280,6 +281,7 @@ export class ManagedSessionIpcServer {
 					continue;
 				}
 				this.registry.assertAuthorized(envelope, state.id, state.attachment);
+				if (envelope.type.startsWith("branch.") && !state.capabilities?.includes("branch-v1")) throw new RelayRegistryError("permission_denied", "Branch capability was not negotiated");
 				if (envelope.type.startsWith("title.") && !state.capabilities?.includes("title-v1")) throw new RelayRegistryError("permission_denied", "Title capability was not negotiated");
 				if (envelope.type.startsWith("host.") && !state.capabilities?.includes("approval-v1")) throw new RelayRegistryError("permission_denied", "Host approval capability was not negotiated");
 				if (envelope.type === "host.request") {
@@ -292,6 +294,7 @@ export class ManagedSessionIpcServer {
 				if (envelope.type === "recovery.confirm" && !state.capabilities?.includes("recovery-attention-v1")) {
 					throw new RelayRegistryError("permission_denied", "Recovery capability was not negotiated");
 				}
+				if (envelope.type === "transcript.offer" && envelope.payload.kind === "branch_marker" && (!state.capabilities?.includes("branch-v1") || envelope.payload.disposition !== "silent")) throw new RelayRegistryError("permission_denied", "Branch markers require negotiated silent projection");
 				if (envelope.type === "transcript.offer" && envelope.payload.kind === "assistant_commentary" && !state.capabilities?.includes("commentary-v1")) {
 					throw new RelayRegistryError("permission_denied", "Commentary projection was not negotiated");
 				}

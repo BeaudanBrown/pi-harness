@@ -49,6 +49,7 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 		case "input.acknowledge": return { type: "input.result", fields: [["deliveryId", String(payload.deliveryId)], ["status", String(payload.status)]] };
 		case "activity.update": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "updated"]] };
 		case "activity.finalize": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "finalized"]] };
+		case "branch.prepare": case "branch.complete": return { type: "self.result", fields: [["operation", request.type], ["operationId", String(payload.operationId)], ["status", "ok"]] };
 		case "title.read": return { type: "self.result", fields: [["operation", "title.read"]] };
 		case "title.observe": return { type: "self.result", fields: [["operation", "title.observe"], ["sequence", Number(payload.sequence)]] };
 		case "control.result": return { type: "self.result", fields: [["operation", "control.result"], ["status", "ok"]] };
@@ -112,6 +113,8 @@ export class BoundAdapterClient {
 	#capabilities: string[] = [];
 	supports(capability: ManagedSessionCapability): boolean { return this.#capabilities.includes(capability); }
 	#matrixBindingPending = true;
+	#pendingTreeOperation?: string;
+	get pendingTreeOperation(): string | undefined { return this.#pendingTreeOperation; }
 	get matrixBindingPending(): boolean { return this.#matrixBindingPending; }
 	/** A stored room binding on this connection, not account or phone readiness. */
 	get matrixBound(): boolean { return this.connected && !this.#matrixBindingPending; }
@@ -170,6 +173,8 @@ export class BoundAdapterClient {
 			const capabilities = response.payload.capabilities as ManagedSessionCapability[] | undefined;
 			if (capabilities?.some((item) => !this.options.requestedCapabilities?.includes(item))) throw new ManagedAdapterError("Relay returned an unrequested capability", "invalid_response");
 			this.#capabilities = capabilities ?? [];
+			if (response.payload.branchOperationId !== undefined && !this.supports("branch-v1")) throw new ManagedAdapterError("Unnegotiated tree boundary state", "invalid_response");
+			this.#pendingTreeOperation = response.payload.branchOperationId as string | undefined;
 			if (this.supports("local-enrollment-v1") !== (response.payload.matrixBinding !== undefined)) throw new ManagedAdapterError("Relay omitted or exposed unnegotiated Matrix binding state", "invalid_response");
 			const pending = response.payload.matrixBinding === "pending";
 			if (!pending) this.options.beforeMatrixBindingReady?.();
@@ -289,10 +294,11 @@ export class BoundAdapterClient {
 		entryId: string;
 		piSessionId: string;
 		piEntryKey: string;
-		kind: "local_user" | "assistant_final" | "assistant_commentary";
+		kind: "local_user" | "assistant_final" | "assistant_commentary" | "branch_marker";
 		disposition?: "silent" | "notify";
 		body: string;
 	}): Promise<ManagedSessionEnvelope> {
+		if (entry.kind === "branch_marker" && (!this.supports("branch-v1") || entry.disposition !== "silent")) throw new ManagedAdapterError("Branch markers require negotiated silent projection", "upgrade_required");
 		if (entry.kind === "assistant_commentary" && !this.supports("commentary-v1")) throw new ManagedAdapterError("Commentary projection requires a capable relay", "upgrade_required");
 		if (entry.disposition !== undefined && !this.supports("notification-disposition-v1")) throw new ManagedAdapterError("Notification metadata requires a capable relay", "upgrade_required");
 		const result = await this.request({
@@ -328,6 +334,15 @@ export class BoundAdapterClient {
 		if (result.type !== "aloop.acknowledge" || result.payload.lifecycleId !== payload.lifecycleId || result.payload.status !== "projected") {
 			throw new ManagedAdapterError("Relay did not confirm aloop lifecycle projection", "invalid_response");
 		}
+	}
+
+	async treeChange(operationId: string, phase: "prepare" | "complete", cancelled = false): Promise<void> {
+		if (!this.supports("branch-v1")) throw new ManagedAdapterError("Branch capability was not negotiated", "upgrade_required");
+		const response = await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("branch"), conversationId: this.options.binding.conversationId,
+			role: this.options.role, type: `branch.${phase}`, payload: { operationId, ...(phase === "complete" ? { cancelled } : {}) } });
+		if (response.type !== "self.result" || response.payload.operation !== `branch.${phase}` || response.payload.operationId !== operationId || response.payload.status !== "ok") throw new ManagedAdapterError("Invalid branch acknowledgement", "invalid_response");
+		if (phase === "prepare") this.#pendingTreeOperation = operationId;
+		else if (this.#pendingTreeOperation === operationId) this.#pendingTreeOperation = undefined;
 	}
 
 	async selfStatus(): Promise<ManagedSessionEnvelope> {

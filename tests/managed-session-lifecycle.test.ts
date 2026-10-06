@@ -682,6 +682,9 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	assert.equal(delivered.conversationId, conversationId);
 	assert.equal(delivered.payload.body, "first real task", "authorized text routes directly without @host addressing");
 	await router.stop();
+	await registry.acknowledgeInput(conversationId, String(delivered.payload.deliveryId), "persisted", deriveTranscriptEntryId(manifest.piSessionId, "tree-input"));
+	await registry.acknowledgeInput(conversationId, String(delivered.payload.deliveryId), "completed", deriveTranscriptEntryId(manifest.piSessionId, "tree-input"));
+	await registry.prepareTreeChange(conversationId, "tree-reset-recovery");
 
 	await writeFile(record, "", "utf8");
 	const generationAttaching = attachFromRecord(record, server, registry);
@@ -705,6 +708,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const generationFile = join(sessions, conversationId, "generation-2.jsonl");
 	assert.equal((await readFile(generationFile, "utf8")).trim().split("\n").length, 2, "fresh generation contains only its header and binding boundary");
 	assert.equal(registry.generationTransitions().length, 0);
+	assert.equal(registry.pendingTreeOperation(conversationId), undefined, "confirmed process replacement cannot inherit an old native tree fence");
 	await assert.rejects(() => registry.attach({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "old-generation-reattach",
 		conversationId, role: "ordinary_adapter", type: "attachment.attach", payload: { sessionId: oldManifest.piSessionId,
 			attachmentNonce: "abcdefghijklmnopqrstuvwxyzABCDEF", bindingBoundaryEntryId: oldManifest.bindingBoundaryEntryId } }, "old-generation"), /active generation|manifest/);

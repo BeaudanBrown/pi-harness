@@ -147,7 +147,7 @@ const relayEnvelopeWithPayload = (type: string, payload: TSchema) =>
 const relayEnvelope = <T extends Record<string, TSchema>>(type: string, payload: T) =>
 	relayEnvelopeWithPayload(type, strictObject(payload));
 
-export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1", "title-v1"] as const;
+export const MANAGED_SESSION_CAPABILITIES = ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1", "title-v1", "branch-v1"] as const;
 export type ManagedSessionCapability = typeof MANAGED_SESSION_CAPABILITIES[number];
 const managedCapabilities = Type.Array(Type.Union(MANAGED_SESSION_CAPABILITIES.map((value) => Type.Literal(value))), { maxItems: MANAGED_SESSION_CAPABILITIES.length, uniqueItems: true });
 const matrixBindingState = Type.Union([Type.Literal("pending"), Type.Literal("bound")]);
@@ -174,6 +174,8 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			Type.Literal("bridge_delete"),
 		]),
 	}),
+	clientEnvelope(adapterRole, "branch.prepare", { operationId: identifier }),
+	clientEnvelope(adapterRole, "branch.complete", { operationId: identifier, cancelled: Type.Boolean() }),
 	clientEnvelope(adapterRole, "title.read", {}),
 	clientEnvelope(adapterRole, "title.observe", { sequence: TitleRevisionSchema, title: Type.String({ maxLength: 4096 }) }),
 	clientEnvelope(adapterRole, "session.change", {
@@ -213,7 +215,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		entryId: TranscriptEntryIdSchema,
 		piSessionId: identifier,
 		piEntryKey: identifier,
-		kind: Type.Union([Type.Literal("local_user"), Type.Literal("assistant_final"), Type.Literal("assistant_commentary")]),
+		kind: Type.Union([Type.Literal("local_user"), Type.Literal("assistant_final"), Type.Literal("assistant_commentary"), Type.Literal("branch_marker")]),
 		disposition: Type.Optional(notificationDisposition),
 		body: boundedString(MAX_TRANSCRIPT_TEXT_LENGTH),
 	}),
@@ -302,6 +304,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	relayEnvelope("attachment.accepted", {
 		capabilities: Type.Optional(managedCapabilities),
 		matrixBinding: Type.Optional(matrixBindingState),
+		branchOperationId: Type.Optional(identifier),
 		placement: Type.Optional(WorkspaceIdentitySchema),
 		attachmentId: identifier,
 		generation: Type.Optional(Type.Integer({ minimum: 1 })),
@@ -374,6 +377,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		strictObject({ operation: Type.Literal("self.delete"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("self.promote"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("control.result"), status: Type.Literal("ok") }),
+		strictObject({ operation: Type.Union([Type.Literal("branch.prepare"), Type.Literal("branch.complete")]), operationId: identifier, status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("title.read"), title: ConversationTitleSchema, revision: TitleRevisionSchema }),
 		strictObject({ operation: Type.Literal("title.observe"), title: ConversationTitleSchema, revision: TitleRevisionSchema, sequence: TitleRevisionSchema }),
 		strictObject({ operation: Type.Literal("refresh.result"), status: Type.Literal("ok") }),
@@ -606,6 +610,7 @@ const projectionEntry = strictObject({
 		Type.Literal("local_user"),
 		Type.Literal("assistant_final"),
 		Type.Literal("assistant_commentary"),
+		Type.Literal("branch_marker"),
 		Type.Literal("checkpoint"),
 		Type.Literal("notice"),
 	]),
@@ -645,6 +650,8 @@ const runtimeConversation = strictObject({
 	artifactExports: Type.Array(artifactExport, { maxItems: MAX_ARTIFACT_EXPORTS }),
 	projection: Type.Array(projectionEntry, { maxItems: MAX_PROJECTION_ENTRIES }),
 	operatorDeparted: Type.Optional(Type.Literal(true)),
+	treeTransition: Type.Optional(strictObject({ operationId: identifier, sessionId: identifier })),
+	completedTreeOperation: Type.Optional(identifier),
 	launch: Type.Optional(strictObject({ launchId: stableId("launch"), generationId: GenerationIdSchema,
 		ordinal: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), observed: Type.Boolean() })),
 	managedWindow: nullable(
@@ -763,6 +770,8 @@ export interface HostRuntimeState {
 			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
 		}>;
 		operatorDeparted?: true;
+		treeTransition?: { operationId: string; sessionId: string };
+		completedTreeOperation?: string;
 		launch?: { launchId: string; generationId: string; ordinal: number; observed: boolean };
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string; ownership?: ExactWindowProof };
 		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "shutdown_confirmed" | "adopted"; requestedAt: string };

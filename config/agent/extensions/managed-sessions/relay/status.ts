@@ -42,6 +42,7 @@ export function renderManagedConversationStatus(
 		`Queues: ${pendingInputs} input; ${runtime.pendingControls.filter((control) => control.controlId !== currentControlId).length} control`,
 		`Checkpoint: ${checkpoint ? "awaiting response" : "none"}`,
 		`Project reconciliation pending: ${pendingReconciliation}`,
+		`Tree transition: ${runtime.treeTransition ? "pending; input held" : "none"}`,
 		...(runtime.lastLaunchError ? [`Latest launch failure: ${runtime.lastLaunchError.code} at ${runtime.lastLaunchError.at}`] : []),
 	];
 	return lines.join("\n").slice(0, 4_096);

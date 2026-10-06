@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { treeBoundaryIndex, TREE_NOTICE } from "./tree-boundary.js";
 import { assistantTranscriptParts, assistantTranscriptSourceKey } from "./assistant-transcript.js";
 import { ALOOP_LIFECYCLE_ENTRY_TYPE, parseAloopLifecycleEvent } from "../aloop-lifecycle.js";
 import {
@@ -41,7 +42,7 @@ export interface ProjectionMarker {
 	version: typeof MANAGED_SESSION_STATE_VERSION;
 	entryId: string;
 	piEntryKey: string;
-	kind: "local_user" | "assistant_final" | "assistant_commentary";
+	kind: "local_user" | "assistant_final" | "assistant_commentary" | "branch_marker";
 	status: "offered" | "projected" | "blocked";
 	disposition?: "silent" | "notify";
 	reason?: "oversized" | "backfill_limit" | "aloop_private";
@@ -52,7 +53,7 @@ export interface EligibleTranscriptEntry {
 	piEntryKey: string;
 	/** Local planner metadata only, never part of the adapter wire payload. */
 	sourcePiEntryKey?: string;
-	kind: "local_user" | "assistant_final" | "assistant_commentary";
+	kind: "local_user" | "assistant_final" | "assistant_commentary" | "branch_marker";
 	body: string;
 }
 
@@ -282,7 +283,7 @@ export function restoreProjections(entries: readonly unknown[]): Map<string, Pro
 		const value = candidate.data;
 		if (value.version !== MANAGED_SESSION_STATE_VERSION || typeof value.entryId !== "string" ||
 			!/^entry_[a-f0-9]{32}$/.test(value.entryId) || typeof value.piEntryKey !== "string" ||
-			(value.kind !== "local_user" && value.kind !== "assistant_final" && value.kind !== "assistant_commentary") ||
+			(value.kind !== "local_user" && value.kind !== "assistant_final" && value.kind !== "assistant_commentary" && value.kind !== "branch_marker") ||
 			!(["offered", "projected", "blocked"] as unknown[]).includes(value.status) ||
 			(value.disposition !== undefined && value.disposition !== "silent" && value.disposition !== "notify") ||
 			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit" && value.reason !== "aloop_private")) continue;
@@ -356,9 +357,10 @@ export function eligibleTranscriptEntries(
 	deliveries: ReadonlyMap<string, DeliveryMarker>,
 	options?: { commentary: boolean; legacyEntries?: ReadonlySet<string> },
 ): EligibleTranscriptEntry[] {
-	const boundaryIndex = entries.findIndex((entry) =>
+	const treeIndex = treeBoundaryIndex(entries, binding);
+	const boundaryIndex = Math.max(treeIndex, entries.findIndex((entry) =>
 		typeof entry === "object" && entry !== null && typeof (entry as { id?: unknown }).id === "string" &&
-		persistedEntryId(binding.sessionId, (entry as { id: string }).id) === binding.bindingBoundaryEntryId);
+		persistedEntryId(binding.sessionId, (entry as { id: string }).id) === binding.bindingBoundaryEntryId));
 	if (boundaryIndex < 0) throw new Error("Managed-session binding boundary is absent from the Pi branch");
 	const branch = entries.slice(boundaryIndex + 1);
 	const matrixEntryIds = new Set([...deliveries.values()]
@@ -367,6 +369,10 @@ export function eligibleTranscriptEntries(
 	const inferred = deliveredUserEntries(branch);
 	const pendingMatrixUserEntries = new Set([...deliveries.keys()].map((id) => inferred.get(id)).filter(Boolean));
 	const result: EligibleTranscriptEntry[] = [];
+	if (treeIndex >= 0) {
+		const key = (entries[treeIndex] as { id: string }).id;
+		result.push({ entryId: persistedEntryId(binding.sessionId, key), piEntryKey: key, kind: "branch_marker", body: TREE_NOTICE });
+	}
 	let checkpointBoundary = false;
 	for (const value of branch) {
 		if (customData(value, CHECKPOINT_ENTRY_TYPE)?.data.status === "offered") { checkpointBoundary = true; continue; }

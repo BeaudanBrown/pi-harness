@@ -541,8 +541,9 @@ export class ManagedMatrixClient {
 		if (formattedBody !== undefined) { content.format = "org.matrix.custom.html"; content.formatted_body = boundedText(formattedBody, "formatted message body", MAX_MESSAGE_BODY_LENGTH * 2); }
 		return this.sendEvent(roomId, "m.room.message", transactionId, content, signal);
 	}
-	async sendNotice(roomId: string, transactionId: string, body: string, signal?: AbortSignal): Promise<string> {
-		return this.sendEvent(roomId, "m.room.message", transactionId, { msgtype: "m.notice", body: boundedText(body, "notice body") }, signal);
+	async sendNotice(roomId: string, transactionId: string, body: string, signal?: AbortSignal, disposition?: "silent"): Promise<string> {
+		return this.sendEvent(roomId, "m.room.message", transactionId, { msgtype: "m.notice", body: boundedText(body, "notice body"),
+			...(disposition ? { "lol.bepis.pi.notification": { version: 1, disposition }, "m.mentions": {} } : {}) }, signal);
 	}
 	async createMedia(signal?: AbortSignal): Promise<{ contentUri: string; unusedExpiresAt: string }> {
 		const response = await this.request("POST", "/_matrix/media/v1/create", {}, signal);
