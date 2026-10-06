@@ -552,6 +552,16 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				description: "Separately confirm deletion of the removed worktree's local branch only when its unchanged tip is fully merged into the explicit previewed target and is checked out nowhere.",
 				parameters: Type.Object({ removalKey: Type.String({ pattern: "^worktree_remove_[a-f0-9]{32}$" }), confirm: Type.Literal(true) }, { additionalProperties: false }),
 				execute: async (_id, params) => lifecycle({ operation: "worktree.branch.delete", removalKey: params.removalKey, confirmed: params.confirm }) });
+			pi.registerTool({ name: "remote_session_provisioning_list", label: "Inspect Pending Provisioning",
+				description: "List this host's bounded pre-manifest conversation provisioning intents, phases and original creation keys. Inspection is read-only; retries are explicit, not background work.",
+				parameters: Type.Object({}, { additionalProperties: false }), execute: async () => lifecycle({ operation: "conversation.provisioning.list" }) });
+			pi.registerTool({ name: "remote_session_provisioning_resume", label: "Resume Exact Provisioning",
+				description: "After operator approval, resume one inspected retained creation key with its original concept and workspace. Reuse its prepared session and deterministic Matrix identities; never delete other intents or create a new retry key.",
+				parameters: Type.Object({ creationKey: Type.String({ minLength: 1, maxLength: 128 }), rootKey: Type.String({ minLength: 1, maxLength: 128 }),
+					workspace: Type.String({ minLength: 1, maxLength: 128 }), relativeCwd: Type.Optional(Type.String({ maxLength: 512 })),
+					concept: Type.String({ minLength: 1, maxLength: 128 }), confirm: Type.Literal(true) }, { additionalProperties: false }),
+				execute: async (_id, params) => lifecycle({ operation: "conversation.provisioning.resume", creationKey: params.creationKey, concept: params.concept,
+					placement: { rootKey: params.rootKey, workspace: params.workspace, relativeCwd: params.relativeCwd ?? "" }, confirmed: params.confirm }) });
 			pi.registerTool({ name: "remote_session_start", label: "Start Managed Conversation",
 				description: "Create an idle managed Pi conversation in an existing depth-one checkout. The host groups linked Git worktrees by common-directory identity. Do not include an objective or task context; the first Matrix message is the first task.",
 				parameters: Type.Object({ rootKey: Type.String({ minLength: 1, maxLength: 128 }), workspace: Type.String({ minLength: 1, maxLength: 128 }),

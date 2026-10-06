@@ -6,6 +6,7 @@ import { AtomicJsonFile } from "./atomic-json.js";
 import type { ResolvedWorkspace } from "./host-lifecycle.js";
 import { ManagedMatrixClient } from "./matrix-client.js";
 import { ProjectSpaces } from "./project-spaces.js";
+import { isMatrixRoomId } from "../room-identity.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 interface ReconciliationItem {
@@ -17,7 +18,6 @@ interface ReconciliationItem {
 interface CleanupSpace { spaceId: string; hostUnlinked: boolean; operatorRemoved: boolean; left: boolean }
 interface ReconciliationIntent { version: 1; reconciliationKey: string; items: ReconciliationItem[]; cleanupSpaces?: CleanupSpace[] }
 
-const id = /^![^\s:]{1,200}:[^\s]{1,200}$/;
 const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const planIdentity = (item: ReconciliationItem) => ({ conversationId: item.conversationId, concept: item.concept, workspace: item.workspace,
 	roomId: item.roomId, ...(item.oldProjectSpace ? { oldProjectSpace: item.oldProjectSpace } : {}), projectKey: item.projectKey,
@@ -36,9 +36,9 @@ function parseIntent(value: unknown): ReconciliationIntent {
 		if (Object.keys(entry).some((key) => !allowed.includes(key)) || typeof entry.conversationId !== "string" || !/^conv_[a-f0-9]{32}$/.test(entry.conversationId) ||
 			![entry.concept, entry.workspace].every((field) => typeof field === "string" && field.length > 0 && field.length <= 128 && !/[\u0000-\u001f\u007f]/.test(field)) ||
 			![entry.projectDisplayName, entry.checkoutDisplayName].every((field) => typeof field === "string" && field.length > 0 && field.length <= 128 && !/[\u0000-\u001f\u007f/]/.test(field)) ||
-			typeof entry.roomId !== "string" || !id.test(entry.roomId) || typeof entry.projectKey !== "string" || !/^project_[a-f0-9]{32}$/.test(entry.projectKey) ||
+			!isMatrixRoomId(entry.roomId) || typeof entry.projectKey !== "string" || !/^project_[a-f0-9]{32}$/.test(entry.projectKey) ||
 			typeof entry.sourceManifestHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.sourceManifestHash) ||
-			[entry.oldProjectSpace, entry.plannedProjectSpace, entry.targetProjectSpace].some((field) => field !== undefined && (typeof field !== "string" || !id.test(field))) ||
+			[entry.oldProjectSpace, entry.plannedProjectSpace, entry.targetProjectSpace].some((field) => field !== undefined && !isMatrixRoomId(field)) ||
 			(entry.targetManifestHash !== undefined && (typeof entry.targetManifestHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.targetManifestHash))) ||
 			(entry.plannedProjectSpace !== undefined && entry.targetProjectSpace !== entry.plannedProjectSpace) ||
 			![entry.hostLinked, entry.roomLinked, entry.manifestUpdated, entry.oldUnlinked].every((field) => typeof field === "boolean") ||
@@ -52,7 +52,7 @@ function parseIntent(value: unknown): ReconciliationIntent {
 	for (const item of (record.cleanupSpaces ?? []) as unknown[]) {
 		if (typeof item !== "object" || item === null || Array.isArray(item) || Object.keys(item).some((key) => !["spaceId", "hostUnlinked", "operatorRemoved", "left"].includes(key))) throw new RelayRegistryError("invalid_state", "Project cleanup intent is malformed");
 		const entry = item as Record<string, unknown>;
-		if (typeof entry.spaceId !== "string" || !id.test(entry.spaceId) || typeof entry.hostUnlinked !== "boolean" || typeof entry.operatorRemoved !== "boolean" || typeof entry.left !== "boolean" || entry.operatorRemoved && !entry.hostUnlinked || entry.left && !entry.operatorRemoved) throw new RelayRegistryError("invalid_state", "Project cleanup intent is malformed");
+		if (!isMatrixRoomId(entry.spaceId) || typeof entry.hostUnlinked !== "boolean" || typeof entry.operatorRemoved !== "boolean" || typeof entry.left !== "boolean" || entry.operatorRemoved && !entry.hostUnlinked || entry.left && !entry.operatorRemoved) throw new RelayRegistryError("invalid_state", "Project cleanup intent is malformed");
 	}
 	const cleanup = (record.cleanupSpaces ?? []) as unknown as CleanupSpace[];
 	if (new Set(cleanup.map((item) => item.spaceId)).size !== cleanup.length) throw new RelayRegistryError("invalid_state", "Project cleanup identity is inconsistent");

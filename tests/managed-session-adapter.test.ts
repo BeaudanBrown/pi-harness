@@ -710,7 +710,7 @@ test("only the coordinator profile exposes the bounded managed lifecycle tools",
 			"remote_workspace_list", "remote_session_list", "remote_session_status", "remote_project_reconcile_preview", "remote_project_reconcile_apply",
 			"remote_project_space_cleanup", "remote_project_create", "remote_worktree_list", "remote_worktree_create", "remote_worktree_conversation_create",
 			"remote_worktree_remove_preview", "remote_worktree_remove_apply", "remote_worktree_cleanup_preview", "remote_worktree_cleanup_apply",
-			"remote_worktree_branch_delete", "remote_session_start", "remote_session_resume", "remote_session_stop", "remote_session_refresh", "remote_session_delete",
+			"remote_worktree_branch_delete", "remote_session_provisioning_list", "remote_session_provisioning_resume", "remote_session_start", "remote_session_resume", "remote_session_stop", "remote_session_refresh", "remote_session_delete",
 		]);
 		assert.deepEqual(entryRenderers, [CHECKPOINT_ENTRY_TYPE]);
 		assert.ok(handlers.includes("session_start") && handlers.includes("session_shutdown"));

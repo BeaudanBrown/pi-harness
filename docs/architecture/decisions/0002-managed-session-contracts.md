@@ -221,6 +221,32 @@ and newer queued inputs are preserved; historical completion is not inferred.
 Deployment and live recovery remain separately approved operations. See
 [selective recovery operations](../../managed-input-recovery.md).
 
+## Matrix v12 provisioning amendment (#126)
+
+Managed Matrix identities accept legacy server-qualified room IDs and room-v12
+create-event digests. For v12 the relay verifies the immutable create event's ID,
+room, type, state key, sender and content before treating the original bot creator
+as having infinite power. Joined membership remains mandatory. Foreign creators
+are never adopted; only an unbound legacy-alias recovery probe may skip a proven
+foreign target. Domainless Space-child routing uses the server of a verified joined
+bot, not a suffix inferred from the room ID.
+
+Coordinator-only provisioning inspection exposes a bounded host-labelled list of
+pre-manifest intents, original creation keys, creation timestamps and next phases.
+There is no background retry authority. Confirmed provisioning resume requires an
+existing intent plus its exact original concept, host-resolved workspace/project
+and persisted Pi session, and continues the existing creation identity. New intents
+also bind the exact portable tuple. Legacy records lacked that tuple; explicit
+confirmation binds the approved host-resolved tuple only after matching canonical
+session cwd and project/checkout identity, before further Matrix work. This does
+not claim to recover an absent historical tuple. In-flight creation is fenced by
+conversation identity and exact request; a competing tuple or unrelated workspace
+operation cannot join its result. It never
+creates a replacement session when the prepared file is missing, deletes another
+intent, or selects arbitrary paths. Provisioning failures report bounded phase,
+error class/HTTP status and whitelisted validation reasons, never server bodies or
+credentials. See [v12 recovery operations](../../managed-matrix-v12-recovery.md).
+
 ## Consequences
 
 - Relay, ordinary adapter, coordinator adapter, and tests share one small interface while authority remains relay-enforced.

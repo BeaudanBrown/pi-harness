@@ -446,13 +446,98 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	const conversationId = deriveConversationId(hostId, creationKey);
 	const startRequest = { operation: "conversation.start", creationKey, concept: "alpha work",
 		placement: { rootKey: "projects", workspace: "alpha", relativeCwd: "" } };
-	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, startRequest)), /Matrix PUT/);
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, startRequest)), /Provisioning host_link failed: http \(HTTP 503\)/);
 	const interruptedBinding = JSON.parse(await readFile(join(sessions, conversationId, "matrix-provisioning.json"), "utf8"));
 	assert.deepEqual({ projectKey: interruptedBinding.projectKey, projectSpaceId: interruptedBinding.projectSpaceId,
 		hostSpaceLinked: interruptedBinding.hostSpaceLinked, roomId: interruptedBinding.roomId },
 		{ projectKey: `project_${"a".repeat(32)}`, projectSpaceId: "!room1:example.com", hostSpaceLinked: undefined, roomId: undefined });
+	const preparedText = await readFile(join(sessions, conversationId, "session.jsonl"), "utf8");
+	const preserved: Array<{ dir: string; session: string; intent: string }> = [];
+	for (let index = 0; index < 4; index++) {
+		const otherKey = `other-retained-${index}`; const otherId = deriveConversationId(hostId, otherKey); const dir = join(sessions, otherId);
+		await mkdir(dir);
+		const otherEntries = preparedText.trim().split("\n").map(line => JSON.parse(line));
+		otherEntries[0].id = `managed-${otherId.slice(5)}`;
+		otherEntries[1].data = { ...otherEntries[1].data, creationKey: otherKey, concept: "preserve this intent", sessionId: otherEntries[0].id };
+		const session = otherEntries.map(entry => JSON.stringify(entry)).join("\n") + "\n";
+		const intent = JSON.stringify({ conversationId: otherId, concept: "preserve this intent", projectKey: interruptedBinding.projectKey, projectDisplayName: "alpha", checkoutDisplayName: "alpha" });
+		await writeFile(join(dir, "session.jsonl"), session, { mode: 0o600 });
+		await writeFile(join(dir, "matrix-provisioning.json"), intent, { mode: 0o600 });
+		preserved.push({ dir, session, intent });
+	}
+	const inspectRequest = lifecycleEnvelope(coordinatorId, { operation: "conversation.provisioning.list" });
+	const inspected = await lifecycle.request(inspectRequest);
+	assert.equal(inspected.hostId, hostId);
+	assert.deepEqual((inspected.intents as any[]).find(intent => intent.creationKey === creationKey), {
+		conversationId, creationKey, concept: "alpha work", createdAt: JSON.parse(preparedText.split("\n")[0]!).timestamp,
+		placement: startRequest.placement, phase: "host_link", inProgress: false, retry: "manual", projectSpaceId: "!room1:example.com" });
+	const resumeRequest = { ...startRequest, operation: "conversation.provisioning.resume", confirmed: true };
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, creationKey: "not-retained" })), /retained provisioning intent/);
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, confirmed: false })), /explicit confirmation/);
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, concept: "wrong concept" })), /retained provisioning intent/);
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, placement: { ...startRequest.placement, workspace: "alpha-worktree" } })), /host-resolved identity/);
+	await rm(join(sessions, conversationId, "session.jsonl"));
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, resumeRequest)), /persisted Pi session file is unavailable/);
+	await writeFile(join(sessions, conversationId, "session.jsonl"), preparedText, { mode: 0o600 });
+	const originalInvoke = (lifecycle as any).invoke.bind(lifecycle);
+	let removedDuringStart = false;
+	(lifecycle as any).invoke = async (operation: string, ...args: any[]) => {
+		if (operation === "workspace-resolve" && args[0].rootKey === "aliases") return { ...await originalInvoke(operation, ...args), rootKey: "aliases" };
+		if (operation === "root-ensure" && !removedDuringStart) {
+			removedDuringStart = true;
+			await rm(join(sessions, conversationId, "session.jsonl"));
+		}
+		return originalInvoke(operation, ...args);
+	};
+	try {
+		await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, placement: { ...startRequest.placement, rootKey: "aliases" } })), /host-resolved identity/);
+		assert.equal(removedDuringStart, false, "alternate tuple with the same cwd is rejected before root launch");
+		await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, resumeRequest)), /persisted Pi session file is unavailable/);
+		await assert.rejects(() => stat(join(sessions, conversationId, "session.jsonl")), { code: "ENOENT" });
+	} finally {
+		(lifecycle as any).invoke = originalInvoke;
+		await writeFile(join(sessions, conversationId, "session.jsonl"), preparedText, { mode: 0o600 });
+	}
+	await writeFile(join(sessions, conversationId, "matrix-provisioning.json"), JSON.stringify({ ...interruptedBinding, projectSpaceId: "!malformed" }), { mode: 0o600 });
+	await assert.rejects(() => lifecycle.request(inspectRequest), /intent is malformed/);
+	await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, resumeRequest)), /intent is malformed/);
+	const legacyIntent = { ...interruptedBinding }; delete legacyIntent.placement;
+	await writeFile(join(sessions, conversationId, "matrix-provisioning.json"), JSON.stringify(legacyIntent), { mode: 0o600 });
+	let releaseRoot!: () => void; let signalRoot!: () => void; let paused = false;
+	let releasePreflight!: () => void; let signalPreflight!: () => void; let preflightPaused = false;
+	const preflightGate = new Promise<void>(resolve => { releasePreflight = resolve; });
+	const preflightReached = new Promise<void>(resolve => { signalPreflight = resolve; });
+	const rootGate = new Promise<void>(resolve => { releaseRoot = resolve; });
+	const rootReached = new Promise<void>(resolve => { signalRoot = resolve; });
+	(lifecycle as any).invoke = async (operation: string, ...args: any[]) => {
+		if (operation === "workspace-resolve" && !preflightPaused) { preflightPaused = true; signalPreflight(); await preflightGate; }
+		if (operation === "workspace-resolve" && args[0].rootKey === "aliases") return { ...await originalInvoke(operation, ...args), rootKey: "aliases" };
+		if (operation === "root-ensure" && !paused) { paused = true; signalRoot(); await rootGate; }
+		return originalInvoke(operation, ...args);
+	};
 	const attaching = attachFromRecord(record, server, registry);
-	const started = await lifecycle.request(lifecycleEnvelope(coordinatorId, startRequest));
+	const starting = lifecycle.request(lifecycleEnvelope(coordinatorId, resumeRequest));
+	await preflightReached;
+	try {
+		assert.equal(((await lifecycle.request(inspectRequest)).intents as any[]).find(intent => intent.creationKey === creationKey).inProgress, true, "preflight is included in inspection");
+		await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, placement: { ...startRequest.placement, rootKey: "aliases" } })), /already in progress with another identity/);
+	} finally { releasePreflight(); }
+	await rootReached;
+	const repeated = lifecycle.request(lifecycleEnvelope(coordinatorId, resumeRequest));
+	try {
+		assert.equal(((await lifecycle.request(inspectRequest)).intents as any[]).find(intent => intent.creationKey === creationKey).inProgress, true);
+		await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, placement: { ...startRequest.placement, rootKey: "aliases" } })), /already in progress with another identity/);
+		await assert.rejects(() => lifecycle.request(lifecycleEnvelope(coordinatorId, { ...resumeRequest, creationKey: "other-retained-0", concept: "preserve this intent" })), /Workspace lifecycle operation is already in progress/);
+	} finally { releaseRoot(); }
+	const started = await starting;
+	assert.deepEqual(await repeated, started, "only identical creation requests may coalesce");
+	(lifecycle as any).invoke = originalInvoke;
+	assert.equal(started.operation, "conversation.provisioning.resume");
+	for (const other of preserved) {
+		assert.equal(await readFile(join(other.dir, "session.jsonl"), "utf8"), other.session);
+		assert.equal(await readFile(join(other.dir, "matrix-provisioning.json"), "utf8"), other.intent);
+	}
+	assert.deepEqual((await lifecycle.request(inspectRequest)).intents, (inspected.intents as any[]).filter(intent => intent.creationKey !== creationKey));
 	const firstSocket = await attaching;
 	assert.equal(started.conversationState, "active");
 	const manifest = registry.manifestByConversationId(conversationId)!;
@@ -461,6 +546,7 @@ test("coordinator lifecycle persists project Pi first, starts/resumes/stops, and
 	assert.equal(sessionText.trim().split("\n").length, 2, "no objective or orientation is injected before the first Matrix task");
 	assert.equal(manifest.projectSpace, "!room1:example.com");
 	const durableBinding = JSON.parse(await readFile(join(sessions, conversationId, "matrix-provisioning.json"), "utf8"));
+	assert.deepEqual(durableBinding.placement, startRequest.placement, "confirmed legacy retry binds its approved portable tuple before further Matrix work");
 	assert.deepEqual({ projectSpaceId: durableBinding.projectSpaceId, hostSpaceLinked: durableBinding.hostSpaceLinked,
 		roomId: durableBinding.roomId, roomLinked: durableBinding.roomLinked },
 		{ projectSpaceId: "!room1:example.com", hostSpaceLinked: true, roomId: "!room2:example.com", roomLinked: true });

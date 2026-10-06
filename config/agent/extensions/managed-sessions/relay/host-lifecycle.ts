@@ -8,15 +8,17 @@ import {
 	deriveConversationId,
 	deriveGenerationId,
 	deriveTranscriptEntryId,
+	parseWorkspaceIdentity,
 	type ConversationManifest,
 	type ManagedSessionEnvelope,
 	type WorkspaceIdentity,
 } from "../contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
-import { ManagedMatrixClient } from "./matrix-client.js";
+import { ManagedMatrixClient, ManagedMatrixError, describeMatrixFailure } from "./matrix-client.js";
 import { ProjectReconciler } from "./project-reconciliation.js";
 import { ProjectSpaces } from "./project-spaces.js";
+import { isMatrixRoomId } from "../room-identity.js";
 import { RelayRegistry, RelayRegistryError } from "./registry.js";
 
 export const PROJECT_ATTACHMENT_TIMEOUT_MS = 60_000;
@@ -103,21 +105,29 @@ export function parseProjectWindow(result: Record<string, unknown>, manifest: Co
 
 interface MatrixProvisioningIntent {
 	conversationId: string; concept: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string;
-	projectSpaceId?: string; hostSpaceLinked?: boolean; roomId?: string; roomLinked?: boolean;
+	placement?: WorkspaceIdentity; projectSpaceId?: string; hostSpaceLinked?: boolean; roomId?: string; roomLinked?: boolean;
+}
+
+function samePlacement(a: WorkspaceIdentity, b: WorkspaceIdentity): boolean {
+	return a.rootKey === b.rootKey && a.workspace === b.workspace && a.relativeCwd === b.relativeCwd;
 }
 
 function parseMatrixProvisioningIntent(value: unknown): MatrixProvisioningIntent {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Matrix provisioning intent is malformed");
 	const item = value as Record<string, unknown>; const required = ["conversationId", "concept", "projectKey", "projectDisplayName", "checkoutDisplayName"];
-	const allowed = new Set([...required, "projectSpaceId", "hostSpaceLinked", "roomId", "roomLinked"]);
+	const allowed = new Set([...required, "placement", "projectSpaceId", "hostSpaceLinked", "roomId", "roomLinked"]);
 	if (Object.keys(item).some((key) => !allowed.has(key)) || required.some((key) => typeof item[key] !== "string") ||
 		!/^conv_[a-f0-9]{32}$/.test(String(item.conversationId)) || !/^project_[a-f0-9]{32}$/.test(String(item.projectKey)) ||
 		!(typeof item.concept === "string" && item.concept.length > 0 && item.concept.length <= 128 && !/[\u0000-\u001f\u007f]/.test(item.concept)) ||
 		![item.projectDisplayName, item.checkoutDisplayName].every((field) => typeof field === "string" && field.length > 0 && field.length <= 128 && !/[\u0000-\u001f\u007f/]/.test(field)) ||
-		[item.projectSpaceId, item.roomId].some((field) => field !== undefined && (typeof field !== "string" || field.length < 1 || field.length > 255)) ||
+		[item.projectSpaceId, item.roomId].some((field) => field !== undefined && !isMatrixRoomId(field)) ||
 		[item.hostSpaceLinked, item.roomLinked].some((field) => field !== undefined && typeof field !== "boolean") ||
 		(item.hostSpaceLinked === true && !item.projectSpaceId) || (item.roomId && !item.projectSpaceId) || (item.roomLinked === true && !item.roomId)) {
 		throw new RelayRegistryError("invalid_state", "Matrix provisioning intent is malformed");
+	}
+	if (item.placement !== undefined) {
+		try { parseWorkspaceIdentity(item.placement); }
+		catch { throw new RelayRegistryError("invalid_state", "Matrix provisioning placement is malformed"); }
 	}
 	return item as unknown as MatrixProvisioningIntent;
 }
@@ -214,8 +224,8 @@ function parseProjectCreationIntent(value: unknown): ProjectCreationIntent {
 		(item.projectKey !== undefined && (typeof item.projectKey !== "string" || !/^project_[a-f0-9]{32}$/.test(item.projectKey))) ||
 		[item.projectDisplayName, item.checkoutDisplayName].some((field) => field !== undefined && (typeof field !== "string" || field.length < 1 || field.length > 128 || /[\u0000-\u001f\u007f]/.test(field))) ||
 		[item.projectKey, item.projectDisplayName, item.checkoutDisplayName].some((field) => field !== undefined) && [item.projectKey, item.projectDisplayName, item.checkoutDisplayName].some((field) => field === undefined) ||
-		(item.projectSpaceId !== undefined && (typeof item.projectSpaceId !== "string" || item.projectSpaceId.length > 255)) || (item.hostSpaceLinked !== undefined && typeof item.hostSpaceLinked !== "boolean") ||
-		(item.roomId !== undefined && (typeof item.roomId !== "string" || item.roomId.length > 255)) || (item.roomLinked !== undefined && typeof item.roomLinked !== "boolean") ||
+		(item.projectSpaceId !== undefined && !isMatrixRoomId(item.projectSpaceId)) || (item.hostSpaceLinked !== undefined && typeof item.hostSpaceLinked !== "boolean") ||
+		(item.roomId !== undefined && !isMatrixRoomId(item.roomId)) || (item.roomLinked !== undefined && typeof item.roomLinked !== "boolean") ||
 		(item.projectSpaceId !== undefined && item.sessionPersisted !== true) || (item.hostSpaceLinked === true && !item.projectSpaceId) || (item.roomId && !item.projectSpaceId) || (item.roomLinked === true && !item.roomId)) {
 		throw new RelayRegistryError("invalid_state", "Project creation intent is malformed");
 	}
@@ -292,6 +302,7 @@ export class HostLifecycle {
 	private readonly creations = new Map<string, Promise<Record<string, unknown>>>();
 	private readonly worktreeOperations = new Map<string, Promise<unknown>>();
 	private readonly provisions = new Map<string, Promise<{ roomId: string; projectSpace: string }>>();
+	private readonly conversationCreations = new Map<string, { identity: string; work: Promise<Record<string, unknown>> }>();
 	private readonly promotions = new Map<string, Promise<void>>();
 	private readonly generationRetries = new Map<string, NodeJS.Timeout>();
 	private readonly refreshWaiters = new Map<string, { refreshId: string; resolve: (ready: boolean) => void }>();
@@ -369,6 +380,11 @@ export class HostLifecycle {
 				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Managed branch deletion requires separate explicit confirmation");
 				return this.deleteWorktreeBranch(String(request.removalKey));
 			case "conversation.list": return { operation: "conversation.list", conversations: this.options.registry.listConversations() };
+			case "conversation.provisioning.list": return this.provisioningList();
+			case "conversation.provisioning.resume": {
+				if (request.confirmed !== true) throw new RelayRegistryError("permission_denied", "Provisioning resume requires explicit confirmation");
+				return { ...await this.start(request as never, undefined, true), operation: "conversation.provisioning.resume" };
+			}
 			case "conversation.status": return this.status(String(request.targetConversationId));
 			case "project.create": return this.createProject(request as never);
 			case "project.reconcile.preview": return this.reconciler.preview();
@@ -402,6 +418,45 @@ export class HostLifecycle {
 		return value as unknown as ResolvedWorkspace;
 	}
 
+	private async provisioningList(): Promise<Record<string, unknown>> {
+		const root = resolve(this.options.projectSessionDirectory);
+		let entries; try { entries = await readdir(root, { withFileTypes: true }); }
+		catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return { operation: "conversation.provisioning.list", hostId: this.options.hostId, intents: [] }; throw error; }
+		if (entries.length > 1_024) throw new RelayRegistryError("capacity_reached", "Provisioning inspection capacity was reached");
+		const intents: Record<string, unknown>[] = [];
+		for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
+			if (!/^conv_[a-f0-9]{32}$/.test(entry.name) || this.options.registry.manifestByConversationId(entry.name)) continue;
+			if (!entry.isDirectory()) throw new RelayRegistryError("invalid_state", "Provisioning directory is not a regular directory");
+			const intent = await readPrivateIntent(new AtomicJsonFile(join(root, entry.name, "matrix-provisioning.json"), parseMatrixProvisioningIntent));
+			if (!intent) continue;
+			const path = join(root, entry.name, "session.jsonl"); const info = await lstat(path);
+			if (!info.isFile() || info.isSymbolicLink() || (info.mode & 0o077) !== 0 || info.size > 65_536 ||
+				(process.getuid?.() !== undefined && info.uid !== process.getuid!())) throw new RelayRegistryError("invalid_state", "Prepared provisioning session is not a bounded private file");
+			const lines = (await readFile(path, "utf8")).trimEnd().split("\n").map(line => JSON.parse(line) as Record<string, unknown>);
+			const header = lines[0]; const boundaries = lines.filter(line => line.type === "custom" && line.customType === "managed-session.binding-boundary");
+			const data = boundaries.length === 1 ? boundaries[0]!.data as Record<string, unknown> : undefined;
+			if (header?.type !== "session" || typeof header.id !== "string" || typeof header.timestamp !== "string" ||
+				!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(header.timestamp) || !Number.isFinite(Date.parse(header.timestamp)) || data?.version !== MANAGED_SESSION_STATE_VERSION ||
+				typeof data.creationKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(data.creationKey) ||
+				deriveConversationId(this.options.hostId, data.creationKey) !== entry.name || intent.conversationId !== entry.name ||
+				data.concept !== intent.concept || data.sessionId !== header.id) throw new RelayRegistryError("invalid_state", "Prepared provisioning identity is inconsistent");
+			if (intents.length >= 64) throw new RelayRegistryError("capacity_reached", "Provisioning inspection is limited to 64 pending intents");
+			intents.push({ conversationId: intent.conversationId, creationKey: data.creationKey, concept: intent.concept, createdAt: header.timestamp, ...(intent.placement ? { placement: intent.placement } : {}),
+				phase: intent.roomLinked ? "manifest" : intent.roomId ? "room_link" : intent.hostSpaceLinked ? "room" : intent.projectSpaceId ? "host_link" : "project_space",
+				inProgress: this.conversationCreations.has(intent.conversationId) || this.provisions.has(intent.conversationId), retry: "manual", ...(intent.projectSpaceId ? { projectSpaceId: intent.projectSpaceId } : {}), ...(intent.roomId ? { roomId: intent.roomId } : {}) });
+		}
+		return { operation: "conversation.provisioning.list", hostId: this.options.hostId,
+			intents: intents.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)) || String(a.conversationId).localeCompare(String(b.conversationId))) };
+	}
+
+	private async provisioningStep<T>(phase: string, operation: () => Promise<T>): Promise<T> {
+		try { return await operation(); }
+		catch (error) {
+			if (!(error instanceof ManagedMatrixError)) throw error;
+			throw new RelayRegistryError("matrix_unavailable", `Provisioning ${phase} failed: ${describeMatrixFailure(error)}; durable intent retained for explicit retry`);
+		}
+	}
+
 	provisionConversationMatrix(conversationId: string, concept: string, resolved: ResolvedWorkspace): Promise<{ roomId: string; projectSpace: string }> {
 		const running = this.provisions.get(conversationId); if (running) return running;
 		const provision = this.provisionConversationMatrixOnce(conversationId, concept, resolved)
@@ -418,27 +473,33 @@ export class HostLifecycle {
 				(process.getuid?.() !== undefined && info.uid !== process.getuid!())) throw new RelayRegistryError("invalid_state", "Existing Matrix provisioning intent is not a private relay-user file");
 			const expected = { conversationId, concept, projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName, checkoutDisplayName: resolved.checkoutDisplayName };
 			for (const [key, value] of Object.entries(expected)) if ((intent as unknown as Record<string, unknown>)[key] !== value) throw new RelayRegistryError("invalid_state", "Matrix provisioning retry changed its host-resolved identity");
+			if (intent.placement && !samePlacement(intent.placement, resolved)) throw new RelayRegistryError("invalid_state", "Matrix provisioning retry changed its portable workspace identity");
+			if (!intent.placement) {
+				intent = { ...intent, placement: { rootKey: resolved.rootKey, workspace: resolved.workspace, relativeCwd: resolved.relativeCwd } };
+				await file.write(intent);
+			}
 		} else {
-			intent = { conversationId, concept, projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName, checkoutDisplayName: resolved.checkoutDisplayName };
+			intent = { conversationId, concept, projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName, checkoutDisplayName: resolved.checkoutDisplayName,
+				placement: { rootKey: resolved.rootKey, workspace: resolved.workspace, relativeCwd: resolved.relativeCwd } };
 			await file.write(intent);
 		}
 		if (!intent.projectSpaceId) {
-			intent = { ...intent, projectSpaceId: await this.projectSpaces.ensure(resolved.projectKey, resolved.projectDisplayName, retry) };
+			intent = { ...intent, projectSpaceId: await this.provisioningStep("project_space", () => this.projectSpaces.ensure(resolved.projectKey, resolved.projectDisplayName, retry)) };
 			await file.write(intent);
-		} else await this.projectSpaces.assertTarget(resolved.projectKey, intent.projectSpaceId);
+		} else await this.provisioningStep("project_space", () => this.projectSpaces.assertTarget(resolved.projectKey, intent!.projectSpaceId!));
 		const projectSpace = intent.projectSpaceId;
 		if (!projectSpace) throw new RelayRegistryError("invalid_state", "Project Space identity is unavailable");
 		const coordinator = this.options.registry.listManifests().find((item) => item.kind === "coordinator");
-		if (!intent.hostSpaceLinked) { if (coordinator?.kind === "coordinator" && coordinator.hostSpace) await this.options.matrix.addSpaceChild(coordinator.hostSpace, projectSpace);
+		if (!intent.hostSpaceLinked) { if (coordinator?.kind === "coordinator" && coordinator.hostSpace) await this.provisioningStep("host_link", () => this.options.matrix.addSpaceChild(coordinator.hostSpace!, projectSpace));
 			intent = { ...intent, hostSpaceLinked: true }; await file.write(intent); }
-		if (!intent.roomId) { intent = { ...intent, roomId: await this.options.matrix.createPrivateRoomIdempotent(
-			`pi · ${resolved.checkoutDisplayName} · ${concept}`, `pi-${conversationId.slice(5)}-room`) }; await file.write(intent); }
-		else if (await this.options.matrix.resolvePrivateRoomAlias(`pi-${conversationId.slice(5)}-room`, false) !== intent.roomId) {
+		if (!intent.roomId) { intent = { ...intent, roomId: await this.provisioningStep("room", () => this.options.matrix.createPrivateRoomIdempotent(
+			`pi · ${resolved.checkoutDisplayName} · ${concept}`, `pi-${conversationId.slice(5)}-room`)) }; await file.write(intent); }
+		else if (await this.provisioningStep("room", () => this.options.matrix.resolvePrivateRoomAlias(`pi-${conversationId.slice(5)}-room`, false)) !== intent.roomId) {
 			throw new RelayRegistryError("invalid_state", "Project room no longer matches its deterministic alias");
 		}
 		const roomId = intent.roomId;
 		if (!roomId) throw new RelayRegistryError("invalid_state", "Project room identity is unavailable");
-		if (!intent.roomLinked) { await this.options.matrix.addSpaceChild(projectSpace, roomId); intent = { ...intent, roomLinked: true }; await file.write(intent); }
+		if (!intent.roomLinked) { await this.provisioningStep("room_link", () => this.options.matrix.addSpaceChild(projectSpace, roomId)); intent = { ...intent, roomLinked: true }; await file.write(intent); }
 		return { roomId, projectSpace };
 	}
 
@@ -871,12 +932,38 @@ export class HostLifecycle {
 	}
 
 	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
-		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }): Promise<Record<string, unknown>> {
-		return this.runWorktreeOperation(this.workspaceOperationKey(request.placement), () => this.startOnce(request, provisioned));
+		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }, requirePrepared = false): Promise<Record<string, unknown>> {
+		const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
+		const identity = JSON.stringify([request.concept, request.placement.rootKey, request.placement.workspace, request.placement.relativeCwd, requirePrepared, provisioned]);
+		const running = this.conversationCreations.get(conversationId);
+		if (running) return running.identity === identity ? running.work : Promise.reject(new RelayRegistryError("invalid_state", "Conversation creation is already in progress with another identity"));
+		const work = this.validateAndStart(request, provisioned, requirePrepared).finally(() => {
+			if (this.conversationCreations.get(conversationId)?.work === work) this.conversationCreations.delete(conversationId);
+		});
+		this.conversationCreations.set(conversationId, { identity, work });
+		return work;
+	}
+
+	private async validateAndStart(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
+		provisioned: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string } | undefined, requirePrepared: boolean): Promise<Record<string, unknown>> {
+		if (requirePrepared) {
+			const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
+			const intent = await readPrivateIntent(new AtomicJsonFile(join(resolve(this.options.projectSessionDirectory), conversationId, "matrix-provisioning.json"), parseMatrixProvisioningIntent));
+			if (!intent || intent.conversationId !== conversationId || intent.concept !== request.concept) throw new RelayRegistryError("not_found", "Matching retained provisioning intent was not found");
+			const resolved = await this.resolveWorkspaceIdentity(request.placement);
+			if ((intent.placement && !samePlacement(intent.placement, request.placement)) || intent.projectKey !== resolved.projectKey ||
+				intent.projectDisplayName !== resolved.projectDisplayName || intent.checkoutDisplayName !== resolved.checkoutDisplayName) {
+				throw new RelayRegistryError("invalid_state", "Provisioning resume changed its host-resolved identity");
+			}
+			await durableProjectSession(join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl"), resolved.cwd, conversationId, request.creationKey, intent.concept, 1, true);
+		}
+		const workspaceKey = this.workspaceOperationKey(request.placement);
+		if (this.worktreeOperations.has(workspaceKey)) throw new RelayRegistryError("invalid_state", "Workspace lifecycle operation is already in progress");
+		return this.runWorktreeOperation(workspaceKey, () => this.startOnce(request, provisioned, requirePrepared));
 	}
 
 	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity },
-		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }): Promise<Record<string, unknown>> {
+		provisioned?: { projectSpace: string; roomId: string; projectKey: string; projectDisplayName: string; checkoutDisplayName: string }, requirePrepared = false): Promise<Record<string, unknown>> {
 		const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
 		const existing = this.options.registry.manifestByCreationKey(request.creationKey);
 		if (existing) {
@@ -889,7 +976,7 @@ export class HostLifecycle {
 		const resolved = await this.resolveWorkspaceIdentity(request.placement);
 		await this.invoke("root-ensure", request.placement);
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
-		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept);
+		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept, 1, requirePrepared);
 		const identity = provisioned ?? resolved;
 		const matrixBinding = provisioned ?? await this.provisionConversationMatrix(conversationId, request.concept, resolved);
 		const { projectSpace, roomId } = matrixBinding;
@@ -1036,7 +1123,8 @@ export class HostLifecycle {
 		const root = await this.invoke("root-ensure", manifest.placement);
 		if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
 		const rootSessionName = root.sessionName;
-		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal);
+		// A manifest already binds durable Pi history; launch must never reconstruct a missing file.
+		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal, true);
 		if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {
 			throw new RelayRegistryError("invalid_state", "Project Pi session identity conflicts with the conversation manifest");
 		}

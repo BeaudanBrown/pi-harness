@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isAbsolute } from "node:path";
+import { isMatrixRoomId } from "./room-identity.js";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
 
@@ -98,6 +99,9 @@ const lifecycleArguments = Type.Union([
 	strictObject({ operation: Type.Literal("worktree.conversation.cleanup.apply"), removalKey: WorktreeRemovalKeySchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("worktree.branch.delete"), removalKey: WorktreeRemovalKeySchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("conversation.list") }),
+	strictObject({ operation: Type.Literal("conversation.provisioning.list") }),
+	strictObject({ operation: Type.Literal("conversation.provisioning.resume"), creationKey: identifier, concept: boundedString(128),
+		placement: WorkspaceIdentitySchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("conversation.status"), targetConversationId: ConversationIdSchema }),
 	strictObject({ operation: Type.Literal("project.reconcile.preview") }),
 	strictObject({ operation: Type.Literal("project.reconcile.apply"), reconciliationKey: ReconciliationKeySchema, confirmed: Type.Literal(true) }),
@@ -361,6 +365,10 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		strictObject({ operation: Type.Literal("refresh.result"), status: Type.Literal("ok") }),
 	])),
 	relayEnvelopeWithPayload("lifecycle.result", Type.Union([
+		strictObject({ operation: Type.Literal("conversation.provisioning.list"), hostId: identifier,
+			intents: Type.Array(strictObject({ conversationId: ConversationIdSchema, creationKey: identifier, concept: boundedString(128), createdAt: timestamp,
+				placement: Type.Optional(WorkspaceIdentitySchema), phase: Type.Union([Type.Literal("project_space"), Type.Literal("host_link"), Type.Literal("room"), Type.Literal("room_link"), Type.Literal("manifest")]),
+				inProgress: Type.Boolean(), retry: Type.Literal("manual"), projectSpaceId: Type.Optional(boundedString(255)), roomId: Type.Optional(boundedString(255)) }), { maxItems: 64 }) }),
 		strictObject({
 			operation: Type.Literal("workspace.list"),
 			workspaces: Type.Array(strictObject({ rootKey: identifier, workspace: boundedString(128) }), { maxItems: 4_096 }),
@@ -398,7 +406,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		}),
 		strictObject({
 			operation: Type.Union([
-				Type.Literal("conversation.start"), Type.Literal("conversation.resume"), Type.Literal("conversation.refresh"), Type.Literal("conversation.stop"), Type.Literal("conversation.delete"),
+				Type.Literal("conversation.start"), Type.Literal("conversation.provisioning.resume"), Type.Literal("conversation.resume"), Type.Literal("conversation.refresh"), Type.Literal("conversation.stop"), Type.Literal("conversation.delete"),
 			]),
 			targetConversationId: ConversationIdSchema,
 			conversationState: Type.Optional(Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")])),
@@ -776,6 +784,12 @@ function assertWorkspaceIdentity(value: WorkspaceIdentity): void {
 	}
 }
 
+export function parseWorkspaceIdentity(value: unknown): WorkspaceIdentity {
+	assertSchema(WorkspaceIdentitySchema, value, "workspace identity");
+	assertWorkspaceIdentity(value as WorkspaceIdentity);
+	return value as WorkspaceIdentity;
+}
+
 function assertInputBody(kind: string, body: string | undefined): void {
 	if ((kind === "abort") === (body !== undefined)) {
 		throw new ManagedSessionContractError("malformed", "abort input must omit body and all other input kinds require body");
@@ -854,9 +868,19 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 			throw new ManagedSessionContractError("malformed", "self binding requires absolute source paths");
 		}
 	}
+	if (envelope.type === "lifecycle.result" && envelope.payload.operation === "conversation.provisioning.list") {
+		const payload = envelope.payload as { intents: Array<{ createdAt: string; placement?: WorkspaceIdentity; projectSpaceId?: string; roomId?: string }> };
+		for (const intent of payload.intents) {
+			assertTimestamp(intent.createdAt, "provisioning timestamp");
+			if (intent.placement) assertWorkspaceIdentity(intent.placement);
+			if ([intent.projectSpaceId, intent.roomId].some(id => id !== undefined && !isMatrixRoomId(id))) {
+				throw new ManagedSessionContractError("malformed", "provisioning inspection contains a malformed Matrix room ID");
+			}
+		}
+	}
 	if (envelope.type === "lifecycle.request") {
 		const payload = envelope.payload as { request: { operation: string; placement?: WorkspaceIdentity; workspace?: string } };
-		if (payload.request.operation === "conversation.start" && payload.request.placement) assertWorkspaceIdentity(payload.request.placement);
+		if (["conversation.start", "conversation.provisioning.resume"].includes(String(payload.request.operation)) && payload.request.placement) assertWorkspaceIdentity(payload.request.placement);
 		if (payload.request.operation === "project.create" && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(payload.request.workspace ?? "")) {
 			throw new ManagedSessionContractError("malformed", "project workspace must be one safe immediate-child name");
 		}
