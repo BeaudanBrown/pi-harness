@@ -1,22 +1,22 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { HostControlServer } from "../config/agent/extensions/managed-sessions/relay/host-control-server.js";
 import { HostDispatcher } from "../config/agent/extensions/managed-sessions/relay/host-dispatcher.js";
 import { HostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
 import { requestHostControl } from "../config/agent/extensions/managed-sessions/relay/host-control-client.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { deriveConversationId, deriveTranscriptEntryId, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { deriveConversationId, deriveGenerationId, deriveTranscriptEntryId, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
 import type { ExactWindowProof } from "../config/agent/extensions/managed-sessions/exact-window-contracts.js";
 import { ConversationRetirement } from "../config/agent/extensions/managed-sessions/relay/conversation-retirement.js";
-import { HostLifecycle } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import { HostLifecycle, durableProjectSession } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import type { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import type { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, roomless = false) {
 	const root = await mkdtemp(join(tmpdir(), "exact-lifecycle-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const hostId = "host"; const conversationId = deriveConversationId(hostId, "project");
 	const sessionId = `managed-${conversationId.slice(5)}`;
@@ -24,8 +24,18 @@ async function fixture(t: TestContext) {
 		creationKey: "project", concept: "Project", placement: { rootKey: "projects", workspace: "project", relativeCwd: "" },
 		roomId: "!room:example.com", piSessionId: sessionId, createdAt: "2026-10-01T00:00:00.000Z",
 		bindingBoundaryEntryId: deriveTranscriptEntryId(sessionId, `managed-boundary-${conversationId.slice(5)}`) };
-	const manifests = new ConversationManifestStore(join(root, "manifests")); await manifests.write(manifest);
+	const manifests = new ConversationManifestStore(join(root, "manifests"));
+	if (!roomless) await manifests.write(manifest);
 	let registry = new RelayRegistry(hostId, root, manifests); await registry.load();
+	if (roomless) {
+		const session = await durableProjectSession(join(root, "sessions", conversationId, "session.jsonl"), root, conversationId, manifest.creationKey, manifest.concept);
+		const { schemaVersion: _schema, roomId: _room, hostSpace: _hostSpace, projectSpace: _projectSpace, checkoutSpace: _checkoutSpace, ...identity } = manifest;
+		const generationId = deriveGenerationId(conversationId, 1);
+		await registry.registerOwnedLocalConversation({ ...identity, version: 1, kind: "project", placement: manifest.placement!,
+			projectKey: `project_${"1".repeat(32)}`, projectDisplayName: "Project", checkoutDisplayName: "main", checkoutId: `checkout_${"2".repeat(32)}`,
+			activeGenerationId: generationId, generations: [{ generationId, ordinal: 1, piSessionId: session.sessionId,
+				bindingBoundaryEntryId: session.boundaryEntryId, createdAt: manifest.createdAt }] }, "n".repeat(32));
+	}
 	let proof: ExactWindowProof | undefined; let state: "match" | "gone" | "changed" = "gone";
 	let inspectError = false;
 	let attach = true; let retainedAlive = false; let unknownCreate = false; let invalidProof = false; let exits = true; let creates = 0;
@@ -56,7 +66,7 @@ async function fixture(t: TestContext) {
 						windowId: `@${creates}`, paneId: `%${creates}`, panePid: "789", processBootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processStartTicks: "123" };
 					state = attach || retainedAlive ? "match" : "changed";
 					if (attach) await registry.attach({ protocolVersion: "1.0.0", messageId: "attach", conversationId, role: "ordinary_adapter", type: "attachment.attach",
-						payload: { sessionId, attachmentNonce: env.PI_MANAGED_SESSION_ATTACHMENT_NONCE!, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId } }, `connection-${creates}`);
+						payload: { sessionId, attachmentNonce: env.PI_MANAGED_SESSION_ATTACHMENT_NONCE!, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId, ...(roomless ? { requestedCapabilities: ["local-enrollment-v1"] } : {}) } }, `connection-${creates}`);
 					return { ...manifest.placement, conversationId, role: "conversation", sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, ownership: invalidProof ? { ...proof, processBootId: undefined } : proof };
 				}
 				case "window-check-exact": assert.deepEqual(request, proof); return { state };
@@ -77,7 +87,7 @@ async function fixture(t: TestContext) {
 		set exits(value: boolean) { exits = value; }, set state(value: typeof state) { state = value; },
 		async attachNow() {
 			await registry.attach({ protocolVersion: "1.0.0", messageId: "late-attach", conversationId, role: "ordinary_adapter", type: "attachment.attach",
-				payload: { sessionId, attachmentNonce: launchNonce!, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId } }, `connection-${creates}`);
+				payload: { sessionId, attachmentNonce: launchNonce!, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId, ...(roomless ? { requestedCapabilities: ["local-enrollment-v1"] } : {}) } }, `connection-${creates}`);
 		},
 		async reload() { registry = new RelayRegistry(hostId, root, manifests); await registry.load(); } };
 }
@@ -86,6 +96,50 @@ function request(conversationId: string, operation: "conversation.stop" | "conve
 	return { protocolVersion: "1.0.0" as const, messageId: "request", conversationId, role: "coordinator_adapter" as const, type: "lifecycle.request" as const,
 		payload: { request: { operation, targetConversationId: conversationId } } };
 }
+
+test("owned roomless open and resume share one exact launch before independent Matrix binding", async t => {
+	const f = await fixture(t, true); const owner = f.owner();
+	const sessionFile = join(f.root, "sessions", f.manifest.conversationId, "session.jsonl");
+	const history = await readFile(sessionFile, "utf8");
+	const [first, second, ready] = await Promise.all([owner.openConversation(f.manifest.conversationId),
+		owner.openConversation(f.manifest.conversationId), owner.resumeConversation(f.manifest.conversationId)]);
+	assert.deepEqual(first, second); assert.equal(first.launchId, ready.launchId); assert.equal(f.creates, 1);
+	assert.equal(f.registry.conversationState(f.manifest.conversationId), "active");
+	assert.equal(f.registry.manifestByConversationId(f.manifest.conversationId), undefined);
+	assert.equal(f.registry.localConversations().length, 1);
+	const window = f.registry.managedWindow(f.manifest.conversationId);
+	await f.registry.completeLocalBinding(f.manifest.conversationId, { roomId: "!later:example.com", projectSpace: "!project:example.com",
+		checkoutSpace: "!checkout:example.com", checkoutId: `checkout_${"2".repeat(32)}` });
+	assert.deepEqual(await owner.openConversation(f.manifest.conversationId), first);
+	assert.deepEqual(f.registry.managedWindow(f.manifest.conversationId), window);
+	assert.equal(f.creates, 1); assert.equal(await readFile(sessionFile, "utf8"), history);
+});
+
+test("roomless launch refuses missing durable seed instead of fabricating history", async t => {
+	const f = await fixture(t, true);
+	const sessionFile = join(f.root, "sessions", f.manifest.conversationId, "session.jsonl");
+	await rm(sessionFile);
+	await assert.rejects(f.owner().openConversation(f.manifest.conversationId));
+	await assert.rejects(readFile(sessionFile), { code: "ENOENT" });
+	assert.equal(f.creates, 0); assert.equal(f.registry.launchIdentity(f.manifest.conversationId), undefined);
+});
+
+test("roomless open requires origin proof before resolving or touching its session", async t => {
+	const f = await fixture(t, true);
+	const state = f.registry.snapshot(); delete state.conversations[0].ownedLocalLaunch;
+	await writeFile(join(f.root, "registry.json"), JSON.stringify(state)); await f.reload();
+	await assert.rejects(f.owner().openConversation(f.manifest.conversationId), /durable owned-seed authority/);
+	assert.deepEqual(f.calls, []); assert.equal(f.creates, 0);
+});
+
+test("roomless launch uncertainty survives restart without a second create", async t => {
+	const f = await fixture(t, true); f.unknownCreate = true;
+	await assert.rejects(f.owner().openConversation(f.manifest.conversationId), /lost create response/);
+	assert.equal(f.creates, 1);
+	await f.reload(); f.unknownCreate = false;
+	await assert.rejects(f.owner().openConversation(f.manifest.conversationId), /unobserved|unresolved|unknown|inspect/i);
+	assert.equal(f.creates, 1);
+});
 
 test("normal launch persists exact ownership and stop verifies exit without legacy operations", async (t) => {
 	const f = await fixture(t); const owner = f.owner();

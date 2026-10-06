@@ -243,8 +243,28 @@ This is not the final canonical gate or a complete automatic-launch path. No #11
 subjective review has run yet. Private-state compatibility/rollback must preserve
 or refuse the new origin marker, never silently discard it.
 
-Saved-session selection/full ownership guards, local-first lifecycle and launcher
-wiring remain to be implemented and verified. General startup transport is out of
+## Partial implementation: roomless exact open/resume
+
+Existing `HostLifecycle.openConversation` and `resumeConversation` now accept a
+registered roomless owned seed, without waiting for Matrix or touching its client.
+They reuse the existing exact-window reservation, window-first result and shared
+readiness observer. Bound-only lifecycle operations remain bound-only. Early
+admission refuses missing owned-origin authority before resolving workspace or
+accessing history; a missing seeded file is a recovery error, never recreated.
+
+Four new lifecycle tests cover concurrent open/resume with one launch, independent
+later binding preserving window/history, missing seed/origin refusal, and lost
+creation acknowledgement across restart without a second create. The Matrix test
+client has no provisioning methods: these tests exercise no Matrix call. This is
+not live Matrix/NAS outage acceptance or a fresh automatic-start entrypoint.
+
+Focused enrollment/exact lifecycle: 28 passed before the additional early-origin
+case. Latest full affected managed suite: **535 passed, zero skips**:
+`.pi/tmp/workers/2026-10-06T05-43-31-036Z-roomless-launch-origin-affected-7fea2292bb6a/`.
+No final canonical gate or #116 subjective review yet.
+
+Saved-session selection/full ownership guards, fresh local-first admission and
+launcher wiring remain to be implemented and verified. General startup transport is out of
 scope under the approved simplification. Preflight findings are
 not acceptance of #116. These plans do not authorize live account effects or
 deployment.

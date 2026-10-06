@@ -1202,7 +1202,7 @@ export class HostLifecycle {
 
 	/** Returns an exact target, never switches a client, and does not cancel readiness observation. */
 	async openConversation(conversationId: string): Promise<HostResult<"conversation.open">> {
-		const manifest = this.liveManifest(conversationId);
+		const manifest = this.launchManifest(conversationId);
 		const running = this.worktreeOperations.get(this.launchOperationKey(manifest));
 		if (running && running.identity !== `launch:${conversationId}` && !running.identity?.startsWith(`create:${conversationId}:`)) {
 			throw new RelayRegistryError("invalid_state", "Conflicting workspace operation is already in progress; retry explicitly");
@@ -1229,7 +1229,7 @@ export class HostLifecycle {
 		if (await this.exactWindows.check(window.ownership) !== "match") {
 			throw new RelayRegistryError("launch_failed", "Open target disappeared or changed; inspect the retained window before retry");
 		}
-		this.liveManifest(conversationId); // Retirement wins an asynchronous observation.
+		this.launchManifest(conversationId); // Retirement wins an asynchronous observation.
 		if (!isDeepStrictEqual(window, this.options.registry.managedWindow(conversationId))) {
 			throw new RelayRegistryError("invalid_state", "Open target changed during observation");
 		}
@@ -1244,12 +1244,12 @@ export class HostLifecycle {
 		return { conversationId, launchId: target.launchId, launchState: target.launchState };
 	}
 
-	private launchOperationKey(manifest: ConversationManifest): string {
+	private launchOperationKey(manifest: RegisteredConversation): string {
 		return manifest.kind === "coordinator" ? "coordinator" : this.workspaceOperationKey(manifest.placement!);
 	}
 
 	private resume(conversationId: string): Promise<Record<string, unknown>> {
-		const manifest = this.liveManifest(conversationId);
+		const manifest = this.launchManifest(conversationId);
 		const key = this.launchOperationKey(manifest);
 		const creating = this.worktreeOperations.get(key)?.identity;
 		const identity = creating?.startsWith(`create:${conversationId}:`) ? creating : `launch:${conversationId}`;
@@ -1259,7 +1259,7 @@ export class HostLifecycle {
 	}
 
 	private async resumeOnce(conversationId: string): Promise<Record<string, unknown>> {
-		const manifest = this.liveManifest(conversationId);
+		const manifest = this.launchManifest(conversationId);
 		if (manifest.kind === "coordinator") {
 			if (this.options.registry.conversationState(conversationId) !== "active") await this.launch(conversationId, async (windowCreated) => {
 				const config = this.options.coordinator;
@@ -1381,6 +1381,15 @@ export class HostLifecycle {
 			cleanupState: retired.cleanup?.some((effect) => effect.phase === "blocked") ? "failed" : retired.cleanup ? "pending" : "complete" };
 	}
 
+	private launchManifest(conversationId: string): RegisteredConversation {
+		const manifest = this.options.registry.registeredConversation(conversationId);
+		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+		if (!hasMatrixBinding(manifest) && !this.options.registry.hasOwnedLocalSeed(conversationId)) {
+			throw new RelayRegistryError("invalid_state", "Roomless launch requires durable owned-seed authority");
+		}
+		return manifest;
+	}
+
 	private liveManifest(conversationId: string): ConversationManifest {
 		const manifest = this.options.registry.manifestByConversationId(conversationId);
 		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
@@ -1393,7 +1402,7 @@ export class HostLifecycle {
 		return manifest;
 	}
 
-	private launchProject(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string): Promise<void> {
+	private launchProject(manifest: RegisteredConversation, existingNonce?: string, existingSessionFile?: string): Promise<void> {
 		return this.launch(manifest.conversationId, (windowCreated) => this.launchProjectOnce(manifest, existingNonce, existingSessionFile, windowCreated));
 	}
 
@@ -1411,7 +1420,7 @@ export class HostLifecycle {
 		return ready;
 	}
 
-	private async launchProjectOnce(manifest: ConversationManifest, existingNonce?: string, existingSessionFile?: string, windowCreated?: () => void): Promise<void> {
+	private async launchProjectOnce(manifest: RegisteredConversation, existingNonce?: string, existingSessionFile?: string, windowCreated?: () => void): Promise<void> {
 		if (manifest.kind !== "project" || !manifest.placement) throw new RelayRegistryError("invalid_state", "Project launch requires project placement");
 		const nonce = existingNonce ?? randomBytes(32).toString("base64url");
 		const activeGeneration = this.options.registry.activeGeneration(manifest);
@@ -1421,7 +1430,9 @@ export class HostLifecycle {
 		if (typeof resolved.cwd !== "string" || !isAbsolute(resolved.cwd) || typeof resolved.workspacePath !== "string" || !isAbsolute(resolved.workspacePath)) throw new RelayRegistryError("launch_failed", "Workspace launcher omitted canonical workspace paths");
 		const root = await this.invoke("root-resolve", manifest.placement);
 		if (typeof root.sessionName !== "string" || !root.sessionName) throw new RelayRegistryError("launch_failed", "Root launcher omitted its tmux session name");
-		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal);
+		// Roomless ownership is registered only after seeding. Missing history is
+		// a recovery fault, never permission to fabricate a replacement session.
+		const session = await durableProjectSession(sessionFile, resolved.cwd, manifest.conversationId, manifest.creationKey, manifest.concept, activeGeneration.ordinal, !hasMatrixBinding(manifest));
 		if (session.sessionId !== manifest.piSessionId || session.boundaryEntryId !== manifest.bindingBoundaryEntryId) {
 			throw new RelayRegistryError("invalid_state", "Project Pi session identity conflicts with the conversation manifest");
 		}
@@ -1489,7 +1500,7 @@ export class HostLifecycle {
 		}
 	}
 
-	private async inspectProjectWindow(manifest: ConversationManifest, expectedSessionName: string): Promise<ManagedWindow | undefined> {
+	private async inspectProjectWindow(manifest: RegisteredConversation, expectedSessionName: string): Promise<ManagedWindow | undefined> {
 		const persisted = this.options.registry.managedWindow(manifest.conversationId);
 		const launch = this.options.registry.launchIdentity(manifest.conversationId);
 		// A first admission can create the first tmux server/window. The launcher

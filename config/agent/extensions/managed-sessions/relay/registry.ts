@@ -1111,6 +1111,10 @@ export class RelayRegistry {
 		});
 	}
 
+	hasOwnedLocalSeed(conversationId: string): boolean {
+		return this.runtimeConversation(conversationId).ownedLocalLaunch === true;
+	}
+
 	promotion(conversationId: string): RuntimeConversation["promotion"] {
 		const value = this.runtimeConversation(conversationId).promotion;
 		return value ? { ...value } : value;
