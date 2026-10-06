@@ -71,5 +71,51 @@ still default-off. Dedicated `pi-r-local` stays separate.
   That decision still applies: pre-launch persistence must precede construction
   of the live SDK manager; no fabricated assistant response or private-field hack.
 
-Focused implementation evidence, review disposition and final verification remain
-pending. These plans do not authorize live account effects or deployment.
+## SDK preflight evidence
+
+Disposable public-API probe passed on both actual SDK **0.84.4** and **0.85.0**:
+`.pi/tmp/workers/2026-10-06T03-11-17-878Z-default-launch-sdk-preflight-clean-resources-e9730a46e53d/`.
+Eleven parser cases per version, read-only listing/filtering, and an assistant-free
+standalone `SessionManager.forkFrom` check; no model/network call or real history
+was used. Clear inherited `PI_PACKAGE_DIR` in version-comparison probes: it otherwise
+misreports the older imported code as the parent process's SDK resource version.
+
+Important actual semantics:
+
+- `-r` / `--resume` selects through a picker; a following positional token is a
+  prompt, **not** its session selector. `--session VALUE` is the explicit selector.
+- `--fork VALUE` takes a source selector. `--session-id VALUE` is distinct; the CLI
+  can resume an exact existing ID or create a new session with it, subject to its
+  option-conflict checks. Do not conflate it with a fresh-only request.
+- `--session=VALUE` is an extension/unknown flag in these parsers, not a session
+  selector. `-- --print` is literal prompt text. Preserve parser distinctions.
+- Native main treats `--mode text` with both terminals as interactive, whereas
+  RPC/JSON, print and missing terminals are non-interactive. Mode eligibility
+  needs actual resolved semantics, not a raw `--mode` substring check.
+- Public session listing with a custom directory filters current-project results
+  by cwd; `listAll(customDirectory)` includes other cwd values. Explicit file
+  open uses saved header cwd; fork uses the requested target cwd. Resolve ownership
+  and resources before constructing any writable SDK manager.
+- Public standalone `forkFrom` writes a new file before returning even without an
+  assistant entry, keeps the original untouched and preserves copied metadata's
+  old session IDs. This is a possible **pre-launch history-copy** seam for #116,
+  not native room-preserving `/fork` and not reversal of the #114 decision. Any
+  use still needs fresh authority, atomic publication and no historical backfill.
+
+## Partial implementation: invocation mode
+
+`launch/mode.ts` classifies the public parser result without opening sessions or
+contacting the relay. It excludes command/diagnostic, worker, headless, ephemeral
+and experimental invocations, and keeps explicit local-only and intentional
+managed dispatch separate. This helper is **not yet wired to launchers** and is
+not an authentication boundary or a saved-session ownership guard.
+
+TypeScript build and three focused tests passed on **each** SDK version with zero
+skips: `.pi/tmp/workers/2026-10-06T03-18-19-322Z-default-launch-mode-sdk-focused-965c1bd38505/`.
+Project LSP and staged diff checks were clean. This partial step has not run an
+issue review or final canonical gate.
+
+Argument transport, saved-session resolution/guards, local-first lifecycle and
+launcher wiring remain to be implemented and verified. Preflight findings are
+not acceptance of #116. These plans do not authorize live account effects or
+deployment.
