@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { deriveConversationId } from "../contracts.js";
+import { deriveConversationId, hasMatrixBinding } from "../contracts.js";
 import { APPROVAL_LIFETIME_MS, parseHostResponse, type HostAction, type HostReadAction, type HostRequest, type HostResult } from "../live-workspace-contracts.js";
 import type { FrozenHostEffects, FrozenJson, HostApprovalRecord } from "./host-approval-record.js";
 import type { HostMutationOwner } from "./host-approval-runtime.js";
@@ -38,10 +38,12 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 	private target(conversationId: string): FrozenJson {
 		const { registry } = this.options;
 		if (registry.retirement(conversationId)) throw new HostControlError("retired", "Conversation is permanently retired");
-		const manifest = registry.manifestByConversationId(conversationId);
+		const manifest = registry.registeredConversation(conversationId);
 		if (!manifest) throw new HostControlError("not_found", "Managed conversation was not found");
 		return detached({ conversationId, kind: manifest.kind, generationId: registry.activeGeneration(manifest).generationId,
-			placement: manifest.placement ?? null, piSessionId: manifest.piSessionId, roomId: manifest.roomId,
+			placement: manifest.placement ?? null, piSessionId: manifest.piSessionId,
+			matrixBinding: hasMatrixBinding(manifest) ? "bound" : "pending",
+			roomId: hasMatrixBinding(manifest) ? manifest.roomId : manifest.verifiedBinding?.roomId ?? null,
 			attachmentId: this.options.server.attachment(conversationId)?.attachmentId ?? null, window: registry.managedWindow(conversationId),
 			launch: registry.launchIdentity(conversationId) ?? null });
 	}

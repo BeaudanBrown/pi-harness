@@ -1319,7 +1319,7 @@ export class HostLifecycle {
 	}
 
 	private async refresh(conversationId: string, expected?: { attachmentId: string; desiredRuntimeId?: string }): Promise<Record<string, unknown>> {
-		const manifest = this.projectManifest(conversationId);
+		const manifest = this.ownedProjectManifest(conversationId);
 		this.options.registry.beginRefresh(conversationId);
 		try {
 			return await this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), async () => {
@@ -1366,12 +1366,12 @@ export class HostLifecycle {
 	}
 
 	stopConversation(conversationId: string): Promise<Record<string, unknown>> {
-		const manifest = this.projectManifest(conversationId);
+		const manifest = this.ownedProjectManifest(conversationId);
 		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => this.stopOnce(conversationId));
 	}
 
 	private async stopOnce(conversationId: string): Promise<Record<string, unknown>> {
-		this.projectManifest(conversationId);
+		this.ownedProjectManifest(conversationId);
 		const window = this.options.registry.managedWindow(conversationId);
 		if (!window) throw new RelayRegistryError("invalid_state", "Active managed conversation has no exact window identity");
 		const attachment = this.options.server.attachment(conversationId);
@@ -1393,7 +1393,7 @@ export class HostLifecycle {
 	}
 
 	private async delete(conversationId: string): Promise<Record<string, unknown>> {
-		this.projectManifest(conversationId);
+		this.ownedProjectManifest(conversationId);
 		if (!this.options.retireConversation) throw new RelayRegistryError("invalid_state", "Canonical retirement is unavailable");
 		const retired = await this.options.retireConversation(conversationId);
 		return { operation: "conversation.delete", targetConversationId: conversationId, retirementId: retired.retirementId,
@@ -1409,6 +1409,13 @@ export class HostLifecycle {
 		if (!hasMatrixBinding(manifest) && !this.options.registry.hasOwnedLocalSeed(conversationId)) {
 			throw new RelayRegistryError("invalid_state", "Roomless launch requires durable owned-seed authority");
 		}
+		return manifest;
+	}
+
+	/** Local process controls do not depend on successful Matrix provisioning. */
+	private ownedProjectManifest(conversationId: string): RegisteredConversation {
+		const manifest = this.launchManifest(conversationId);
+		if (manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Coordinator lifecycle cannot modify the guaranteed coordinator");
 		return manifest;
 	}
 

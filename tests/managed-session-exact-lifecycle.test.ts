@@ -3,6 +3,8 @@ import test, { type TestContext } from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { HostControlServer } from "../config/agent/extensions/managed-sessions/relay/host-control-server.js";
 import { HostDispatcher } from "../config/agent/extensions/managed-sessions/relay/host-dispatcher.js";
+import { ManagedHostMutationOwner } from "../config/agent/extensions/managed-sessions/relay/host-mutation-owner.js";
+import { prepareHostApproval, type ModelHostRequest } from "../config/agent/extensions/managed-sessions/relay/host-approval-record.js";
 import { HostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
 import { requestHostControl } from "../config/agent/extensions/managed-sessions/relay/host-control-client.js";
 import { tmpdir } from "node:os";
@@ -178,6 +180,85 @@ test("roomless launch uncertainty survives restart without a second create", asy
 	await f.reload(); f.unknownCreate = false;
 	await assert.rejects(f.owner().openConversation(f.manifest.conversationId), /unobserved|unresolved|unknown|inspect/i);
 	assert.equal(f.creates, 1);
+});
+
+test("private host controls open, stop, resume and retire owned roomless work without Matrix", async t => {
+	const f = await fixture(t, true); const lifecycle = f.owner(); const id = f.manifest.conversationId;
+	const historyPath = join(f.root, "sessions", id, "session.jsonl"); const history = await readFile(historyPath, "utf8");
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix,
+		matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+	const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
+	const dispatcher = new HostDispatcher({ hostId: "host", protectedConversationId: deriveConversationId("host", "coordinator"),
+		policy: new HostPolicy(JSON.parse(await readFile("config/agent/managed-host-policy.json", "utf8"))),
+		read: async () => { throw Error("not used"); }, humanMutation: input => mutations.executeHuman(input) });
+	const server = new HostControlServer({ runtimeDirectory: join(f.root, "control"), expectedUid: process.getuid!(), peerUid: () => process.getuid!(), dispatcher });
+	await server.start();
+	try {
+		const opened = await requestHostControl({ socketPath: server.socketPath, requestId: "open", action: { operation: "conversation.open", conversationId: id } });
+		assert.equal(opened.ok, true, JSON.stringify(opened));
+		const stopped = await requestHostControl({ socketPath: server.socketPath, requestId: "stop", action: { operation: "conversation.stop", conversationId: id } });
+		assert.equal(stopped.ok, true, JSON.stringify(stopped));
+		assert.equal(f.registry.conversationState(id), "dormant"); assert.ok(f.registry.managedWindow(id)?.ownership);
+		const resumed = await requestHostControl({ socketPath: server.socketPath, requestId: "resume", action: { operation: "conversation.resume", conversationId: id } });
+		assert.equal(resumed.ok, true, JSON.stringify(resumed)); assert.equal(f.creates, 2);
+		assert.equal(f.registry.manifestByConversationId(id), undefined);
+		const deleted = await requestHostControl({ socketPath: server.socketPath, requestId: "retire", action: { operation: "conversation.delete", conversationId: id, confirmed: true } });
+		assert.equal(deleted.ok, true, JSON.stringify(deleted)); await retirement.drain();
+		assert.ok(f.registry.retirement(id));
+		const stop = f.registry.retirement(id)?.cleanup?.find(effect => effect.kind === "stop");
+		assert.equal(stop?.phase, "blocked", "unresolved provisioning is not falsely reported as completed cleanup");
+		await assert.rejects(lifecycle.openConversation(id)); assert.equal(f.creates, 2);
+		assert.equal(await readFile(historyPath, "utf8"), history);
+	} finally { await server.close(); await retirement.close(); }
+});
+
+test("roomless binding completion invalidates frozen process-control consent", async t => {
+	const f = await fixture(t, true); const lifecycle = f.owner(); const id = f.manifest.conversationId;
+	await lifecycle.resumeConversation(id);
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+	try {
+		const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
+		const input: ModelHostRequest = { version: "1.0.0", actor: { kind: "model", requestId: "stop", conversationId: id,
+			generationId: deriveGenerationId(id, 1), runId: "run", toolCallId: "tool", presentation: "local_dialog" },
+			action: { operation: "conversation.stop", conversationId: id } };
+		const record = prepareHostApproval("host", input, await mutations.freeze(input), Date.now());
+		assert.equal(await mutations.revalidate(record), true);
+		await f.registry.completeLocalBinding(id, { roomId: "!later:example.com", projectSpace: "!project:example.com", checkoutSpace: "!checkout:example.com", checkoutId: `checkout_${"2".repeat(32)}` });
+		assert.equal(await mutations.revalidate(record), false);
+		await assert.rejects(mutations.execute(record), /Frozen targets/);
+		assert.ok(!f.calls.includes("window-terminate-exact")); assert.equal(f.registry.conversationState(id), "active");
+	} finally { await retirement.close(); }
+});
+
+test("roomless failed attachment can be explicitly stopped only after proven process exit", async t => {
+	const f = await fixture(t, true); const lifecycle = f.owner(); const id = f.manifest.conversationId;
+	f.attach = false; f.retainedAlive = true;
+	await assert.rejects(lifecycle.resumeConversation(id), /timed out/);
+	f.exits = false;
+	await assert.rejects(lifecycle.stopConversation(id), /exit is unverified/);
+	f.exits = true;
+	await lifecycle.stopConversation(id);
+	assert.equal(f.registry.conversationState(id), "dormant"); assert.ok(f.registry.managedWindow(id)?.ownership);
+	assert.equal(f.creates, 1);
+});
+
+test("roomless controls do not reinterpret unproven registration as owned process authority", async t => {
+	const f = await fixture(t, true); const id = f.manifest.conversationId;
+	const state = f.registry.snapshot(); delete state.conversations[0].ownedLocalLaunch;
+	await writeFile(join(f.root, "registry.json"), JSON.stringify(state)); await f.reload(); const lifecycle = f.owner();
+	assert.throws(() => lifecycle.stopConversation(id), /durable owned-seed authority/);
+	await assert.rejects(lifecycle.refreshApproved(id), /durable owned-seed authority/);
+	assert.deepEqual(f.calls, []);
+});
+
+test("roomless dormant refresh preserves history and binding identity", async t => {
+	const f = await fixture(t, true); const lifecycle = f.owner(); const id = f.manifest.conversationId;
+	await lifecycle.resumeConversation(id); await lifecycle.stopConversation(id);
+	const file = join(f.root, "sessions", id, "session.jsonl"); const history = await readFile(file, "utf8");
+	const result = await lifecycle.refreshApproved(id);
+	assert.equal(result.launchState, "attached"); assert.equal(f.creates, 2);
+	assert.equal(f.registry.manifestByConversationId(id), undefined); assert.equal(f.registry.hasOwnedLocalSeed(id), true);
+	assert.equal(await readFile(file, "utf8"), history);
 });
 
 test("normal launch persists exact ownership and stop verifies exit without legacy operations", async (t) => {

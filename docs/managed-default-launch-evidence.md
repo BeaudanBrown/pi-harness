@@ -64,6 +64,43 @@ ownership proof, and cannot create a requested arbitrary managed session ID.
 | Trusted dispatcher enters Pi | Ambient auto-enrollment cannot recursively re-enter; inherited PATH/worker environment cannot reuse a writer identity |
 | Local-only saved-session switch | Inspect binding before SDK opens/copies a writable target; refuse active bound history without contacting Matrix |
 
+## Pending-control integration plan
+
+#116 also owns truthful local controls for its newly owned, roomless processes.
+The shared host mutation owner must freeze registered identities, not require an
+already-provisioned room. Stop/refresh keep exact ownership and coordinator
+protection; pending terminal enrollment does not confer owned-process authority.
+
+| Boundary | Evidence planned |
+| --- | --- |
+| Private control socket → mutation owner → lifecycle | Roomless open/resume/stop through real IPC and fake exact launcher; no Matrix calls |
+| Stop after failed attachment | Verify original process exit before dormant state; retain proof/history; no automatic retry |
+| Pending binding changes after frozen consent | Reject stale approval; do not execute under newly changed binding |
+| Stop/refresh while launch is admitted | Existing per-workspace exclusion; no cancellation of in-flight launch |
+| Roomless retirement | Commit tombstone before exact cleanup; retain unresolved provisioning blocker and history; never claim remote completion |
+| Missing owned origin or coordinator target | Refuse process control before launcher effects |
+
+Implemented: the shared mutation owner now freezes registered pending/bound
+identities, including binding phase, and local stop/refresh/legacy delete admit
+only bound projects or positively owned roomless seeds. Pending terminal
+registrations remain ineligible for owned-process control. Existing kernel-proof,
+launch exclusion, coordinator protection and irreversible retirement owners are
+unchanged. Binding completion invalidates frozen consent rather than silently
+expanding it. Retirement of unresolved provisioning remains visibly blocked even
+when the exact local process was stopped; history is retained.
+
+Focused evidence: **32 passed, zero skips**, including actual private host-control
+IPC through policy/dispatcher/mutation owner/lifecycle with a fake exact launcher,
+roomless stop/resume/delete, stale consent, failed-attachment exit verification,
+missing-origin refusal and dormant refresh/history preservation:
+`.pi/tmp/workers/2026-10-06T10-42-48-609Z-roomless-controls-focused-dbf092e098e2/`.
+Affected suite: **544 passed, zero skips**:
+`.pi/tmp/workers/2026-10-06T10-43-28-358Z-roomless-controls-affected-06464a6b9930/`.
+
+These checks do not authorize deployment, live retirement, migration or account
+traffic. Launcher entrypoints and local-only guards remain separate unfinished
+acceptance within #116. This is not the final issue review or canonical gate.
+
 ## Initial source observations (not final design decisions)
 
 - `nix/module.nix` currently installs the managed ordinary extension in the normal
