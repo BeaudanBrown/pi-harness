@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { classifyLaunchMode, type LaunchModeContext } from "../config/agent/extensions/managed-sessions/launch/mode.js";
+import { inspectSavedHistory, resolveNativeSessionPath } from "../config/agent/extensions/managed-sessions/launch/history.js";
 
 const interactive: LaunchModeContext = { configured: true, localOnly: false, stdinIsTTY: true, stdoutIsTTY: true,
 	trustedDispatch: false, internalWorker: false, experimentsEnabled: false };
@@ -93,4 +95,38 @@ test("automatic workspace eligibility is read-only, Git-only and validates linke
 	}));
 	assert.equal(explicit.cwd, plain, "existing explicit non-Git support remains intact");
 	assert.deepEqual(await readdir(plain), [], "eligibility and explicit resolution create no session or workspace files");
+});
+
+test("saved history inspection uses real SDK parsing and refuses concealed or unproven authority", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	const id = randomUUID(); const header = { type: "session", version: sdk.CURRENT_SESSION_VERSION, id, cwd: process.cwd(), timestamp: new Date().toISOString() };
+	const encode = (...rows: unknown[]) => rows.map(row => JSON.stringify(row)).join("\n") + "\n";
+	const inspect = (text: string) => inspectSavedHistory(text, sdk.parseSessionEntries, sdk.CURRENT_SESSION_VERSION);
+	assert.deepEqual(inspect(encode(header)), { sessionId: id, cwd: process.cwd(), managedMarkers: false });
+	for (const customType of ["managed-session.binding", "managed-session.binding-boundary", "managed-session.binding-future", "managed-session.unbound", "managed-session.tree"]) {
+		const marker = { type: "custom", id: "scope", parentId: null, customType, data: { sessionId: id } };
+		assert.equal(inspect(encode(header, marker)).managedMarkers, true);
+		assert.equal(inspect(encode({ ...header, id: randomUUID() }, marker)).managedMarkers, false, "copied old-session metadata is not new-session authority");
+		for (const data of [undefined, null, {}, { sessionId: "" }, { sessionId: "invalid scope" }]) {
+			assert.equal(inspect(encode(header, { ...marker, data })).managedMarkers, true, "malformed scope cannot imply unbound");
+		}
+	}
+	assert.throws(() => inspect(encode(header) + '{"type":"custom",broken\n'), /safely inspected/);
+	assert.throws(() => inspect(encode(header, null)), /safely inspected/);
+	assert.throws(() => inspect(encode(header, { ...header, id: randomUUID() })), /ambiguous session header/);
+	assert.throws(() => inspect(encode({ ...header, version: sdk.CURRENT_SESSION_VERSION + 1 })), /unsupported/);
+	assert.throws(() => inspectSavedHistory(encode(header), sdk.parseSessionEntries, NaN), /Unsupported SDK/);
+});
+
+test("native path normalization agrees with public SessionManager without modifying fixture history", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-native-path-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const path = join(root, "literal # percent % ; saved.jsonl");
+	const original = JSON.stringify({ type: "session", version: sdk.CURRENT_SESSION_VERSION, id: randomUUID(), cwd: root, timestamp: new Date().toISOString() }) + "\n";
+	await writeFile(path, original);
+	for (const selector of [path, relative(process.cwd(), path), `~/${relative(homedir(), path)}`, pathToFileURL(path).href]) {
+		assert.equal(resolveNativeSessionPath(selector, process.cwd()), path);
+		assert.equal(sdk.SessionManager.open(selector).getSessionFile(), path, "only disposable existing fixtures are opened to compare SDK semantics");
+		assert.equal(await readFile(path, "utf8"), original);
+	}
 });

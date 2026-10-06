@@ -1,8 +1,9 @@
 # Default managed launch evidence (#116)
 
-Status: preflight; implementation not started. #114 is complete. This issue owns
-new eligible interactive launches and explicit resume, not adoption of already
-running ordinary sessions. No push, deployment, activation, service restart,
+Status: partial implementation; mode and Git-eligibility helpers are tested, but
+launchers do not yet auto-enroll. #114 is complete. This issue owns new eligible
+interactive launches and explicit resume, not adoption of already running
+ordinary sessions. No push, deployment, activation, service restart,
 live-account traffic or nix-dotfiles Nix evaluation/build is authorized.
 
 ## Ownership
@@ -136,6 +137,28 @@ non-Git behavior. The first check invocation selected a nonexistent flake packag
 attribute; corrected runs use `checks.x86_64-linux.managed-session-test-launcher`.
 These are harness-packaged primitive tests, not a deployed external launcher or
 end-to-end automatic launch. No launcher invokes automatic enrollment yet.
+
+## Partial implementation: saved-history inspection
+
+`launch/history.ts` inspects through the public parser without constructing a
+writable manager. Malformed lines/headers cannot conceal authority. Current-ID
+binding, pending-boundary, tree and unbound markers are conservatively treated as
+managed evidence; an offline unbound marker alone cannot prove host release.
+Genuine new-ID copies retain foreign-ID metadata without acquiring its authority.
+This is **not yet a complete ownership guard**: callers must also validate owned
+paths/identities and host state before any writable resume.
+
+POSIX relative, absolute, tilde and file-URL path normalization agrees with the
+public `SessionManager.open` API on disposable existing fixtures, whose bytes stay
+unchanged. Production inspection does not open a writable manager. All six focused
+tests passed on each SDK version, zero skips, with TypeScript/package checks:
+`.pi/tmp/workers/2026-10-06T04-08-24-157Z-default-launch-history-sdk-focused-3c7f95089b49/`.
+
+Further public seams observed, not yet integrated: `main(args)` can retain native
+CLI execution after pre-open selection; `migrateSessionEntries` permits native
+in-memory format migration before publishing a fresh owned file. No private SDK
+field or persistence patch is needed. Argument rewriting must remain parser-backed
+and preserve literal values and resources, including `--` and extension flags.
 
 Argument transport, saved-session resolution/guards, local-first lifecycle and
 launcher wiring remain to be implemented and verified. Preflight findings are
