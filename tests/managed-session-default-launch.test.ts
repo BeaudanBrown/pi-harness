@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { dirname, join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { classifyLaunchMode, type LaunchModeContext } from "../config/agent/extensions/managed-sessions/launch/mode.js";
@@ -54,4 +57,40 @@ test("intentional dispatch and local-only are not automatic-launch candidates an
 	assert.deepEqual(classifyLaunchMode(argv, parsed, { ...interactive, trustedDispatch: true, localOnly: true }), { kind: "local-only" });
 	assert.equal(parsed.apiKey, "fixture-not-for-host-ipc", "classifier never mutates native arguments");
 	assert.equal(JSON.stringify(classifyLaunchMode(argv, parsed, interactive)).includes("fixture-not-for-host-ipc"), false);
+});
+
+test("automatic workspace eligibility is read-only, Git-only and validates linked checkout identity", async t => {
+	const launcher = process.env.PI_MANAGED_TEST_LAUNCHER; if (!launcher) return t.skip("packaged launcher unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-auto-workspace-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const workspaces = join(root, "configured roots"); const main = join(workspaces, "main"); const plain = join(workspaces, "plain");
+	await mkdir(main, { recursive: true }); await mkdir(plain);
+	const env = { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", PI_MANAGED_TEST_WORKSPACE_ROOT: workspaces,
+		PI_MANAGED_TEST_TMUX_SOCKET: `unused-auto-${process.pid}`, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify({ projects: workspaces }) };
+	const git = (args: string[]) => execFileSync("git", args, { env, cwd: root, stdio: "pipe" });
+	git(["-C", main, "init", "-b", "main"]);
+	git(["-C", main, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--no-gpg-sign", "--allow-empty", "-m", "fixture"]);
+	const invoke = (cwd: string, roots: Record<string, string> = { projects: workspaces }) => JSON.parse(execFileSync(launcher, ["managed", "workspace-identify-auto"], {
+		input: JSON.stringify({ cwd }), encoding: "utf8", cwd: root, stdio: "pipe", env: { ...env, PI_MANAGED_SESSIONS_WORKSPACE_ROOTS: JSON.stringify(roots) },
+	}));
+	assert.deepEqual(invoke(plain), { eligible: false, reason: "not-git-checkout" });
+	assert.deepEqual(invoke(main), { eligible: true, placement: { rootKey: "projects", workspace: "main", relativeCwd: "" }, cwd: main });
+	const relative = "literal $(touch CANARY) ; punctuation"; const subdir = join(main, relative); await mkdir(subdir);
+	assert.deepEqual(invoke(subdir, { outer: root, projects: workspaces, absent: join(root, "missing") }), {
+		eligible: true, placement: { rootKey: "projects", workspace: "main", relativeCwd: relative }, cwd: subdir,
+	});
+	assert.equal((await readdir(root)).includes("CANARY"), false, "literal cwd cannot execute shell text");
+	const linked = join(workspaces, "linked"); git(["-C", main, "worktree", "add", linked, "-b", "linked"]);
+	assert.equal(invoke(linked).eligible, true);
+	const forged = join(workspaces, "forged"); await mkdir(forged); await writeFile(join(forged, ".git"), await readFile(join(linked, ".git")));
+	assert.throws(() => invoke(forged), "a copied gitdir pointer is not a registered linked checkout");
+	const nested = join(main, "nested-repo"); await mkdir(nested); git(["-C", nested, "init", "-b", "main"]);
+	assert.deepEqual(invoke(nested), { eligible: false, reason: "outside-configured-checkouts" }, "never bind a nested repo as the enclosing checkout");
+	const outside = join(root, "outside"); await mkdir(outside); git(["-C", outside, "init", "-b", "main"]);
+	assert.deepEqual(invoke(outside), { eligible: false, reason: "outside-configured-checkouts" });
+	assert.throws(() => invoke(main, { first: workspaces, second: workspaces }), /Ambiguous configured checkout roots/, "duplicate root authorities are ambiguous before resolver dispatch");
+	const explicit = JSON.parse(execFileSync(launcher, ["managed", "workspace-resolve"], {
+		input: JSON.stringify({ rootKey: "projects", workspace: "plain", relativeCwd: "" }), encoding: "utf8", cwd: root, env, stdio: "pipe",
+	}));
+	assert.equal(explicit.cwd, plain, "existing explicit non-Git support remains intact");
+	assert.deepEqual(await readdir(plain), [], "eligibility and explicit resolution create no session or workspace files");
 });

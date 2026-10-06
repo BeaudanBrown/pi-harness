@@ -18,6 +18,7 @@ pkgs.writeShellApplication {
       } | sha256sum | cut -c1-32
     }
     ${builtins.readFile ./managed-worktree-lifecycle.sh}
+    ${builtins.readFile ./managed-auto-workspace.sh}
 
     if [[ "$operation" == workspace-identify ]]; then
       requested_cwd=$(jq -er '.cwd | select(type == "string" and length >= 1 and length <= 4096 and startswith("/") and (test("[\u0000-\u001f\u007f]") | not))' <<<"$request")

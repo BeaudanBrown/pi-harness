@@ -115,6 +115,28 @@ skips: `.pi/tmp/workers/2026-10-06T03-18-19-322Z-default-launch-mode-sdk-focused
 Project LSP and staged diff checks were clean. This partial step has not run an
 issue review or final canonical gate.
 
+## Partial implementation: trusted automatic workspace classification
+
+`workspace-identify-auto` in the existing packaged launcher is read-only and
+reuses its existing trusted `workspace-resolve` validation. It admits only Git
+checkouts that are real immediate children of a configured root, including
+registered linked worktrees with the correct gitdir backlink. A nested checkout
+is never mistaken for its parent. Nested named roots are disambiguated by the
+actual checkout parent; duplicate matching root authorities fail closed. Missing
+unrelated roots do not disable valid local checkouts. Non-Git/out-of-root results
+are explicitly ineligible; a failed eligible-checkout proof is an error, not a
+silent standalone fallback. Existing explicit non-Git operations are unchanged.
+
+TypeScript and packaged shell validation passed. Four focused launch tests and
+the existing project-create/trust confinement regression passed (five selected,
+zero skips): `.pi/tmp/workers/2026-10-06T03-46-52-080Z-default-launch-workspace-affected-a4d6e3e73b56/`.
+Fixtures covered literal cwd punctuation/spaces, linked and forged gitdir
+pointers, nested checkouts, overlapping/duplicate roots, and unchanged explicit
+non-Git behavior. The first check invocation selected a nonexistent flake package
+attribute; corrected runs use `checks.x86_64-linux.managed-session-test-launcher`.
+These are harness-packaged primitive tests, not a deployed external launcher or
+end-to-end automatic launch. No launcher invokes automatic enrollment yet.
+
 Argument transport, saved-session resolution/guards, local-first lifecycle and
 launcher wiring remain to be implemented and verified. Preflight findings are
 not acceptance of #116. These plans do not authorize live account effects or
