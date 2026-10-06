@@ -8,7 +8,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { classifyLaunchMode, type LaunchModeContext } from "../config/agent/extensions/managed-sessions/launch/mode.js";
 import { inspectSavedHistory, resolveNativeSessionPath } from "../config/agent/extensions/managed-sessions/launch/history.js";
-import { assertBasicManagedInvocation } from "../config/agent/extensions/managed-sessions/launch/arguments.js";
+import { assertBasicManagedInvocation, resolveBasicSessionSelection } from "../config/agent/extensions/managed-sessions/launch/arguments.js";
 
 const interactive: LaunchModeContext = { configured: true, localOnly: false, stdinIsTTY: true, stdoutIsTTY: true,
 	trustedDispatch: false, internalWorker: false, experimentsEnabled: false };
@@ -141,6 +141,35 @@ test("basic managed invocation refuses overrides without echoing secrets or sile
 		assert.throws(() => assertBasicManagedInvocation(sdk.parseArgs(argv)), error => error instanceof Error && error.message.includes("pi-local-only") && !error.message.includes("fixture-secret"));
 	}
 	assert.throws(() => assertBasicManagedInvocation({ ...sdk.parseArgs([]), futureOption: true }), /pi-local-only/);
+});
+
+test("basic resume resolution uses read-only SDK lists, refuses ambiguity and never creates a requested ID", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-resume-selection-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const files = new Map<string, string>();
+	for (const [id, cwd] of [["session-one", root], ["session-two", root], ["foreign-one", join(root, "foreign")]]) {
+		const path = join(root, `${id}.jsonl`); const timestamp = new Date().toISOString();
+		const text = [JSON.stringify({ type: "session", version: sdk.CURRENT_SESSION_VERSION, id, cwd, timestamp }),
+			JSON.stringify({ type: "message", id: "user-entry", parentId: null, timestamp, message: { role: "user", content: "Fixture history", timestamp: Date.now() } })].join("\n") + "\n";
+		files.set(path, text); await writeFile(path, text);
+	}
+	const choose = (argv: string[]) => resolveBasicSessionSelection(sdk.parseArgs(argv), root, sdk.SessionManager, resolveNativeSessionPath);
+	assert.deepEqual(await choose([]), { kind: "fresh" });
+	assert.deepEqual(await choose(["--session", "./session-one.jsonl"]), { kind: "saved", source: "path", path: join(root, "session-one.jsonl") });
+	assert.deepEqual(await choose(["--session", "session-one", "--session-dir", root]), { kind: "saved", source: "local", path: join(root, "session-one.jsonl") });
+	assert.deepEqual(await choose(["--session", "foreign", "--session-dir", root]), { kind: "saved", source: "global", path: join(root, "foreign-one.jsonl") });
+	await assert.rejects(choose(["--session", "session", "--session-dir", root]), /ambiguous/);
+	await assert.rejects(choose(["--session-id", "foreign-one", "--session-dir", root]), /existing history/);
+	await assert.rejects(choose(["--session-id", "not-created", "--session-dir", root]), /existing history/);
+	const picker = await choose(["-r", "--session-dir", root]);
+	assert.equal(picker.kind, "picker"); if (picker.kind === "picker") assert.deepEqual(picker.candidates.map(row => row.id).sort(), ["session-one", "session-two"]);
+	const recent = await choose(["-c", "--session-dir", root]);
+	assert.equal(recent.kind, "saved"); if (recent.kind === "saved") assert.equal(recent.path, (await sdk.SessionManager.list(root, root))[0].path);
+	for (const id of ["bad:id", "bad-", "_bad"]) {
+		assert.throws(() => sdk.SessionManager.inMemory(root, { id }));
+		await assert.rejects(choose(["--session-id", id]), /Invalid native session ID/);
+	}
+	for (const [path, text] of files) assert.equal(await readFile(path, "utf8"), text);
 });
 
 test("native path normalization agrees with public SessionManager without modifying fixture history",  async t => {

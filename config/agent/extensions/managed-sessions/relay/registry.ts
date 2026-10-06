@@ -59,7 +59,7 @@ function expectedRole(manifest: RegisteredConversation): AdapterRole {
 }
 
 export interface RegistryConversationMetadata {
-	conversationId: string; kind: "project" | "coordinator"; title: string; activeGenerationId: string;
+	conversationId: string; kind: "project" | "coordinator"; title: string; activeGenerationId: string; sessionId?: string;
 	attached: boolean; matrixBound: boolean; placement?: WorkspaceIdentity; projectKey?: string; checkoutId?: string;
 	projectDisplayName?: string; checkoutDisplayName?: string;
 }
@@ -493,7 +493,7 @@ export class RelayRegistry {
 			const state = runtime.get(manifest.conversationId);
 			return {
 				conversationId: manifest.conversationId, kind: manifest.kind, title: manifest.title ?? manifest.concept,
-				activeGenerationId: this.activeGeneration(manifest).generationId,
+				activeGenerationId: this.activeGeneration(manifest).generationId, sessionId: manifest.piSessionId,
 				attached: Boolean(this.liveConnections.has(manifest.conversationId) && state?.state === "active" && state.attachment?.sessionId === manifest.piSessionId),
 				matrixBound: hasMatrixBinding(manifest),
 				...(manifest.kind === "project" ? { ...(manifest.placement ? { placement: { ...manifest.placement } } : {}),

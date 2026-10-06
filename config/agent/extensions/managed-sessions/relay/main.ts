@@ -441,7 +441,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			cancelApprovals: (conversationId) => hostApprovals?.cancelRun(conversationId),
 			onFailure: () => process.stderr.write("pi-managed-session-relay: retirement cleanup is pending\n") });
 		if (hostPolicy) {
-			const reads = new HostReadModel({ hostId, registry, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
+			const reads = new HostReadModel({ hostId, registry, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
 			} });

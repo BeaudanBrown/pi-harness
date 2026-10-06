@@ -6,6 +6,13 @@ import { Check } from "typebox/value";
 import { ConversationIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 import { ForkSummarySchema, parseForkSummary } from "./fork-context.js";
 
+/** Opaque discovery key, not ownership authority; never expose native session IDs. */
+export function savedSessionKey(hostId: string, sessionId: string): string {
+	const hash = createHash("sha256").update("pi-managed-sessions:saved-session:live-v1\0");
+	for (const part of [hostId, sessionId]) hash.update(`${Buffer.byteLength(part)}:`).update(part);
+	return `session_${hash.digest("hex").slice(0, 32)}`;
+}
+
 export const HOST_CONTROL_VERSION = "1.0.0" as const;
 export const HOST_CONTROL_FRAME_BYTES = 64 * 1024;
 export const ACCOUNT_ACTION_VERSION = "1.0.0" as const;
@@ -14,7 +21,7 @@ export const HOST_INVENTORY_PAGE_SIZE = 50;
 export const HOST_INVENTORY_MAX_PAGE_SIZE = 100;
 export const LIVE_WORKSPACE_CAPABILITIES = [
 	"host-control-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
-	"commentary-v1", "notification-disposition-v1", "window-first-open-v1",
+	"commentary-v1", "notification-disposition-v1", "window-first-open-v1", "saved-session-open-v1",
 ] as const;
 const strict = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
 const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
@@ -47,7 +54,7 @@ export const HostActionSchema = Type.Union([
 	action("conversation.list", page),
 	action("conversation.status", target),
 	action("conversation.create", { ...creation, placement: WorkspaceIdentitySchema }),
-	action("conversation.open", target),
+	action("conversation.open", { ...target, expectedGenerationId: Type.Optional(stable("generation")) }),
 	action("conversation.resume", target),
 	action("conversation.stop", target),
 	action("conversation.refresh", { ...target, confirmed: Type.Literal(true) }),
@@ -109,7 +116,7 @@ const cleanupState = enumeration(["pending", "complete", "failed"]);
 const errorCode = enumeration(Object.keys(HOST_ERROR_EXITS) as Array<keyof typeof HOST_ERROR_EXITS>);
 const capabilities = Type.Array(enumeration([...LIVE_WORKSPACE_CAPABILITIES]), { maxItems: LIVE_WORKSPACE_CAPABILITIES.length, uniqueItems: true });
 const windowSchema = strict({ sessionName: text(128), windowId: Type.String({ pattern: "^@[0-9]+$" }), paneId: Type.String({ pattern: "^%[0-9]+$" }), conversationId: ConversationIdSchema });
-const summaryFields = { conversationId: ConversationIdSchema, title: text(128), runtimeState, launchState, setupState, activeGenerationId: stable("generation"), window: Type.Optional(windowSchema), errorCode: Type.Optional(errorCode), capabilities };
+const summaryFields = { conversationId: ConversationIdSchema, title: text(128), runtimeState, launchState, setupState, activeGenerationId: stable("generation"), sessionKey: Type.Optional(stable("session")), window: Type.Optional(windowSchema), errorCode: Type.Optional(errorCode), capabilities };
 const displayFields = { projectDisplayName: Type.Optional(text(128)), checkoutDisplayName: Type.Optional(text(128)) };
 const projectSummaryFields = { placement: Type.Optional(WorkspaceIdentitySchema), ...displayFields };
 const summary = Type.Union([

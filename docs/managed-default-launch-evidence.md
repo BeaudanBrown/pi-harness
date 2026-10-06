@@ -282,8 +282,40 @@ An ad-hoc run of the broader lifecycle file omitted its packaged environment,
 skipped five probes and failed a launcher probe; that is not acceptance evidence.
 The properly packaged full suite above passed that probe without changing it.
 
-Saved-session selection/full ownership guards and launcher wiring remain to be
-implemented and verified. Typed pending-control presentation also needs checking
+## Partial implementation: read-only saved selection and guarded reuse
+
+`resolveBasicSessionSelection` uses the public SDK `list`/`listAll` without opening
+a writable manager. It follows native local-before-global matching and explicit
+path precedence, returns picker candidates without selecting implicitly, and
+uses newest-first SDK order for continue. Unlike native prefix-first guessing,
+ambiguous matches are refused. `--session-id` must identify existing local history,
+not impose a caller-chosen identity on a new managed conversation. Invalid IDs
+are checked against actual public SDK in-memory construction in tests. Lists over
+4096 candidates require explicit file selection. No host admission follows from
+this helper alone.
+
+Nine focused helpers pass on **each actual SDK 0.84.4 and 0.85.0, zero skips**:
+`.pi/tmp/workers/2026-10-06T07-37-43-659Z-default-launch-resume-resolution-sdk-300314b92b82/`.
+Fixtures verify local/global/path selection, picker/continue, ambiguous prefixes,
+missing exact IDs, and unchanged saved bytes.
+
+The public host read model now supplies an optional host-scoped opaque
+`sessionKey` for active native identity. Raw native session IDs stay private. The
+`saved-session-open-v1` capability allows `conversation.open` to carry an expected
+generation through the existing mutation owner. It is checked before effects and
+after exact-window observation, preventing a reset race from silently opening a
+successor. The key uses SHA-256 domain `pi-managed-sessions:saved-session:live-v1`
+with a NUL separator and UTF-8 byte-length framing of host/session IDs, truncated
+to 32 hex characters with `session_` prefix. It is not an authorization token.
+
+The first broad run caught raw native-ID disclosure in the unchanged production
+IPC privacy assertion (538/539). Production output was corrected to the opaque
+key; the privacy assertion was not weakened. Latest affected managed suite:
+**539 passed, zero skips**:
+`.pi/tmp/workers/2026-10-06T07-49-11-156Z-saved-resume-private-identity-affected-6d1e8fb04c64/`.
+
+Full saved-file/retirement ownership integration, requesting-client targeting,
+local-only guards and launcher wiring remain to be implemented and verified. Typed pending-control presentation also needs checking
 against the final integrated path; bound-only controls have not been generalized. General startup transport is out of
 scope under the approved simplification. Preflight findings are
 not acceptance of #116. These plans do not authorize live account effects or

@@ -82,6 +82,17 @@ flags, except a sole conversation ID is positional. Workspace operations use
 `--relative-cwd` (default empty). No prefix/title lookup or arbitrary tmux target
 is accepted. No shell interpolation or caller-provided executable/path exists.
 
+`saved-session-open-v1` advertises guarded saved-history reuse. Inventory may
+include an opaque host-scoped `sessionKey`, never a raw native session ID or file
+path. It is a discovery hint, not ownership authority. A saved-history frontend
+must resolve exactly one matching row and send its `activeGenerationId` as
+`conversation.open.expectedGenerationId`. The owner checks that generation before
+effects and again after asynchronous exact-window observation; changes require
+explicit reselection, not implicit opening of the successor generation. Older
+hosts without the capability cannot authorize this flow. Strict older clients
+may require refresh for the extended inventory schema; never strip unknown
+identity fields to manufacture compatibility.
+
 | Action ID | Required fields (optional in parentheses) | Result data |
 | --- | --- | --- |
 | host.status | none | hostId, relayState, capabilities, accountState |

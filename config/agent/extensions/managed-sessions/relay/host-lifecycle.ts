@@ -1220,8 +1220,8 @@ export class HostLifecycle {
 	}
 
 	/** Returns an exact target, never switches a client, and does not cancel readiness observation. */
-	async openConversation(conversationId: string): Promise<HostResult<"conversation.open">> {
-		const manifest = this.launchManifest(conversationId);
+	async openConversation(conversationId: string, expectedGenerationId?: string): Promise<HostResult<"conversation.open">> {
+		const manifest = this.launchManifest(conversationId, expectedGenerationId);
 		const running = this.worktreeOperations.get(this.launchOperationKey(manifest));
 		if (running && running.identity !== `launch:${conversationId}` && !running.identity?.startsWith(`create:${conversationId}:`)) {
 			throw new RelayRegistryError("invalid_state", "Conflicting workspace operation is already in progress; retry explicitly");
@@ -1248,7 +1248,7 @@ export class HostLifecycle {
 		if (await this.exactWindows.check(window.ownership) !== "match") {
 			throw new RelayRegistryError("launch_failed", "Open target disappeared or changed; inspect the retained window before retry");
 		}
-		this.launchManifest(conversationId); // Retirement wins an asynchronous observation.
+		this.launchManifest(conversationId, expectedGenerationId); // Retirement or generation change wins an asynchronous observation.
 		if (!isDeepStrictEqual(window, this.options.registry.managedWindow(conversationId))) {
 			throw new RelayRegistryError("invalid_state", "Open target changed during observation");
 		}
@@ -1400,9 +1400,12 @@ export class HostLifecycle {
 			cleanupState: retired.cleanup?.some((effect) => effect.phase === "blocked") ? "failed" : retired.cleanup ? "pending" : "complete" };
 	}
 
-	private launchManifest(conversationId: string): RegisteredConversation {
+	private launchManifest(conversationId: string, expectedGenerationId?: string): RegisteredConversation {
 		const manifest = this.options.registry.registeredConversation(conversationId);
 		if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+		if (expectedGenerationId !== undefined && this.options.registry.activeGeneration(manifest).generationId !== expectedGenerationId) {
+			throw new RelayRegistryError("invalid_state", "Saved-session generation changed; resolve the selection again");
+		}
 		if (!hasMatrixBinding(manifest) && !this.options.registry.hasOwnedLocalSeed(conversationId)) {
 			throw new RelayRegistryError("invalid_state", "Roomless launch requires durable owned-seed authority");
 		}

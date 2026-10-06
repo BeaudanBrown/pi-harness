@@ -1,4 +1,4 @@
-import { HOST_CONTROL_VERSION, parseHostResponse, type HostConversationSummary, type HostResult } from "../live-workspace-contracts.js";
+import { HOST_CONTROL_VERSION, parseHostResponse, savedSessionKey, type HostConversationSummary, type HostResult } from "../live-workspace-contracts.js";
 import type { RuntimeObservation } from "./runtime-observer.js";
 import { HostControlError } from "./host-control-error.js";
 import { HostInventoryPages } from "./host-inventory-pages.js";
@@ -17,14 +17,14 @@ export class HostReadModel {
 	private readonly now: () => number;
 	constructor(private readonly options: {
 		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean; accountState?: () => "ready" | "pending" | "unavailable"; accountSetup?: (id: string) => "ready" | "pending" | "notification_setup_uncertain";
-		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; now?: () => number; runtimeObservations?: () => ReadonlyMap<string, RuntimeObservation>;
+		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; savedSessionOpen?: boolean; now?: () => number; runtimeObservations?: () => ReadonlyMap<string, RuntimeObservation>;
 	}) { this.options = { ...options }; this.now = options.now ?? (() => performance.now()); this.pages = new HostInventoryPages(options.hostId, this.now); }
 
 	async read(request: HostReadRequest): Promise<unknown> {
 		const action = request.action;
 		switch (action.operation) {
 			case "host.status": return { hostId: this.options.hostId, relayState: this.options.matrixReady() ? "ready" : "disconnected",
-				capabilities: this.options.windowFirstOpen ? ["host-control-v1", "window-first-open-v1"] : ["host-control-v1"], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
+				capabilities: ["host-control-v1", ...(this.options.windowFirstOpen ? ["window-first-open-v1" as const] : []), ...(this.options.savedSessionOpen ? ["saved-session-open-v1" as const] : [])], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
 			case "conversation.list": return this.pages.page(action, this.conversations());
 			case "conversation.status": {
 				const retired = this.options.registry.retirement(action.conversationId);
@@ -70,6 +70,7 @@ export class HostReadModel {
 		return this.options.registry.conversationMetadata().map((item): HostConversationSummary => {
 			const observation = observations?.get(item.conversationId);
 			const common = { conversationId: item.conversationId, title: item.title, activeGenerationId: item.activeGenerationId,
+				...(item.sessionId ? { sessionKey: savedSessionKey(this.options.hostId, item.sessionId) } : {}),
 				runtimeState: observation?.runtimeState ?? "unknown" as const, launchState: observation?.launchState ?? (item.attached ? "attached" as const : "none" as const),
 				setupState: !item.matrixBound ? "pending" as const : !this.options.matrixReady() ? "disconnected" as const : this.options.accountSetup?.(item.conversationId) ?? "pending" as const,
 				capabilities: ["host-control-v1" as const] };

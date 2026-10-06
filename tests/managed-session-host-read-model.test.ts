@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { readHostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
 import { HostReadModel } from "../config/agent/extensions/managed-sessions/relay/host-read-model.js";
-import { parseHostResponse, HOST_CONTROL_VERSION, type HostReadAction } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
+import { parseHostResponse, savedSessionKey, HOST_CONTROL_VERSION, type HostReadAction } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
 import type { RetirementRecord } from "../config/agent/extensions/managed-sessions/relay/retirement-store.js";
 import type { RegistryConversationMetadata } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 
@@ -41,6 +41,23 @@ test("retired status reports cleanup without exposing receipts or returning a re
 	}
 	assert.equal(inventoryReads, 0, "retirement lookup does not sweep ordinary inventories");
 	const result = await read(model, { operation: "conversation.list" }); assert.ok(result.ok); assert.deepEqual(result.data.items, []);
+});
+
+test("saved-session discovery exposes opaque active identity and advertises guarded open explicitly", async () => {
+	const registry = { conversationMetadata: () => [{ ...base, sessionId: "saved-native-id" }], retirement: () => undefined };
+	const model = new HostReadModel({ hostId: "host", registry, matrixReady: () => false, windowFirstOpen: true, savedSessionOpen: true });
+	const host = await read(model, { operation: "host.status" }); assert.ok(host.ok);
+	assert.ok(host.data.capabilities.includes("saved-session-open-v1"));
+	const rows = await read(model, { operation: "conversation.list" }); assert.ok(rows.ok);
+	assert.equal(rows.data.items[0].sessionKey, savedSessionKey("host", "saved-native-id"));
+	assert.equal(JSON.stringify(rows).includes("saved-native-id"), false);
+	assert.notEqual(savedSessionKey("host", "saved-native-id"), savedSessionKey("other", "saved-native-id"));
+	assert.notEqual(savedSessionKey("ab", "c"), savedSessionKey("a", "bc"));
+	assert.equal(rows.data.items[0].activeGenerationId, base.activeGenerationId);
+	assert.equal(rows.data.items[0].setupState, "pending");
+	assert.equal("sessionFile" in rows.data.items[0], false);
+	const unavailable = await read(new HostReadModel({ hostId: "host", registry, matrixReady: () => false }), { operation: "host.status" });
+	assert.ok(unavailable.ok); assert.equal(unavailable.data.capabilities.includes("saved-session-open-v1"), false);
 });
 
 test("host reads share one observation snapshot and never override exact stopped or unknown evidence", async () => {

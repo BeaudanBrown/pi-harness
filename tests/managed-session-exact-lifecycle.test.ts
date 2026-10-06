@@ -41,6 +41,7 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false) {
 	let inspectError = false;
 	let attach = true; let retainedAlive = false; let unknownCreate = false; let invalidProof = false; let exits = true; let creates = 0;
 	let beforeCreate: (() => Promise<void>) | undefined;
+	let beforeCheck: (() => Promise<void>) | undefined;
 	let launchNonce: string | undefined;
 	const calls: string[] = [];
 	const server = { attachment: () => undefined, sendToAttachment: () => true } as unknown as ManagedSessionIpcServer;
@@ -73,7 +74,7 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false) {
 						payload: { sessionId, attachmentNonce: env.PI_MANAGED_SESSION_ATTACHMENT_NONCE!, bindingBoundaryEntryId: manifest.bindingBoundaryEntryId, ...(roomless ? { requestedCapabilities: ["local-enrollment-v1"] } : {}) } }, `connection-${creates}`);
 					return { ...manifest.placement, conversationId, role: "conversation", sessionName: proof.sessionName, windowId: proof.windowId, paneId: proof.paneId, ownership: invalidProof ? { ...proof, processBootId: undefined } : proof };
 				}
-				case "window-check-exact": assert.deepEqual(request, proof); return { state };
+				case "window-check-exact": assert.deepEqual(request, proof); await beforeCheck?.(); return { state };
 				case "window-terminate-exact":
 					assert.deepEqual(request, proof);
 					if (exits) { state = "gone"; await registry.markDormant(conversationId); }
@@ -87,6 +88,7 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false) {
 		set inspectError(value: boolean) { inspectError = value; },
 		set attach(value: boolean) { attach = value; }, set retainedAlive(value: boolean) { retainedAlive = value; }, set unknownCreate(value: boolean) { unknownCreate = value; },
 		set beforeCreate(value: () => Promise<void>) { beforeCreate = value; },
+		set beforeCheck(value: () => Promise<void>) { beforeCheck = value; },
 		set invalidProof(value: boolean) { invalidProof = value; },
 		set exits(value: boolean) { exits = value; }, set state(value: typeof state) { state = value; },
 		async attachNow() {
@@ -100,6 +102,22 @@ function request(conversationId: string, operation: "conversation.stop" | "conve
 	return { protocolVersion: "1.0.0" as const, messageId: "request", conversationId, role: "coordinator_adapter" as const, type: "lifecycle.request" as const,
 		payload: { request: { operation, targetConversationId: conversationId } } };
 }
+
+test("saved-session open fences its generation before effects and after asynchronous observation", async t => {
+	const f = await fixture(t); const owner = f.owner(); const id = f.manifest.conversationId;
+	const generation = deriveGenerationId(id, 1);
+	await assert.rejects(owner.openConversation(id, deriveGenerationId(id, 2)), /generation changed/);
+	assert.deepEqual(f.calls, []); assert.equal(f.creates, 0);
+	await owner.openConversation(id, generation);
+	assert.equal(f.registry.conversationMetadata()[0].sessionId, f.manifest.piSessionId);
+	f.beforeCheck = async () => {
+		const transition = await f.registry.beginGenerationTransition(id, `control_${"3".repeat(32)}`, {});
+		await f.registry.recordGenerationSession(id, transition.transitionId, { sessionId: "new-generation", boundaryEntryId: deriveTranscriptEntryId("new-generation", "boundary") });
+		await f.registry.activateGeneration(id, transition.transitionId);
+	};
+	await assert.rejects(owner.openConversation(id, generation), /generation changed/);
+	assert.equal(f.creates, 1);
+});
 
 test("fresh hierarchy-backed start persists and launches locally while Matrix bootstrap is unavailable", async t => {
 	const f = await fixture(t, "fresh"); const owner = f.owner();

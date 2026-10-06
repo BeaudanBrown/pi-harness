@@ -213,7 +213,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		const target = action as Extract<HostAction, { operation: "conversation.open" | "conversation.resume" | "conversation.stop" | "conversation.refresh" }>;
 		// Synchronous target recheck and lifecycle admission have no intervening await.
 		if (!isDeepStrictEqual(this.target(target.conversationId), frozen.preconditions.target)) throw stale();
-		if (target.operation === "conversation.open") return this.options.lifecycle.openConversation(target.conversationId);
+		if (target.operation === "conversation.open") return this.options.lifecycle.openConversation(target.conversationId, target.expectedGenerationId);
 		if (target.operation === "conversation.resume") return this.options.lifecycle.resumeConversation(target.conversationId);
 		if (target.operation === "conversation.refresh") {
 			const saved = frozen.preconditions.target as { attachmentId: string | null };
