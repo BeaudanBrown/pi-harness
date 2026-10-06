@@ -1,9 +1,9 @@
 # Native managed navigation evidence (#114)
 
-Status: implementation in progress under revised operator scope. Keep the working
-Matrix process-replacement reset; defer native new/fork handoff and add bound
-navigation guards. No SDK patch is authorized or needed for this revised scope.
-Safe tree projection remains in scope; no deployment/live acceptance.
+Status: revised #114 implementation complete and deterministically verified.
+The working Matrix process-replacement reset is retained; native new/fork handoff
+is deferred with bound navigation guards. Safe tree projection is implemented.
+No SDK patch, push, deployment, activation or live-account acceptance was performed.
 
 ## Superseding operator decision
 
@@ -41,8 +41,9 @@ including existing confirmed Matrix reset/generation protection tests:
 The first affected run identified the now-obsolete RPC expectation; it was updated
 to verify actual veto responses rather than weakening the test.
 
-The guard slice alone is not completion of #114 or the epic. The tree implementation
-below is under final affected-suite and review verification.
+The guard slice alone was not completion of #114. The tree implementation,
+review remediation and final verification below complete the revised issue scope;
+the epic and live acceptance remain open.
 
 ### Current tree acceptance/crash plan
 
@@ -110,9 +111,8 @@ RPC reconnect condition instead of a fixed sleep. Final focused guard/revisit/re
 checks also passed against both actual SDK 0.84.4 and 0.85.0, including explicit
 legacy-relay tree rejection (four checks, no skips):
 `.pi/tmp/workers/2026-10-06T02-28-43-582Z-tree-final-sdk-guards-92d5d2f70be0/`.
-Final review and canonical
-evidence remain pending; these are deterministic tests, not live Matrix/phone
-acceptance.
+These are deterministic tests, not live Matrix/phone acceptance. Final review and
+canonical results follow.
 
 ### Pinned issue review and remediation
 
@@ -134,6 +134,25 @@ text/image/status routing passed, **3 tests, no skips**:
 Admission becomes available once all chunks and poll closure complete, without
 consuming input or changing attachment state. No additional subjective pass was
 needed for this bounded correction; final canonical verification follows.
+
+### Final verification
+
+`nix run .#verify` passed after review remediation `c207ad8`: **all 12 groups**,
+**520 managed tests and 87 bridge-chat tests, zero skips**. Saved logs:
+`.pi/tmp/workers/2026-10-06T02-40-12-216Z-native-navigation-final-canonical-afe931364eaf/`.
+Managed derivation `/nix/store/2h97p5srlrkcjd5nxpmyn96yl63iyciy-pi-harness-managed-session-tests.drv`;
+bridge derivation `/nix/store/0ffjrhg52pf9b27b2frc60lnaibl5hp6-pi-bridge-chat-tests.drv`.
+Changed project files have clean LSP diagnostics and `git diff --check` passed.
+Unrelated immutable SDK-example, external Go workspace and settings-schema
+warnings remain outside this issue. No LSP implementation changed.
+
+Implementation commits: guard `74e4286` / revised scope `1a696cc`, tree `cf7e946`,
+review correction `c207ad8`. Native new/fork successor handoff remains explicitly
+deferred; older SDK interrupted-tree recovery is conservative as documented above.
+No unresolved current-issue review findings. Cumulative epic review, enrollment,
+migration, picker/configuration and separately authorized desktop/Element X live
+acceptance remain #116–#121. Nothing was pushed or deployed; no nix-dotfiles Nix
+evaluation/build, service restart, live retirement/migration or account traffic.
 
 ## Original ownership and implementation boundaries (superseded)
 
