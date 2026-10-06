@@ -8,6 +8,7 @@ import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { classifyLaunchMode, type LaunchModeContext } from "../config/agent/extensions/managed-sessions/launch/mode.js";
 import { inspectSavedHistory, resolveNativeSessionPath } from "../config/agent/extensions/managed-sessions/launch/history.js";
+import { managedInvocationArguments } from "../config/agent/extensions/managed-sessions/launch/arguments.js";
 
 const interactive: LaunchModeContext = { configured: true, localOnly: false, stdinIsTTY: true, stdoutIsTTY: true,
 	trustedDispatch: false, internalWorker: false, experimentsEnabled: false };
@@ -21,7 +22,7 @@ async function realSdk() {
 test("default launch mode follows real Pi parsing rather than option-looking prompt text", async t => {
 	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
 	const rows: Array<[string[], string, string | undefined]> = [
-		[[], "candidate", undefined], [["--mode", "text"], "candidate", undefined],
+		[[], "candidate", undefined], [["--mode", "text"], "candidate", undefined], [["--export", ""], "candidate", undefined],
 		[["--", "--print", "--mode", "rpc"], "candidate", undefined],
 		[["--extension", "--print"], "candidate", undefined],
 		[["--mode", "rpc"], "native", "headless"], [["--mode", "json"], "native", "headless"],
@@ -103,14 +104,15 @@ test("saved history inspection uses real SDK parsing and refuses concealed or un
 	const encode = (...rows: unknown[]) => rows.map(row => JSON.stringify(row)).join("\n") + "\n";
 	const inspect = (text: string) => inspectSavedHistory(text, sdk.parseSessionEntries, sdk.CURRENT_SESSION_VERSION);
 	assert.deepEqual(inspect(encode(header)), { sessionId: id, cwd: process.cwd(), managedMarkers: false });
-	for (const customType of ["managed-session.binding", "managed-session.binding-boundary", "managed-session.binding-future", "managed-session.unbound", "managed-session.tree"]) {
-		const marker = { type: "custom", id: "scope", parentId: null, customType, data: { sessionId: id } };
+	for (const customType of ["managed-session.binding", "managed-session.binding-boundary", "managed-session.unbound", "managed-session.tree"]) {
+		const marker = { type: "custom", id: "scope", parentId: null, customType, data: { version: "1.0.0", sessionId: id } };
 		assert.equal(inspect(encode(header, marker)).managedMarkers, true);
 		assert.equal(inspect(encode({ ...header, id: randomUUID() }, marker)).managedMarkers, false, "copied old-session metadata is not new-session authority");
-		for (const data of [undefined, null, {}, { sessionId: "" }, { sessionId: "invalid scope" }]) {
+		for (const data of [undefined, null, {}, { version: "1.0.0", sessionId: "" }, { version: "1.0.0", sessionId: "invalid scope" }, { version: "future", sessionId: randomUUID() }]) {
 			assert.equal(inspect(encode(header, { ...marker, data })).managedMarkers, true, "malformed scope cannot imply unbound");
 		}
 	}
+	assert.equal(inspect(encode(header, { type: "custom", customType: "managed-session.binding-future", data: { version: "1.0.0", sessionId: randomUUID() } })).managedMarkers, true, "unknown binding schemas cannot prove a foreign scope");
 	assert.throws(() => inspect(encode(header) + '{"type":"custom",broken\n'), /safely inspected/);
 	assert.throws(() => inspect(encode(header, null)), /safely inspected/);
 	assert.throws(() => inspect(encode(header, { ...header, id: randomUUID() })), /ambiguous session header/);
@@ -118,7 +120,38 @@ test("saved history inspection uses real SDK parsing and refuses concealed or un
 	assert.throws(() => inspectSavedHistory(encode(header), sdk.parseSessionEntries, NaN), /Unsupported SDK/);
 });
 
-test("native path normalization agrees with public SessionManager without modifying fixture history", async t => {
+test("managed argument encoding round-trips literal values through the real parser without transferring selection", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	const argv = ["--session", "source.jsonl", "--session-dir", "/source files",
+		"--provider", "fixture", "--model", "literal model ; $(no-exec)", "--thinking", "high", "--name", "title \"quoted\"",
+		"--system-prompt", "literal\nmultiline", "--append-system-prompt", "first", "--append-system-prompt", "--session",
+		"--extension", "./literal plugin.ts", "--extension", "--print", "--skill", "./skills", "--prompt-template", "./prompts", "--theme", "./theme",
+		"--models", "one, two", "--tools", "read,bash", "--exclude-tools", "edit", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
+		"--no-context-files", "--no-builtin-tools", "--no-tools", "--no-approve", "--offline", "--verbose", "--use-theme", "dark", "--tui-mode", "fullscreen", "--mode", "text",
+		"--custom-boolean", "--custom-string=--session", "@literal file", "--", "--session", "literal prompt ; $(no-exec)"];
+	const parsed = sdk.parseArgs(argv); const original = structuredClone(parsed);
+	const encoded = managedInvocationArguments(parsed);
+	const roundTrip = sdk.parseArgs(["--session", "/owner/fixed.jsonl", ...encoded]);
+	const expected = { ...parsed, session: "/owner/fixed.jsonl" };
+	for (const key of ["continue", "resume", "sessionId", "fork", "sessionDir"]) delete expected[key];
+	assert.deepEqual(roundTrip, expected);
+	assert.deepEqual(parsed, original, "no mutation of the caller's parsed arguments");
+	assert.equal(encoded.includes("source.jsonl"), false);
+	for (const selection of [["--continue"], ["--resume"], ["--session-id", randomUUID()], ["--fork", "other.jsonl"]]) {
+		assert.deepEqual(sdk.parseArgs(["--session", "/owner/fixed.jsonl", ...managedInvocationArguments(sdk.parseArgs(selection))]), sdk.parseArgs(["--session", "/owner/fixed.jsonl"]));
+	}
+});
+
+test("managed argument encoding refuses secrets, noninteractive modes and ambiguous core unknown flags", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	for (const argv of [["--api-key", "fixture-secret"], ["--mode", "rpc"], ["--mode", "json"], ["--no-session"], ["--print"], ["--export", "saved.jsonl"], ["--help"],
+		["--session=source.jsonl"], ["--export"], ["--system-prompt"], ["--thinking", "invalid"]]) {
+		assert.throws(() => managedInvocationArguments(sdk.parseArgs(argv)), error => error instanceof Error && !error.message.includes("fixture-secret"));
+	}
+	assert.throws(() => managedInvocationArguments(sdk.parseArgs(["--", "invalid\0prompt"])), /NUL/);
+});
+
+test("native path normalization agrees with public SessionManager without modifying fixture history",  async t => {
 	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
 	const root = await mkdtemp(join(tmpdir(), "pi-native-path-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const path = join(root, "literal # percent % ; saved.jsonl");

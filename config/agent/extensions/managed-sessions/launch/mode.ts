@@ -30,7 +30,7 @@ export function classifyLaunchMode(argv: readonly string[], parsed: NativeArgume
 	if (context.trustedDispatch) return { kind: "dispatch" };
 	if (!context.configured) return { kind: "native", reason: "not-configured" };
 	if (ADMIN_COMMANDS.has(argv[0] ?? "")) return { kind: "native", reason: "command" };
-	if (parsed.help || parsed.version || parsed.export !== undefined || parsed.listModels !== undefined || parsed.diagnostics.some(item => item.type === "error")) {
+	if (parsed.help || parsed.version || parsed.export || parsed.listModels !== undefined || parsed.diagnostics.some(item => item.type === "error")) {
 		return { kind: "native", reason: "diagnostic" };
 	}
 	if (context.internalWorker || (context.profile && context.profile !== "engineering-full")) return { kind: "native", reason: "worker" };

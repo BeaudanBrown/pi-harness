@@ -3,6 +3,9 @@ import { isAbsolute, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { BINDING_ENTRY_TYPE, BINDING_BOUNDARY_ENTRY_TYPE, UNBOUND_ENTRY_TYPE } from "../adapter/state.js";
 import { TREE_ENTRY_TYPE } from "../adapter/tree-boundary.js";
+import { MANAGED_SESSION_STATE_VERSION } from "../contracts.js";
+
+const AUTHORITY_TYPES = new Set([BINDING_ENTRY_TYPE, BINDING_BOUNDARY_ENTRY_TYPE, UNBOUND_ENTRY_TYPE, TREE_ENTRY_TYPE]);
 
 export interface SavedHistoryInspection {
 	sessionId: string;
@@ -54,12 +57,12 @@ export function inspectSavedHistory(
 	let managedMarkers = false;
 	for (const entry of entries.slice(1)) {
 		if (!record(entry) || entry.type !== "custom" || typeof entry.customType !== "string") continue;
-		const authority = entry.customType === BINDING_BOUNDARY_ENTRY_TYPE || entry.customType.startsWith(BINDING_ENTRY_TYPE) ||
-			entry.customType === UNBOUND_ENTRY_TYPE || entry.customType === TREE_ENTRY_TYPE;
-		if (!authority) continue;
+		const known = AUTHORITY_TYPES.has(entry.customType);
+		if (!known && !entry.customType.startsWith(BINDING_ENTRY_TYPE)) continue;
 		// A genuine new-ID history copy retains old metadata, not old ownership.
 		// Missing/malformed scope is never evidence that a session is unbound.
-		if (!record(entry.data) || !sessionId(entry.data.sessionId) || entry.data.sessionId === header.id) managedMarkers = true;
+		if (!known || !record(entry.data) || entry.data.version !== MANAGED_SESSION_STATE_VERSION ||
+			!sessionId(entry.data.sessionId) || entry.data.sessionId === header.id) managedMarkers = true;
 	}
 	return { sessionId: header.id, ...(typeof header.cwd === "string" ? { cwd: header.cwd } : {}), managedMarkers };
 }

@@ -1,7 +1,7 @@
 # Default managed launch evidence (#116)
 
-Status: partial implementation; mode and Git-eligibility helpers are tested, but
-launchers do not yet auto-enroll. #114 is complete. This issue owns new eligible
+Status: partial implementation; mode, Git-eligibility, history and argument
+helpers are tested, but launchers do not yet auto-enroll. #114 is complete. This issue owns new eligible
 interactive launches and explicit resume, not adoption of already running
 ordinary sessions. No push, deployment, activation, service restart,
 live-account traffic or nix-dotfiles Nix evaluation/build is authorized.
@@ -160,7 +160,31 @@ in-memory format migration before publishing a fresh owned file. No private SDK
 field or persistence patch is needed. Argument rewriting must remain parser-backed
 and preserve literal values and resources, including `--` and extension flags.
 
-Argument transport, saved-session resolution/guards, local-first lifecycle and
-launcher wiring remain to be implemented and verified. Preflight findings are
+## Partial implementation: parser-backed argument encoding
+
+`launch/arguments.ts` exhaustively maps the pinned public argument type to a
+canonical argument vector. It preserves literal values, repeated resource order,
+file arguments, prompt text after `--`, and extension flag values; it does not
+promise identical spelling/order of equivalent flags. Selection fields are
+omitted for separate authoritative resolution; only the owner may supply the
+fixed destination session. This encoder is not admission, storage, transport or
+retry authority.
+
+Managed encoding refuses command-line API keys without echoing their values,
+noninteractive/metadata flags and parser diagnostics. It also refuses unknown
+flags that collide with core options (for example `--session=...` or a missing
+`--export` value): a bare re-emission could otherwise consume the owner's next
+option. Local-only/native invocation policy remains separate. An empty export
+value is classified like actual native main (not as an export operation), though
+managed encoding still rejects that option.
+
+All eight focused checks passed on each SDK version, zero skips, with TypeScript
+and packaged helper validation:
+`.pi/tmp/workers/2026-10-06T04-30-32-849Z-default-launch-argument-history-final-focused-7ed85aa40fd1/`.
+The same pass tightened offline inspection: unknown binding schemas/versions
+cannot prove a foreign scope. No issue review or final canonical gate yet.
+
+Saved-session selection/full ownership guards, one-shot argument transport,
+local-first lifecycle and launcher wiring remain to be implemented and verified. Preflight findings are
 not acceptance of #116. These plans do not authorize live account effects or
 deployment.
