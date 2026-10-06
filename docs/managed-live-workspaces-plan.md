@@ -54,7 +54,7 @@ Revalidate stable tmux window/pane IDs and conversation markers immediately befo
 
 ## 3. Pi session navigation while bound
 
-- `/new`, `/fork`, and `!new --confirm` **retain the room**, durably changing its Matrix-active session generation. Preserve prior Pi files and do not replay their history.
+- Retain the working process-replacement `!new --confirm` path: it **retains the room**, durably changes the active generation and preserves prior files without history replay. The operator subsequently declined SDK patching and in-process handoff complexity. Native room-preserving `/new` and `/fork` are deferred; guard them while bound with supported reset/conversation guidance. Unbound navigation is unchanged.
 - Block saved-session switching while bound, including `/resume`, `/sesh`, and equivalent switching entrypoints. Explain that another conversation is selected through the launcher.
 - Keep `/tree` for branches of the current session. Project a silent branch-change marker and new activity only, without rearranging/replaying the linear Matrix timeline.
 - Retain explicit reset confirmation and existing safe busy/transition preconditions. Invalidate stale attachments/generations, and serialize changes with stop/delete/input acceptance.
@@ -82,7 +82,7 @@ or replaying a model action. Summary initialization is silent.
 
 No Matrix equivalent of native room-preserving `/fork` is required. #114 retains
 ownership of native navigation; its scoped prepare/commit/recovery IPC amendment
-was subsequently approved for implementation under the existing restrictions.
+was initially approved, then superseded by the operator's decision to retain the existing Matrix reset and avoid SDK/in-process handoff complexity.
 #125 owns this independent split-fork feature and blocks #121 cumulative acceptance.
 See the contract and issue evidence for implementation status; this amendment
 itself is not verification. No deployment, push or live traffic is authorized.
@@ -277,7 +277,7 @@ Issue mapping: contracts #104; experiments #105; hierarchy #106; control-api #10
 | projection | Commentary and deterministic notification/recovery classification | contracts |
 | account | NAS trusted autojoin, once-only push rules, leave/forget, action acknowledgments | hierarchy, retirement, projection |
 | frontends | managed_host skill/tool, /host/!host, room aliases, protected coordinator recovery | approvals, retirement, open, account |
-| generations | Room-preserving new/fork/tree and session-switch restrictions | retirement, hierarchy |
+| generations | Existing Matrix reset, safe tree projection and bound native-navigation guards | retirement, hierarchy |
 | status | Host-wide 10-second status and two-way title reconciliation | hierarchy, open |
 | default-launch | Eligible interactive automatic enrollment and local-only entrypoint | experiments, open, generations, account |
 | migration | Explicit non-disruptive worktree-Space migration and compatibility docs | hierarchy, account, generations, status |

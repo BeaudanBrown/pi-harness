@@ -1,11 +1,50 @@
 # Native managed navigation evidence (#114)
 
-Status: implementation in progress. Scoped prepare/commit/recovery and durable
-branch-boundary protocol approved by the operator; no deployment/live acceptance.
-A newly reproduced SDK persistence limitation requires an additional SDK-scope
-decision before completing native new/assistant-free fork adoption.
+Status: implementation in progress under revised operator scope. Keep the working
+Matrix process-replacement reset; defer native new/fork handoff and add bound
+navigation guards. No SDK patch is authorized or needed for this revised scope.
+Safe tree projection remains in scope; no deployment/live acceptance.
 
-## Ownership and implementation boundaries
+## Superseding operator decision
+
+The operator explicitly chose to avoid the added complexity after the SDK
+persistence explanation. Retain existing `!new --confirm`, including its confirmation,
+busy/input-cutoff and exact process-replacement protections. Do not implement the
+proposed SDK hook or native prepare/commit handoff. Guard bound native new/fork with
+useful alternatives; leave unbound behavior unchanged. Independent worktree/summary
+fork #125 is unaffected. Revised acceptance is authoritative in GitHub #114 and the
+plan/contract. The original matrices and SDK preflight below are retained as
+historical rationale, not remaining obligations or a pending approval request.
+
+Revised evidence required: bound new/fork/resume/import guards, unchanged unbound
+navigation, existing Matrix reset regression checks, and durable silent tree
+boundaries with no historical replay or weakened input/retirement isolation.
+
+## Revised guard implementation and evidence
+
+Bound native `/new` and `/fork` are now vetoed by the shared native before-hooks,
+not merely command-name interception. Project reset guidance points to the existing
+Matrix `!new --confirm`; coordinator guidance does not promise an unsupported reset.
+Unbound new/fork and saved navigation remain unchanged. No SDK code or Matrix reset
+implementation changed.
+
+Real SDK guard tests passed for project/coordinator roles, checking no source file
+or entries changed and no abort/detach occurred. The packaged RPC fixture now checks
+new/fork/resume cancellation while preserving the original attachment across relay
+reconnect, rather than expecting the superseded unbinding behavior.
+
+Focused guard evidence:
+`.pi/tmp/workers/2026-10-06T00-22-03-830Z-native-navigation-revised-guards-75cfc6788881/`.
+Affected packaged gate: **503 managed tests, zero skips**, plus source contracts,
+including existing confirmed Matrix reset/generation protection tests:
+`.pi/tmp/workers/2026-10-06T00-28-35-251Z-revised-navigation-affected-corrected-8e0adb9ead5a/`.
+The first affected run identified the now-obsolete RPC expectation; it was updated
+to verify actual veto responses rather than weakening the test.
+
+Safe tree projection and the final #114 issue boundary remain pending. This guard
+slice is not completion of #114 or the epic.
+
+## Original ownership and implementation boundaries (superseded)
 
 This issue owns room-preserving native `/new` and `/fork`, branch-only `/tree`,
 saved-session-switch guards, and safe parity with Matrix `!new --confirm`.

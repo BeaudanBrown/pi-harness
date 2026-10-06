@@ -62,7 +62,7 @@ async function rpc(child: ReturnType<typeof spawn>, commands: Array<Record<strin
 	});
 }
 
-test("real Pi binds, expands once, persists provenance, leaves /new and /fork unbound, and reattaches /resume", { timeout: 25_000 }, async (t) => {
+test("real Pi binds, expands once, persists provenance and guards bound new/fork/resume across reconnect", { timeout: 25_000 }, async (t) => {
 	if (!pi || !adapterExtension) return t.skip("packaged Pi adapter probe paths are unavailable");
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-real-"));
 	const home = join(root, "home");
@@ -237,9 +237,13 @@ export default function (pi) {
 	assert.equal(commands.some((name) => name.startsWith("remote_session_")), false);
 	assert.equal((await readFile(expandedPath, "utf8")).trim(), "hello");
 	assert.equal(frames.filter((frame) => frame.type === "self.bind").length, 0);
-	assert.equal(frames.filter((frame) => frame.type === "attachment.attach").length, 3, "one reconnect and one exact-session resume must attach; new and fork must remain unbound");
+	assert.equal(frames.filter((frame) => frame.type === "attachment.attach").length, 2, "only the initial attachment and reconnect occur; guarded navigation never replaces the source");
+	for (const id of ["new", "resume", "fork"]) {
+		const response = events.find(event => event.type === "response" && event.id === id) as { success?: boolean; data?: { cancelled?: boolean } } | undefined;
+		assert.equal(response?.success, true); assert.equal(response?.data?.cancelled, true, `${id} is vetoed before session replacement`);
+	}
 	assert.equal(redeliveredAfterReconnect, true);
-	assert.ok(frames.some((frame) => frame.type === "attachment.detach" && frame.payload.reason === "session_change"));
+	assert.equal(frames.some((frame) => frame.type === "attachment.detach" && frame.payload.reason === "session_change"), false);
 	const lines = (await readFile(sessionPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 	const frameSummary = frames.map((frame) => ({ type: frame.type, deliveryId: frame.payload.deliveryId, status: frame.payload.status }));
 	assert.ok(frames.filter((frame) => frame.type === "input.acknowledge").some((frame) => frame.payload.status === "accepted"));

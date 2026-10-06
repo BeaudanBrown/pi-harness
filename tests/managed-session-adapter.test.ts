@@ -54,7 +54,7 @@ import {
 	registerManagedAloopAbortDelegate,
 } from "../config/agent/extensions/managed-sessions/aloop-lifecycle.js";
 
-test("real Pi blocks saved switches/imports in both bound roles without changing unbound navigation", { timeout: 15000 }, async t => {
+test("real Pi guards bound new/fork/saved switches/imports without changing unbound navigation", { timeout: 15000 }, async t => {
 	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
 	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
 	const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
@@ -79,8 +79,13 @@ test("real Pi blocks saved switches/imports in both bound roles without changing
 				if (!bound) {
 					assert.deepEqual(await runtime.emitBeforeSwitch("resume", join(relay.root, "other.jsonl")), { cancelled: false });
 					assert.deepEqual(await runtime.emitBeforeSwitch("new"), { cancelled: false });
+					assert.deepEqual(await runtime.emitBeforeFork(boundary, { position: "at" }), { cancelled: false });
 					continue;
 				}
+				const beforeEntries = structuredClone(sm.getEntries()); const beforeFile = await readFile(path, "utf8");
+				assert.deepEqual(await runtime.newSession(), { cancelled: true });
+				assert.deepEqual(await runtime.fork(boundary, { position: "at" }), { cancelled: true });
+				assert.deepEqual(sm.getEntries(), beforeEntries); assert.equal(await readFile(path, "utf8"), beforeFile);
 				assert.deepEqual(await runtime.switchSession(join(relay.root, "does-not-exist.jsonl")), { cancelled: true }, "native resume veto precedes reading the selected file");
 				const imports = join(relay.root, "imports"); await mkdir(imports); const input = join(imports, "other.jsonl"); await writeFile(input, "must not be imported");
 				assert.deepEqual(await runtime.importFromJsonl(input), { cancelled: true });

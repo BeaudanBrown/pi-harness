@@ -1189,10 +1189,22 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		// Native hook covers /resume, /sesh, imports and extension/API switches.
 		// Veto before Pi opens/replaces history or aborts the current agent run.
 		pi.on("session_before_switch", (event, ctx) => {
+			if (binding && event.reason === "new") {
+				notify(ctx, role === "ordinary_adapter"
+					? "Native /new is unavailable while bound. Use !new --confirm in the managed Matrix room for a supported reset, or create another managed conversation through the launcher."
+					: "Native /new is unavailable in the bound coordinator. Select another managed conversation through the launcher; coordinator context reset is not supported.", "warning");
+				return { cancel: true };
+			}
 			if (binding && event.reason === "resume") {
 				notify(ctx, "Saved-session switching is unavailable while bound. Select another managed conversation through the launcher, or open unbound history in a separate local session.", "warning");
 				return { cancel: true };
 			}
+		});
+
+		pi.on("session_before_fork", (_event, ctx) => {
+			if (!binding) return;
+			notify(ctx, "Native /fork is unavailable while bound. Create an independent managed worktree/conversation with explicit summary context, or explore a branch with /tree in this session.", "warning");
+			return { cancel: true };
 		});
 
 		pi.on("session_info_changed", (event, ctx) => { titleSync?.onName(event.name); setStatus(ctx); });

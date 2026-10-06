@@ -442,8 +442,11 @@ thinking, raw tools/logs, partial tokens, compaction or pre-binding history.
 Matrix-origin user entries map to original events. Commentary is emitted once
 per persisted completed entry, not accumulated again into the final answer.
 `/tree` records a silent branch-change boundary with subsequent new activity only.
-`/new` and `/fork` durably append a generation while keeping the room; block saved
-session switching while bound. Transition/input/stop/retirement serialize on the
+Keep the existing process-replacement `!new --confirm` generation reset, retaining
+the room and old files. The operator declined SDK patching and in-process handoff:
+native room-preserving `/new` and `/fork` are deferred and guarded while bound,
+with supported reset/conversation guidance. Block saved-session switching while
+bound; unbound navigation is unchanged. Transition/input/stop/retirement serialize on the
 same conversation authority and invalidate stale attachment generations.
 
 Freeze `{sourceId, generationId, branchId, disposition, attentionId?, chunks}`
@@ -528,7 +531,8 @@ navigation. Existing notices without this field retain their semantics; older
 strict readers are not a supported downgrade.
 
 #125 owns this implementation, separate from #114 native navigation. The operator
-has now approved #114's scoped native handoff; implementation remains separate.
+initially approved #114's scoped native handoff, then chose to avoid its added
+SDK/transition complexity. Existing Matrix reset remains; native handoff is deferred.
 Deployment/live acceptance remains separately gated under #120/#121.
 
 ## Version and rollout boundary
