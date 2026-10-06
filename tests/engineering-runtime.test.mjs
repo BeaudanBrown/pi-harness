@@ -10,7 +10,7 @@ const managed = process.env.PI_HARNESS_MANAGED_PI;
 const local = process.env.PI_HARNESS_LOCAL_PI;
 if (!normal || !managed || !local || !process.env.PI_HARNESS_WORKER_EXTENSION) throw new Error("Packaged engineering launchers are required");
 
-async function probe(t, launcher, role, projectPath) {
+async function probe(t, launcher, role, projectPath, nested = false) {
   const cwd = await mkdtemp(join(tmpdir(), "engineering-runtime-"));
   t.after(() => rm(cwd, { recursive: true, force: true }));
   const resultPath = join(cwd, "probe.json");
@@ -26,7 +26,7 @@ async function probe(t, launcher, role, projectPath) {
   await writeFile(join(cwd, "bin/git"), "#!/bin/sh\nprintf project-git\\n\n");
   await chmod(join(cwd, "bin/git"), 0o700);
   await writeFile(extension, `
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { diagnoseCommandResult } from ${JSON.stringify(process.env.PI_HARNESS_WORKER_EXTENSION)};
 export default function(pi) {
@@ -45,11 +45,22 @@ export default function(pi) {
     const diagnosis = await diagnoseCommandResult(new Proxy({}, { get() { throw new Error("model context must not be read"); } }), { name: "check", command: ["must-not-run"], task: "diagnose" }, { code: null, cancelled: true, timedOut: false, stdout: "", stderr: "", durationMs: 0, logPath: "not-run" }, "", AbortSignal.abort());
     const managedEnvironment = Object.fromEntries(Object.entries(process.env).filter(([name]) =>
       name.startsWith("PI_MANAGED_SESSION_") || name.startsWith("PI_MANAGED_PROJECT_") || name.startsWith("PI_MANAGED_COORDINATOR_") || name === "PI_HARNESS_AGENT_PROFILE" || name === "PI_MANAGED_LOCAL_MODEL_TOOLS"));
-    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ pathEntries: (process.env.PATH ?? "").split(":"), hostProbe: spawnSync("pi-host-profile-probe", [], { encoding: "utf8" }).stdout ?? null, decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
+    let nestedResult;
+    if (process.env.ENGINEERING_NESTED_LAUNCHER) {
+      const nestedPath = process.env.ENGINEERING_PROBE_RESULT + ".nested";
+      const child = spawnSync(process.env.ENGINEERING_NESTED_LAUNCHER, ["--mode", "rpc", "--no-session", "--approve", "--extension", ${JSON.stringify(extension)}], {
+        env: { ...process.env, ENGINEERING_NESTED_LAUNCHER: "", ENGINEERING_PROBE_RESULT: nestedPath },
+        input: JSON.stringify({ id: "nested-state", type: "get_state" }) + "\\n", encoding: "utf8", timeout: 20000,
+      });
+      if (child.status !== 0) throw new Error("Nested probe failed: " + child.stderr);
+      nestedResult = JSON.parse(readFileSync(nestedPath, "utf8"));
+    }
+    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ nestedResult, argv: process.argv.slice(2), pathEntries: (process.env.PATH ?? "").split(":"), hostProbe: spawnSync("pi-host-profile-probe", [], { encoding: "utf8" }).stdout ?? null, decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
   });
 }
 `);
-  const env = { HOME: join(cwd, "home"), PATH: projectPath ? join(cwd, "bin") : "", XDG_RUNTIME_DIR: cwd, ENGINEERING_PROBE_RESULT: resultPath };
+  const env = { HOME: join(cwd, "home"), PATH: projectPath ? join(cwd, "bin") : "", XDG_RUNTIME_DIR: cwd, ENGINEERING_PROBE_RESULT: resultPath,
+    ...(nested ? { ENGINEERING_NESTED_LAUNCHER: managed } : {}) };
   if (role === "project") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "session.jsonl"), PI_MANAGED_SESSIONS_IMAGE_NORMALIZER: "/untrusted/project-decoder" });
   if (role === "coordinator") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "coordinator", PI_MANAGED_COORDINATOR_CWD: cwd, PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "coordinator.jsonl") });
   if (role === "fallback") Object.assign(env, {
@@ -99,6 +110,15 @@ for (const [name, launcher, role] of [["normal", normal, undefined], ["managed p
     assert.equal(result.hostProbe, "project", "project executable shadows the host profile");
   });
 }
+for (const role of ["project", "coordinator"]) {
+  test(`managed ${role} consumes dispatch authority before a nested Pi can inherit it`, async t => {
+    const { result } = await probe(t, managed, role, false, true);
+    assert.equal(result.managedEnvironment.PI_MANAGED_SESSION_LAUNCH_ROLE, undefined);
+    assert.deepEqual(result.nestedResult.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
+    assert.equal(result.nestedResult.argv.includes("--session"), false, "child never receives its parent's fixed session argument");
+  });
+}
+
 test("managed launcher rejects an unsupported non-empty role", async () => {
   const result = await new Promise((resolve, reject) => {
     const child = spawn(managed, [], { env: { PI_MANAGED_SESSION_LAUNCH_ROLE: "untrusted" }, stdio: ["ignore", "ignore", "pipe"] });

@@ -172,6 +172,8 @@ let
     [[ -z "''${PI_MANAGED_SESSION_MODEL:-}" ]] || coordinator_model_args+=(--model "$PI_MANAGED_SESSION_MODEL")
     [[ -z "''${PI_MANAGED_SESSION_THINKING:-}" ]] || coordinator_model_args+=(--thinking "$PI_MANAGED_SESSION_THINKING")
     cd "$PI_MANAGED_COORDINATOR_CWD"
+    # Dispatch authority is consumed here, not inherited by Pi's subprocesses.
+    unset PI_MANAGED_SESSION_LAUNCH_ROLE
     exec ${managedRawPi}/bin/pi \
       --no-extensions \
       --no-skills \
@@ -312,6 +314,8 @@ let
         generation_args=()
         [[ -z "''${PI_MANAGED_SESSION_MODEL:-}" ]] || generation_args+=(--model "$PI_MANAGED_SESSION_MODEL")
         [[ -z "''${PI_MANAGED_SESSION_THINKING:-}" ]] || generation_args+=(--thinking "$PI_MANAGED_SESSION_THINKING")
+        # A nested Pi must enter the ordinary fallback, not reopen this writer.
+        unset PI_MANAGED_SESSION_LAUNCH_ROLE
         exec ${managedRawPi}/bin/pi \
           --no-extensions \
           --no-skills \

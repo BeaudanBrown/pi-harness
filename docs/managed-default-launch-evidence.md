@@ -314,6 +314,25 @@ key; the privacy assertion was not weakened. Latest affected managed suite:
 **539 passed, zero skips**:
 `.pi/tmp/workers/2026-10-06T07-49-11-156Z-saved-resume-private-identity-affected-6d1e8fb04c64/`.
 
+## Partial implementation: consume trusted dispatch before subprocesses
+
+The module's managed project/coordinator wrappers now unset
+`PI_MANAGED_SESSION_LAUNCH_ROLE` immediately before entering the SDK. It is a
+one-shot dispatch selector, not inheritable authority for a nested Pi to reopen
+its parent's fixed session. The parent adapter still receives its binding data;
+nested invocations through the inherited private launcher enter the existing
+ordinary fallback, which clears stale managed identity and profile fields.
+
+Two actual packaged SDK subprocess probes cover both parent roles and verify the
+child receives engineering-full, no managed identity, and no forced `--session`
+argument. Package contracts passed: 11 engineering runtime and 17 headless tests,
+zero skips:
+`.pi/tmp/workers/2026-10-06T09-05-12-669Z-nested-dispatch-package-contracts-8875e26740e3/`.
+Affected module contracts and all **539 managed tests passed, zero skips**:
+`.pi/tmp/workers/2026-10-06T09-22-50-576Z-nested-dispatch-affected-ab17a591e30b/`.
+This proves the packaged child-dispatch boundary, not completion of automatic
+launch or all direct SDK worker paths. No issue review/final canonical gate yet.
+
 Full saved-file/retirement ownership integration, requesting-client targeting,
 local-only guards and launcher wiring remain to be implemented and verified. Typed pending-control presentation also needs checking
 against the final integrated path; bound-only controls have not been generalized. General startup transport is out of
