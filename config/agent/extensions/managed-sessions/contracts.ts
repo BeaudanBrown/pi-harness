@@ -662,6 +662,7 @@ const runtimeConversation = strictObject({
 			paneId: boundedString(64),
 		}),
 	),
+	ownedLocalLaunch: Type.Optional(Type.Literal(true)),
 	promotion: Type.Optional(nullable(strictObject({
 		sourceSessionFile: boundedString(4_096),
 		phase: Type.Union([Type.Literal("prepared"), Type.Literal("shutdown_requested"), Type.Literal("shutdown_confirmed"), Type.Literal("adopted")]),
@@ -774,6 +775,7 @@ export interface HostRuntimeState {
 		completedTreeOperation?: string;
 		launch?: { launchId: string; generationId: string; ordinal: number; observed: boolean };
 		managedWindow: null | { sessionName: string; windowId: string; paneId: string; ownership?: ExactWindowProof };
+		ownedLocalLaunch?: true;
 		promotion?: null | { sourceSessionFile: string; phase: "prepared" | "shutdown_requested" | "shutdown_confirmed" | "adopted"; requestedAt: string };
 		lastLaunchError?: { code: string; message: string; at: string };
 		generationTransition?: null | {
@@ -1282,6 +1284,9 @@ export function parsePersistenceBundle(manifestValues: unknown[], runtimeValue: 
 	}
 	for (const conversation of runtime.conversations) {
 		const manifest = registered.find((candidate) => candidate.conversationId === conversation.conversationId)!;
+		if (conversation.ownedLocalLaunch && (manifest.kind !== "project" || conversation.promotion)) {
+			throw new ManagedSessionContractError("conflict", `owned local launch conflicts with terminal/coordinator origin for ${conversation.conversationId}`);
+		}
 		const transition = conversation.generationTransition;
 		if (transition) {
 			const activeGenerationId = manifest.activeGenerationId ?? deriveGenerationId(manifest.conversationId, 1);

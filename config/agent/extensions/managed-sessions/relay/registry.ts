@@ -756,7 +756,12 @@ export class RelayRegistry {
 		return this.registerProject(parsePendingLocalConversation(manifest), nonce, sourceSessionFile);
 	}
 
-	private async registerProject(manifest: RegisteredConversation, nonce: string, promotionSourceSessionFile?: string): Promise<RegisteredConversation> {
+	/** Launch owner only, after durable native seeding; no running terminal source is adopted. */
+	async registerOwnedLocalConversation(manifest: PendingLocalConversation, nonce: string): Promise<RegisteredConversation> {
+		return this.registerProject(parsePendingLocalConversation(manifest), nonce, undefined, true);
+	}
+
+	private async registerProject(manifest: RegisteredConversation, nonce: string, promotionSourceSessionFile?: string, requireOwnedLaunch = false): Promise<RegisteredConversation> {
 		if (manifest.creationKey === "coordinator") throw new RelayRegistryError("permission_denied", "Coordinator identity is protected");
 		if (manifest.kind !== "project" || manifest.ownerHostId !== this.hostId || !manifest.placement) {
 			throw new RelayRegistryError("permission_denied", "Self binding requires a host-owned project manifest");
@@ -779,6 +784,7 @@ export class RelayRegistry {
 						existing.bindingBoundaryEntryId === manifest.bindingBoundaryEntryId &&
 						JSON.stringify(existing.placement) === JSON.stringify(manifest.placement)) {
 						const runtime = this.runtimeConversation(existing.conversationId);
+						if (requireOwnedLaunch && (!runtime.ownedLocalLaunch || runtime.promotion)) throw new RelayRegistryError("invalid_state", "Terminal or unproven registration cannot be reinterpreted as an owned launch");
 						if (!runtime.attachmentNonceHash || !equalHash(runtime.attachmentNonceHash, nonceHash(nonce))) {
 							if (runtime.promotion?.phase !== "prepared" || runtime.state !== "dormant" || runtime.attachment) {
 								throw new RelayRegistryError("invalid_nonce", "Attachment nonce does not match the existing binding");
@@ -801,6 +807,7 @@ export class RelayRegistry {
 				this.state.conversations.push({
 					conversationId: manifest.conversationId,
 					state: "dormant",
+					...(requireOwnedLaunch ? { ownedLocalLaunch: true as const } : {}),
 					attachmentNonceHash: nonceHash(nonce),
 					attachment: null,
 					matrixCursor: { status: "bootstrap" },
@@ -949,7 +956,15 @@ export class RelayRegistry {
 			const conversation = this.runtimeConversation(conversationId);
 			if (conversation.state === "active" || conversation.managedWindow || conversation.launch?.observed === false)
 				throw new RelayRegistryError("invalid_state", "Previous launch requires ownership-safe inspection before retry");
-			const generationId = this.activeGeneration(this.boundConversation(conversationId)).generationId;
+			const manifest = this.registeredConversation(conversationId);
+			if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
+			if (!hasMatrixBinding(manifest) && !conversation.ownedLocalLaunch) {
+				throw new RelayRegistryError("invalid_state", "Roomless launch requires durable owned-seed authority");
+			}
+			if (conversation.promotion && conversation.promotion.phase !== "adopted") {
+				throw new RelayRegistryError("invalid_state", "Terminal promotion must complete source adoption before an owned launch");
+			}
+			const generationId = this.activeGeneration(manifest).generationId;
 			const ordinal = (conversation.launch?.ordinal ?? 0) + 1;
 			if (!Number.isSafeInteger(ordinal)) throw new RelayRegistryError("capacity_reached", "Launch ordinal limit reached");
 			const hash = createHash("sha256").update("pi-managed-sessions:launch:live-v1\0");

@@ -38,7 +38,58 @@ async function fixture(t: { after: (callback: () => Promise<void>) => void }, re
 	return { root, store, registry, value, binding };
 }
 
-test("HostLifecycle admits a local attachment before bootstrap/Matrix availability and finishes without Pi reads or launch", async (t) => {
+test("owned roomless registration reserves one launch and survives restart and later Matrix binding", async t => {
+	const { root, store, registry, value, binding } = await fixture(t, false);
+	await registry.registerOwnedLocalConversation(value, nonce);
+	assert.ok(!registry.promotion(value.conversationId), "an owned seed is not a terminal promotion");
+	assert.equal(registry.manifestByConversationId(value.conversationId), undefined);
+	const attempts = await Promise.allSettled([registry.prepareProjectLaunch(value.conversationId, nonce), registry.prepareProjectLaunch(value.conversationId, "x".repeat(32))]);
+	assert.equal(attempts.filter(result => result.status === "fulfilled").length, 1);
+	assert.equal(attempts.filter(result => result.status === "rejected").length, 1);
+	const launch = registry.launchIdentity(value.conversationId)!;
+	assert.equal(launch.observed, false); assert.equal(launch.generationId, value.activeGenerationId);
+	await assert.rejects(() => registry.attach(attach(value, { legacy: true }), "legacy"), { code: "matrix_unavailable" });
+	await registry.attach(attach(value), "first-owner");
+	await assert.rejects(() => registry.attach(attach(value), "second-owner"), { code: "attachment_conflict" });
+	assert.deepEqual(await store.list(), [], "roomless ownership does not fabricate a portable Matrix manifest");
+	const restarted = new RelayRegistry(hostId, root, store); await restarted.load(); restarted.beginRestartReconciliation();
+	assert.deepEqual(restarted.launchIdentity(value.conversationId), launch); assert.ok(!restarted.promotion(value.conversationId));
+	const attached = await restarted.attach(attach(value), "reconnected-owner");
+	await restarted.finishRestartReconciliation();
+	await restarted.completeLocalBinding(value.conversationId, binding);
+	assert.equal(restarted.manifestByConversationId(value.conversationId)?.roomId, binding.roomId);
+	assert.deepEqual(restarted.launchIdentity(value.conversationId), launch);
+	assert.equal(restarted.snapshot().conversations[0].attachment?.attachmentId, attached.attachmentId);
+});
+
+test("terminal promotion cannot be relabelled or launched as an owned roomless seed", async t => {
+	const { registry, value, binding } = await fixture(t);
+	await assert.rejects(() => registry.registerOwnedLocalConversation(value, nonce), /cannot be reinterpreted/);
+	await assert.rejects(() => registry.prepareProjectLaunch(value.conversationId, nonce), /durable owned-seed authority/);
+	await registry.completeLocalBinding(value.conversationId, binding);
+	await assert.rejects(() => registry.prepareProjectLaunch(value.conversationId, nonce), /complete source adoption/);
+	assert.equal(registry.promotion(value.conversationId)?.phase, "prepared");
+	assert.equal(registry.launchIdentity(value.conversationId), undefined);
+});
+
+test("a missing owned-seed marker is not permission to launch a roomless session", async t => {
+	const { root, store, registry, value } = await fixture(t, false);
+	await registry.registerOwnedLocalConversation(value, nonce);
+	const state = registry.snapshot();
+	assert.equal(state.conversations[0].ownedLocalLaunch, true);
+	const contradictory = structuredClone(state);
+	contradictory.conversations[0].promotion = { sourceSessionFile: join(root, "source.jsonl"), phase: "prepared", requestedAt: value.createdAt };
+	assert.throws(() => parsePersistenceBundle([], contradictory), /owned local launch conflicts/);
+	delete state.conversations[0].ownedLocalLaunch;
+	await writeFile(join(root, "registry.json"), JSON.stringify(state), { mode: 0o600 });
+	const restarted = new RelayRegistry(hostId, root, store); await restarted.load();
+	await assert.rejects(() => restarted.registerOwnedLocalConversation(value, nonce), /cannot be reinterpreted/);
+	await assert.rejects(() => restarted.prepareProjectLaunch(value.conversationId, nonce), /durable owned-seed authority/);
+	assert.equal(restarted.launchIdentity(value.conversationId), undefined);
+	assert.equal(restarted.conversationState(value.conversationId), "dormant");
+});
+
+test("HostLifecycle admits a local attachment before bootstrap/Matrix availability and finishes without Pi reads or launch",  async (t) => {
 	const { root, store, registry, value } = await fixture(t, false);
 	const workspace = join(root, "work"); const cwd = join(workspace, "sub"); await mkdir(cwd, { recursive: true });
 	const source = join(root, "source.jsonl");

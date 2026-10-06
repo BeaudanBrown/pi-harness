@@ -61,6 +61,16 @@ membership or phone readiness. Legacy binding requests retain their bound-only
 behavior. A pending enrollment must not terminate the foreground Pi or authorize
 an implicit later process handoff.
 
+A pre-launch seed owned by the relay is distinct from terminal promotion. The
+launch owner records private `ownedLocalLaunch: true` only after durable native
+seeding. Roomless exact-launch admission requires that explicit origin; a missing
+marker is not permission to reinterpret a terminal or unknown source. A promotion
+must reach source adoption before owned launch, and the owned-local marker cannot
+coexist with terminal promotion or coordinator origin. Existing exact-launch
+reservation/recovery rules still apply; this marker is neither a model-action
+receipt nor automatic replay authorization. Older relay binaries that do not
+understand this private field must fail closed, not discard it during rollback.
+
 ## Host operations
 
 The public command is `pi-managed-session <noun> <action> ... [--json]`.

@@ -1,7 +1,7 @@
 # Default managed launch evidence (#116)
 
-Status: partial implementation; mode, Git-eligibility, history and argument
-helpers are tested, but launchers do not yet auto-enroll. #114 is complete. This issue owns new eligible
+Status: partial implementation; launch helpers and owned roomless registration
+are tested, but launchers do not yet auto-enroll. #114 is complete. This issue owns new eligible
 interactive launches and explicit resume, not adoption of already running
 ordinary sessions. No push, deployment, activation, service restart,
 live-account traffic or nix-dotfiles Nix evaluation/build is authorized.
@@ -184,7 +184,32 @@ and packaged helper validation:
 The same pass tightened offline inspection: unknown binding schemas/versions
 cannot prove a foreign scope. No issue review or final canonical gate yet.
 
-Saved-session selection/full ownership guards, one-shot argument transport,
+## Partial implementation: owned roomless launch admission
+
+The existing registry now has `registerOwnedLocalConversation`, separate from
+terminal-source enrollment. Its private `ownedLocalLaunch: true` origin is durable
+and required before a roomless exact launch can reserve an identity. Absence is
+not evidence of ownership; terminal promotion cannot be relabelled, and a
+promotion must reach adopted state before an owned launch. Contradictory
+terminal/coordinator origins fail persistence validation. This is an
+operation-specific origin marker, not a model receipt or replay mechanism.
+
+Tests prove one admitted concurrent launch, capable-only attachment while
+roomless, duplicate-attachment refusal, reconnect through the existing restart
+reconciliation, later Matrix completion preserving attachment/launch identity,
+and missing/contradictory-origin refusal. The first broad run was 529/530: the new
+fixture omitted `beginRestartReconciliation`; production attachment checks were
+not weakened to fix it. Corrected focused registry/enrollment checks: 19 passed,
+zero skips, `.pi/tmp/workers/2026-10-06T04-52-03-242Z-default-launch-owned-origin-focused-e7020511677b/`.
+
+**Affected managed suite: 531 passed, zero skips**, including packaged relay and
+existing promotion/coordinator/exact-window paths:
+`.pi/tmp/workers/2026-10-06T04-53-50-763Z-default-launch-owned-origin-affected-102c67d32f26/`.
+This is not the final canonical gate or a complete automatic-launch path. No #116
+subjective review has run yet. Private-state compatibility/rollback must preserve
+or refuse the new origin marker, never silently discard it.
+
+Saved-session selection/full ownership guards, argument-transport policy,
 local-first lifecycle and launcher wiring remain to be implemented and verified. Preflight findings are
 not acceptance of #116. These plans do not authorize live account effects or
 deployment.
