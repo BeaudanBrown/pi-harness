@@ -597,7 +597,8 @@ export class RelayRegistry {
 				return;
 			}
 			if (row.completedTreeOperation === operationId || this.isRefreshing(conversationId) || this.hasGenerationBoundary(conversationId) || row.pendingControls.length || row.activeCheckpointPoll || row.publishingCheckpointPoll || row.activeControlPoll || row.publishingControlPoll ||
-				row.pendingInputs.some(input => input.status !== "completed" && input.status !== "cancelled")) throw new RelayRegistryError("invalid_state", "Wait for pending managed input and controls before changing branches");
+				row.closingCheckpointPolls.length || row.projection.some(projection => projection.status !== "projected") ||
+				row.pendingInputs.some(input => input.status !== "completed" && input.status !== "cancelled")) throw new RelayRegistryError("invalid_state", "Wait for pending managed input, controls, projection and poll closure before changing branches");
 			row.treeTransition = { operationId, sessionId: manifest.piSessionId };
 		});
 	}

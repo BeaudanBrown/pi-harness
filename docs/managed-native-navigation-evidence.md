@@ -114,6 +114,27 @@ Final review and canonical
 evidence remain pending; these are deterministic tests, not live Matrix/phone
 acceptance.
 
+### Pinned issue review and remediation
+
+Paired exhaustive audit at `cf7e946`:
+`.pi/tmp/reviews/2026-10-06T02-31-17-303Z-audit-cf7e946961a5-b92618380377/`.
+
+- **Standards:** one medium, current-issue finding: relay admission also needed to
+  reject offered/projecting transcript chunks and closing checkpoint polls.
+  Accepted and fixed in the registry owner; no subjective-smell findings.
+- **Spec:** no verified defects in revised scope. This is an individual #114 audit,
+  not the still-required cumulative epic review or live acceptance.
+
+Both regression cases failed with the expected missing rejection before the fix:
+`.pi/tmp/workers/2026-10-06T02-37-46-955Z-tree-review-regressions-red-corrected-d1c0d9d7ad39/`.
+(The first poll fixture omitted required hash/origin evidence; it was corrected
+before accepting the red result.) After remediation, both and adjacent real
+text/image/status routing passed, **3 tests, no skips**:
+`.pi/tmp/workers/2026-10-06T02-38-35-799Z-tree-review-remediation-green-fce58467fd2b/`.
+Admission becomes available once all chunks and poll closure complete, without
+consuming input or changing attachment state. No additional subjective pass was
+needed for this bounded correction; final canonical verification follows.
+
 ## Original ownership and implementation boundaries (superseded)
 
 This issue owns room-preserving native `/new` and `/fork`, branch-only `/tree`,

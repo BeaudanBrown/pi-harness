@@ -66,6 +66,43 @@ async function readMany(socket: Socket, count: number): Promise<ManagedSessionEn
 	});
 }
 
+test("tree admission waits for every offered/projecting chunk and leaves delivery state unchanged", async t => {
+	const { root, registry, manifest } = await fixture(); const id = manifest.conversationId;
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "tree-projection") }); await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const entryId = deriveTranscriptEntryId(manifest.piSessionId, "pending-final");
+	const chunks = [0, 1].map(index => { const chunkId = deriveChunkId(entryId, index); return { chunkId, transactionId: deriveMatrixTransactionId(id, entryId, index), status: "pending" as const }; });
+	await registry.beginProjection(id, { entryId, kind: "assistant_final", status: "offered", chunks });
+	for (const chunk of chunks) {
+		await assert.rejects(registry.prepareTreeChange(id, "tree-after-final"), /pending managed/);
+		assert.equal(registry.pendingTreeOperation(id), undefined); assert.equal(registry.conversationState(id), "active"); assert.deepEqual(registry.pendingInputs(id), []);
+		await registry.markProjectionChunkSent(id, entryId, chunk.chunkId);
+	}
+	await registry.prepareTreeChange(id, "tree-after-final"); await registry.completeTreeChange(id, "tree-after-final");
+});
+
+test("tree admission cannot cross an unresolved checkpoint poll closure even after its answer completed", async t => {
+	const { root, registry, manifest } = await fixture(); const id = manifest.conversationId;
+	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "tree-poll") }); await server.start(); t.after(() => server.close());
+	const socket = await attach(server, manifest); t.after(() => socket.destroy());
+	const entryId = deriveTranscriptEntryId(manifest.piSessionId, "question"); const chunkId = deriveChunkId(entryId, 0);
+	const base = { checkpointId: "tree-question", originDeliveryId: deriveDeliveryId(id, "$origin"), entryId, transactionId: deriveMatrixTransactionId(id, entryId, 0), question: "Choose", options: [{ answerId: deriveCheckpointPollAnswerId("tree-question", 0), text: "One" }] };
+	await registry.recordAcceptedInput(id, { deliveryId: base.originDeliveryId, matrixEventId: "$origin", kind: "prompt", body: "ask", status: "completed", piEntryId: deriveTranscriptEntryId(manifest.piSessionId, "origin") });
+	await registry.beginProjection(id, { entryId, kind: "checkpoint", status: "projected", originDeliveryId: base.originDeliveryId, contentHash: deriveCheckpointPollIntentHash(base), chunks: [{ chunkId, transactionId: base.transactionId, status: "sent" }] });
+	await registry.beginCheckpointPollPublication(id, { ...base, intentHash: deriveCheckpointPollIntentHash(base) });
+	await assert.rejects(registry.prepareTreeChange(id, "tree-after-poll"), /pending managed/);
+	await registry.completeCheckpointPollPublication(id, base.checkpointId, "$poll");
+	await assert.rejects(registry.prepareTreeChange(id, "tree-after-poll"), /pending managed/);
+	const answer = { deliveryId: deriveDeliveryId(id, "$answer"), matrixEventId: "$answer", kind: "prompt", body: "One", status: "accepted" as const };
+	const closing = await registry.acceptActiveCheckpointPollResponse(id, "$poll", base.options[0]!.answerId, "One", answer); assert.ok(closing);
+	await registry.acknowledgeInput(id, answer.deliveryId, "persisted", deriveTranscriptEntryId(manifest.piSessionId, "answer"));
+	await registry.acknowledgeInput(id, answer.deliveryId, "completed", deriveTranscriptEntryId(manifest.piSessionId, "answer"));
+	await assert.rejects(registry.prepareTreeChange(id, "tree-after-poll"), /pending managed/);
+	assert.equal(registry.pendingTreeOperation(id), undefined); assert.deepEqual(registry.pendingInputs(id).map(row => row.status), ["completed", "completed"]);
+	await registry.completeCheckpointPollClosure(id, "$poll", closing.closureTransactionId);
+	await registry.prepareTreeChange(id, "tree-after-poll"); await registry.completeTreeChange(id, "tree-after-poll");
+});
+
 test("tree fencing queues text and image bytes while status stays usable, then delivers only after completion", { timeout: 10000 }, async t => {
 	const { root, registry, manifest } = await fixture(); const id = manifest.conversationId;
 	const server = new ManagedSessionIpcServer(registry, { runtimeDirectory: join(root, "tree-routing") }); await server.start(); t.after(() => server.close());
