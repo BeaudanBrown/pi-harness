@@ -1165,11 +1165,13 @@ export class HostLifecycle {
 	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity; context?: ForkContext },
 		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
 		const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
-		const existing = this.options.registry.manifestByCreationKey(request.creationKey);
+		const existing = this.options.registry.registeredConversation(conversationId);
+		if (this.options.registry.retirement(conversationId)) throw new RelayRegistryError("invalid_state", "Managed conversation is permanently retired");
 		if (existing) {
 			if (existing.kind !== "project" || existing.conversationId !== conversationId || existing.concept !== request.concept ||
 				JSON.stringify(existing.placement) !== JSON.stringify(request.placement)) throw new RelayRegistryError("invalid_state", "Conversation start retry conflicts with existing identity");
 			if (request.context) {
+				if (!hasMatrixBinding(existing)) throw new RelayRegistryError("invalid_state", "Fork retry requires its original bound context");
 				const seed = await durableProjectSession(join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl"), (await this.resolveWorkspaceIdentity(request.placement)).cwd, conversationId, request.creationKey, request.concept, 1, true, request.context);
 				if (!this.options.stageForkNotice) throw new RelayRegistryError("invalid_state", "Fork summary publication is unavailable");
 				await this.options.stageForkNotice({ ...existing, piSessionId: seed.sessionId }, forkContextId(request.context), forkContextText(request.context));
@@ -1181,6 +1183,23 @@ export class HostLifecycle {
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
 		if (request.context && !this.options.stageForkNotice) throw new RelayRegistryError("invalid_state", "Fork summary publication is unavailable");
 		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept, 1, false, request.context);
+		if (this.options.hierarchy && !provisioned && !request.context) {
+			// Ordinary fresh starts must not wait for Matrix. The existing enrollment
+			// reconciler owns independent, durable provisioning after registration.
+			const reserved = await this.options.hierarchy.prepare({ creationKey: request.creationKey, projectKey: resolved.projectKey,
+				canonicalCheckoutRoot: resolved.workspacePath, projectTitle: resolved.projectDisplayName,
+				checkoutTitle: resolved.checkoutDisplayName, conversationTitle: request.concept });
+			const createdAt = new Date().toISOString(); const generationId = deriveGenerationId(conversationId, 1);
+			const nonce = randomBytes(32).toString("base64url");
+			const local: PendingLocalConversation = { version: 1, kind: "project", conversationId, ownerHostId: this.options.hostId,
+				creationKey: request.creationKey, concept: request.concept, piSessionId: session.sessionId, placement: request.placement,
+				projectKey: resolved.projectKey, projectDisplayName: resolved.projectDisplayName, checkoutDisplayName: resolved.checkoutDisplayName,
+				checkoutId: reserved.checkoutId, bindingBoundaryEntryId: session.boundaryEntryId, createdAt, activeGenerationId: generationId,
+				generations: [{ generationId, ordinal: 1, piSessionId: session.sessionId, bindingBoundaryEntryId: session.boundaryEntryId, createdAt }] };
+			await this.options.registry.registerOwnedLocalConversation(local, nonce);
+			await this.launchProject(local, nonce, sessionFile);
+			return { operation: "conversation.start", targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId) };
+		}
 		const identity = provisioned ?? resolved;
 		const matrixBinding = provisioned ?? await this.provisionConversationMatrix(conversationId, request.concept, resolved, request.creationKey);
 		const { projectSpace, roomId } = matrixBinding;

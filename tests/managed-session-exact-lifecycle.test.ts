@@ -10,13 +10,14 @@ import { join } from "node:path";
 import { deriveConversationId, deriveGenerationId, deriveTranscriptEntryId, type ConversationManifest } from "../config/agent/extensions/managed-sessions/contracts.js";
 import type { ExactWindowProof } from "../config/agent/extensions/managed-sessions/exact-window-contracts.js";
 import { ConversationRetirement } from "../config/agent/extensions/managed-sessions/relay/conversation-retirement.js";
+import { LiveHierarchy } from "../config/agent/extensions/managed-sessions/relay/live-hierarchy.js";
 import { HostLifecycle, durableProjectSession } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import type { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import type { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 
-async function fixture(t: TestContext, roomless = false) {
+async function fixture(t: TestContext, roomless: boolean | "fresh" = false) {
 	const root = await mkdtemp(join(tmpdir(), "exact-lifecycle-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const hostId = "host"; const conversationId = deriveConversationId(hostId, "project");
 	const sessionId = `managed-${conversationId.slice(5)}`;
@@ -27,7 +28,7 @@ async function fixture(t: TestContext, roomless = false) {
 	const manifests = new ConversationManifestStore(join(root, "manifests"));
 	if (!roomless) await manifests.write(manifest);
 	let registry = new RelayRegistry(hostId, root, manifests); await registry.load();
-	if (roomless) {
+	if (roomless === true) {
 		const session = await durableProjectSession(join(root, "sessions", conversationId, "session.jsonl"), root, conversationId, manifest.creationKey, manifest.concept);
 		const { schemaVersion: _schema, roomId: _room, hostSpace: _hostSpace, projectSpace: _projectSpace, checkoutSpace: _checkoutSpace, ...identity } = manifest;
 		const generationId = deriveGenerationId(conversationId, 1);
@@ -44,13 +45,16 @@ async function fixture(t: TestContext, roomless = false) {
 	const calls: string[] = [];
 	const server = { attachment: () => undefined, sendToAttachment: () => true } as unknown as ManagedSessionIpcServer;
 	const matrix = { operatorUserId: "@operator:example.com", botUserId: "@bot:example.com" } as ManagedMatrixClient;
+	const hierarchy = roomless === "fresh" ? new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => undefined) : undefined;
+	if (hierarchy) { await hierarchy.load(); t.after(() => hierarchy.close()); }
 	function owner() {
 		const lifecycle = new HostLifecycle({ hostId, launcher: "/fixture", projectSessionDirectory: join(root, "sessions"), socketPath: join(root, "socket"),
-			registry, server, matrix, attachmentTimeoutMs: 100 });
+			registry, server, matrix, hierarchy, attachmentTimeoutMs: 100 });
 		(lifecycle as unknown as { invoke: (op: string, request: Record<string, unknown>, env?: NodeJS.ProcessEnv) => Promise<Record<string, unknown>> }).invoke = async (op, request, env = {}) => {
 			calls.push(op);
 			switch (op) {
-				case "workspace-resolve": return { ...manifest.placement, cwd: root, workspacePath: root };
+				case "workspace-resolve": return { ...manifest.placement, cwd: root, workspacePath: root,
+					projectKey: `project_${"1".repeat(32)}`, projectDisplayName: "Project", checkoutDisplayName: "main" };
 				case "root-resolve": return { sessionName: "project" };
 				case "window-inspect-exact":
 					if (inspectError) throw Error("tmux server cannot be contacted");
@@ -96,6 +100,23 @@ function request(conversationId: string, operation: "conversation.stop" | "conve
 	return { protocolVersion: "1.0.0" as const, messageId: "request", conversationId, role: "coordinator_adapter" as const, type: "lifecycle.request" as const,
 		payload: { request: { operation, targetConversationId: conversationId } } };
 }
+
+test("fresh hierarchy-backed start persists and launches locally while Matrix bootstrap is unavailable", async t => {
+	const f = await fixture(t, "fresh"); const owner = f.owner();
+	const start = { ...request(f.manifest.conversationId, "conversation.resume"), payload: { request: {
+		operation: "conversation.start" as const, creationKey: f.manifest.creationKey, concept: f.manifest.concept, placement: f.manifest.placement! } } };
+	await Promise.all([owner.request(start), owner.request(start)]);
+	assert.equal(f.creates, 1); assert.equal(f.registry.conversationState(f.manifest.conversationId), "active");
+	assert.equal(f.registry.manifestByConversationId(f.manifest.conversationId), undefined);
+	assert.equal(f.registry.hasOwnedLocalSeed(f.manifest.conversationId), true);
+	assert.equal(f.registry.localConversations().length, 1);
+	await assert.rejects(owner.completeLocalEnrollment(f.manifest.conversationId), /Host Space provisioning is pending/);
+	assert.equal(f.registry.conversationState(f.manifest.conversationId), "active");
+	const sessionFile = join(f.root, "sessions", f.manifest.conversationId, "session.jsonl");
+	const history = await readFile(sessionFile, "utf8");
+	await owner.request(start);
+	assert.equal(f.creates, 1); assert.equal(await readFile(sessionFile, "utf8"), history);
+});
 
 test("owned roomless open and resume share one exact launch before independent Matrix binding", async t => {
 	const f = await fixture(t, true); const owner = f.owner();

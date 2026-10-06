@@ -263,8 +263,28 @@ case. Latest full affected managed suite: **535 passed, zero skips**:
 `.pi/tmp/workers/2026-10-06T05-43-31-036Z-roomless-launch-origin-affected-7fea2292bb6a/`.
 No final canonical gate or #116 subjective review yet.
 
-Saved-session selection/full ownership guards, fresh local-first admission and
-launcher wiring remain to be implemented and verified. General startup transport is out of
+## Partial implementation: fresh local-first lifecycle
+
+Ordinary `conversation.start` with configured live hierarchy now durably seeds,
+reserves hierarchy identity locally, registers owned roomless authority, and
+launches before any Matrix provisioning. It uses the existing independent local
+enrollment reconciler, not a new retry owner or argv journal. Retries find both
+pending and bound registrations; retirement is checked before new seeding.
+Explicit fork context and pre-provisioned compound creation retain their existing
+bound paths, as do legacy configurations without live hierarchy.
+
+A new fixture with unavailable coordinator bootstrap and no Matrix provisioning
+methods proves concurrent/repeated fresh requests create one local process, and
+failed remote completion leaves it active with unchanged history. Full packaged
+affected suite: **536 passed, zero skips**:
+`.pi/tmp/workers/2026-10-06T05-48-21-280Z-fresh-local-first-affected-6cf765227ed2/`.
+An ad-hoc run of the broader lifecycle file omitted its packaged environment,
+skipped five probes and failed a launcher probe; that is not acceptance evidence.
+The properly packaged full suite above passed that probe without changing it.
+
+Saved-session selection/full ownership guards and launcher wiring remain to be
+implemented and verified. Typed pending-control presentation also needs checking
+against the final integrated path; bound-only controls have not been generalized. General startup transport is out of
 scope under the approved simplification. Preflight findings are
 not acceptance of #116. These plans do not authorize live account effects or
 deployment.
