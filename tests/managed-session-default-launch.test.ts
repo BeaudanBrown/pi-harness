@@ -2,13 +2,18 @@ import assert from "node:assert/strict";
 import { dirname, join, relative } from "node:path";
 import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
+import { readFileSync } from "node:fs";
+import { link, mkdir, mkdtemp, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { classifyLaunchMode, type LaunchModeContext } from "../config/agent/extensions/managed-sessions/launch/mode.js";
 import { inspectSavedHistory, resolveNativeSessionPath } from "../config/agent/extensions/managed-sessions/launch/history.js";
 import { assertBasicManagedInvocation, resolveBasicSessionSelection } from "../config/agent/extensions/managed-sessions/launch/arguments.js";
+import { prepareImportedHistory } from "../config/agent/extensions/managed-sessions/launch/import-history.js";
+import { deriveConversationId, MANAGED_SESSION_STATE_VERSION } from "../config/agent/extensions/managed-sessions/contracts.js";
+import { durableProjectSession } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import { eligibleTranscriptEntries } from "../config/agent/extensions/managed-sessions/adapter/state.js";
 
 const interactive: LaunchModeContext = { configured: true, localOnly: false, stdinIsTTY: true, stdoutIsTTY: true,
 	trustedDispatch: false, internalWorker: false, experimentsEnabled: false };
@@ -183,4 +188,75 @@ test("native path normalization agrees with public SessionManager without modify
 		assert.equal(sdk.SessionManager.open(selector).getSessionFile(), path, "only disposable existing fixtures are opened to compare SDK semantics");
 		assert.equal(await readFile(path, "utf8"), original);
 	}
+});
+
+test("explicit history import copies context into a new native identity with zero historical projection", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-history-import-")); t.after(() => rm(root, { recursive: true, force: true }));
+	for (const retired of [false, true]) {
+		const source = join(root, `source-${retired}.jsonl`); const destination = join(root, `owned-${retired}`, "session.jsonl");
+		const oldId = `original-${retired}`; const now = new Date().toISOString();
+		const entries: unknown[] = [{ type: "session", version: sdk.CURRENT_SESSION_VERSION, id: oldId, cwd: root, timestamp: now },
+			{ type: "message", id: "old-user", parentId: null, timestamp: now, message: { role: "user", content: [{ type: "text", text: "Keep this old context private" }], timestamp: Date.now() } }];
+		if (retired) entries.push({ type: "custom", id: "old-boundary", parentId: "old-user", timestamp: now,
+			customType: "managed-session.binding-boundary", data: { version: MANAGED_SESSION_STATE_VERSION, sessionId: oldId, creationKey: "old", concept: "Old" } });
+		const original = entries.map(entry => JSON.stringify(entry)).join("\n") + "\n";
+		await writeFile(source, original, { mode: 0o600 });
+		const creationKey = `copy-${retired}`; const conversationId = deriveConversationId("host", creationKey);
+		const input = { source, destination, cwd: root, conversationId, creationKey, concept: "Imported", authority: retired ? "retired" as const : "unregistered" as const };
+		if (retired) await assert.rejects(prepareImportedHistory({ ...input, authority: "unregistered" }, sdk), /proven retirement/);
+		const imported = await prepareImportedHistory(input, sdk);
+		assert.notEqual(imported.sessionId, oldId); assert.equal(await readFile(source, "utf8"), original);
+		assert.deepEqual(await durableProjectSession(destination, root, conversationId, creationKey, "Imported", 1, true), imported);
+		const manager = sdk.SessionManager.open(destination); const branch = manager.getBranch();
+		assert.ok(branch.some((entry: { id: string }) => entry.id === "old-user"));
+		assert.equal(manager.getHeader().parentSession, source);
+		const binding = { version: MANAGED_SESSION_STATE_VERSION, conversationId, concept: "Imported", role: "ordinary_adapter" as const, sessionId: imported.sessionId, bindingBoundaryEntryId: imported.boundaryEntryId };
+		assert.deepEqual(eligibleTranscriptEntries(branch, binding, new Map()), []);
+		const bytes = await readFile(destination, "utf8");
+		await assert.rejects(prepareImportedHistory(input, sdk), { code: "EEXIST" });
+		assert.equal(await readFile(destination, "utf8"), bytes, "retry cannot replace a seed or live writer");
+		assert.deepEqual(await readdir(dirname(destination)), ["session.jsonl"], "completed attempts remove private staging copies");
+	}
+});
+
+test("history import rejects unsafe source aliases and malformed histories before publication", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-import-refusal-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const source = join(root, "source.jsonl"); const destination = join(root, "owned", "session.jsonl");
+	const input = { source, destination, cwd: root, conversationId: deriveConversationId("host", "copy"), creationKey: "copy", concept: "Copy", authority: "unregistered" as const };
+	await writeFile(source, JSON.stringify({ type: "session", version: sdk.CURRENT_SESSION_VERSION, id: "source", cwd: root }) + "\n{invalid}\n");
+	await assert.rejects(prepareImportedHistory(input, sdk), /safely inspected/);
+	const alias = join(root, "alias.jsonl"); await symlink(source, alias);
+	await assert.rejects(prepareImportedHistory({ ...input, source: alias }, sdk), /non-symlink/);
+	await rm(alias); await link(source, alias);
+	await assert.rejects(prepareImportedHistory(input, sdk), /single-link/);
+	assert.deepEqual((await readdir(root)).sort(), ["alias.jsonl", "source.jsonl"]);
+});
+
+test("history import freezes the source and publishes exclusively under concurrent attempts", async t => {
+	const sdk = await realSdk(); if (!sdk) return t.skip("packaged Pi SDK unavailable");
+	const root = await mkdtemp(join(tmpdir(), "pi-import-race-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const source = join(root, "source.jsonl"); const destination = join(root, "owned", "session.jsonl");
+	const original = JSON.stringify({ type: "session", version: sdk.CURRENT_SESSION_VERSION, id: "source", cwd: root }) + "\n";
+	await writeFile(source, original);
+	const input = { source, destination, cwd: root, conversationId: deriveConversationId("host", "copy"), creationKey: "copy", concept: "Copy", authority: "unregistered" as const };
+	await assert.rejects(prepareImportedHistory({ ...input, destination: source }, sdk), /independent/);
+	await assert.rejects(prepareImportedHistory(input, { ...sdk, SessionManager: { forkFrom() { throw new Error("injected SDK failure"); } } }), /injected SDK failure/);
+	assert.deepEqual(await readdir(dirname(destination)), []);
+	const results = await Promise.allSettled([prepareImportedHistory(input, sdk), prepareImportedHistory(input, sdk)]);
+	assert.equal(results.filter(result => result.status === "fulfilled").length, 1);
+	const winner = results.find(result => result.status === "fulfilled")!;
+	assert.equal(sdk.SessionManager.open(destination).getSessionId(), winner.status === "fulfilled" && winner.value.sessionId);
+	assert.equal(await readFile(source, "utf8"), original);
+	assert.deepEqual(await readdir(dirname(destination)), ["session.jsonl"]);
+	let snapshotBytes: string | undefined;
+	await prepareImportedHistory({ ...input, destination: join(root, "second", "session.jsonl") }, { ...sdk, SessionManager: {
+		forkFrom(path: string, cwd: string, directory: string) {
+			snapshotBytes = readFileSync(path, "utf8");
+			assert.notEqual(path, source, "SDK receives only the immutable private snapshot");
+			return sdk.SessionManager.forkFrom(path, cwd, directory);
+		},
+	} });
+	assert.equal(snapshotBytes, original);
 });

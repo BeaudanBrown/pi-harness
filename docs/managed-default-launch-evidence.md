@@ -36,6 +36,46 @@ resources remain intact. This does not authorize a new general argv payload,
 startup-prompt journal, or exception to host path authority. Selection is not
 ownership proof, and cannot create a requested arbitrary managed session ID.
 
+## Approved ordinary-history resume policy
+
+The operator selected option 1: explicit managed resume of never-managed saved
+history imports a snapshot into a new native session/conversation. The original
+file and any ordinary writer remain untouched. This is independent context,
+not in-place adoption, and no copied history is backfilled to Matrix. Existing
+managed active/dormant bindings still reuse their original identity/window;
+retired histories require proven retirement and fresh identity.
+
+`launch/import-history.ts` now prepares such a seed through the public standalone
+SDK `forkFrom`, using a private immutable snapshot rather than the original live
+file. It rejects noncanonical/symlink/hardlinked/non-user/malformed/changing
+sources and mismatched cwd before copying. A complete fresh projection boundary
+is published exclusively with fsync; existing destinations are never replaced.
+No assistant response, SDK private persistence method or live-manager mutation
+is used. Copied metadata retains its old session scope; lifecycle verification
+ignores only positively scoped foreign boundaries, not malformed/unknown ones.
+This preparation helper is not host ownership/retirement authorization and is
+not yet wired to the automatic launcher.
+
+Crash boundaries: before publication, private staging has no registry/process
+identity; handled errors remove it. After exclusive publication, the complete
+seed survives for explicit owner admission/recovery, never overwrite/replay.
+Process crashes may retain private staging for manual inspection; no automatic
+cleanup/adoption of crash remnants is introduced. Source files are never written.
+
+Initial actual SDK 0.84.4 and 0.85.0 checks passed (two each, zero skips), including
+user-only history with no assistant, retired old-scope metadata, native reopen,
+zero historical projection, unchanged source/destination retry refusal, and
+alias/malformed refusal. Initial affected suite: 547 passed, zero skips. Artifacts:
+`.pi/tmp/workers/2026-10-07T04-40-44-085Z-history-import-real-sdk-a44dbcf991b7/` and
+`.pi/tmp/workers/2026-10-07T04-46-46-247Z-history-import-affected-ea8834ea0d12/`.
+Final focused coverage: **three cases on each actual SDK, zero skips**, including
+header-only history, injected SDK failure cleanup, immutable snapshot input and
+concurrent exclusive publication:
+`.pi/tmp/workers/2026-10-07T04-52-47-493Z-history-import-final-focused-9b76d88a72f4/`.
+Final affected snapshot: **548 passed, zero skips**:
+`.pi/tmp/workers/2026-10-07T04-53-14-972Z-history-import-complete-affected-0f9fe7fd7539/`.
+This is not #116's final canonical gate or completed launcher acceptance.
+
 ## Acceptance-to-evidence plan
 
 | Acceptance | Intended seam | Required evidence |

@@ -285,7 +285,14 @@ export async function durableProjectSession(path: string, cwd: string, conversat
 		const text = await readFile(path, "utf8");
 		const lines = text.trimEnd().split("\n").map((line) => JSON.parse(line) as Record<string, unknown>);
 		const header = lines[0];
-		const boundaries = lines.filter((entry) => entry.type === "custom" && entry.customType === "managed-session.binding-boundary");
+		const boundaries = lines.filter((entry) => {
+			if (entry.type !== "custom" || entry.customType !== "managed-session.binding-boundary") return false;
+			const scope = entry.data as Record<string, unknown> | undefined;
+			// A supported new-ID history import retains old entries as context, not
+			// authority. Ignore only positively scoped foreign-session boundaries.
+			return scope?.version !== MANAGED_SESSION_STATE_VERSION || typeof scope.sessionId !== "string" ||
+				!/^[^\s\u0000-\u001f\u007f]{1,128}$/u.test(scope.sessionId) || scope.sessionId === header?.id;
+		});
 		const boundary = boundaries.length === 1 ? boundaries[0] : undefined;
 		const data = boundary?.data as Record<string, unknown> | undefined;
 		if (header?.type !== "session" || typeof header.id !== "string" || header.cwd !== cwd || typeof boundary?.id !== "string" ||
