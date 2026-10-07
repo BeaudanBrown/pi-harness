@@ -22,7 +22,7 @@ import {
 } from "../contracts.js";
 import { deriveCheckoutId } from "../managed-provenance.js";
 import { FORK_CONTEXT_TYPE, forkContextEntry, forkContextId, forkContextText, parseForkContext, verifyForkContextEntry, type ForkContext } from "../fork-context.js";
-import { parseHostAction, type HostAction, type HostResult } from "../live-workspace-contracts.js";
+import { parseHostAction, savedSessionKey, type HostAction, type HostResult } from "../live-workspace-contracts.js";
 import type { FrozenJson } from "./host-approval-record.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
@@ -876,7 +876,7 @@ export class HostLifecycle {
 		if (!isDeepStrictEqual(await this.freezeCreation(action), frozen)) throw new RelayRegistryError("invalid_state", "Approved creation preconditions changed");
 		let result: Record<string, unknown>;
 		if (action.operation === "project.create") result = await this.createProject({ rootKey: action.rootKey, workspace: action.workspace, creationKey: action.creationKey, concept: action.title });
-		else if (action.operation === "conversation.create") result = await this.start({ creationKey: action.creationKey, concept: action.title, placement: action.placement });
+		else if (action.operation === "conversation.create") result = await this.start({ creationKey: action.creationKey, concept: action.title, placement: action.placement, expectedSessionKey: action.expectedSessionKey });
 		else {
 			result = await this.createWorktree({ creationKey: action.creationKey, rootKey: action.rootKey, workspace: action.workspace,
 				baseRef: action.baseRef, branch: action.branch, ...(action.operation !== "worktree.create" ? { concept: action.title } : {}),
@@ -1163,13 +1163,13 @@ export class HostLifecycle {
 			conversationState: this.options.registry.conversationState(manifest.conversationId), roomLink };
 	}
 
-	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity; context?: ForkContext },
+	private start(request: { creationKey: string; concept: string; placement: WorkspaceIdentity; context?: ForkContext; expectedSessionKey?: string },
 		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
 		return this.runWorktreeOperation(this.workspaceOperationKey(request.placement), () => this.startOnce(request, provisioned),
-			`create:${deriveConversationId(this.options.hostId, request.creationKey)}:${JSON.stringify([request.concept, request.placement, request.context])}`);
+			`create:${deriveConversationId(this.options.hostId, request.creationKey)}:${JSON.stringify([request.concept, request.placement, request.context, request.expectedSessionKey])}`);
 	}
 
-	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity; context?: ForkContext },
+	private async startOnce(request: { creationKey: string; concept: string; placement: WorkspaceIdentity; context?: ForkContext; expectedSessionKey?: string },
 		provisioned?: ProvisionedProject): Promise<Record<string, unknown>> {
 		const conversationId = deriveConversationId(this.options.hostId, request.creationKey);
 		const existing = this.options.registry.registeredConversation(conversationId);
@@ -1177,6 +1177,11 @@ export class HostLifecycle {
 		if (existing) {
 			if (existing.kind !== "project" || existing.conversationId !== conversationId || existing.concept !== request.concept ||
 				JSON.stringify(existing.placement) !== JSON.stringify(request.placement)) throw new RelayRegistryError("invalid_state", "Conversation start retry conflicts with existing identity");
+			if (request.expectedSessionKey) {
+				const generation = this.options.registry.activeGeneration(existing);
+				const seed = await durableProjectSession(join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl"), (await this.resolveWorkspaceIdentity(request.placement)).cwd, conversationId, request.creationKey, request.concept, 1, true);
+				if (generation.ordinal !== 1 || savedSessionKey(this.options.hostId, seed.sessionId) !== request.expectedSessionKey || generation.piSessionId !== seed.sessionId) throw new RelayRegistryError("invalid_state", "Imported session identity changed; explicit recovery required");
+			}
 			if (request.context) {
 				if (!hasMatrixBinding(existing)) throw new RelayRegistryError("invalid_state", "Fork retry requires its original bound context");
 				const seed = await durableProjectSession(join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl"), (await this.resolveWorkspaceIdentity(request.placement)).cwd, conversationId, request.creationKey, request.concept, 1, true, request.context);
@@ -1189,7 +1194,8 @@ export class HostLifecycle {
 		const resolved = await this.resolveWorkspaceIdentity(request.placement);
 		const sessionFile = join(resolve(this.options.projectSessionDirectory), conversationId, "session.jsonl");
 		if (request.context && !this.options.stageForkNotice) throw new RelayRegistryError("invalid_state", "Fork summary publication is unavailable");
-		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept, 1, false, request.context);
+		const session = await durableProjectSession(sessionFile, resolved.cwd, conversationId, request.creationKey, request.concept, 1, request.expectedSessionKey !== undefined, request.context);
+		if (request.expectedSessionKey && savedSessionKey(this.options.hostId, session.sessionId) !== request.expectedSessionKey) throw new RelayRegistryError("invalid_state", "Imported session identity changed; explicit recovery required");
 		if (this.options.hierarchy && !provisioned && !request.context) {
 			// Ordinary fresh starts must not wait for Matrix. The existing enrollment
 			// reconciler owns independent, durable provisioning after registration.

@@ -162,11 +162,12 @@ let
   managedSessionTests = runCompiledTests {
     name = "pi-harness-managed-session-tests";
     selector = ''find ${testBuild}/build/tests -maxdepth 1 -type f -name 'managed-session-*.test.js' | sort'';
-    extraInputs = [ pkgs.direnv pkgs.tmux pkgs.imagemagick ];
+    extraInputs = [ pkgs.direnv pkgs.tmux pkgs.imagemagick pkgs.python3 ];
     nodeArgs = "--test-concurrency=6";
     environment = ''
       export PI_HARNESS_JQ=${lib.getExe pkgs.jq}
       export PI_TEST_SHELL=${lib.getExe pkgs.bash}
+      export PI_TEST_FZF=${lib.getExe pkgs.fzf}
       export PI_MANAGED_ADAPTER_TEST_PI=${piPackage}/bin/pi
       export PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary}
       export PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator}
@@ -293,6 +294,7 @@ let
     PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
       PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
       PI_HARNESS_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
+      PI_HARNESS_LOCAL_ONLY_PI=$(jq -r .localOnlyExecutable ${managedSessionModuleReport}) \
       PI_HARNESS_EXPECTED_IMAGE_DECODER=${lib.getExe pkgs.imagemagick} \
       PI_HARNESS_WORKER_EXTENSION=${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts \
       node --test ${source}/tests/engineering-runtime.test.mjs

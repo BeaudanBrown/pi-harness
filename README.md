@@ -196,8 +196,8 @@ The executable requires `PI_MANAGED_SESSIONS_RUNTIME_DIR`,
 `PI_MANAGED_SESSIONS_STATE_DIR`, `PI_MANAGED_SESSIONS_MANIFEST_DIR`,
 `PI_MANAGED_SESSIONS_HOST_ID`, and the
 existing `PI_MATRIX_*` identity/credential variables. Packaging the executable does not enable it. The NixOS module's atomic
-`managedSessions.enable` switch installs only the ordinary adapter into the
-interactive Pi wrapper, starts one lingered systemd user relay for the selected
+`managedSessions.enable` switch installs the managed-aware interactive Pi wrapper
+and offline native-history guard, starts one lingered systemd user relay for the selected
 Unix user, and strictly parses the SOPS Matrix token file for the relay without
 sourcing arbitrary environment assignments. `managedSessions.stateDirectory`
 defaults to `%h/.local/state/pi-managed-sessions/relay`: registry, activity and
@@ -206,6 +206,22 @@ live under `XDG_RUNTIME_DIR`. First startup atomically copies existing legacy
 runtime state under the host lock without merging or deleting the old store.
 The coordinator uses a separate raw-Pi profile and never inherits
 `PI_MATRIX_*` credentials.
+
+On enabled hosts, bare interactive `pi` in a host-validated Git checkout or linked
+worktree creates a relay-owned conversation and opens its exact tmux window.
+Explicit resume reuses an existing owned binding; ordinary saved history is copied
+to a fresh native identity without changing the original or projecting old history.
+Retired history requires positive host retirement proof. Non-Git/out-of-root
+launches remain local; workers, headless jobs and dedicated experiments do not
+auto-enroll. Eligible startup overrides are refused rather than discarded.
+Use `pi-local-only` for normal engineering resources without managed/Matrix
+transport, or for startup overrides; it refuses bound-history resume. This is
+separate from the existing `pi-local`/`pi-r-local` model profile. Matrix setup may
+remain pending while local work runs; an unavailable local relay instead refuses
+admission with explicit local-only guidance. Linux, tmux 3.6+, and the matching
+launcher UI capabilities are required. See [default-launch evidence](docs/managed-default-launch-evidence.md)
+for ownership, recovery and verification boundaries. Installing these sources is
+not authorization to activate or migrate a live host.
 
 Enabled hosts also install `pi-managed-session`, backed by a separate private
 `$XDG_RUNTIME_DIR/pi-managed-sessions/control.sock`:

@@ -108,11 +108,11 @@ let
     export PI_CODING_AGENT_SESSION_DIR=${lib.escapeShellArg (nonNullString cfg.sessionDirectory)}
   '';
   managedSessionEnvironment = lib.optionalString managedSessionsEnabled ''
-    if [[ -z "''${XDG_RUNTIME_DIR:-}" ]]; then
-      echo "pi-harness: XDG_RUNTIME_DIR is required for managed sessions" >&2
-      exit 1
+    if [[ -n "''${XDG_RUNTIME_DIR:-}" ]]; then
+      export PI_MANAGED_SESSIONS_SOCKET="$XDG_RUNTIME_DIR/pi-managed-sessions/relay.sock"
+    else
+      unset PI_MANAGED_SESSIONS_SOCKET
     fi
-    export PI_MANAGED_SESSIONS_SOCKET="$XDG_RUNTIME_DIR/pi-managed-sessions/relay.sock"
     export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER="${lib.getExe pkgs.imagemagick}"
   '';
   lspExtensionArray =
@@ -127,7 +127,10 @@ let
   lspEnvironmentCleanup = fragments.lspCleanup;
   lspDisabledCleanup = lib.optionalString (!cfg.lsp.enable) lspEnvironmentCleanup;
   managedOrdinaryExtension = lib.optionalString managedSessionsEnabled ''
-    extension_args+=(--extension "${managedExtensions.ordinary}")
+    extension_args+=(--extension "${cfg.package.harnessResources}/share/pi-harness/agent/extensions/managed-sessions/launch/local-only.ts")
+    if [[ "''${PI_HARNESS_LOCAL_ONLY:-0}" != 1 && -n "''${PI_MANAGED_SESSIONS_SOCKET:-}" ]]; then
+      extension_args+=(--extension "${managedExtensions.ordinary}")
+    fi
   '';
 
   pinRuntime = lib.optionalString (managedSessionsEnabled && cfg.managedSessions.retainRuntime) ''
@@ -139,13 +142,19 @@ let
     unset PI_HARNESS_PINNED_LAUNCHER PI_RUNTIME_NIX_STORE
   '';
 
-  piWithRuntime = pkgs.writeShellScriptBin "pi" ''
+  nativePiWithRuntime = pkgs.writeShellScriptBin "pi" ''
     set -euo pipefail
     ${pinRuntime}
     ${experimentEnvironment}
     ${runtimeEnvironmentSetup}
     ${sessionDirectoryEnvironment}
-    ${managedSessionEnvironment}
+    if [[ "''${PI_HARNESS_LOCAL_ONLY:-0}" != 1 ]]; then
+      :
+      ${managedSessionEnvironment}
+    else
+      for key in "''${!PI_MANAGED_@}" "''${!PI_MATRIX_@}" "''${!PI_BRIDGE_CHAT_@}"; do unset "$key"; done
+      unset PI_HARNESS_AGENT_PROFILE
+    fi
     ${lib.optionalString (!(cfg.package ? engineeringRuntimePath)) engineeringRuntimeEnvironment}
     export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspEnabledEnvironment}
@@ -154,6 +163,28 @@ let
     ${lspExtensionArray}
     ${managedOrdinaryExtension}
     exec ${cfg.package}/bin/pi "''${extension_args[@]}" "$@"
+  '';
+
+  piWithRuntime = if !managedSessionsEnabled then nativePiWithRuntime else pkgs.writeShellScriptBin "pi" ''
+    set -euo pipefail
+    ${pinRuntime}
+    ${experimentEnvironment}
+    ${sessionDirectoryEnvironment}
+    export NODE_PATH="${managedRawPi}/lib/node_modules:${managedRawPi}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules:''${NODE_PATH:-}"
+    export PI_HARNESS_NATIVE_SDK="${managedRawPi}/lib/node_modules/@earendil-works/pi-coding-agent/dist/index.js"
+    export PI_HARNESS_NATIVE_PI="${nativePiWithRuntime}/bin/pi"
+    export PI_HARNESS_MANAGED_LAUNCHER="${managedLauncherPackage}/bin/tmux_project"
+    export PI_HARNESS_MANAGED_HOST_ID=${lib.escapeShellArg cfg.managedSessions.hostId}
+    export PI_MANAGED_SESSIONS_WORKSPACE_ROOTS=${lib.escapeShellArg (builtins.toJSON cfg.managedSessions.workspaceRoots)}
+    project_sessions=${lib.escapeShellArg cfg.managedSessions.projectSessionDirectory}
+    export PI_MANAGED_PROJECT_SESSION_DIR="''${project_sessions//%h/$HOME}"
+    export PI_HARNESS_RESUME_FZF="${pkgs.fzf}/bin/fzf"
+    exec ${pkgs.nodejs}/bin/node "${cfg.package.harnessResources}/share/pi-harness/agent/extensions/managed-sessions/launch/main.mjs" "$@"
+  '';
+
+  localOnlyPi = pkgs.writeShellScriptBin "pi-local-only" ''
+    export PI_HARNESS_LOCAL_ONLY=1
+    exec ${piWithRuntime}/bin/pi "$@"
   '';
 
   headlessAloop = pkgs.writeShellScriptBin "pi-aloop" ''
@@ -787,6 +818,7 @@ in
       [ piWithRuntime ]
       ++ lib.optional managedSessionsEnabled managedStatus
       ++ lib.optional managedSessionsEnabled managedControl
-      ++ lib.optional (cfg.package.hasAloopDriver or false) headlessAloop;
+      ++ lib.optional (cfg.package.hasAloopDriver or false) headlessAloop
+      ++ lib.optional managedSessionsEnabled localOnlyPi;
   };
 }

@@ -253,6 +253,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		throw new ManagedAdapterError("Closing activity limit must be a positive bounded integer");
 	}
 	return function managedSessionAdapter(pi: ExtensionAPI): void {
+		// An explicit local-only launch cannot acquire managed tools or a socket,
+		// even if user/project discovery includes this adapter again.
+		if (environment.PI_HARNESS_LOCAL_ONLY === "1") return;
 		pi.registerEntryRenderer?.(CHECKPOINT_ENTRY_TYPE, (entry, _options, theme) => {
 			const body = projectedCheckpointHistoryText(entry.data);
 			return new Text(body ? theme.fg("accent", body) : "", 0, 0);

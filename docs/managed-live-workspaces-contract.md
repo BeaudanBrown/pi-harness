@@ -93,6 +93,16 @@ hosts without the capability cannot authorize this flow. Strict older clients
 may require refresh for the extended inventory schema; never strip unknown
 identity fields to manufacture compatibility.
 
+`saved-session-import-v1` adds the optional opaque `expectedSessionKey` fence to
+`conversation.create`. A snapshot-import frontend requires this capability and
+sends the fresh copied native identity's key. The owner requires the matching
+existing durable seed before reservation, registration or launch; an absent seed
+must not become a newly generated empty history. Retries also fence the active
+initial generation and native identity. This supplements, rather than replaces,
+normal host placement, creation identity, file ownership and retirement checks.
+These qualified saved-history fences use opaque keys, never arbitrary native
+files or raw native IDs. The schema-driven CLI exposes their corresponding flags.
+
 | Action ID | Required fields (optional in parentheses) | Result data |
 | --- | --- | --- |
 | host.status | none | hostId, relayState, capabilities, accountState |
@@ -109,8 +119,8 @@ identity fields to manufacture compatibility.
 | worktree.branch.delete | previewId, confirmed=true | operationId, cleanupState |
 | conversation.list | (limit, cursor) | items of conversation summary, nextCursor |
 | conversation.status | conversationId | conversation summary |
-| conversation.create | creationKey, title, placement | conversationId, launchId, setupState |
-| conversation.open | conversationId | conversationId, launchId, launchState, window |
+| conversation.create | creationKey, title, placement (expectedSessionKey) | conversationId, launchId, setupState |
+| conversation.open | conversationId (expectedGenerationId) | conversationId, launchId, launchState, window |
 | conversation.resume | conversationId | conversationId, launchId, launchState |
 | conversation.stop | conversationId | conversationId, runtimeState |
 | conversation.refresh | conversationId, confirmed=true | conversationId, launchId, launchState |
@@ -135,8 +145,8 @@ Space apply uses existing #68 reconciliation intents extended to checkout Spaces
 
 A conversation summary contains only conversationId, kind, title, checkoutId
 (project only), projectKey (project only), runtimeState, launchState, setupState,
-activeGenerationId, optional exact marked window, optional bounded error code,
-and capabilities. Project summaries may include logical placement (rootKey,
+activeGenerationId, optional opaque sessionKey (never a raw native session ID),
+optional exact marked window, optional bounded error code, and capabilities. Project summaries may include logical placement (rootKey,
 workspace, relativeCwd) and project/checkout display names, never an absolute cwd.
 Legacy project rows without a
 verified checkout identity instead carry `reconciliationRequired: true`, omit

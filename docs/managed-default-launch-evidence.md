@@ -1,7 +1,10 @@
 # Default managed launch evidence (#116)
 
-Status: partial implementation; launch helpers and owned roomless registration
-are tested, but launchers do not yet auto-enroll. #114 is complete. This issue owns new eligible
+Status: implementation and deterministic acceptance complete. Paired review,
+remediation, final canonical verification and harness production package builds
+passed. No deployment or live-account acceptance is claimed. Historical milestones
+below record earlier partial states; the final verification section is current. #114 is
+complete. This issue owns new eligible
 interactive launches and explicit resume, not adoption of already running
 ordinary sessions. No push, deployment, activation, service restart,
 live-account traffic or nix-dotfiles Nix evaluation/build is authorized.
@@ -53,8 +56,9 @@ is published exclusively with fsync; existing destinations are never replaced.
 No assistant response, SDK private persistence method or live-manager mutation
 is used. Copied metadata retains its old session scope; lifecycle verification
 ignores only positively scoped foreign boundaries, not malformed/unknown ones.
-This preparation helper is not host ownership/retirement authorization and is
-not yet wired to the automatic launcher.
+This preparation helper is not host ownership/retirement authorization. The
+integrated launcher obtains live host identity/retirement evidence separately and
+requires host-side expected-native-identity admission before launch.
 
 Crash boundaries: before publication, private staging has no registry/process
 identity; handled errors remove it. After exclusive publication, the complete
@@ -485,9 +489,181 @@ compiler evidence. External pre-commit hooks were bypassed to avoid forbidden
 Nix evaluation. No shared server was restarted. These primitives still need
 frontend wiring and do not constitute #116/#118 completion or live acceptance.
 
-Full saved-file/retirement ownership integration, requesting-client frontend wiring,
-local-only guards and launcher wiring remain to be implemented and verified. Typed pending-control presentation also needs checking
-against the final integrated path; bound-only controls have not been generalized. General startup transport is out of
-scope under the approved simplification. Preflight findings are
-not acceptance of #116. These plans do not authorize live account effects or
-deployment.
+At that milestone the frontend and final verification were still outstanding.
+General startup transport remains outside the approved scope. These source
+changes do not authorize live account effects or deployment.
+
+## Integrated default launcher
+
+`launch/main.mjs` uses the packaged SDK parser and read-only settings/session
+inventory, including a read-only fzf resume selector. It resolves placement with
+the trusted Git/root helper, checks host identity/capabilities, and captures the
+requesting tmux client before admission. Bare creation starts once; a bounded
+status join opens its generation-fenced exact window without waiting for Matrix.
+Outside tmux, the terminal attach primitive retains terminal stdout. Cancellation,
+disconnection, unknown acknowledgements and focus failure never replay or cancel
+an accepted host launch.
+
+Saved owned histories require their canonical generation path, unique scoped
+boundary, matching opaque native key, and current host generation. Terminal/legacy
+or historical-generation ambiguity refuses for explicit recovery rather than
+inventing ownership. Retired histories require a positive private host response.
+Ordinary and positively retired imports use fresh identities; the host's new
+`saved-session-import-v1` / `conversation.create.expectedSessionKey` fence requires
+that exact durable seed **before** registration, hierarchy reservation or launch.
+Missing seeds, mismatched host storage/configuration, changed IDs and superseding
+generations cannot silently turn a requested context import into an empty session.
+The opaque key is a fence, not standalone authorization. A published but unadmitted
+seed is retained for manual inspection, never adopted or overwritten automatically.
+
+`pi-local-only` retains the engineering baseline, project resources and executable
+precedence while removing inherited managed/Matrix/bridge-chat configuration and
+omitting the managed adapter. Even a rediscovered adapter returns before registering
+events/tools. Offline pre-open and native navigation guards reject bound histories
+and host-owned storage, including canonical aliases and dangling links. Native-only
+new IDs/files and startup overrides keep native argument semantics. Workers,
+headless/ephemeral jobs, diagnostics and dedicated experiments do not auto-enroll;
+the trusted dispatcher still consumes its one-shot role before child execution.
+Scratch `LLM`, `pi-local`/`pi-r-local`, and experiment defaults are unchanged.
+
+The external launcher negotiates read-only `ui-capabilities` before admission,
+requiring Linux and tmux 3.6+. This neither starts nor contacts a server. Unsupported
+versions fail before resource creation. Existing captured-client and exact-target
+checks remain authoritative at focus/attach time.
+
+### Updated acceptance and crash evidence
+
+| Boundary / criterion | Current evidence |
+| --- | --- |
+| Bare/attached/outside launch; pending Matrix; saved live/retired/ordinary selection | Real SDK + PTY + private fake-host IPC integration; one create, opaque generation-fenced open; original files unchanged |
+| Native picker/continue/prefix/ID and cancellation | Read-only selector integration; actual fzf on a sized controlling PTY consumes Enter and opens the existing identity |
+| Imported seed admission and concurrent retry | Exact lifecycle test rejects absent/wrong seeds before registration/launch; same identity coalesces; missing retry seed never regenerates history |
+| Local-only and ineligible behavior | Offline bound/alias guards, no host requests, ordinary overrides/new IDs/new files preserved; unavailable relay does not block explicit local work |
+| Native navigation and rediscovery | Guard cancels bound resume before SDK switch; rediscovered managed adapter performs no registrations |
+| Runtime resources, inherited authority and default-off profiles | Actual packaged local-only/engineering/PATH/nested dispatcher tests; managed and Matrix environment stripped |
+| Source snapshot crash | SDK helper fault injection and exclusive publication; original/active writer untouched; orphaned private staging/seed requires manual inspection |
+| Accepted create / lost requester / failed target | Existing durable host lifecycle and actual disposable tmux tests; no replay, replacement, cleanup or fallback client |
+| Git roots/linked worktrees and ambiguous paths | Existing trusted helper tests in affected suite; no shell-token eligibility inference |
+
+Focused integrated/host checks: **37 passed, zero skips**, at
+`.pi/tmp/workers/2026-10-07T08-01-38-678Z-default-launch-host-fence-focused-58e73ccdd435/`.
+Package/module checks: **13 engineering/runtime + 17 headless passed**, at
+`.pi/tmp/workers/2026-10-07T08-01-38-678Z-local-only-clean-environment-package-e5c1e19e5580/`.
+An actual package test exposed unavailable `compgen` in Nix's noninteractive Bash;
+cleanup now uses prefix expansion plus pre-exec environment filtering, not that
+unsupported builtin. The passing result supersedes the initial failure.
+Affected managed suite: **559 passed, zero skips**, before the final real-fzf test,
+at `.pi/tmp/workers/2026-10-07T08-07-45-078Z-default-launch-complete-affected-5272cd027c8a/`.
+Real fzf/PTY: **1 passed**, at
+`.pi/tmp/workers/2026-10-07T08-13-23-985Z-real-native-resume-picker-terminal-9b7d2154f0ee/`;
+the fixture supplies terminal geometry and cursor-position replies. Direct external
+Go/tmux checks initially passed 50 top-level tests. Final requester fencing also
+checks the captured name/PID pair together in the server queue and refuses format
+syntax in client names. **51 top-level tests passed, zero skips**, at
+`.pi/tmp/workers/2026-10-07T08-26-51-991Z-tmux-captured-pair-final-228fcadd9551/`.
+External source commits are `537b46f` (capabilities) and `1ea4bf7` (pair fence),
+on top of `78e5115` / `d2d35db`. All are local and unpushed.
+
+These are deterministic SDK/IPC/package/terminal checks, not desktop/Element X or
+live-account acceptance. No push, activation, shared tmux restart, live migration,
+live traffic or external Nix evaluation/build was performed. #118/#119 still own
+the unified conversation picker and latency work; #120/#121 own deployment and
+separately authorized live acceptance. Paired review and the final canonical gate
+remain required before closing #116.
+
+## Review disposition and durable caller recovery
+
+Initial paired review:
+`.pi/tmp/reviews/2026-10-07T08-30-26-212Z-worktree-45c6c124ac86-fe0d811352e9/`.
+
+### Standards
+
+Two findings (worst high), both current issue: persist the caller's creation retry
+key before effects, and include `expectedGenerationId` in the operation table.
+Both are addressed. `launch/attempt.ts` exclusively writes a private, fsynced,
+16-KiB-bounded record under `project-sessions/.launch-attempts/` before snapshot
+publication or create IPC. It stores the exact creation action/key and optional
+source identity, never arbitrary startup argv. `preparing` is not replay authority;
+`ready` records contain the complete imported-seed fence when applicable. Records
+survive uncertain outcomes and cannot be overwritten by competing attempts. A
+confirmed exact host open hands recovery to the durable host owner and clears the
+caller record; subsequent UI failure never retries creation. Accumulated interrupted
+records require manual inspection rather than unbounded automatic retry.
+
+Recovery is explicit: inspect host status for the recorded conversation first;
+for a `ready` unadmitted attempt, use the schema-driven `pi-managed-session`
+creation flags with the **same** creation key, title, placement and optional
+`--expected-session-key`. A `preparing` import requires inspecting its seed before
+any admission; never replay an incomplete unfenced action. Never regenerate an
+absent imported seed, overwrite a surviving seed, or rerun bare `pi` as an implicit
+retry: bare invocation intentionally means a fresh conversation. No replay daemon,
+new recovery service or generic startup-argument journal was added.
+
+### Spec
+
+Two high current-issue findings. The missing production capability advertisement
+is fixed in `HostReadModel` and production relay wiring, with actual production
+startup IPC coverage (not merely a fake host's advertised capabilities).
+
+The proposed blanket native-mode bypass was **not adopted as written**: excluding
+workers/headless/experiments from automatic managed admission must not permit a
+second writer to known bound history. Ephemeral/diagnostic paths still delegate
+immediately; persistent native selection retains offline ownership/storage guards
+without host contact or enrollment. Added tests cover unchanged ordinary arguments
+for review, aloop, evaluation, experiment and RPC invocations and refusal of bound
+history. Intentional owned RPC dispatch remains separate and unchanged. This is a
+single-writer safety clarification, not automatic management of excluded jobs.
+
+The initial agents could not inspect external Git commits with their read-only
+file interface. Immutable archive/diff inputs for external
+`f4c43cf7bcdb73d80d9f7232d5fc8b425281d248..1ea4bf7b8748ec1c6a57efa39e9b7c26153cf92e`
+are therefore supplied for review. A targeted follow-up is justified by that
+unreviewed surface and the material new caller-persistence boundary, not a routine
+subjective review loop.
+
+Post-remediation affected suite: **563 passed, zero skips**, at
+`.pi/tmp/workers/2026-10-07T09-03-52-627Z-default-launch-remediation-affected-fcef453b689f/`.
+This includes durable attempt collision/recovery tests and production capability
+advertisement. Final canonical and review completion evidence follows below.
+
+### Exceptional follow-up review
+
+`.pi/tmp/reviews/2026-10-07T09-13-57-994Z-worktree-5a86f149871f-518b59388af9/`
+reviewed the new persistence boundary and the readable immutable external archives.
+Both axes confirmed external coverage.
+
+- **Standards:** one low current-issue documentation inconsistency is fixed by
+  including optional opaque `sessionKey` in the exhaustive summary-field list.
+  The medium procedural finding was the still-pending final canonical gate; it
+  is not waived. Harness Nix verification is authorized—the restriction applies
+  only to external nix-dotfiles Nix evaluation/build.
+- **Spec:** no findings, including the excluded-mode/single-writer disposition.
+
+No further design remediation was required.
+
+## Final verification and handoff
+
+- `nix run .#verify --option builders '' -L`: **all 12 deterministic checks passed**;
+  **563 managed + 87 bridge-chat**, zero skips; package contracts include
+  **13 engineering/runtime + 17 headless** cases. Log:
+  `.pi/tmp/workers/2026-10-07T09-19-13-598Z-default-launch-final-canonical-78de925d5657/`.
+- Actual SDK **0.85.0** supplementary verification: **14 integrated/guard/attempt
+  tests + 3 snapshot/no-backfill tests passed**, zero skips. The canonical gate
+  covers the pinned **0.84.4** SDK. Log:
+  `.pi/tmp/workers/2026-10-07T09-19-13-598Z-default-launch-sdk085-final-8997311ae798/`.
+- `nix build .#default .#managed-session-relay --option builders '' --no-link -L`
+  passed after the gate:
+  `.pi/tmp/workers/2026-10-07T09-21-11-776Z-default-launch-production-packages-f3c09fc8dcea/`.
+- External final **51 Go/tmux tests passed**, zero skips, at the pinned
+  `1ea4bf7` source. No external Nix evaluation/build or activation was run.
+- TypeScript/Nix diagnostics and `git diff --check` passed. External Go LSP lacked
+  a workspace build; direct Go compilation/tests provide that compiler evidence.
+
+Only this final evidence/status documentation was updated after the canonical
+gate; no production or test code changed, so the expensive gate was not repeated.
+All implementation is committed locally for handoff, with no push. Real machine
+activation, aliases, hierarchy migration, and desktop/Element X liveness and
+notification acceptance remain owned by #117/#120/#121 and require their existing
+separate authorization. #118/#119 retain unified picker and performance ownership.
+Interrupted-attempt recovery is explicit and ownership-safe; there is no automatic
+mutation replay, forced cleanup, or adoption of an unproven legacy writer.

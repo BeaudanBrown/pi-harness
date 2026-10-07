@@ -22,6 +22,7 @@ export async function prepareImportedHistory(input: {
 	source: string; destination: string; cwd: string;
 	conversationId: string; creationKey: string; concept: string;
 	authority: "unregistered" | "retired";
+	expectedSessionId?: string;
 }, sdk: ImportHistorySdk): Promise<{ sessionId: string; boundaryEntryId: string }> {
 	const source = resolve(input.source); const destination = resolve(input.destination);
 	if (source === destination || !/^conv_[a-f0-9]{32}$/.test(input.conversationId) ||
@@ -45,6 +46,7 @@ export async function prepareImportedHistory(input: {
 		}
 	} finally { await file.close(); }
 	const inspection = inspectSavedHistory(text, sdk.parseSessionEntries, sdk.CURRENT_SESSION_VERSION);
+	if (input.expectedSessionId !== undefined && inspection.sessionId !== input.expectedSessionId) throw new Error("Selected history identity changed; inspect ownership again");
 	if (inspection.managedMarkers && input.authority !== "retired") throw new Error("Managed history requires existing binding or proven retirement authority");
 	if (!inspection.cwd || inspection.cwd !== input.cwd) throw new Error("Saved history workspace does not match resolved placement");
 	const directory = await ensurePrivateDirectory(dirname(destination));

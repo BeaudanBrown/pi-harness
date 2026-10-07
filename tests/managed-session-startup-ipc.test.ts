@@ -144,6 +144,7 @@ process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.
 	const hostStatus = await requestHostControl({ socketPath: controlPath, action: { operation: "host.status" }, requestId: "startup-status" });
 	assert.equal(hostStatus.ok, true); if (!hostStatus.ok) assert.fail();
 	assert.equal(hostStatus.data.relayState, "disconnected"); assert.equal(hostStatus.data.accountState, "unavailable");
+	assert.ok(hostStatus.data.capabilities.includes("saved-session-import-v1"), "production lifecycle advertises its import admission fence");
 	const socketPath = join(root, "runtime", "relay.sock"); const attachmentNonce = "abcdefghijklmnopqrstuvwxyzABCDEF";
 	const result = await requestLocalBind({ socketPath, role: "ordinary_adapter", creationKey, concept, sessionId, attachmentNonce,
 		bindingBoundaryEntryId, sourceCwd: cwd, sourceSessionFile });

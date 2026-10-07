@@ -21,7 +21,7 @@ export const HOST_INVENTORY_PAGE_SIZE = 50;
 export const HOST_INVENTORY_MAX_PAGE_SIZE = 100;
 export const LIVE_WORKSPACE_CAPABILITIES = [
 	"host-control-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
-	"commentary-v1", "notification-disposition-v1", "window-first-open-v1", "saved-session-open-v1",
+	"commentary-v1", "notification-disposition-v1", "window-first-open-v1", "saved-session-open-v1", "saved-session-import-v1",
 ] as const;
 const strict = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
 const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
@@ -53,7 +53,7 @@ export const HostActionSchema = Type.Union([
 	action("worktree.branch.delete", preview),
 	action("conversation.list", page),
 	action("conversation.status", target),
-	action("conversation.create", { ...creation, placement: WorkspaceIdentitySchema }),
+	action("conversation.create", { ...creation, placement: WorkspaceIdentitySchema, expectedSessionKey: Type.Optional(stable("session")) }),
 	action("conversation.open", { ...target, expectedGenerationId: Type.Optional(stable("generation")) }),
 	action("conversation.resume", target),
 	action("conversation.stop", target),

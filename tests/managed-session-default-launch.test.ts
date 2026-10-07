@@ -242,6 +242,7 @@ test("history import freezes the source and publishes exclusively under concurre
 	await writeFile(source, original);
 	const input = { source, destination, cwd: root, conversationId: deriveConversationId("host", "copy"), creationKey: "copy", concept: "Copy", authority: "unregistered" as const };
 	await assert.rejects(prepareImportedHistory({ ...input, destination: source }, sdk), /independent/);
+	await assert.rejects(prepareImportedHistory({ ...input, expectedSessionId: "replaced-source" }, sdk), /identity changed/);
 	await assert.rejects(prepareImportedHistory(input, { ...sdk, SessionManager: { forkFrom() { throw new Error("injected SDK failure"); } } }), /injected SDK failure/);
 	assert.deepEqual(await readdir(dirname(destination)), []);
 	const results = await Promise.allSettled([prepareImportedHistory(input, sdk), prepareImportedHistory(input, sdk)]);

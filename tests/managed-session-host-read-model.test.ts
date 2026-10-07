@@ -45,9 +45,10 @@ test("retired status reports cleanup without exposing receipts or returning a re
 
 test("saved-session discovery exposes opaque active identity and advertises guarded open explicitly", async () => {
 	const registry = { conversationMetadata: () => [{ ...base, sessionId: "saved-native-id" }], retirement: () => undefined };
-	const model = new HostReadModel({ hostId: "host", registry, matrixReady: () => false, windowFirstOpen: true, savedSessionOpen: true });
+	const model = new HostReadModel({ hostId: "host", registry, matrixReady: () => false, windowFirstOpen: true, savedSessionOpen: true, savedSessionImport: true });
 	const host = await read(model, { operation: "host.status" }); assert.ok(host.ok);
 	assert.ok(host.data.capabilities.includes("saved-session-open-v1"));
+	assert.ok(host.data.capabilities.includes("saved-session-import-v1"));
 	const rows = await read(model, { operation: "conversation.list" }); assert.ok(rows.ok);
 	assert.equal(rows.data.items[0].sessionKey, savedSessionKey("host", "saved-native-id"));
 	assert.equal(JSON.stringify(rows).includes("saved-native-id"), false);
@@ -58,6 +59,7 @@ test("saved-session discovery exposes opaque active identity and advertises guar
 	assert.equal("sessionFile" in rows.data.items[0], false);
 	const unavailable = await read(new HostReadModel({ hostId: "host", registry, matrixReady: () => false }), { operation: "host.status" });
 	assert.ok(unavailable.ok); assert.equal(unavailable.data.capabilities.includes("saved-session-open-v1"), false);
+	assert.equal(unavailable.data.capabilities.includes("saved-session-import-v1"), false);
 });
 
 test("host reads share one observation snapshot and never override exact stopped or unknown evidence", async () => {

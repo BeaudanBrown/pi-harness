@@ -7,6 +7,7 @@ import { HostDispatcher } from "../config/agent/extensions/managed-sessions/rela
 import { ManagedHostMutationOwner } from "../config/agent/extensions/managed-sessions/relay/host-mutation-owner.js";
 import { prepareHostApproval, type ModelHostRequest } from "../config/agent/extensions/managed-sessions/relay/host-approval-record.js";
 import { HostPolicy } from "../config/agent/extensions/managed-sessions/relay/host-policy.js";
+import { savedSessionKey } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
 import { requestHostControl } from "../config/agent/extensions/managed-sessions/relay/host-control-client.js";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -140,6 +141,27 @@ test("fresh hierarchy-backed start persists and launches locally while Matrix bo
 	const history = await readFile(sessionFile, "utf8");
 	await owner.request(start);
 	assert.equal(f.creates, 1); assert.equal(await readFile(sessionFile, "utf8"), history);
+});
+
+test("import admission requires the selected durable native identity before registration or launch", async t => {
+	const f = await fixture(t, "fresh"); const owner = f.owner(); const id = f.manifest.conversationId;
+	const action = { operation: "conversation.create" as const, creationKey: f.manifest.creationKey, title: f.manifest.concept,
+		placement: f.manifest.placement!, expectedSessionKey: savedSessionKey("host", f.manifest.piSessionId) };
+	const sessionFile = join(f.root, "sessions", id, "session.jsonl");
+	await assert.rejects(owner.executeCreation(action, await owner.freezeCreation(action)), /persisted Pi session file is unavailable/);
+	await assert.rejects(readFile(sessionFile), { code: "ENOENT" }); assert.equal(f.creates, 0); assert.equal(f.registry.localConversations().length, 0);
+	await durableProjectSession(sessionFile, f.root, id, action.creationKey, action.title);
+	const bytes = await readFile(sessionFile, "utf8"), wrong = { ...action, expectedSessionKey: savedSessionKey("host", "other") };
+	await assert.rejects(owner.executeCreation(wrong, await owner.freezeCreation(wrong)), /Imported session identity changed/);
+	assert.equal(f.creates, 0); assert.equal(f.registry.localConversations().length, 0);
+	const frozen = await owner.freezeCreation(action);
+	await Promise.all([owner.executeCreation(action, frozen), owner.executeCreation(action, frozen)]);
+	assert.equal(f.creates, 1); assert.equal(f.registry.hasOwnedLocalSeed(id), true); assert.equal(await readFile(sessionFile, "utf8"), bytes);
+	await owner.executeCreation(action, await owner.freezeCreation(action)); assert.equal(f.creates, 1);
+	await assert.rejects(owner.executeCreation(wrong, await owner.freezeCreation(wrong)), /Imported session identity changed/);
+	await rm(sessionFile);
+	await assert.rejects(owner.executeCreation(action, await owner.freezeCreation(action)), /persisted Pi session file is unavailable/);
+	assert.equal(f.creates, 1);
 });
 
 test("owned roomless open and resume share one exact launch before independent Matrix binding", async t => {

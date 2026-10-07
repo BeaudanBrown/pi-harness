@@ -413,6 +413,7 @@
           };
           restrictivePolicyFile = restrictivePolicyTest.config.systemd.user.services.pi-managed-session-relay.environment.PI_MANAGED_HOST_ACTION_POLICY;
           hostControlExecutable = "${builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 2}/bin/pi-managed-session";
+          localOnlyExecutable = "${lib.last managedSessionModuleTest.config.environment.systemPackages}/bin/pi-local-only";
           disabledHostHasNoService = !(lspDisabledModuleTest.config.systemd.user.services ? pi-managed-session-relay);
           disabledHostHasNoControlCommand = lib.all (package: !(lib.hasPrefix "pi-managed-session" (lib.getName package))) lspDisabledModuleTest.config.environment.systemPackages;
           relayUserLingers = managedSessionModuleTest.config.users.users.operator.linger;

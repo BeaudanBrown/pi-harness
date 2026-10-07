@@ -53,6 +53,11 @@ pkgs.writeShellApplication {
       exit 0
     fi
 
+    # Attachment is a terminal UI operation; command substitution would replace
+    # its terminal stdout with a pipe. Keep the strict request on stdin only.
+    if [[ "$operation" == window-attach-exact ]]; then
+      exec ${launcherPackage}/${launcherExecutable} "$@" <<<"$request"
+    fi
     result=$(printf '%s\n' "$request" | ${launcherPackage}/${launcherExecutable} "$@")
     if [[ "$operation" != workspace-resolve && "$operation" != project-create ]]; then
       printf '%s\n' "$result"

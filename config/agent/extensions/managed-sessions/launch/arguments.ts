@@ -44,6 +44,7 @@ export type BasicSessionSelection =
 export async function resolveBasicSessionSelection(
 	parsed: NativeArguments, cwd: string, sessions: SavedSessionLists,
 	resolvePath: (path: string, cwd: string) => string,
+	options: { allowMissingSessionId?: boolean } = {},
 ): Promise<BasicSessionSelection> {
 	assertBasicManagedInvocation(parsed);
 	const directory = parsed.sessionDir === undefined ? undefined : resolvePath(parsed.sessionDir, cwd);
@@ -75,7 +76,10 @@ export async function resolveBasicSessionSelection(
 	}
 	if (parsed.sessionId !== undefined) {
 		const existing = match(bounded(await sessions.list(cwd, directory)), parsed.sessionId, false);
-		if (!existing) throw new Error("Managed --session-id must select existing history; omit it for a fresh conversation");
+		if (!existing) {
+			if (options.allowMissingSessionId) return { kind: "fresh" };
+			throw new Error("Managed --session-id must select existing history; omit it for a fresh conversation");
+		}
 		return { kind: "saved", source: "local", path: existing.path };
 	}
 	return { kind: "fresh" };
