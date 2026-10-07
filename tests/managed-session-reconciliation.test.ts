@@ -7,7 +7,7 @@ import { MANAGED_SESSION_STATE_VERSION, deriveGenerationId, type ConversationMan
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { ProjectReconciler } from "../config/agent/extensions/managed-sessions/relay/project-reconciliation.js";
-import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { RelayRegistry, projectGroupingHash } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { projectSpaceAlias } from "../config/agent/extensions/managed-sessions/relay/project-spaces.js";
 
 const hostId = "reconciliation-host";
@@ -88,6 +88,27 @@ test("explicit reconciliation preserves rooms, sessions, runtime, and workspaces
 	const cleaned = await value.reconciler.cleanup(preview.reconciliationKey);
 	assert.equal((cleaned as Record<string, unknown>).remaining, 0); assert.equal(left, true);
 	assert.ok(calls.some((call) => call.includes("PUT /_matrix/client/v3/rooms/!stable:example.com/state/m.space.child/!root:example.com")));
+});
+
+test("grouping migration serializes with generation activation and preferences without rewinding either identity", async t => {
+	for (const reverse of [false, true]) {
+		const value = await fixture(async () => { throw Error("No Matrix effects are needed for the grouping commit"); });
+		t.after(() => rm(value.root, { recursive: true, force: true }));
+		const id = conversation("1"), source = value.registry.manifestByConversationId(id)!;
+		const identity = { projectKey: `project_${"a".repeat(32)}`, projectDisplayName: "main", checkoutDisplayName: "main",
+			projectSpace: "!project:example.com", checkoutId: `checkout_${"b".repeat(32)}`, checkoutSpace: "!checkout:example.com" };
+		const transition = await value.registry.beginGenerationTransition(id, `control_${"c".repeat(32)}`, { thinking: "high" });
+		await value.registry.recordGenerationSession(id, transition.transitionId, { sessionId: "next-session", boundaryEntryId: entry("9") });
+		const migrate = () => value.registry.reconcileProjectManifest(id, projectGroupingHash(source), projectGroupingHash({ ...source, ...identity }), identity, true);
+		const reset = () => value.registry.activateGeneration(id, transition.transitionId);
+		await Promise.all([...(reverse ? [reset(), migrate()] : [migrate(), reset()]), value.registry.updateActiveGenerationModel(id, "provider/model")]);
+		const current = value.registry.manifestByConversationId(id)!;
+		assert.equal(current.piSessionId, "next-session"); assert.equal(current.generations?.length, 2);
+		assert.equal(current.checkoutSpace, identity.checkoutSpace); assert.equal(current.roomId, source.roomId);
+		assert.equal(current.selectedModel, "provider/model"); assert.equal(current.selectedThinking, "high");
+		const restarted = new RelayRegistry(hostId, join(value.root, "runtime"), value.store); await restarted.load();
+		assert.deepEqual(restarted.manifestByConversationId(id), current);
+	}
 });
 
 test("a removed worktree fails preview without deleting its durable conversation or room", async (t) => {

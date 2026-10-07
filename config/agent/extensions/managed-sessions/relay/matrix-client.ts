@@ -376,6 +376,29 @@ export class ManagedMatrixClient {
 		return roomId;
 	}
 
+	/** Explicit reconciliation only: a saved legacy identity may receive an absent proof,
+	 * but an existing proof is never overwritten, even when authored by this bot. */
+	async inspectLegacyRoom(roomId: string, space: boolean, signal?: AbortSignal): Promise<ManagedProvenance | undefined> {
+		const events = await this.privateManagedState(roomId, space, signal);
+		const proofs = events.filter(event => event.type === MANAGED_PROVENANCE_EVENT && event.state_key === "");
+		if (!proofs.length) return undefined;
+		const proof = parseManagedProvenance(proofs[0]!.content); this.assertProof(events, proof); return structuredClone(proof);
+	}
+	async inspectLegacyProvenance(roomId: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<boolean> {
+		const expected = parseManagedProvenance(provenance);
+		const events = await this.privateManagedState(roomId, expected.kind.endsWith("_space"), signal);
+		if (!events.some(event => event.type === MANAGED_PROVENANCE_EVENT && event.state_key === "")) return false;
+		this.assertProof(events, expected); return true;
+	}
+	async ensureLegacyProvenance(roomId: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<void> {
+		const expected = structuredClone(parseManagedProvenance(provenance));
+		if (await this.inspectLegacyProvenance(roomId, expected, signal)) return;
+		if (this.#http.retry.maxAttempts !== 1) throw new Error("Legacy ownership stamping requires one-attempt transport");
+		signal?.throwIfAborted();
+		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/${MANAGED_PROVENANCE_EVENT}/`, expected, signal);
+		await this.recoverManagedRoom(roomId, expected, signal);
+	}
+
 	/** Saved room IDs remain authoritative when mutable aliases or names change. */
 	async assertManagedProvenance(roomId: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<void> {
 		const expected = parseManagedProvenance(provenance);

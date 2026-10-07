@@ -51,7 +51,7 @@ export class HostAccountOwner {
 			const proof = node.provenance;
 			actions.push({ operation: "room.ensure", kind: proof.kind, roomId: node.roomId, hostSpaceId: node.hostSpaceId, creationKey: proof.creationKey,
 				...(node.project ? { project: node.project } : {}), ...(node.checkout ? { checkout: node.checkout } : {}),
-				...("conversationId" in proof ? { conversationId: proof.conversationId } : {}), notificationSetup: this.client.notificationSetup(proof.kind, proof.creationKey) });
+				...("conversationId" in proof ? { conversationId: proof.conversationId } : {}), notificationSetup: node.preserveNotificationPolicy ? "preserve" : this.client.notificationSetup(proof.kind, proof.creationKey) });
 		}
 		await this.client.cancelRetired(id => Boolean(this.registry.retirement(id)));
 		await this.client.requestMany(actions);

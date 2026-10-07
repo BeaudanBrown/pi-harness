@@ -74,6 +74,20 @@ test("legacy stamping requires the exact saved coordinator, private ownership an
 	assert.equal(fixture.writes.length, 0);
 });
 
+test("explicit legacy object stamping preserves policies and never overwrites uncertain or foreign ownership", async () => {
+	const fixture = matrixFixture({ saved: true, missingProof: true, loseStampResponse: true });
+	assert.equal(await fixture.client.inspectLegacyRoom(fixture.roomId, true), undefined); assert.equal(fixture.writes.length, 0);
+	await assert.rejects(fixture.client.ensureLegacyProvenance(fixture.roomId, proof), /Matrix PUT .* failed/);
+	await fixture.client.ensureLegacyProvenance(fixture.roomId, proof); assert.equal(fixture.writes.length, 1);
+	assert.deepEqual(fixture.writes[0].body, proof);
+	fixture.setProof({ ...proof, hostId: "foreign" });
+	await assert.rejects(fixture.client.ensureLegacyProvenance(fixture.roomId, proof), /foreign/); assert.equal(fixture.writes.length, 1);
+	for (const options of [{ encrypted: true }, { public: true }, { denyManagement: true }, { sender: "@foreign:example.com" }]) {
+		const other = matrixFixture({ saved: true, ...options });
+		await assert.rejects(other.client.ensureLegacyProvenance(other.roomId, proof)); assert.equal(other.writes.length, 0);
+	}
+});
+
 test("new identity derivation uses the pinned live-v1 domain and fallback titles extend on collision", () => {
 	assert.equal(deriveCheckoutId("host", `project_${"a".repeat(32)}`, "/work/project"), "checkout_34ec3bf360e92b747b6668f5cdc39557");
 	assert.equal(managedRoomAlias({ version: 1, hostId: "host", kind: "host_space", creationKey: "host" }), "pi-live-v1-64f7de10ad843eb0066eeb5ed28e795a");

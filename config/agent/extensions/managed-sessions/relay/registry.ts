@@ -34,6 +34,11 @@ import { RetirementStore, retirementId, retirementEffectId, type RetirementRecor
 type RuntimeConversation = HostRuntimeState["conversations"][number];
 type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
 
+export function projectGroupingHash(manifest: ConversationManifest): string {
+	const { ownerHostId, conversationId, creationKey, kind, roomId, placement, projectKey, projectDisplayName, checkoutDisplayName, projectSpace, checkoutId, checkoutSpace } = manifest;
+	return createHash("sha256").update(JSON.stringify({ ownerHostId, conversationId, creationKey, kind, roomId, placement, projectKey, projectDisplayName, checkoutDisplayName, projectSpace, checkoutId, checkoutSpace })).digest("hex");
+}
+
 export class RelayRegistryError extends Error {
 	constructor(
 		readonly code: "permission_denied" | "invalid_nonce" | "attachment_conflict" | "not_found" | "invalid_state" | "capacity_reached" | "launch_failed" | "matrix_unavailable" | "activity_interrupted",
@@ -662,21 +667,21 @@ export class RelayRegistry {
 	}
 
 	async activateGeneration(conversationId: string, transitionId: string): Promise<ConversationManifest> {
-		const current = this.boundConversation(conversationId);
-		const transition = this.runtimeConversation(conversationId).generationTransition;
-		if (!current || !transition || transition.transitionId !== transitionId || !transition.toPiSessionId || !transition.toBindingBoundaryEntryId) throw new RelayRegistryError("invalid_state", "Persisted generation is unavailable for activation");
-		let replacement = current;
-		if (current.activeGenerationId !== transition.toGenerationId) {
-			const history = current.generations ?? [this.activeGeneration(current)];
-			if (history.at(-1)?.generationId !== transition.fromGenerationId) throw new RelayRegistryError("invalid_state", "Generation activation no longer follows the active generation");
-			const generation: SessionGeneration = { generationId: transition.toGenerationId, ordinal: transition.ordinal, piSessionId: transition.toPiSessionId,
-				bindingBoundaryEntryId: transition.toBindingBoundaryEntryId, createdAt: new Date().toISOString(), ...(transition.model ? { model: transition.model } : {}), ...(transition.thinking ? { thinking: transition.thinking } : {}) };
-			replacement = { ...current, piSessionId: generation.piSessionId, bindingBoundaryEntryId: generation.bindingBoundaryEntryId,
-				activeGenerationId: generation.generationId, generations: [...history, generation],
-				...(transition.model ? { selectedModel: transition.model } : {}), ...(transition.thinking ? { selectedThinking: transition.thinking } : {}) };
-			await this.manifestStore.write(replacement);
-		}
 		return this.mutate(async () => {
+			const current = this.boundConversation(conversationId);
+			const transition = this.runtimeConversation(conversationId).generationTransition;
+			if (!current || !transition || transition.transitionId !== transitionId || !transition.toPiSessionId || !transition.toBindingBoundaryEntryId) throw new RelayRegistryError("invalid_state", "Persisted generation is unavailable for activation");
+			let replacement = current;
+			if (current.activeGenerationId !== transition.toGenerationId) {
+				const history = current.generations ?? [this.activeGeneration(current)];
+				if (history.at(-1)?.generationId !== transition.fromGenerationId) throw new RelayRegistryError("invalid_state", "Generation activation no longer follows the active generation");
+				const generation: SessionGeneration = { generationId: transition.toGenerationId, ordinal: transition.ordinal, piSessionId: transition.toPiSessionId,
+					bindingBoundaryEntryId: transition.toBindingBoundaryEntryId, createdAt: new Date().toISOString(), ...(transition.model ? { model: transition.model } : {}), ...(transition.thinking ? { thinking: transition.thinking } : {}) };
+				replacement = { ...current, piSessionId: generation.piSessionId, bindingBoundaryEntryId: generation.bindingBoundaryEntryId,
+					activeGenerationId: generation.generationId, generations: [...history, generation],
+					...(transition.model ? { selectedModel: transition.model } : {}), ...(transition.thinking ? { selectedThinking: transition.thinking } : {}) };
+				await this.manifestStore.write(replacement);
+			}
 			const live = this.runtimeConversation(conversationId).generationTransition;
 			if (!live || live.transitionId !== transitionId) throw new RelayRegistryError("invalid_state", "Generation transition changed during activation");
 			this.manifests.set(conversationId, replacement); this.liveConnections.delete(conversationId);
@@ -905,7 +910,19 @@ export class RelayRegistry {
 	}
 
 	async reconcileProjectManifest(conversationId: string, sourceHash: string, targetHash: string,
-		identity: Required<Pick<ConversationManifest, "projectKey" | "projectDisplayName" | "checkoutDisplayName" | "projectSpace">>): Promise<ConversationManifest> {
+		identity: Required<Pick<ConversationManifest, "projectKey" | "projectDisplayName" | "checkoutDisplayName" | "projectSpace">> & Pick<ConversationManifest, "checkoutId" | "checkoutSpace">,
+		groupingOnly = false): Promise<ConversationManifest> {
+		if (groupingOnly) return this.mutate(async () => {
+			const current = this.boundConversation(conversationId); this.assertNotRetired(conversationId);
+			if (current.kind !== "project") throw new RelayRegistryError("invalid_state", "Migration target is not a project");
+			if (projectGroupingHash(current) === targetHash) return current;
+			if (projectGroupingHash(current) !== sourceHash) throw new RelayRegistryError("invalid_state", "Project grouping changed after reconciliation preview");
+			const replacement = { ...current, ...identity };
+			if (projectGroupingHash(replacement) !== targetHash) throw new RelayRegistryError("invalid_state", "Project reconciliation target identity changed");
+			// Merge only grouping while holding the registry queue. Generation/title/input
+			// evolution is not part of migration and must never be rewound by a snapshot.
+			await this.manifestStore.write(replacement); this.manifests.set(conversationId, replacement); return replacement;
+		});
 		const existing = this.boundConversation(conversationId);
 		if (existing.kind !== "project") throw new RelayRegistryError("not_found", "Project conversation was not found");
 		const hash = (value: ConversationManifest) => createHash("sha256").update(JSON.stringify(value)).digest("hex");

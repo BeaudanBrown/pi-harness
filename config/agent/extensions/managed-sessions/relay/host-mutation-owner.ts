@@ -92,8 +92,13 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			const targets = new Map<string, PreviewResult["targets"][number]>();
 			for (const link of preview.spaces.links) {
 				const proof = link.child.provenance;
-				targets.set(link.child.roomId, proof.kind === "conversation" ? { kind: "conversation", conversationId: proof.conversationId } : { kind: "space", roomId: link.child.roomId });
+				targets.set(proof.kind === "conversation" ? proof.conversationId : link.child.roomId, proof.kind === "conversation" ? { kind: "conversation", conversationId: proof.conversationId } : { kind: "space", roomId: link.child.roomId });
 				if (!cleanup) targets.set(link.parent.roomId, { kind: "space", roomId: link.parent.roomId });
+			}
+			for (const item of preview.spaces.migration?.items ?? []) {
+				if (item.retired) continue;
+				targets.set(item.conversationId, { kind: "conversation", conversationId: item.conversationId });
+				for (const roomId of [item.checkout?.hostSpace, item.oldProjectSpace, item.targetProjectSpace, item.targetCheckoutSpace]) if (roomId) targets.set(roomId, { kind: "space", roomId });
 			}
 			preview.targets = [...targets.values()];
 			conversations = preview.targets.flatMap((target) => target.kind === "conversation" ? [target.conversationId] : []);

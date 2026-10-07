@@ -442,7 +442,7 @@ let
     test -d "$manifest_dir"
     pending_reconciliation=0
     if ${pkgs.bash}/bin/bash -c 'compgen -G "$1/conv_*.json" >/dev/null' _ "$manifest_dir"; then
-      pending_reconciliation=$(${pkgs.jq}/bin/jq -s '[.[] | select(.kind == "project" and (.projectKey == null))] | length' "$manifest_dir"/conv_*.json)
+      pending_reconciliation=$(${pkgs.jq}/bin/jq -s '[.[] | select(.kind == "project" and (.checkoutSpace == null))] | length' "$manifest_dir"/conv_*.json)
     fi
     report=$(${pkgs.jq}/bin/jq --slurpfile health "$runtime/sync-health.json" --argjson pending "$pending_reconciliation" --arg desiredRuntime ${lib.escapeShellArg (toString managedRelayPackage)} \
       -f ${../scripts/managed-session-status.jq} "$registry")

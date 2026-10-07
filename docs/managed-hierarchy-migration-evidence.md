@@ -1,6 +1,7 @@
 # Existing hierarchy migration (#117)
 
-Status: preflight; implementation and verification pending. No live migration is authorized.
+Status: migration implementation and focused checks pass; broader checks, review
+and final verification remain pending. No live migration is authorized.
 
 ## Ownership
 
@@ -33,6 +34,36 @@ store cutover; this issue does not activate it. #118/#119 own picker work;
 | New links → manifest grouping | New parent present, old parent retained | Atomically merge only grouping into current manifest; retain generation/queues |
 | Manifest → old unlink | Durable current grouping | Retry exact old edge; retirement wins before any further effect |
 | Cleanup → account completion | Existing exact Space retirement fence | Fresh ownership/emptiness/reference checks; no kick or policy reset |
+
+## Implementation notes and focused evidence
+
+The existing journal now optionally freezes canonical checkout placement and its
+host Space. Live reconciliation exposes that plan through the existing consent
+owner. Existing room IDs enter the ordinary hierarchy reservation/provisioning
+owner; conversation creation is never used for these saved rooms. Ownership proof
+is additive only after private bot ownership checks, and conflicting proof is not
+overwritten. Adopted objects explicitly preserve notification policy.
+
+Grouping commits merge only grouping fields under the registry queue. Generation
+activation now uses the same queue for its complete read/write transaction: the
+previous read-before-queue pattern could overwrite concurrently committed grouping.
+Tests exercise both call orders plus preference writes and reload.
+
+An admitted old #68 plan retains its original phases and targets. After completion,
+a fresh preview can authorize checkout grouping; apply preserves the old plan and
+its cleanup IDs as a private receipt before publishing the new journal. Unmarked
+obsolete legacy Spaces are retained rather than gaining cleanup authority or being
+kicked through the modern interface. Modern verified empty Spaces use the existing
+separately confirmed NAS cleanup path. Retirement terminates a pending migration
+item without resurrecting its manifest or expanding retired cleanup scope.
+
+Focused evidence: **39 passed, zero skips**, including link/proof/store/unlink
+faults, restart, exact old project target reuse, archived receipt retention,
+placement/foreign refusal, retirement before/during apply, legacy attachments,
+pending input/history, policy preservation, and grouping/generation concurrency:
+`.pi/tmp/workers/2026-10-07T19-07-05-663Z-hierarchy-migration-focused-fixed-8ae70ed8a6d0/`.
+The preceding failed run exposed an invalid test retirement fixture (omitted
+required exact cleanup); the corrected fixture uses real owner-derived targets.
 
 No live state, shared tmux server, service, deployed alias or NAS account is touched
 by source edits and disposable tests. Logical commits record preflight, code,

@@ -13,7 +13,8 @@ const identifier = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" 
 const stable = (prefix: string) => Type.String({ pattern: `^${prefix}_[a-f0-9]{32}$` });
 const room = Type.String({ pattern: "^![^\\s:]{1,200}:[^\\s]{1,200}$", maxLength: 255 });
 const common = { key: identifier, creationKey: identifier, title: Type.String({ minLength: 1, maxLength: 256 }),
-	roomId: Type.Optional(room), parentRoomId: Type.Optional(room), createAttempted: Type.Optional(Type.Literal(true)), linked: Type.Boolean() };
+	roomId: Type.Optional(room), parentRoomId: Type.Optional(room), createAttempted: Type.Optional(Type.Literal(true)),
+	preserveNotificationPolicy: Type.Optional(Type.Literal(true)), linked: Type.Boolean() };
 const NodeSchema = Type.Union([
 	Type.Object({ ...common, kind: Type.Literal("host_space") }, { additionalProperties: false }),
 	Type.Object({ ...common, kind: Type.Literal("project_space"), parentKey: identifier, projectKey: stable("project") }, { additionalProperties: false }),
@@ -68,7 +69,8 @@ function provenance(hostId: string, node: Node): ManagedProvenance {
 		projectKey: node.projectKey, ...(node.kind !== "project_space" ? { checkoutId: node.checkoutId } : {}),
 		...(node.kind === "conversation" ? { conversationId: node.conversationId } : {}) });
 }
-type HierarchyMatrix = Pick<ManagedMatrixClient, "ensureLegacyHostProvenance" | "ensureManagedRoom" | "recoverManagedAlias" | "recoverManagedRoom" | "addSpaceChild">;
+type HierarchyMatrix = Pick<ManagedMatrixClient, "ensureLegacyHostProvenance" | "ensureManagedRoom" | "recoverManagedAlias" | "recoverManagedRoom" | "addSpaceChild">
+	& Partial<Pick<ManagedMatrixClient, "ensureLegacyProvenance">>;
 export interface HierarchyPlacement {
 	creationKey: string; projectKey: string; canonicalCheckoutRoot: string;
 	projectTitle: string; checkoutTitle: string; conversationTitle: string;
@@ -143,6 +145,43 @@ export class LiveHierarchy {
 		});
 		return { conversationId, checkoutId };
 	}
+	/** Read-only target discovery for an explicitly confirmed reconciliation. */
+	migrationProjectSpace(projectKey: string): string | undefined {
+		this.assertAvailable(); const node = this.state.nodes.find(n => n.kind === "project_space" && n.projectKey === projectKey);
+		if (node) this.assertUnretiredBranch(node);
+		return node?.roomId;
+	}
+	/** Reuse the ordinary reservation/provisioning owner, but never create a replacement conversation room. */
+	migrateExisting(input: HierarchyPlacement, roomId: string, projectSpace?: string): Promise<HierarchyBinding> {
+		return this.projectScope(input.projectKey, true, async () => {
+			if (!this.matrix.ensureLegacyProvenance) throw Error("Legacy hierarchy migration requires an upgraded ownership verifier");
+			const check = () => { this.controller.signal.throwIfAborted(); if (this.isRetired(deriveConversationId(this.hostId, input.creationKey))) throw Error("Managed conversation is permanently retired"); };
+			check(); const reserved = await this.prepareOnce(input);
+			for (const key of [input.projectKey, reserved.conversationId]) {
+				const pending = this.node(key);
+				if (pending.createAttempted && !pending.roomId && (key === reserved.conversationId || projectSpace)) throw Error("Uncertain prior provisioning requires ownership-safe recovery before migration");
+			}
+			const hostSpace = await this.ensure("host"); check();
+			if (projectSpace) {
+				const node = this.node(input.projectKey);
+				if (node.roomId && node.roomId !== projectSpace) throw Error("Frozen migration project Space changed");
+				if (!node.roomId) {
+					await this.update(node.key, { parentRoomId: hostSpace });
+					check(); await this.matrix.ensureLegacyProvenance(projectSpace, provenance(this.hostId, this.node(node.key)), this.controller.signal);
+					check(); await this.update(node.key, { roomId: projectSpace, preserveNotificationPolicy: true });
+				}
+			}
+			const checkoutSpace = await this.ensure(reserved.checkoutId); check();
+			const node = this.node(reserved.conversationId);
+			if (node.roomId && node.roomId !== roomId) throw Error("Frozen migration conversation room changed");
+			await this.update(node.key, { parentRoomId: checkoutSpace });
+			check(); await this.matrix.ensureLegacyProvenance(roomId, provenance(this.hostId, this.node(node.key)), this.controller.signal);
+			check(); await this.update(node.key, { roomId, preserveNotificationPolicy: true });
+			// ensure() now has a saved room ID and therefore cannot create another room.
+			await this.ensure(node.key); check();
+			return { ...reserved, roomId, checkoutSpace, projectSpace: this.node(input.projectKey).roomId!, hostSpace };
+		});
+	}
 	listConversations(): Array<{ conversationId: string; checkoutId: string; projectKey: string; title: string; phase: "pending" | "hierarchy_ready" }> {
 		return this.state.nodes.flatMap((node) => node.kind === "conversation" && !this.isRetired(node.conversationId) ? [{ conversationId: node.conversationId,
 			checkoutId: node.checkoutId, projectKey: node.projectKey, title: node.title, phase: node.linked ? "hierarchy_ready" as const : "pending" as const }] : []);
@@ -171,7 +210,7 @@ export class LiveHierarchy {
 			checkoutSpace: this.node(conversation.checkoutId).roomId!, projectSpace: this.node(conversation.projectKey).roomId!, hostSpace: this.node("host").roomId! };
 	}
 	/** Exact saved identities only. Does not discover, adopt, create or rename rooms. */
-	accountInventory(): Array<{ roomId?: string; provenance: ManagedProvenance; hostSpaceId?: string; project?: { projectKey: string; spaceId: string }; checkout?: { checkoutId: string; spaceId: string } }> {
+	accountInventory(): Array<{ roomId?: string; preserveNotificationPolicy?: true; provenance: ManagedProvenance; hostSpaceId?: string; project?: { projectKey: string; spaceId: string }; checkout?: { checkoutId: string; spaceId: string } }> {
 		if (this.poisoned) throw Error("Hierarchy authority unavailable");
 		const nodes = new Map(this.state.nodes.map(node => [node.key, node]));
 		return this.state.nodes.filter(n => n.kind !== "conversation" || !this.isRetired(n.conversationId)).flatMap(node => {
@@ -179,7 +218,7 @@ export class LiveHierarchy {
 			if (node.roomId && this.state.retiredSpaces?.some(s => s.roomId === node.roomId)) return [];
 			const project = "projectKey" in node ? nodes.get(node.projectKey) : undefined;
 			const checkout = "checkoutId" in node ? nodes.get(node.checkoutId) : undefined;
-			return [{ ...(node.linked && node.roomId ? { roomId: node.roomId } : {}), provenance: provenance(this.hostId, node), hostSpaceId: nodes.get("host")?.roomId,
+			return [{ ...(node.linked && node.roomId ? { roomId: node.roomId } : {}), ...(node.preserveNotificationPolicy ? { preserveNotificationPolicy: true as const } : {}), provenance: provenance(this.hostId, node), hostSpaceId: nodes.get("host")?.roomId,
 				...(project?.roomId && "projectKey" in project ? { project: { projectKey: project.projectKey, spaceId: project.roomId } } : {}),
 				...(checkout?.roomId && "checkoutId" in checkout ? { checkout: { checkoutId: checkout.checkoutId, spaceId: checkout.roomId } } : {}) }];
 		});
@@ -323,7 +362,7 @@ export class LiveHierarchy {
 		if (!node.linked) { await this.matrix.addSpaceChild(parentRoomId, roomId, this.controller.signal); await this.update(key, { linked: true }); }
 		return roomId;
 	}
-	private update(key: string, fields: { roomId?: string; parentRoomId?: string; createAttempted?: true; linked?: boolean }): Promise<void> {
+	private update(key: string, fields: { roomId?: string; parentRoomId?: string; createAttempted?: true; preserveNotificationPolicy?: true; linked?: boolean }): Promise<void> {
 		return this.mutate((state) => { Object.assign(state.nodes.find((item) => item.key === key)!, fields); });
 	}
 	private mutate(change: (state: State) => void, retirement = false): Promise<void> {
