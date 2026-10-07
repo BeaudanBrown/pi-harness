@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test, { type TestContext } from "node:test";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { HostControlServer } from "../config/agent/extensions/managed-sessions/relay/host-control-server.js";
@@ -19,12 +20,12 @@ import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay
 import type { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
 import type { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 
-async function fixture(t: TestContext, roomless: boolean | "fresh" = false) {
+async function fixture(t: TestContext, roomless: boolean | "fresh" = false, creationKeyForRoot: (root: string) => string = () => "project") {
 	const root = await mkdtemp(join(tmpdir(), "exact-lifecycle-")); t.after(() => rm(root, { recursive: true, force: true }));
-	const hostId = "host"; const conversationId = deriveConversationId(hostId, "project");
+	const hostId = "host"; const creationKey = creationKeyForRoot(root); const conversationId = deriveConversationId(hostId, creationKey);
 	const sessionId = `managed-${conversationId.slice(5)}`;
 	const manifest: ConversationManifest = { schemaVersion: "1.0.0", kind: "project", ownerHostId: hostId, conversationId,
-		creationKey: "project", concept: "Project", placement: { rootKey: "projects", workspace: "project", relativeCwd: "" },
+		creationKey, concept: "Project", placement: { rootKey: "projects", workspace: "project", relativeCwd: "" },
 		roomId: "!room:example.com", piSessionId: sessionId, createdAt: "2026-10-01T00:00:00.000Z",
 		bindingBoundaryEntryId: deriveTranscriptEntryId(sessionId, `managed-boundary-${conversationId.slice(5)}`) };
 	const manifests = new ConversationManifestStore(join(root, "manifests"));
@@ -58,6 +59,9 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false) {
 			switch (op) {
 				case "workspace-resolve": return { ...manifest.placement, cwd: root, workspacePath: root,
 					projectKey: `project_${"1".repeat(32)}`, projectDisplayName: "Project", checkoutDisplayName: "main" };
+				case "worktree-create-preview": return { rootKey: "projects", sourceWorkspace: "source", projectWorkspace: "source", targetWorkspace: "project",
+					commonDir: join(root, ".git"), mainPath: root, targetPath: root, baseRef: "refs/heads/main", baseCommit: "a".repeat(40), branch: "topic" };
+				case "worktree-create-apply": return { rootKey: "projects", workspace: "project", branch: "topic", baseCommit: "a".repeat(40) };
 				case "root-resolve": return { sessionName: "project" };
 				case "window-inspect-exact":
 					if (inspectError) throw Error("tmux server cannot be contacted");
@@ -182,9 +186,9 @@ test("roomless launch uncertainty survives restart without a second create", asy
 	assert.equal(f.creates, 1);
 });
 
-test("private host controls open, stop, resume and retire owned roomless work without Matrix", async t => {
-	const f = await fixture(t, true); const lifecycle = f.owner(); const id = f.manifest.conversationId;
-	const historyPath = join(f.root, "sessions", id, "session.jsonl"); const history = await readFile(historyPath, "utf8");
+test("private host controls create, open, stop, resume and retire owned roomless work without Matrix", async t => {
+	const f = await fixture(t, "fresh"); const lifecycle = f.owner(); const id = f.manifest.conversationId;
+	const historyPath = join(f.root, "sessions", id, "session.jsonl");
 	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix,
 		matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
 	const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
@@ -194,6 +198,11 @@ test("private host controls open, stop, resume and retire owned roomless work wi
 	const server = new HostControlServer({ runtimeDirectory: join(f.root, "control"), expectedUid: process.getuid!(), peerUid: () => process.getuid!(), dispatcher });
 	await server.start();
 	try {
+		const created = await requestHostControl({ socketPath: server.socketPath, requestId: "create", action: { operation: "conversation.create",
+			creationKey: f.manifest.creationKey, title: f.manifest.concept, placement: f.manifest.placement! } });
+		assert.equal(created.ok, true, JSON.stringify(created));
+		if (created.ok) assert.equal(created.data.setupState, "pending");
+		const history = await readFile(historyPath, "utf8");
 		const opened = await requestHostControl({ socketPath: server.socketPath, requestId: "open", action: { operation: "conversation.open", conversationId: id } });
 		assert.equal(opened.ok, true, JSON.stringify(opened));
 		const stopped = await requestHostControl({ socketPath: server.socketPath, requestId: "stop", action: { operation: "conversation.stop", conversationId: id } });
@@ -210,6 +219,25 @@ test("private host controls open, stop, resume and retire owned roomless work wi
 		await assert.rejects(lifecycle.openConversation(id)); assert.equal(f.creates, 2);
 		assert.equal(await readFile(historyPath, "utf8"), history);
 	} finally { await server.close(); await retirement.close(); }
+});
+
+test("bundled worktree conversation creation returns local success without inventing a pending room link", async t => {
+	const digest = (domain: string, ...parts: string[]) => {
+		const hash = createHash("sha256").update(`pi-managed-sessions:${domain}:v1\0`);
+		for (const part of parts) hash.update(`${Buffer.byteLength(part)}:`).update(part);
+		return hash.digest("hex").slice(0, 32);
+	};
+	const f = await fixture(t, "fresh", root => `worktree-conversation-${digest("worktree-conversation",
+		`worktree_${digest("worktree", "host", "projects", join(root, ".git"), "topic")}`, "Project")}`);
+	const lifecycle = f.owner();
+	const result = await lifecycle.request({ ...request(f.manifest.conversationId, "conversation.resume"), payload: { request: {
+		operation: "worktree.conversation.create", creationKey: "new-worktree", rootKey: "projects", workspace: "source", baseRef: "main", branch: "topic", concept: "Project" } } });
+	assert.equal(result.targetConversationId, f.manifest.conversationId);
+	assert.equal(result.conversationState, "active"); assert.equal("roomLink" in result, false);
+	assert.equal(f.registry.manifestByConversationId(f.manifest.conversationId), undefined);
+	assert.equal(f.registry.hasOwnedLocalSeed(f.manifest.conversationId), true); assert.equal(f.creates, 1);
+	await assert.rejects(lifecycle.completeLocalEnrollment(f.manifest.conversationId), /Host Space provisioning is pending/);
+	assert.equal(f.registry.conversationState(f.manifest.conversationId), "active");
 });
 
 test("roomless binding completion invalidates frozen process-control consent", async t => {

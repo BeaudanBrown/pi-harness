@@ -370,7 +370,50 @@ Affected module contracts and all **539 managed tests passed, zero skips**:
 This proves the packaged child-dispatch boundary, not completion of automatic
 launch or all direct SDK worker paths. No issue review/final canonical gate yet.
 
-Full saved-file/retirement ownership integration, requesting-client targeting,
+## Public creation and compound pending results
+
+The private-IPC regression now begins with public `conversation.create`, not a
+preseeded registration, and exercises create/open/stop/resume/retire through the
+policy/dispatcher/mutation owner/lifecycle stack with unavailable Matrix setup.
+A further integration gap was corrected: bundled worktree/conversation creation
+had successfully started roomless work, then incorrectly required a bound
+manifest to construct its result. It now reports local success without inventing
+a room link; already-bound and explicit-summary fork results retain their links.
+
+The worktree regression uses the real durable intent/seed/registration/launch
+pipeline with fake trusted Git/tmux primitives, not real external Git mutation.
+Focused exact-lifecycle checks: **26 passed, zero skips**:
+`.pi/tmp/workers/2026-10-07T01-27-17-094Z-roomless-creation-integration-67a83f2c8fff/`.
+Affected suite: **545 passed, zero skips**:
+`.pi/tmp/workers/2026-10-07T01-28-13-811Z-roomless-creation-affected-20e91337947f/`.
+
+## External requesting-client target primitive
+
+Local nix-dotfiles commit `d2d35db` adds `managed window-focus-exact` in the owning
+Go launcher. The caller supplies the host open result's conversation/launch and
+stable session/window/pane identities plus a previously captured client name/PID.
+It verifies exact kernel-owned window metadata, then guards both target identity
+and attached client PID in the same tmux server queue as the explicit client
+switch. Missing/stale identities or a late disconnect refuse without fallback.
+It creates/stops/replaces nothing. Legacy live rows now use stable window/pane IDs
+rather than indices, and managed selection no longer cleans up the default
+session. No picker inventory frontend or default Pi wrapper is wired by this.
+
+Direct Go + disposable tmux 3.6a verification: **43 top-level tests passed, zero
+skips**, including eight focus/dispatch/no-cleanup cases, two real control-mode
+clients in different sessions, window renumbering, injected late replacement and
+client disconnect, strict JSON dispatch and inherited-target rejection:
+`.pi/tmp/workers/2026-10-07T01-20-20-097Z-exact-focus-client-queue-guard-d3d187b40fd2/`.
+A numeric `switch-client -c PID` experiment failed against actual tmux; the final
+implementation uses its required client name and separately guards PID via the
+client-loop format. This passing run supersedes that experiment. Native shared
+session selection semantics remain; no per-client session manager was introduced.
+External LSP lacked an active build, so direct Go compilation/tests are the
+compiler evidence. External hooks were explicitly bypassed to avoid forbidden
+Nix evaluation; no dotfiles Nix evaluation/build, activation, shared server
+restart or live-account traffic occurred.
+
+Full saved-file/retirement ownership integration, requesting-client frontend wiring,
 local-only guards and launcher wiring remain to be implemented and verified. Typed pending-control presentation also needs checking
 against the final integrated path; bound-only controls have not been generalized. General startup transport is out of
 scope under the approved simplification. Preflight findings are

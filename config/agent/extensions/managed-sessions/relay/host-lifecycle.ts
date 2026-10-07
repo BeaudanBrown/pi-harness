@@ -926,10 +926,10 @@ export class HostLifecycle {
 		const conversationCreationKey = intent.conversationCreationKey; const concept = intent.concept;
 		if (!conversationCreationKey || !concept) throw new RelayRegistryError("invalid_state", "Bundled worktree creation lost its conversation identity");
 		const started = await this.start({ creationKey: conversationCreationKey, concept, placement: { rootKey: intent.rootKey, workspace: intent.targetWorkspace, relativeCwd: "" }, ...(intent.context ? { context: intent.context } : {}) });
-		const conversationId = String(started.targetConversationId); const manifest = this.projectManifest(conversationId);
-		const roomLink = `https://matrix.to/#/${encodeURIComponent(manifest.roomId)}`;
+		const conversationId = String(started.targetConversationId); const manifest = this.ownedProjectManifest(conversationId);
+		const roomLink = hasMatrixBinding(manifest) ? `https://matrix.to/#/${encodeURIComponent(manifest.roomId)}` : undefined;
 		return { operation: "worktree.conversation.create", worktreeKey: intent.worktreeKey, rootKey: intent.rootKey, workspace: intent.targetWorkspace,
-			branch: intent.branch, baseCommit: intent.baseCommit, targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId), roomLink };
+			branch: intent.branch, baseCommit: intent.baseCommit, targetConversationId: conversationId, conversationState: this.options.registry.conversationState(conversationId), ...(roomLink ? { roomLink } : {}) };
 	}
 
 	async removalApprovalPreview(action: Extract<HostAction, { operation: "worktree.remove.preview" | "worktree.conversation.cleanup.preview" }>): Promise<{ intent: WorktreeRemovalIntent; checkoutId: string; activeConversations: string[] }> {
