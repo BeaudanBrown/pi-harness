@@ -38,7 +38,7 @@ class MatrixFixture {
 	readonly left = new Set<string>(); readonly extraMembers = new Map<string, string[]>();
 	loseLeaveReply = false;
 	async assertRoomAuthority(roomId: string): Promise<void> { assert.ok(this.rooms.has(roomId) || this.legacy.has(roomId)); }
-	async resolvePrivateRoomAlias(): Promise<undefined> { return undefined; }
+	async resolvePrivateRoomAlias(): Promise<string | undefined> { return undefined; }
 	async inspectLegacyRoom(roomId: string): Promise<ManagedProvenance | undefined> { await this.assertRoomAuthority(roomId); return this.rooms.get(roomId); }
 	async inspectLegacyProvenance(roomId: string, proof: ManagedProvenance): Promise<boolean> {
 		const existing = await this.inspectLegacyRoom(roomId); if (existing) assert.deepEqual(existing, proof); return Boolean(existing);
@@ -83,7 +83,7 @@ class MatrixFixture {
 	}
 	async recoverManagedRoom(roomId: string, proof: ManagedProvenance): Promise<void> { assert.deepEqual(this.rooms.get(roomId), proof); }
 	async addSpaceChild(parent: string, room: string): Promise<void> {
-		assert.ok(this.rooms.has(parent)); const kind = this.rooms.get(room)!.kind;
+		assert.ok(this.rooms.has(parent) || this.legacy.has(parent)); const kind = this.rooms.get(room)?.kind ?? "conversation";
 		this.effect(`link:${kind}`, () => this.links.add(`${parent}/${room}`));
 	}
 }
@@ -134,7 +134,7 @@ test("host hierarchy producer and NAS consumer roundtrip preserves existing rule
 });
 
 test("legacy migration preserves old attachments, pending input and history across proof/link/store/unlink interruptions", async () => {
-	for (const point of ["host", "create:project_space", "create:worktree_space", "stamp:conversation", "link:conversation", "unlink", "manifest", "placement", "foreign", "retirement", "retire-mid", "legacy-receipt"]) {
+	for (const point of ["host", "create:project_space", "create:worktree_space", "stamp:conversation", "link:conversation", "unlink", "manifest", "placement", "foreign", "retirement", "retire-mid", "legacy-receipt", "legacy-pending"]) {
 		const root = await mkdtemp(join(tmpdir(), "legacy-hierarchy-")); const matrix = new MatrixFixture(point === "manifest" ? undefined : { point, timing: "after" });
 		const store = new ConversationManifestStore(join(root, "manifests"));
 		const { hostSpace: _host, ...base } = coordinator;
@@ -153,15 +153,17 @@ test("legacy migration preserves old attachments, pending input and history acro
 		for (const room of ["!host:test", "!old:test", "!legacy:test"]) matrix.legacy.add(room);
 		matrix.links.add("!old:test/!legacy:test");
 		let priorKey: string | undefined;
-		if (point === "legacy-receipt") {
+		if (point === "legacy-receipt" || point === "legacy-pending") {
+			const pending = point === "legacy-pending";
+			if (pending) matrix.resolvePrivateRoomAlias = async () => "!old:test";
 			const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
-			const item = { conversationId: id, concept: original.concept, workspace: "repository", roomId: original.roomId, oldProjectSpace: "!before:test",
-				projectKey: placement.projectKey, projectDisplayName: "Project", checkoutDisplayName: "Main", sourceManifestHash: "a".repeat(64), plannedProjectSpace: "!old:test" };
+			const item = { conversationId: id, concept: original.concept, workspace: "repository", roomId: original.roomId, oldProjectSpace: pending ? "!old:test" : "!before:test",
+				projectKey: placement.projectKey, projectDisplayName: "Project", checkoutDisplayName: "Main", sourceManifestHash: pending ? digest(original) : "a".repeat(64), plannedProjectSpace: "!old:test" };
 			priorKey = `reconcile_${digest([item]).slice(0, 32)}`;
 			await mkdir(join(root, "intents"), { mode: 0o700 });
 			await writeFile(join(root, "intents", "project-reconciliation.json"), JSON.stringify({ version: 1, reconciliationKey: priorKey,
-				items: [{ ...item, targetProjectSpace: "!old:test", targetManifestHash: digest(original), hostLinked: true, roomLinked: true, manifestUpdated: true, oldUnlinked: true }],
-				cleanupSpaces: [{ spaceId: "!before:test", hostUnlinked: false, operatorRemoved: false, left: false }] }), { mode: 0o600 });
+				items: [{ ...item, targetProjectSpace: "!old:test", targetManifestHash: digest({ ...original, projectKey: placement.projectKey, projectDisplayName: "Project", checkoutDisplayName: "Main" }), hostLinked: !pending, roomLinked: !pending, manifestUpdated: !pending, oldUnlinked: !pending }],
+				...(pending ? {} : { cleanupSpaces: [{ spaceId: "!before:test", hostUnlinked: false, operatorRemoved: false, left: false }] }) }), { mode: 0o600 });
 		}
 		const state = registry.snapshot();
 		const makeHierarchy = () => new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator, cid => Boolean(registry.retirement(cid)));
@@ -191,6 +193,13 @@ test("legacy migration preserves old attachments, pending input and history acro
 				await retire();
 				await assert.rejects(reconciler.applyLive(preview, false), /preview changed/); assert.equal(matrix.calls, 0);
 				assert.equal(registry.manifestByConversationId(id), undefined); continue;
+			} else if (point === "legacy-pending") {
+				assert.equal(preview.legacyPlacements?.[0].hostSpace, coordinator.hostSpace);
+				canonicalRoot = "/projects/replaced";
+				await assert.rejects(reconciler.applyLive(preview, false), /preview changed/); assert.equal(matrix.calls, 0);
+				canonicalRoot = "/projects/repository";
+				await reconciler.applyLive(preview, false);
+				assert.equal(registry.manifestByConversationId(id)?.checkoutSpace, undefined, "first consent finishes only the original #68 scope");
 			} else if (point === "retire-mid") await assert.rejects(reconciler.applyLive(preview, false));
 			else if (point !== "legacy-receipt") await assert.rejects(reconciler.applyLive(preview, false), /injected/);
 			await hierarchy.close(); hierarchy = makeHierarchy(); await hierarchy.load(); reconciler = make();
@@ -207,10 +216,20 @@ test("legacy migration preserves old attachments, pending input and history acro
 			assert.equal(await readFile(join(root, "saved.jsonl"), "utf8"), "unchanged native history\n");
 			assert.ok(matrix.links.has(`${current.checkoutSpace}/${current.roomId}`)); assert.ok(!matrix.links.has("!old:test/!legacy:test"));
 			assert.equal(matrix.aliases.size, priorKey ? 1 : 2, "saved project IDs are reused; the conversation room is never replaced");
+			const completedIntent = JSON.parse(await readFile(join(root, "intents", "project-reconciliation.json"), "utf8"));
+			assert.deepEqual(completedIntent.cleanupSpaces, [], "migration retains old IDs without manufacturing destructive cleanup authority");
+			assert.equal(completedIntent.items[0].oldProjectSpace, "!old:test");
+			const beforeCleanup = matrix.calls;
+			await assert.rejects(reconciler.cleanup(completedIntent.reconciliationKey), /modern ownership preview/);
+			assert.equal(matrix.calls, beforeCleanup, "even direct legacy cleanup callers cannot kick or leave");
 			if (priorKey) {
 				assert.equal(current.projectSpace, "!old:test");
 				const receipt = JSON.parse(await readFile(join(root, "intents", `project-reconciliation-${priorKey}.json`), "utf8"));
-				assert.equal(receipt.cleanupSpaces[0].spaceId, "!before:test", "old cleanup identities remain in the backup boundary, never silently discarded or kicked");
+				if (point === "legacy-receipt") assert.equal(receipt.cleanupSpaces[0].spaceId, "!before:test", "old cleanup identities remain in the backup boundary, never silently discarded or kicked");
+				assert.equal(receipt.items[0].oldUnlinked, true);
+				receipt.items[0].retired = true;
+				await writeFile(join(root, "intents", "project-reconciliation.json"), JSON.stringify(receipt), { mode: 0o600 });
+				await assert.rejects(reconciler.previewLive(false), /retirement authority is missing/, "a completed legacy receipt cannot hide a partial restore that lost tombstones");
 			}
 			assert.equal(hierarchy.accountInventory().find(node => node.roomId === current.roomId)?.preserveNotificationPolicy, true);
 			const actions: Array<Record<string, unknown>> = [];

@@ -100,6 +100,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 				targets.set(item.conversationId, { kind: "conversation", conversationId: item.conversationId });
 				for (const roomId of [item.checkout?.hostSpace, item.oldProjectSpace, item.targetProjectSpace, item.targetCheckoutSpace]) if (roomId) targets.set(roomId, { kind: "space", roomId });
 			}
+			for (const saved of preview.spaces.legacyPlacements ?? []) targets.set(saved.hostSpace, { kind: "space", roomId: saved.hostSpace });
 			preview.targets = [...targets.values()];
 			conversations = preview.targets.flatMap((target) => target.kind === "conversation" ? [target.conversationId] : []);
 		}

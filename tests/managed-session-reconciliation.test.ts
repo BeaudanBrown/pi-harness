@@ -47,18 +47,14 @@ function authority(path: string): Response | undefined {
 }
 
 test("explicit reconciliation preserves rooms, sessions, runtime, and workspaces while recovering every Matrix phase", async (t) => {
-	let createdSpaces = 0; let mutation = 0; let failAt = 1; let left = false; let operatorRemoved = false; let uncertainLeave = true; const calls: string[] = [];
+	let createdSpaces = 0; let mutation = 0; let failAt = 1; const calls: string[] = [];
 	const fetcher: typeof fetch = async (input, init) => {
 		const path = new URL(String(input)).pathname; calls.push(`${init?.method ?? "GET"} ${decodeURIComponent(path)}`);
-		if (left && path.includes(encodeURIComponent("!old:example.com")) && path.includes("/state/m.room.member/") && decodeURIComponent(path).includes(config.botUserId)) return new Response("left", { status: 403 });
-		if (operatorRemoved && path.includes(encodeURIComponent("!old:example.com")) && path.includes("/state/m.room.member/") && decodeURIComponent(path).includes(config.operatorUserId)) return new Response("removed", { status: 403 });
 		const owned = authority(path); if (owned) return owned;
 		if (path.includes("/directory/room/")) return createdSpaces > 0 ? Response.json({ room_id: "!stable:example.com" }) : new Response("missing", { status: 404 });
 		if (path.endsWith("/createRoom")) { createdSpaces += 1; return Response.json({ room_id: "!stable:example.com" }); }
 		if (path.includes("/state/m.space.child/")) { mutation += 1; if (mutation === failAt) return new Response("injected", { status: 503 }); return Response.json({ event_id: `$state-${mutation}` }); }
 		if (path.endsWith("/state")) return Response.json([]);
-		if (path.endsWith("/kick")) { operatorRemoved = true; return Response.json({}); }
-		if (path.endsWith("/leave")) { left = true; if (uncertainLeave) { uncertainLeave = false; throw new TypeError("response lost"); } return Response.json({}); }
 		throw new Error(`unexpected Matrix request ${init?.method} ${path}`);
 	};
 	const value = await fixture(fetcher); t.after(() => rm(value.root, { recursive: true, force: true }));
@@ -71,7 +67,7 @@ test("explicit reconciliation preserves rooms, sessions, runtime, and workspaces
 	}
 	failAt = -1; mutation = 0;
 	const applied = await value.reconciler.apply(preview.reconciliationKey);
-	assert.deepEqual(applied, { operation: "project.reconcile.apply", reconciliationKey: preview.reconciliationKey, reconciled: 2, obsoleteSpaces: 1 });
+	assert.deepEqual(applied, { operation: "project.reconcile.apply", reconciliationKey: preview.reconciliationKey, reconciled: 2, obsoleteSpaces: 0 });
 	assert.equal(createdSpaces, 1, "retries create one project Space and never create replacement conversation rooms");
 	for (const digit of ["1", "2"]) {
 		const manifest = value.registry.manifestByConversationId(conversation(digit))!;
@@ -83,10 +79,11 @@ test("explicit reconciliation preserves rooms, sessions, runtime, and workspaces
 	const intentPath = join(value.root, "sessions", "project-reconciliation.json"); const interrupted = JSON.parse(await readFile(intentPath, "utf8"));
 	interrupted.items[0].manifestUpdated = false; interrupted.items[0].oldUnlinked = false; await writeFile(intentPath, `${JSON.stringify(interrupted)}\n`, { mode: 0o600 });
 	await value.reconciler.apply(preview.reconciliationKey);
-	await assert.rejects(() => value.reconciler.cleanup("reconcile_ffffffffffffffffffffffffffffffff"), /key|required/);
-	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /Matrix POST .*leave.*failed/, "an uncertain leave stops after its durable pre-leave phase");
-	const cleaned = await value.reconciler.cleanup(preview.reconciliationKey);
-	assert.equal((cleaned as Record<string, unknown>).remaining, 0); assert.equal(left, true);
+	const beforeCleanup = calls.length;
+	await assert.rejects(() => value.reconciler.cleanup("reconcile_ffffffffffffffffffffffffffffffff"), /modern ownership preview/);
+	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /modern ownership preview/);
+	assert.equal(calls.length, beforeCleanup, "legacy keys never authorize unlink, kick or leave");
+	assert.deepEqual(JSON.parse(await readFile(intentPath, "utf8")).cleanupSpaces, []);
 	assert.ok(calls.some((call) => call.includes("PUT /_matrix/client/v3/rooms/!stable:example.com/state/m.space.child/!root:example.com")));
 });
 
@@ -140,7 +137,7 @@ test("preview refuses a host Space without child-state authority before any muta
 	await assert.rejects(() => value.reconciler.preview(), /authority/); assert.equal(mutations, 0);
 });
 
-test("cleanup refuses a non-empty managed Space and operation-specific foreign authority", async (t) => {
+test("legacy cleanup refuses regardless of emptiness or apparent bot authority", async (t) => {
 	let nonEmpty = true; let foreign = false; let kickDenied = false; let hostChildDenied = false; let mutations = 0;
 	const fetcher: typeof fetch = async (input) => {
 		const path = new URL(String(input)).pathname;
@@ -158,13 +155,13 @@ test("cleanup refuses a non-empty managed Space and operation-specific foreign a
 	};
 	const value = await fixture(fetcher); t.after(() => rm(value.root, { recursive: true, force: true }));
 	const preview = await value.reconciler.preview(); await value.reconciler.apply(preview.reconciliationKey);
-	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /not empty/);
+	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /modern ownership preview/);
 	nonEmpty = false; const beforeCleanupMutation = mutations; kickDenied = true;
-	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /authority/); assert.equal(mutations, beforeCleanupMutation, "kick authority fails before host unlink");
+	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /modern ownership preview/); assert.equal(mutations, beforeCleanupMutation, "legacy cleanup refuses before host unlink");
 	kickDenied = false; hostChildDenied = true;
-	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /authority/); assert.equal(mutations, beforeCleanupMutation, "host child authority fails before host unlink");
+	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /modern ownership preview/); assert.equal(mutations, beforeCleanupMutation, "legacy cleanup cannot gain authority from power levels");
 	hostChildDenied = false; foreign = true;
-	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /authority/);
+	await assert.rejects(() => value.reconciler.cleanup(preview.reconciliationKey), /modern ownership preview/);
 	assert.ok(value.registry.manifestByConversationId(conversation("1")), "cleanup failure never removes a conversation");
 });
 

@@ -1,7 +1,7 @@
 # Existing hierarchy migration (#117)
 
-Status: migration implementation and focused checks pass; broader checks, review
-and final verification remain pending. No live migration is authorized.
+Status: migration implementation, focused and broader affected checks pass;
+review and final verification remain pending. No live migration is authorized.
 
 ## Ownership
 
@@ -64,6 +64,46 @@ pending input/history, policy preservation, and grouping/generation concurrency:
 `.pi/tmp/workers/2026-10-07T19-07-05-663Z-hierarchy-migration-focused-fixed-8ae70ed8a6d0/`.
 The preceding failed run exposed an invalid test retirement fixture (omitted
 required exact cleanup); the corrected fixture uses real owner-derived targets.
+
+Broader affected checks passed: **566 managed + 87 bridge-chat**, zero skips,
+and module contracts. Initial log:
+`.pi/tmp/workers/2026-10-07T19-08-34-935Z-hierarchy-migration-affected-4412b2615f63/`.
+After the final legacy-consent/receipt guards and status-wrapper portability fix,
+managed **566/566** plus module contracts passed again:
+`.pi/tmp/workers/2026-10-07T19-24-24-857Z-migration-legacy-scope-affected-8cf840ec30c7/`.
+The finalized fixture also proves an unfinished #68 plan completes only its old
+scope under the first consent, then requires a second preview for checkout
+migration. Current host/placement and ownership are revalidated before that old
+scope is admitted. Changed old full-manifest hashes remain held for explicit
+recovery rather than being silently rebased. Completed batches never expand to
+new arrivals without another preview/consent; their receipts survive rollover.
+A retained retirement flag without its tombstone fails closed before rollover.
+
+## Review and remediation
+
+Paired exhaustive #117 review:
+`.pi/tmp/reviews/2026-10-07T19-26-31-589Z-worktree-c2c2b0afbd8f-2eeddb665307/`.
+
+### Standards
+
+One **high / current issue** finding: migration still generated legacy
+`cleanupSpaces`, and the retained legacy cleanup entrypoint could kick/leave.
+Accepted: new migration records now retain old IDs only as journal/receipt data,
+never derive destructive cleanup authority, and legacy cleanup unconditionally
+refuses with modern-preview guidance. The kick/leave implementation was removed.
+
+### Spec
+
+One **high / current issue** finding identified the same unsafe cleanup path.
+Accepted with the same remediation. Regression tests call the legacy entrypoint
+directly (not only through frontend policy), assert no Matrix effects, and assert
+new journals have no legacy cleanup candidates. Modern verified Space cleanup
+continues to use the existing separately confirmed NAS flow and its prior tests.
+Historical cleanup records remain readable for backup but are not execution consent.
+
+No additional review loop is planned: remediation removes the unsafe path without
+adding a new owner or changing the reviewed migration design. Focused remediation
+checks and the final canonical gate/build follow.
 
 No live state, shared tmux server, service, deployed alias or NAS account is touched
 by source edits and disposable tests. Logical commits record preflight, code,

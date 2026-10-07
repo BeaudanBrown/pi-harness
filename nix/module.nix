@@ -441,8 +441,10 @@ let
     manifest_dir="''${manifest_dir//%h/$HOME}"
     test -d "$manifest_dir"
     pending_reconciliation=0
-    if ${pkgs.bash}/bin/bash -c 'compgen -G "$1/conv_*.json" >/dev/null' _ "$manifest_dir"; then
-      pending_reconciliation=$(${pkgs.jq}/bin/jq -s '[.[] | select(.kind == "project" and (.checkoutSpace == null))] | length' "$manifest_dir"/conv_*.json)
+    shopt -s nullglob
+    manifest_files=("$manifest_dir"/conv_*.json)
+    if (( ''${#manifest_files[@]} )); then
+      pending_reconciliation=$(${pkgs.jq}/bin/jq -s '[.[] | select(.kind == "project" and (.checkoutSpace == null))] | length' "''${manifest_files[@]}")
     fi
     report=$(${pkgs.jq}/bin/jq --slurpfile health "$runtime/sync-health.json" --argjson pending "$pending_reconciliation" --arg desiredRuntime ${lib.escapeShellArg (toString managedRelayPackage)} \
       -f ${../scripts/managed-session-status.jq} "$registry")

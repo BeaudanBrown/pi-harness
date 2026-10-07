@@ -93,15 +93,58 @@ code again is unsupported for unfinished new-alias provisioning/reconciliation.
 
 ## Existing-room reconciliation
 
-Run reconciliation from the coordinator conversation only:
+**Actual migration requires separate deployment authorization.** Source development
+and fixtures do not authorize these commands against a live host.
 
-1. Call `remote_project_reconcile_preview`. This resolves every compatibility checkout through the trusted launcher, validates current room and Space authority, and returns a bounded plan plus a stable reconciliation key. It performs no Matrix or manifest mutation.
-2. Review the listed conversation, workspace, project, and checkout display identities. If any checkout was removed, inaccessible, or changed ownership, restore or resolve it first; the conversation and room remain unchanged.
-3. Call `remote_project_reconcile_apply` with the exact preview key and `confirm: true`. A private durable intent is written before Matrix changes. Existing room IDs are linked into their deterministic project Spaces, manifests gain only host-resolved project identity, and old parent links are removed. Pi session files, bindings, active/dormant state, pending input/control/projection state, and workspace files are not rewritten.
-4. This legacy migration description is not an enabled modern frontend: migration remains #117. Do not replay legacy model applies or delete/edit reconciliation intents. Modern saved-link repair requires its own fresh frozen preview and consent.
-5. Review the returned obsolete-Space count. Cleanup is optional and separately destructive: call `remote_project_space_cleanup` with the same key and `confirm: true`. It refuses any referenced, non-empty, inaccessible, wrong-type, or insufficiently bot-controlled Space. For a verified empty obsolete Space it removes the host link, removes the operator from that obsolete Space, and then makes the bot leave. It never leaves a current conversation room or touches a checkout.
+1. After an approved guarded relay upgrade and a complete backup, run
+   `pi-managed-session space reconcile preview --json` (or the same `!host`/`/host`
+   grammar). This reads ownership and resolves saved placements through the trusted
+   launcher; it does not enroll ordinary local Pi, start a process, stamp a proof,
+   or move a room. Inspect exact IDs and blockers, not display-name equality.
+2. Apply only that preview with `pi-managed-session space reconcile apply
+   --preview-id preview_… --confirmed --json`. Every model apply additionally
+   requires independent per-call consent. Preview expiry, placement/ownership
+   drift or unavailable authority requires a fresh preview, never a forced apply.
+3. The existing #68 journal freezes placement/IDs before effects. The hierarchy
+   owner reuses verified saved targets and creates only missing project/worktree
+   Spaces, not replacement conversation rooms. New parent links precede a
+   grouping-only manifest commit; old links are removed last. Session/generation,
+   attachment, nonce, input/projection queues, native history and titles remain
+   untouched by migration. Existing adopted objects always preserve push policy.
+4. After interruption, request a fresh preview and consent. It exposes the durable
+   remaining plan; accepted remote effects are verified and reused. An uncertain
+   create without a verifiable alias remains held for ownership-safe recovery.
+   Do not delete/edit intents, invent replacement rooms, or replay old model tools.
+   A pre-existing unfinished #68 intent first completes its original frozen scope;
+   a subsequent preview authorizes checkout grouping. Completed old intents and
+   their cleanup IDs remain private `project-reconciliation-reconcile_*.json`
+   receipts. Retirement terminates an affected item without resurrection or
+   expanding the original retirement cleanup scope.
+5. Empty-Space cleanup is optional and separately confirmed with `space cleanup
+   preview` / `space cleanup apply --preview-id … --confirmed`. Only verified,
+   empty, unreferenced modern owned Spaces qualify. The NAS account owner leaves
+   and forgets; there is no kick fallback. Unmarked obsolete legacy Spaces and
+   their receipt IDs are retained for explicit ownership-safe recovery, not
+   silently adopted, discarded or deleted. The old cleanup-key entrypoint now
+   refuses even when a historical receipt contains cleanup phases; those records
+   are backup/recovery evidence, not permission to kick or leave.
 
-Reconciliation is forward-recoverable but not transactionally rollbackable across Matrix and synchronized manifests. Before cleanup, the durable intent retains old parent IDs, but there is no automatic rollback operation. A room linked to its target before interruption can temporarily have both old and new parents; retry completes the move. After confirmed cleanup, an obsolete Space is intentionally no longer accessible to the operator or bot. Back up synchronized manifests and host-local registry state before deployment-level work; the final V2 store migration remains owned by #63.
+Reconciliation is forward-recoverable, not a Matrix/filesystem transaction or
+rollback service. During a partial operation the same room may have both parents.
+Preserve the complete manifests, registry, native histories, live-workspace
+hierarchy/retirement/account state and reconciliation journals/receipts together.
+Never restore active manifests without newer tombstones. Strict older readers
+cannot consume the added hierarchy/journal fields: downgrading after mutation is
+unsupported. #63 still owns the separately authorized V2 cutover; this operation
+neither changes the current protocol version nor activates that migration.
+
+Existing adapters retain their loaded code, wire subset and processes. New host
+operations or active-run observation may report an upgrade requirement; this is
+not permission to refresh a busy process. Use the existing guarded relay-first
+rollout and deliberate idle-only adapter update, retaining pinned runtime closures.
+Do not restart shared tmux or force a refresh to make migration pass. See
+[migration evidence](managed-hierarchy-migration-evidence.md) and
+[restart-safe updates](managed-session-updates.md).
 
 Removing a checkout or Git worktree independently never deletes its managed conversation or Matrix room: resolution fails closed and leaves the durable binding visible. Confirmed conversation deletion permanently retires the identity, stops only exact owned processes and cleans up its room, but never invokes checkout or worktree removal. Only the separately named bundled cleanup operation composes retirement with worktree removal.
 
