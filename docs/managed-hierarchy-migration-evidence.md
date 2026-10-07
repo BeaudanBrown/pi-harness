@@ -1,7 +1,8 @@
 # Existing hierarchy migration (#117)
 
-Status: migration implementation, focused and broader affected checks pass;
-review and final verification remain pending. No live migration is authorized.
+Status: source implementation complete; focused/affected checks, paired review
+with accepted remediation, final canonical verification and production builds pass.
+No live migration or deployment has been performed. No live migration is authorized.
 
 ## Ownership
 
@@ -102,8 +103,30 @@ continues to use the existing separately confirmed NAS flow and its prior tests.
 Historical cleanup records remain readable for backup but are not execution consent.
 
 No additional review loop is planned: remediation removes the unsafe path without
-adding a new owner or changing the reviewed migration design. Focused remediation
-checks and the final canonical gate/build follow.
+adding a new owner or changing the reviewed migration design.
+
+## Final verification
+
+Implementation commits: `98c5431` (acceptance/crash matrix), `72544fe` (migration),
+`eb4df32` (legacy fences, runbook and review remediation).
+
+- Remediation-focused hierarchy/reconciliation/provenance: **32 passed, zero skips**;
+  `.pi/tmp/workers/2026-10-07T19-35-45-490Z-migration-review-remediation-focused-03e87f3ccc91/`.
+- `nix run .#verify --option builders '' -L`: all **12 deterministic checks** pass;
+  **566 managed + 87 bridge-chat**, **13 engineering/runtime + 17 headless package
+  contracts**, zero skips. Remaining gates include module/schema/source contracts,
+  TypeScript, unit tests, eval self-test, pi-r, chat workspace and bridge preflight.
+- `nix build .#default .#managed-session-relay --option builders '' --no-link -L`
+  passes. Final gate/build log:
+  `.pi/tmp/workers/2026-10-07T19-36-55-331Z-hierarchy-migration-final-canonical-fe652805c414/`.
+- `git diff --check` and affected TypeScript/Nix diagnostics pass. Cached external
+  Go workspace warnings are unrelated; external source is unchanged by #117.
+
+Only this evidence/status documentation changed after the final gate. Both
+worktrees are locally committed, unpushed, and unchanged live. Compatibility is
+fixture/contract evidence, not proof of desktop/Element X behavior, live push
+policies or an activated relay upgrade. #120/#121 retain those gated checks;
+#63 retains the separate V2 cutover.
 
 No live state, shared tmux server, service, deployed alias or NAS account is touched
 by source edits and disposable tests. Logical commits record preflight, code,
