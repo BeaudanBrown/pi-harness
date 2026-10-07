@@ -453,6 +453,38 @@ compiler evidence. External hooks were explicitly bypassed to avoid forbidden
 Nix evaluation; no dotfiles Nix evaluation/build, activation, shared server
 restart or live-account traffic occurred.
 
+## Authorized requester capture and outside-tmux attachment
+
+The operator explicitly authorized necessary source changes and disposable
+Go/tmux tests in the owning nix-dotfiles worktree, retaining the existing
+no-evaluation/build, push, deployment and live-traffic restrictions.
+Local external commit `78e5115` adds:
+
+- Read-only `managed client-capture`, using the invocation's original server PID
+  and pane, plus an optional exact client hint. Ambiguous shared-pane viewers,
+  foreign servers, detached clients and malformed/oversized inventories refuse
+  without selecting a recent client or creating a server.
+- UI-only `managed window-attach-exact` for invocation outside tmux. It shares
+  focus's exact kernel/window guard and performs the guarded attach in the same
+  server queue. This occupies the caller's terminal until detach, not a new Pi
+  writer or success receipt. Stale target refusal has nonzero status; terminal
+  stdout is required and command output is bounded. Unsupported platforms refuse.
+
+Actual disposable Linux PTY tests supply JSON on stdin and a controlling terminal
+on stdout, observe the exact window/pane, detach explicitly, and inject a changed
+launch between inspection and attach. Nonterminal refusal preserves redirected
+output files. An initial `/dev/tty` implementation failed actual tmux; the final
+implementation passes the real stdout terminal device instead. No temporary
+receipt files, server mutations for capture, lifecycle creation or fallback
+client selection were added.
+
+Final direct Go suite: **48 top-level tests passed, zero skips**:
+`.pi/tmp/workers/2026-10-07T06-29-37-577Z-native-attach-stdin-wire-eb4b39cc7737/`.
+External LSP reported no active workspace build; direct Go compilation provides
+compiler evidence. External pre-commit hooks were bypassed to avoid forbidden
+Nix evaluation. No shared server was restarted. These primitives still need
+frontend wiring and do not constitute #116/#118 completion or live acceptance.
+
 Full saved-file/retirement ownership integration, requesting-client frontend wiring,
 local-only guards and launcher wiring remain to be implemented and verified. Typed pending-control presentation also needs checking
 against the final integrated path; bound-only controls have not been generalized. General startup transport is out of
