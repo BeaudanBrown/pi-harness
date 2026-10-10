@@ -455,8 +455,9 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				hostId, protectedConversationId: deriveConversationId(hostId, "coordinator"), policy: hostPolicy,
 				read: (request) => owner && isManagedHostPreview(request.action) ? owner.preview(request.action) : reads.read(request),
 				humanMutation: owner ? request => owner.executeHuman(request) : undefined,
-				...(hostLifecycle ? { launch: (action: { operation: "conversation.open" | "conversation.resume"; conversationId: string }) =>
-					action.operation === "conversation.open" ? hostLifecycle!.openConversation(action.conversationId) : hostLifecycle!.resumeConversation(action.conversationId) } : {}) };
+				launch: hostLifecycle ? action => action.operation === "conversation.open"
+					? hostLifecycle!.openConversation(action.conversationId, action.expectedGenerationId)
+					: hostLifecycle!.resumeConversation(action.conversationId) : undefined };
 			if (hostLifecycle) {
 				const store = new HostApprovalStore(resolve(stateDirectory, "host-approvals"), hostId); await store.load();
 				hostApprovals = new HostApprovalRuntime({ ...dispatchOptions, store, matrix, operatorUserIds: new Set([matrix.operatorUserId]),

@@ -11,6 +11,8 @@ import { provisioningFixture } from "./fixtures/managed-matrix-provisioning.js";
 import { BoundAdapterClient, CoordinatorAdapterClient, requestLocalBind } from "../config/agent/extensions/managed-sessions/adapter/client.js";
 import { deriveTranscriptEntryId } from "../config/agent/extensions/managed-sessions/contracts.js";
 import { requestHostControl } from "../config/agent/extensions/managed-sessions/relay/host-control-client.js";
+import { HostLifecycle } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import { deriveGenerationId } from "../config/agent/extensions/managed-sessions/v2-contracts.js";
 
 test("production relay opens local IPC before remote authentication finishes", { timeout: 10_000 }, async (t) => {
 	const peer = process.env.PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER;
@@ -157,6 +159,20 @@ process.stdin.resume(); process.stdin.on('end', () => process.stdout.write(JSON.
 	assert.equal(inventory.ok, true); if (!inventory.ok) assert.fail();
 	assert.equal(inventory.data.items.length, 1); assert.equal(inventory.data.items[0].runtimeState, "running");
 	assert.equal(inventory.data.items[0].setupState, "pending");
+	// Exercise the real main.ts -> dispatcher -> lifecycle wiring. Direct
+	// lifecycle tests alone cannot catch a fence dropped by the composition root.
+	const opened: Array<{ id: string; generation?: string }> = [];
+	const originalOpen = HostLifecycle.prototype.openConversation;
+	const openSpy = t.mock.method(HostLifecycle.prototype, "openConversation", function (this: HostLifecycle, id: string, generation?: string) {
+		opened.push({ id, generation });
+		return originalOpen.call(this, id, generation);
+	});
+	const staleGeneration = deriveGenerationId(result.conversationId, 2);
+	const staleOpen = await requestHostControl({ socketPath: controlPath, requestId: "stale-production-open", timeoutMs: 1000,
+		action: { operation: "conversation.open", conversationId: result.conversationId, expectedGenerationId: staleGeneration } });
+	assert.equal(staleOpen.ok, false);
+	assert.deepEqual(opened, [{ id: result.conversationId, generation: staleGeneration }], "production composition preserves the generation fence");
+	openSpy.mock.restore();
 	for (const secret of [attachmentNonce, sessionId, cwd, sourceSessionFile, "test-token"]) assert.ok(!JSON.stringify(inventory).includes(secret));
 	const cli = process.env.PI_MANAGED_SESSIONS_TEST_HOST_CLI;
 	if (cli) {
