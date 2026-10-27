@@ -1,5 +1,10 @@
 # Cumulative review and isolated smoke-test staging (#121)
 
+**Subsequent live result:** the operator provided dedicated test accounts and
+explicitly authorized the test. It failed on room-v12 ID compatibility during
+coordinator bootstrap. See [live smoke evidence](managed-live-workspaces-live-smoke.md).
+The offline evidence below is historical and does not establish a live pass.
+
 ## Current authorization
 
 The operator approved proceeding through cumulative offline review, candidate
@@ -9,7 +14,7 @@ existing-chat migration, push or destructive cleanup is authorized. Candidate
 package builds are distinct from host/system builds. The external package-lock
 boundary in #120 remains open; offline review can proceed without resolving it.
 
-Only production identity metadata has been provided so far. It is **not** test
+At this original staging checkpoint, only production identity metadata had been provided. It is **not** test
 account provisioning or permission to reuse the production owner token. Before
 any real Matrix smoke traffic, require dedicated disposable owner and bot logins,
 a confirmed homeserver and private test-only credential provisioning. Do not
@@ -181,7 +186,8 @@ without skips. Only this final evidence/handoff prose was added afterward.
 Offline cumulative review, candidate build and installed-picker smoke are done.
 No real-account smoke, desktop/Element X acceptance, fleet evaluation/build,
 publication/lock refresh, activation or existing-room migration is claimed.
-#120 and #121 remain open. Continue real Matrix smoke only after the operator
-provides dedicated test owner/bot MXIDs, device IDs, approved homeserver and paths
-to privately provisioned test-only token files (never tokens in chat). This must
-not fall back to production identities or inspect the private secrets repository.
+#120 and #121 remain open. The operator subsequently supplied dedicated test
+identities and private credential paths, and the first real Matrix attempt failed;
+see the live evidence linked above. Next work is compatibility remediation and
+same-state recovery/retest, not credential provisioning or production rollout.
+Never fall back to production identities or inspect the private secrets repository.
