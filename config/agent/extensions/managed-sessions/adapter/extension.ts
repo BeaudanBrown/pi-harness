@@ -569,6 +569,17 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			};
 		}
 
+		function persistPendingUserEntries(ctx: ExtensionContext): void {
+			if (!binding) return;
+			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
+				const marker = pendingUserPersistence[index]!;
+				const key = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
+				if (!key) continue;
+				pendingUserPersistence.splice(index, 1);
+				persistExpanded(ctx, marker, key);
+			}
+		}
+
 		function persistExpanded(ctx: ExtensionContext, expanded: DeliveryMarker, piEntryKey: string): DeliveryMarker {
 			const persisted: DeliveryMarker = {
 				...expanded, status: "persisted", piEntryId: persistedEntryId(binding!.sessionId, piEntryKey),
@@ -1390,7 +1401,11 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			if (binding && client?.connected) queueProjection(ctx);
 		});
 		pi.on("agent_end", () => hostRun.end());
-		pi.on("tool_execution_start", (event) => {
+		pi.on("tool_execution_start", (event, ctx) => {
+			// SDK message_end hooks precede user persistence. At tool execution the
+			// native entry exists: correlate its delivery before attesting origin.
+			// Missing/ambiguous entries remain pending and cannot grant authority.
+			persistPendingUserEntries(ctx);
 			hostRun.toolStart(event.toolCallId);
 			if (!activity) return;
 			const name = isAloopLifecycleActive(currentContext?.sessionManager.getSessionId() ?? "") ? "aloop" : boundedToolName(activity, event.toolName); activity.activeTools.set(event.toolCallId, name); activity.toolTotal += 1;
@@ -1415,12 +1430,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("message_end", (event, ctx) => {
 			if (event.message.role !== "user") return;
 			hostRun.userMessage();
-			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
-				const marker = pendingUserPersistence[index]!;
-				const key = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
-				if (!key) continue;
-				pendingUserPersistence.splice(index, 1); persistExpanded(ctx, marker, key);
-			}
+			persistPendingUserEntries(ctx);
 			// Project a durable local prompt without waiting for the model to finish.
 			// The shared planner excludes Matrix-origin entries and deduplicates retries.
 			if (binding && client?.connected) queueProjection(ctx);
@@ -1429,13 +1439,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		pi.on("agent_settled", async (_event, ctx) => {
 			hostRun.reset();
 			const finalizations = captureFinalizations(ctx);
-			for (let index = pendingUserPersistence.length - 1; index >= 0; index -= 1) {
-				const marker = pendingUserPersistence[index]!;
-				const piEntryKey = findDeliveredUserEntry(ctx.sessionManager.getBranch(), marker.deliveryId);
-				if (!piEntryKey) continue;
-				pendingUserPersistence.splice(index, 1);
-				persistExpanded(ctx, marker, piEntryKey);
-			}
+			persistPendingUserEntries(ctx);
 			const offeredCheckpointOrigins = new Set([...checkpoints.values()]
 				.filter((marker) => marker.status === "offered").map((marker) => marker.originDeliveryId));
 			for (const [deliveryId, piEntryId] of activeDeliveries) {

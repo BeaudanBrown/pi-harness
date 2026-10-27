@@ -177,7 +177,7 @@ test("real Pi tree revisits retain the binding and emit only fresh silent branch
 	} finally { if (session) { await session.abort(); await session.extensionRunner.emit({ type: "session_shutdown", reason: "quit" }); session.dispose(); } await relay.close(); }
 });
 
-test("real Pi native events attest a current tool and headless approval fails promptly without invented consent", { timeout: 15000 }, async (t) => {
+for (const origin of ["local", "matrix"] as const) test(`real Pi ${origin} native events attest a current tool without invented consent`, { timeout: 15000 }, async (t) => {
 	const piPath = process.env.PI_MANAGED_ADAPTER_TEST_PI; if (!piPath) return t.skip("packaged Pi SDK unavailable");
 	const sdkRoot = join(dirname(dirname(piPath)), "lib/node_modules/@earendil-works/pi-coding-agent");
 	const sdk = await import(pathToFileURL(join(sdkRoot, "dist/index.js")).href);
@@ -200,10 +200,15 @@ test("real Pi native events attest a current tool and headless approval fails pr
 				push("host.run.check", { checkId: "native-live" }, "check-native");
 				await wait(() => relay.frames.some((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-live"));
 				const witness = relay.frames.find((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-live")!.payload.witness as { generationId: string; runId: string; toolCallIds: string[]; sources: unknown[] };
-				assert.ok(witness); assert.deepEqual(witness.sources, [{ kind: "local" }]); assert.equal(witness.toolCallIds.length, 1);
-				push("host.approval.show", { approvalId: `approval_${"a".repeat(32)}`, generationId: witness.generationId, runId: witness.runId, toolCallId: witness.toolCallIds[0], question: "Exact test effect?", expiresAt: Date.now() + 10000 }, "native-dialog");
-				await wait(() => relay.frames.some((frame) => frame.type === "host.approval.answer"));
-				assert.equal(relay.frames.find((frame) => frame.type === "host.approval.answer")!.payload.choice, "unavailable");
+				assert.ok(witness); assert.deepEqual(witness.sources, origin === "local" ? [{ kind: "local" }] : [{ kind: "matrix", deliveryId: deriveDeliveryId(conversationId, "$native-origin") }]); assert.equal(witness.toolCallIds.length, 1);
+				if (origin === "local") {
+					push("host.approval.show", { approvalId: `approval_${"a".repeat(32)}`, generationId: witness.generationId, runId: witness.runId, toolCallId: witness.toolCallIds[0], question: "Exact test effect?", expiresAt: Date.now() + 10000 }, "native-dialog");
+					await wait(() => relay.frames.some((frame) => frame.type === "host.approval.answer"));
+					assert.equal(relay.frames.find((frame) => frame.type === "host.approval.answer")!.payload.choice, "unavailable");
+				} else {
+					assert.ok(relay.frames.some(frame => frame.type === "input.acknowledge" && frame.payload.status === "persisted"));
+					assert.ok(sm.getBranch().some((entry: any) => entry.type === "message" && entry.message.role === "user"));
+				}
 				void session.abort().catch((error: unknown) => errors.push(error));
 				push("host.run.check", { checkId: "native-aborted" }, "check-aborted");
 				await wait(() => relay.frames.some((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-aborted"));
@@ -219,7 +224,13 @@ test("real Pi native events attest a current tool and headless approval fails pr
 			usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: reason, timestamp: Date.now() };
 			stream.push({ type: "done", reason, message }); stream.end(); }); return stream;
 	};
-	await session.prompt("Probe native host liveness"); assert.equal(probed, true, JSON.stringify(session.agent.state.messages.filter((message: { role: string }) => message.role === "toolResult"))); assert.deepEqual(errors, []);
+	if (origin === "local") await session.prompt("Probe native host liveness");
+	else {
+		await wait(() => relay.frames.some(frame => frame.type === "attachment.attach"));
+		push("input.deliver", { deliveryId: deriveDeliveryId(conversationId, "$native-origin"), matrixEventId: "$native-origin", senderUserId: "@operator:example.com", kind: "prompt", body: "Probe native host liveness" }, "native-matrix-input");
+		await wait(() => probed || session.agent.state.messages.some((message: any) => message.role === "assistant" && message.stopReason === "stop"));
+	}
+	assert.equal(probed, true, JSON.stringify(session.agent.state.messages.filter((message: { role: string }) => message.role === "toolResult"))); assert.deepEqual(errors, []);
 	push("host.run.check", { checkId: "native-ended" }, "check-ended"); await wait(() => relay.frames.some((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-ended"));
 	assert.equal(relay.frames.find((frame) => frame.type === "host.run.confirm" && frame.payload.checkId === "native-ended")!.payload.witness, null);
 });
