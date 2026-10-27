@@ -92,7 +92,9 @@ test("branch consent uses a separate expiring preview, displays public targets a
 	const preview = await owner.preview(branchAction); const input = request(preview.previewId);
 	const frozen = await owner.freeze(input); const record = prepareHostApproval("host", input, frozen, now);
 	const question = hostApprovalQuestion(record);
-	assert.ok(question.includes("feature/test")); assert.ok(question.includes(head)); assert.ok(question.includes("Expires:"));
+	assert.ok(question.includes("feature/test")); assert.ok(question.includes(head));
+	assert.ok(!question.includes("Expires:"), "prose omits bookkeeping fields");
+	assert.equal(record.expiresAt, now + 900_000, "expiry remains enforced internally");
 	assert.ok(!question.includes("/private/repo")); assert.equal(await owner.revalidate(record), true);
 	head = "d".repeat(40); assert.equal(await owner.revalidate(record), false);
 	await assert.rejects(owner.execute(record), /Frozen targets/); assert.equal(executed, 0);

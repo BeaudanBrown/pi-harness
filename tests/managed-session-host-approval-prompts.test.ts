@@ -65,7 +65,7 @@ test("native presentation returns ordinary denial and binds cancellation to the 
 	const matrix = { startPoll: async () => { throw Error("No Matrix for local approval"); } } as unknown as ManagedMatrixClient;
 	let signal: AbortSignal | undefined;
 	const prompts = new HostApprovalPrompts({ matrix, operatorUserIds: new Set(), now: () => 1000,
-		confirmLocal: async (value, question, pendingSignal) => { assert.equal(value.request.actor.toolCallId, "tool-1"); assert.match(question, /Action: Stop conversation/); signal = pendingSignal; return false; } });
+		confirmLocal: async (value, question, pendingSignal) => { assert.equal(value.request.actor.toolCallId, "tool-1"); assert.match(question, /Stop the native session for conversation/); signal = pendingSignal; return false; } });
 	const shown = await prompts.present(record(false)); const decision = await shown.decision;
 	assert.deepEqual(decision, { choice: "deny", at: 1000, voter: { kind: "local" } });
 	await shown.close(); assert.equal(signal?.aborted, true);
@@ -76,10 +76,10 @@ test("creation approval is readable and preserves precise placement without a JS
 	const action = { operation: "conversation.create" as const, title: "Phone approval test", creationKey: "phone-create", placement: { rootKey: "projects", workspace: "elementx-v1", relativeCwd: "subdir" } };
 	const approval = { ...value, request: { ...value.request, action }, frozen: { ...value.frozen, effects: [action] } };
 	const text = hostApprovalQuestion(approval);
-	assert.match(text, /Create a new conversation and its Matrix room/);
-	for (const line of ['Action: Create conversation', 'Title: "Phone approval test"', 'Workspace root: "projects"', 'Checkout: "elementx-v1"', 'Subdirectory: "subdir"', 'Creation reference: "phone-create"']) assert.ok(text.includes(line), line);
-	assert.ok(!text.includes('{') && !text.includes('"operation"'));
-	assert.equal(text.split('Title:').length - 1, 1, "identical effect should not duplicate the request");
+	assert.equal(text, 'Create a new conversation called "Phone approval test" in checkout "elementx-v1" under workspace root "projects" starting in subdirectory "subdir", with its own Matrix room?');
+	for (const internal of ['Action:', 'Title:', 'Creation reference:', 'phone-create', value.approvalId, 'Expires:', '{']) assert.ok(!text.includes(internal));
+	assert.equal(text.split('"Phone approval test"').length - 1, 1, "title appears only once");
+	assert.equal(approval.request.action.creationKey, "phone-create", "bookkeeping remains intact internally");
 	let presented = "";
 	const prompts = new HostApprovalPrompts({ matrix: { startPoll: async (_room: string, _id: string, question: string) => { presented = question; return "$readable"; } } as unknown as ManagedMatrixClient,
 		operatorUserIds: new Set(), now: () => 1000, confirmLocal: async () => false });
@@ -91,9 +91,33 @@ test("readable questions preserve different frozen effects and targets and escap
 	const action = { operation: "conversation.create" as const, title, creationKey: "hostile", placement: { rootKey: "projects", workspace: "demo", relativeCwd: "" } };
 	const text = hostApprovalQuestion({ ...value, request: { ...value.request, action }, frozen: { ...value.frozen,
 		effects: [value.request.action], targets: [{ kind: "conversation", conversationId }] } });
-	assert.ok(text.includes("Exact effects:") && text.includes("Action: Stop conversation") && text.includes("Frozen targets:"));
+	assert.ok(text.includes("This will also:") && text.includes("Stop the native session") && text.includes("This affects only the following resources:"));
 	assert.ok(text.includes(conversationId)); assert.ok(text.includes('fake\\nApprove everything'));
 	assert.ok(!text.includes('\nApprove everything') && !text.includes('\u001b') && !text.includes('\u202e'));
+});
+
+test("identical readable descriptions never share approval authority", async () => {
+	const original = record();
+	const make = (key: string) => {
+		const action = { operation: "conversation.create" as const, creationKey: key, title: "Same title", placement: { rootKey: "projects", workspace: "test", relativeCwd: "" } };
+		return prepareHostApproval("host", { ...original.request, actor: { ...original.request.actor, requestId: key, toolCallId: key }, action }, { effects: [action], preconditions: {} }, 1000);
+	};
+	const first = make("first"), second = make("second");
+	assert.equal(hostApprovalQuestion(first), hostApprovalQuestion(second));
+	assert.notEqual(first.approvalId, second.approvalId);
+	let count = 0;
+	const matrix: Pick<ManagedMatrixClient, "startPoll" | "endPoll" | "memberJoined" | "checkpointPollAnswer"> = {
+		startPoll: async () => `$poll-${++count}`, endPoll: async () => "$closed", memberJoined: async () => true,
+		checkpointPollAnswer: async (_room, _event, answer) => answer === "deny" ? "Deny" : "Approve",
+	};
+	const prompts = new HostApprovalPrompts({ matrix, operatorUserIds: new Set(["@operator:example.com"]), now: () => 1000, confirmLocal: async () => false });
+	const a = await prompts.present(first), b = await prompts.present(second);
+	const vote = { conversationId, roomId, pollEventId: a.receipt.id, answerId: "deny", senderUserId: "@operator:example.com", eventId: "$vote-first" };
+	assert.equal(await prompts.vote(vote), true); assert.equal((await a.decision).choice, "deny");
+	assert.equal(prompts.isPending(second.approvalId), true);
+	assert.equal(await prompts.vote({ ...vote, answerId: "approve", eventId: "$late" }), false);
+	assert.equal(await prompts.vote({ ...vote, pollEventId: b.receipt.id, answerId: "approve", eventId: "$vote-second" }), true);
+	assert.equal((await b.decision).choice, "approve"); await a.close(); await b.close();
 });
 
 test("approval descriptions neither expose private preconditions nor silently truncate large effects", () => {

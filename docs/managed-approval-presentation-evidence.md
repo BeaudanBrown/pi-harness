@@ -9,7 +9,7 @@ operator confirmation after deterministic verification.
 | Acceptance | Intended evidence |
 | --- | --- |
 | Creation explains new conversation and exact placement without JSON object dump | Real poll-content test and renderer assertions |
-| Other actions retain all exact parameters, frozen effects and targets | Different effect/target renderer case; existing mutation-owner tests |
+| Other actions retain meaningful resource scope, frozen effects and targets | Different effect/target renderer case; existing mutation-owner tests |
 | Fork retains literal inherited summary, committed base and generation | Existing fork consent regression |
 | Labels cannot inject lines/control characters; no private preconditions leak | Adversarial labels and existing privacy tests |
 | Oversized scope fails closed, never truncates | Existing 100-target and overflow tests |
@@ -67,3 +67,49 @@ git diff --check
 
 No push, fleet lock update, host activation or migration. Existing test poll
 receipts are not reused: a fresh independent request is required for phone review.
+
+Implementation committed locally as `92f0bc6` (unpushed). Fresh real-model poll
+`Readable approval test` was created using the updated standalone relay:
+`.pi/tmp/workers/2026-10-27T12-53-07-258Z-elementx-readable-prompt-live-c8f0f3da55c5/`.
+Authenticated event readback verifies the new readable title/placement and no
+raw action JSON. Inventory remains unchanged before consent. The bounded test
+supervisor is waiting for human readability confirmation and Deny; that result
+and cleanup were initially pending. The operator rejected the labelled-field
+layout and requested a single readable description instead. That trial was
+cancelled through `!abort` and stopped; temporary credentials were removed.
+
+## Prose refinement
+
+Operator-requested refinement: ordinary creation becomes one sentence describing
+the title, checkout/root/subdirectory and new Matrix room, without Action/Title
+labels or an approval-reference footer. Internal creation/preview/approval IDs
+and the literal confirmation flag remain in the immutable record, not the text.
+Resource IDs, generation/session fences, branch/base/merge scope and fork context
+remain visible where meaningful. Different effects and exact frozen targets still
+appear; large destructive scopes cannot be collapsed into an ambiguous sentence.
+
+Identical descriptions are deliberately possible for distinct per-call requests.
+A regression must prove they still get independent poll/approval identities and
+cannot share or replay votes. No change to identity derivation, voting, expiry,
+executor revalidation or notification metadata. Visible expiry/reference fields
+are intentionally omitted; deadline enforcement remains unchanged. The previous
+branch test expected the old `Expires:` label, so it now verifies the unchanged
+900,000ms internal deadline instead; stale-preview/expiry refusal assertions remain.
+
+Refinement verification passed: **22 focused / 580 managed / 87 bridge**, zero
+skips, using the same focused and affected commands above:
+`.pi/tmp/workers/2026-10-27T13-05-42-239Z-approval-prose-scope-and-expiry-checks-99ec8b6a263f/`.
+Refinement review: **Standards: no findings. Spec: no findings.**
+`.pi/tmp/reviews/2026-10-27T13-08-07-346Z-worktree-1059340da2fb-4ef598722291/`.
+Final canonical gate passed: all 12 checks, **580 managed / 87 bridge / 13+17
+package tests, zero skips**, plus default/relay/account package builds:
+`.pi/tmp/workers/2026-10-27T13-10-01-862Z-approval-prose-final-canonical-6ca7d1667333/`.
+The command used `nix run .#verify --option builders '' --option max-jobs 1 -L`
+to reduce cross-build contention; test timeouts and assertions were unchanged.
+The same production build commands above passed. LSP and diff checks are clean.
+
+No additional live poll has been sent for this prose refinement: the prior
+labelled trial is stopped and credentials removed. Final wording can be reviewed
+from the deterministic rendered description; no fresh phone acceptance is claimed.
+Desktop testing remains explicitly deferred, not passed. Publication, fleet lock
+updates, host activation and migration remain separately gated.

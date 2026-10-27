@@ -14,60 +14,83 @@ interface Poll {
 const answers = [{ id: "approve", text: "Approve" }, { id: "deny", text: "Deny" }] as const;
 
 const actionNames: Record<string, string> = {
-	"project.create": "Create project", "worktree.create": "Create checkout",
-	"worktree.conversation.create": "Create checkout and conversation", "worktree.conversation.fork": "Fork into a new checkout and conversation",
-	"conversation.create": "Create conversation", "conversation.open": "Open conversation", "conversation.resume": "Resume conversation",
-	"conversation.stop": "Stop conversation", "conversation.refresh": "Refresh conversation runtime", "conversation.delete": "Retire conversation",
-	"conversation.delete.apply": "Retire selected conversations", "worktree.remove.apply": "Remove checkout",
-	"worktree.conversation.cleanup.apply": "Clean up checkout and conversation", "worktree.branch.delete": "Delete branch",
-	"space.reconcile.apply": "Reconcile room grouping", "space.cleanup.apply": "Clean up Spaces",
+	"project.create": "Create a project", "worktree.create": "Create a new checkout",
+	"worktree.conversation.create": "Create a new checkout and conversation", "worktree.conversation.fork": "Fork into a new checkout and conversation",
+	"conversation.create": "Create a new conversation", "conversation.open": "Open the native session", "conversation.resume": "Resume the native session",
+	"conversation.stop": "Stop the native session", "conversation.refresh": "Refresh the native runtime", "conversation.delete": "Retire the room and native session",
+	"conversation.delete.apply": "Retire the selected conversations", "worktree.remove.apply": "Remove the selected checkout",
+	"worktree.conversation.cleanup.apply": "Clean up the selected checkout and conversation", "worktree.branch.delete": "Delete the selected branch",
+	"space.reconcile.apply": "Reconcile room grouping", "space.cleanup.apply": "Clean up the selected Spaces",
 	"coordinator.membership.restore": "Restore coordinator membership",
 };
-const fieldNames: Record<string, string> = {
-	rootKey: "Workspace root", workspace: "Checkout", relativeCwd: "Subdirectory", creationKey: "Creation reference",
-	conversationId: "Conversation", sourceConversationId: "Source conversation", sourceGenerationId: "Source generation",
-	baseRef: "Base reference", baseCommit: "Committed base", confirmed: "Explicit confirmation requested",
-	previewId: "Frozen preview", roomId: "Room", checkoutId: "Checkout identity",
-};
-const label = (key: string): string => fieldNames[key] ?? (key[0].toUpperCase() + key.slice(1)).replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase().replace(/^./, c => c.toUpperCase());
-// Quote scalar labels so newlines/control characters cannot impersonate headings.
-// Structure is rendered as labelled lines, never a raw JSON object dump.
-function describeFields(value: object, indent = ""): string {
-	return Object.entries(value).map(([key, item]) => {
-		if (key === "operation") return `${indent}Action: ${actionNames[String(item)] ?? String(item)}`;
-		if (item !== null && typeof item === "object") {
-			if (Array.isArray(item)) return `${indent}${label(key)}:\n${item.map((entry, i) => typeof entry === "object" && entry !== null
-				? `${indent}  ${i + 1}.\n${describeFields(entry, `${indent}    `)}` : `${indent}  ${JSON.stringify(entry)}`).join("\n")}`;
-			return `${indent}${label(key)}:\n${describeFields(item, `${indent}  `)}`;
-		}
-		return `${indent}${label(key)}: ${typeof item === "boolean" ? (item ? "yes" : "no") : JSON.stringify(item)}`;
-	}).join("\n");
+const words = (key: string): string => key.replace(/([a-z])([A-Z])/g, "$1 $2").toLowerCase();
+// Hide only bookkeeping/confirmation fields, not resource identities or fences.
+// The unchanged frozen record and exact poll event still bind each decision.
+const bookkeeping = new Set(["operation", "creationKey", "previewId", "confirmed"]);
+function describeScope(value: object, operation = ""): string {
+	const priority = (key: string) => ["title", "conversationId", "sourceConversationId", "placement", "workspace", "rootKey", "relativeCwd"].indexOf(key);
+	return Object.entries(value).filter(([key, item]) => !bookkeeping.has(key) && item !== undefined)
+		.sort(([a], [b]) => (priority(a) < 0 ? 100 : priority(a)) - (priority(b) < 0 ? 100 : priority(b)))
+		.map(([key, item]): string => {
+			if (item !== null && typeof item === "object") {
+				if (Array.isArray(item)) return `with ${words(key)} ${item.map(entry => typeof entry === "object" && entry !== null ? describeScope(entry) : JSON.stringify(entry)).join(", ")}`;
+				return describeScope(item, operation);
+			}
+			const quoted = JSON.stringify(item);
+			switch (key) {
+				case "title": return `called ${quoted}`;
+				case "workspace": return operation === "project.create" ? `named ${quoted}` : `${operation.startsWith("worktree.") ? "using source" : "in"} checkout ${quoted}`;
+				case "rootKey": return `under workspace root ${quoted}`;
+				case "relativeCwd": return item === "" ? "at the checkout root" : `starting in subdirectory ${quoted}`;
+				case "conversationId": return `for conversation ${quoted}`;
+				case "sourceConversationId": return `from conversation ${quoted}`;
+				case "branch": return `on branch ${quoted}`;
+				case "baseRef": return `from base reference ${quoted}`;
+				case "baseCommit": return `at committed base ${quoted}`;
+				case "sourceGenerationId": return `from source generation ${quoted}`;
+				case "roomId": return `for room ${quoted}`;
+				default: return `with ${words(key)} ${quoted}`;
+			}
+		}).join(" ");
+}
+function describeAction(action: Pick<HostApprovalRecord["request"]["action"], "operation">): string {
+	const verb = actionNames[action.operation];
+	if (!verb) throw new HostControlError("unavailable", "Unsupported approval description", false);
+	const scope = describeScope(action, action.operation);
+	return `${verb}${scope ? ` ${scope}` : ""}${action.operation === "conversation.create" ? ", with its own Matrix room" : ""}`;
+}
+
+function describeTarget(target: NonNullable<HostApprovalRecord["frozen"]["targets"]>[number]): string {
+	const q = JSON.stringify;
+	switch (target.kind) {
+		case "conversation": return `Conversation ${q(target.conversationId)}`;
+		case "space": return `Space ${q(target.roomId)}`;
+		case "worktree": return `Checkout ${q(target.workspace)} under workspace root ${q(target.rootKey)} (identity ${q(target.checkoutId)})`;
+		case "branch": return `Branch ${q(target.branch)} in checkout ${q(target.checkoutId)} at commit ${q(target.tip)}, against merge target ${q(target.mergeTarget)} at commit ${q(target.mergeCommit)}`;
+	}
 }
 
 export function hostApprovalQuestion(record: HostApprovalRecord): string {
 	// Scalar quoting plus escaped terminal/bidi controls protects presentation.
 	const effects = record.frozen.effects;
-	const { operation, ...parameters } = record.request.action;
-	let details = record.request.action.operation === "conversation.delete.apply" && effects.every((effect) => effect.operation === "conversation.delete")
-		? `${describeFields(parameters)}\nDelete these exact conversations:\n${effects.map((effect) => effect.conversationId).join("\n")}`
-		: `${describeFields(record.request.action)}${isDeepStrictEqual(effects, [record.request.action]) ? "" : `\n\nExact effects:\n${effects.map(effect => describeFields(effect)).join("\n\n")}`}`;
-	if (record.request.action.operation === "conversation.create") details = `Create a new conversation and its Matrix room in the checkout below.\n${details}`;
+	const { operation } = record.request.action;
+	let details = operation === "conversation.delete.apply" && effects.every((effect) => effect.operation === "conversation.delete")
+		? `Retire these exact conversations?\n${effects.map((effect) => effect.conversationId).join("\n")}`
+		: `${describeAction(record.request.action)}?${isDeepStrictEqual(effects, [record.request.action]) ? "" : `\n\nThis will also: ${effects.map(effect => describeAction(effect)).join("; ")}.`}`;
 	if (record.request.action.operation === "worktree.conversation.fork") {
 		if (!isDeepStrictEqual(effects, [record.request.action])) throw new HostControlError("unavailable", "Fork approval effects changed", false);
 		const context = parseForkContext((record.frozen.preconditions.creation as { context?: unknown } | undefined)?.context);
 		const { summary, ...scope } = record.request.action;
 		if (summary !== context.summary || scope.sourceConversationId !== context.sourceConversationId) throw new HostControlError("unavailable", "Fork approval context changed", false);
-		details = `${describeFields(scope)}\n${describeFields({ baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId })}\nNew independent room; inherited summary only; idle until next message` +
+		details = `${describeAction(scope)} ${describeScope({ baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId })}?\nNew independent room; inherited summary only; idle until next message` +
 			`\n\nInherited summary (context only):\n${summary}\n\nEnd inherited summary.`;
 	}
 	// Bulk retirement already lists these exact conversation targets. Do not
 	// repeat them (100 IDs must still fit); other target kinds remain visible.
 	const targets = record.frozen.targets?.filter(target => !(operation === "conversation.delete.apply" && target.kind === "conversation" &&
 		effects.some(effect => effect.operation === "conversation.delete" && effect.conversationId === target.conversationId)));
-	if (targets?.length) details += `\n\nFrozen targets:\n${targets.map(target => describeFields(target)).join("\n\n")}`;
-	const action = record.request.action;
-	const heading = `${actionNames[action.operation] ?? action.operation}${"title" in action ? ` ${JSON.stringify(action.title)}` : ""}`;
-	const question = `Approve: ${heading}?\n\n${details}\n\nApproval reference: ${record.approvalId}\nExpires: ${new Date(record.expiresAt).toISOString()}`
+	if (targets?.length) details += `\n\nThis affects only the following resources:\n${targets.map(describeTarget).join("\n")}`;
+	const question = details
 		.replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028-\u202e\u2066-\u2069]/g, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 	if (question.length > 4096) throw new HostControlError("unavailable", "Approval details exceed the display limit; request a smaller explicit action", false);
 	return question;
