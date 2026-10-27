@@ -50,22 +50,16 @@ export type RemoteCheckpointInput =
 			approvalRequest: string;
 	  } & RequestedCodeOrDiff);
 
-const CODE_OR_DIFF =
-	/[`()\[\]{}=<>|\\_*~^$]|;\s*$|^\s*(?:diff --git |@@ |(?:\+\+\+|---) [ab]\/|index [0-9a-f]+\.\.[0-9a-f]+|(?:new|deleted) file mode |[+-](?![+-\s])|(?:const|let|var|function|class|interface|type|import|export|def|fn|pub|impl|struct|enum|console\.|curl\b|wget\b|sudo\b|git\b|npm\b|nix\b|bash\b|sh\b|python\b|node\b)|[\w.$]+\s*=)/m;
 const CONTROL_CHARACTER = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
 
+// Code/diff omission is agent guidance, not a punctuation-based content classifier.
+// Keep structural bounds here and the explicit requested-code declaration below.
 function normalizedText(value: unknown, field: string, maxLength: number): string {
 	if (typeof value !== "string") throw new Error(`${field} must be a string`);
 	const normalized = value.replace(/\r\n?/g, "\n").trim();
 	if (!normalized) throw new Error(`${field} must not be empty`);
 	if (normalized.length > maxLength) throw new Error(`${field} must be at most ${maxLength} characters`);
 	if (CONTROL_CHARACTER.test(normalized)) throw new Error(`${field} contains control characters`);
-	return normalized;
-}
-
-function normalizedProse(value: unknown, field: string, maxLength: number): string {
-	const normalized = normalizedText(value, field, maxLength);
-	if (CODE_OR_DIFF.test(normalized)) throw new Error(`${field} must omit code and diffs`);
 	return normalized;
 }
 
@@ -100,13 +94,13 @@ export function validateRemoteCheckpoint(value: unknown): RemoteCheckpointInput 
 		}
 		return {
 			kind: "question",
-			decision: normalizedProse(input.decision, "decision", 1_200),
+			decision: normalizedText(input.decision, "decision", 1_200),
 			...(input.context === undefined
 				? {}
-				: { context: normalizedProse(input.context, "context", 1_200) }),
+				: { context: normalizedText(input.context, "context", 1_200) }),
 			...(options === undefined
 				? {}
-				: { options: options.map((option, index) => normalizedProse(option, `options[${index}]`, 300)) }),
+				: { options: options.map((option, index) => normalizedText(option, `options[${index}]`, 300)) }),
 			...validatedCodeRequest(input),
 		};
 	}
@@ -114,8 +108,8 @@ export function validateRemoteCheckpoint(value: unknown): RemoteCheckpointInput 
 		exactKeys(input, ["kind", "blockerEvidence", "requiredIntervention", ...CODE_REQUEST_KEYS]);
 		return {
 			kind: "blocked",
-			blockerEvidence: normalizedProse(input.blockerEvidence, "blockerEvidence", 2_200),
-			requiredIntervention: normalizedProse(input.requiredIntervention, "requiredIntervention", 1_200),
+			blockerEvidence: normalizedText(input.blockerEvidence, "blockerEvidence", 2_200),
+			requiredIntervention: normalizedText(input.requiredIntervention, "requiredIntervention", 1_200),
 			...validatedCodeRequest(input),
 		};
 	}
@@ -132,12 +126,12 @@ export function validateRemoteCheckpoint(value: unknown): RemoteCheckpointInput 
 		]);
 		return {
 			kind: "issue_complete",
-			issueOrObjective: normalizedProse(input.issueOrObjective, "issueOrObjective", 500),
-			implementationSummary: normalizedProse(input.implementationSummary, "implementationSummary", 1_200),
-			verificationEvidence: normalizedProse(input.verificationEvidence, "verificationEvidence", 1_200),
-			caveats: normalizedProse(input.caveats, "caveats", 800),
-			gitCommitState: normalizedProse(input.gitCommitState, "gitCommitState", 800),
-			approvalRequest: normalizedProse(input.approvalRequest, "approvalRequest", 600),
+			issueOrObjective: normalizedText(input.issueOrObjective, "issueOrObjective", 500),
+			implementationSummary: normalizedText(input.implementationSummary, "implementationSummary", 1_200),
+			verificationEvidence: normalizedText(input.verificationEvidence, "verificationEvidence", 1_200),
+			caveats: normalizedText(input.caveats, "caveats", 800),
+			gitCommitState: normalizedText(input.gitCommitState, "gitCommitState", 800),
+			approvalRequest: normalizedText(input.approvalRequest, "approvalRequest", 600),
 			...validatedCodeRequest(input),
 		};
 	}

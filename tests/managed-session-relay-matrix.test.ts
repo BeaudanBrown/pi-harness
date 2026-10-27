@@ -46,7 +46,7 @@ test("self membership observation survives departure without granting discovered
 });
 
 test("departed owned rooms remain unlinkable references, never mutation targets", async () => {
-	const parent = `!${"p".repeat(43)}`, child = `!${"c".repeat(43)}`;
+	const parent = `!${"p".repeat(42)}A`, child = `!${"c".repeat(43)}`;
 	const calls: Array<{ method?: string; path: string; body?: unknown }> = [];
 	const client = new ManagedMatrixClient(config, async (input, init) => {
 		calls.push({ method: init?.method, path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) });

@@ -177,6 +177,15 @@ is used to resolve collisions. This is not cross-host conversation migration or
 shared-room authority.
 
 Creation keys are durable retry keys, not display names. Coordinator-created conversation keys are supplied by the trusted coordinator adapter. Manual ordinary `/remote on` creates its key once, persists it with the binding-boundary attempt before contacting the relay, and reuses that key on retry. Promotion has persisted `prepared`, `shutdown_requested`, `shutdown_confirmed`, and `adopted` phases: failure before shutdown leaves the source process and file untouched; only an authenticated graceful-shutdown detach can confirm adoption authority, unqualified socket loss remains reconnectable, adoption handles cross-filesystem moves, and restart recovery resumes only confirmed shutdowns. The binding boundary also defines the projection start, so the adopted session retains earlier model history without backfilling it to Matrix. Matrix event IDs identify inbound deliveries. Persisted Pi entry keys identify transcript entries. The same logical operation therefore derives the same ID after restart, while domains and length framing prevent ambiguous concatenation and cross-purpose reuse. Chunk boundaries must be deterministic before deriving chunk and transaction IDs.
+Text projections introduced by #122 carry an explicit rendering version and freeze
+both bounded pending Matrix bodies before the first send. A missing rendering
+version selects the exact legacy renderer, including after a partial delivery.
+Versioned pending bodies are replayed without re-rendering; sent marks release
+payload bytes while retaining source hash, rendering version and transaction
+identity. A 16 MiB host-wide pending-payload budget and per-chunk UTF-8 budgets
+fail closed. Unknown rendering versions and mixed/missing payload metadata are
+errors. Strict older readers cannot read the new optional fields; downgrade is
+unsupported. Adapter wire semantics and checkpoint poll rendering are unchanged.
 
 ### V2 rich-interaction and generation amendment
 
@@ -228,6 +237,50 @@ and do not downgrade to strict older readers. The operator has approved a final
 manual tmux ownership migration, not automatic termination of the old server.
 See [input/runtime operations](../../managed-input-runtime-updates.md) for
 acceptance and crash-boundary evidence.
+
+## Selective input recovery amendment (#124)
+
+Persistence receipts require correlation in both the active Pi branch and its
+session file after the pre-append user event; buffered entries are not receipts.
+Dormant confirmed reset controls may wake an adapter, but ordinary dispatch stays
+blocked until durable generation activation. Ordinary adapters have a self-scoped,
+recovery preview/status operations and snapshot-key-confirmed atomic retirement
+reservation. A local idle-only `/remote recover` command uses explicit operator
+confirmation to retire exactly one restored ambiguous delivery without replay.
+A non-terminal local intent precedes relay reservation; only its durable authority
+permits local cancellation and the existing cancelled receipt. The reserved head
+holds successors until that receipt. Reconnect queries uncertain intent status
+read-only, never applying a stale approval; completed local cancellation retries
+only its receipt. History
+and newer queued inputs are preserved; historical completion is not inferred.
+Deployment and live recovery remain separately approved operations. See
+[selective recovery operations](../../managed-input-recovery.md).
+
+## Matrix v12 provisioning amendment (#126)
+
+Managed Matrix identities accept legacy server-qualified room IDs and room-v12
+create-event digests. For v12 the relay verifies the immutable create event's ID,
+room, type, state key, sender and content before treating the original bot creator
+as having infinite power. Joined membership remains mandatory. Foreign creators
+are never adopted; only an unbound legacy-alias recovery probe may skip a proven
+foreign target. Domainless Space-child routing uses the server of a verified joined
+bot, not a suffix inferred from the room ID.
+
+Coordinator-only provisioning inspection exposes a bounded host-labelled list of
+pre-manifest intents, original creation keys, creation timestamps and next phases.
+There is no background retry authority. Confirmed provisioning resume requires an
+existing intent plus its exact original concept, host-resolved workspace/project
+and persisted Pi session, and continues the existing creation identity. New intents
+also bind the exact portable tuple. Legacy records lacked that tuple; explicit
+confirmation binds the approved host-resolved tuple only after matching canonical
+session cwd and project/checkout identity, before further Matrix work. This does
+not claim to recover an absent historical tuple. In-flight creation is fenced by
+conversation identity and exact request; a competing tuple or unrelated workspace
+operation cannot join its result. It never
+creates a replacement session when the prepared file is missing, deletes another
+intent, or selects arbitrary paths. Provisioning failures report bounded phase,
+error class/HTTP status and whitelisted validation reasons, never server bodies or
+credentials. See [v12 recovery operations](../../managed-matrix-v12-recovery.md).
 
 ## Consequences
 

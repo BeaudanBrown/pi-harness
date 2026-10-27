@@ -16,7 +16,9 @@
       "@earendil-works/pi-ai": [".pi-types/node_modules/@earendil-works/pi-ai/dist/index.d.ts"],
       "@earendil-works/pi-tui": [".pi-types/node_modules/@earendil-works/pi-tui"],
       "typebox": [".pi-types/node_modules/typebox/build/index.d.mts"],
-      "typebox/value": [".pi-types/node_modules/typebox/build/value/index.d.mts"]
+      "typebox/value": [".pi-types/node_modules/typebox/build/value/index.d.mts"],
+      "markdown-it": [".pi-types/node_modules/@types/markdown-it/index.d.ts"],
+      "markdown-it/*": [".pi-types/node_modules/@types/markdown-it/*"]
     }
   },
   "include": ["config/agent/extensions/**/*.ts", "config/agent/extensions/**/*.mts", "eval/**/*.ts", "tests/**/*.ts", "tests/**/*.mts"]

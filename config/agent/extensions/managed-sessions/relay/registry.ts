@@ -438,8 +438,10 @@ export class RelayRegistry {
 			const existing = conversation.projection.find((candidate) => candidate.entryId === projection.entryId);
 			if (existing) {
 				if (existing.kind !== projection.kind || existing.contentHash !== projection.contentHash || existing.originDeliveryId !== projection.originDeliveryId ||
-					existing.disposition !== projection.disposition || existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
-						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId)) {
+					existing.disposition !== projection.disposition || existing.renderingVersion !== projection.renderingVersion ||
+					existing.chunks.length !== projection.chunks.length || existing.chunks.some((chunk, index) =>
+						chunk.chunkId !== projection.chunks[index]?.chunkId || chunk.transactionId !== projection.chunks[index]?.transactionId ||
+						(chunk.status === "pending" && (chunk.body !== projection.chunks[index]?.body || chunk.formattedBody !== projection.chunks[index]?.formattedBody)))) {
 					throw new RelayRegistryError("invalid_state", "Conflicting transcript projection content");
 				}
 				return structuredClone(existing);
@@ -449,6 +451,11 @@ export class RelayRegistry {
 			parseHostRuntimeState(this.state);
 			return structuredClone(projection);
 		});
+	}
+
+	projectionByEntryId(conversationId: string, entryId: string): RuntimeConversation["projection"][number] | undefined {
+		const projection = this.runtimeConversation(conversationId).projection.find((candidate) => candidate.entryId === entryId);
+		return projection ? structuredClone(projection) : undefined;
 	}
 
 	checkpointProjectionForOrigin(conversationId: string, originDeliveryId: string): RuntimeConversation["projection"][number] | undefined {
@@ -463,6 +470,8 @@ export class RelayRegistry {
 			const chunk = projection?.chunks.find((candidate) => candidate.chunkId === chunkId);
 			if (!projection || !chunk) throw new RelayRegistryError("not_found", "Transcript projection chunk was not found");
 			chunk.status = "sent";
+			// Only pending transactions need frozen payloads. Keep identities/hashes after delivery.
+			delete chunk.body; delete chunk.formattedBody;
 			projection.status = projection.chunks.every((candidate) => candidate.status === "sent") ? "projected" : "projecting";
 		});
 	}
@@ -588,8 +597,10 @@ export class RelayRegistry {
 
 	pendingTreeOperation(conversationId: string): string | undefined { return this.runtimeConversation(conversationId).treeTransition?.operationId; }
 
+	hasTreeBoundary(conversationId: string): boolean { return Boolean(this.runtimeConversation(conversationId).treeTransition); }
+
 	hasDeliveryBoundary(conversationId: string): boolean {
-		return Boolean(this.runtimeConversation(conversationId).treeTransition) || this.hasGenerationBoundary(conversationId);
+		return this.hasTreeBoundary(conversationId) || this.hasGenerationBoundary(conversationId);
 	}
 
 	/** In-place branch navigation fences delivery, not process/generation ownership. */
@@ -1036,6 +1047,45 @@ export class RelayRegistry {
 		return structuredClone(this.runtimeConversation(conversationId).managedWindow);
 	}
 
+	retirementStatus(conversationId: string, deliveryId: string, previewKey: string): boolean {
+		return this.runtimeConversation(conversationId).pendingInputs.some(input => input.deliveryId === deliveryId &&
+			(input.status === "delivered" || input.status === "cancelled") && input.recoveryKey === previewKey);
+	}
+
+	async retireDelivery(conversationId: string, deliveryId: string, previewKey: string): Promise<void> {
+		await this.mutate(async () => {
+			if (this.retirementStatus(conversationId, deliveryId, previewKey)) return;
+			const preview = this.recoveryPreview(conversationId);
+			if (preview.deliveryId !== deliveryId || preview.previewKey !== previewKey) {
+				throw new RelayRegistryError("invalid_state", "Recovery preview changed; nothing was retired");
+			}
+			const input = this.runtimeConversation(conversationId).pendingInputs.find(input => input.deliveryId === deliveryId)!;
+			// Reserve this exact retirement durably; its delivered head still gates
+			// successors until the adapter confirms its local cancellation marker.
+			input.recoveryKey = previewKey;
+		});
+	}
+
+	recoveryPreview(conversationId: string): { deliveryId: string; newerInputCount: number; previewKey: string } {
+		const conversation = this.runtimeConversation(conversationId);
+		const manifest = this.manifests.get(conversationId)!;
+		if (!this.isActiveGenerationAttached(conversationId) || this.isRefreshing(conversationId) ||
+			this.hasGenerationBoundary(conversationId) || conversation.pendingControls.length) {
+			throw new RelayRegistryError("invalid_state", "Recovery requires an active generation without pending controls or refresh");
+		}
+		const unresolved = conversation.pendingInputs.filter((input) => input.status === "accepted" || input.status === "delivered");
+		const head = unresolved[0];
+		if (!head || head.status !== "delivered" || head.recoveryKey || head.piEntryId) throw new RelayRegistryError("invalid_state", "No blocking delivered input to retire");
+		if (conversation.pendingInputs.some((input) => input.status === "persisted")) {
+			throw new RelayRegistryError("invalid_state", "Persisted unfinished work cannot be retired by this operation");
+		}
+		// No text crosses IPC. Pin generation, attachment and retained queue; a
+		// changed snapshot requires another preview, never broadens cancellation.
+		const previewKey = createHash("sha256").update("pi-managed-sessions:recovery-preview:v1\0")
+			.update(JSON.stringify([manifest.piSessionId, manifest.bindingBoundaryEntryId, conversation.attachment, unresolved])).digest("hex");
+		return { deliveryId: head.deliveryId, newerInputCount: unresolved.length - 1, previewKey };
+	}
+
 	pendingInputs(conversationId: string): RuntimeConversation["pendingInputs"] {
 		return structuredClone(this.runtimeConversation(conversationId).pendingInputs);
 	}
@@ -1097,6 +1147,7 @@ export class RelayRegistry {
 		await this.mutate(async () => {
 			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
 			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
+			if (input.recoveryKey && status !== "cancelled") throw new RelayRegistryError("invalid_state", "Managed delivery has a reserved retirement");
 			const rank: Record<string, number> = { accepted: 0, delivered: 1, persisted: 2, completed: 3, cancelled: 3 };
 			const receiptAfterSocketDelivery = status === "accepted" && input.status === "delivered";
 			if (!(status in rank) || (!receiptAfterSocketDelivery && rank[status]! < rank[input.status]!) ||

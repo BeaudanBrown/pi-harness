@@ -6,8 +6,10 @@
   piPackage,
   imagemagick,
   runtimeShell,
+  callPackage,
 }:
 
+let matrixMarkdown = callPackage ./matrix-markdown.nix { }; in
 stdenv.mkDerivation {
   pname = "pi-managed-session-relay";
   version = "0.1.0";
@@ -28,6 +30,7 @@ stdenv.mkDerivation {
     cp config/agent/extensions/managed-sessions/exact-window-contracts.ts source/managed-sessions/exact-window-contracts.ts
     cp config/agent/extensions/managed-sessions/live-workspace-contracts.ts source/managed-sessions/live-workspace-contracts.ts
     cp config/agent/extensions/managed-sessions/managed-provenance.ts source/managed-sessions/managed-provenance.ts
+    cp config/agent/extensions/managed-sessions/room-identity.ts source/managed-sessions/room-identity.ts
     cp config/agent/extensions/managed-sessions/v2-contracts.ts source/managed-sessions/v2-contracts.ts
     cp config/agent/extensions/managed-sessions/checkpoint.ts source/managed-sessions/checkpoint.ts
     cp config/agent/extensions/managed-sessions/aloop-lifecycle.ts source/managed-sessions/aloop-lifecycle.ts
@@ -46,7 +49,9 @@ stdenv.mkDerivation {
         "baseUrl": ".",
         "paths": {
           "typebox": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"],
-          "typebox/value": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.d.mts"]
+          "typebox/value": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.d.mts"],
+          "markdown-it": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/index.d.ts"],
+          "markdown-it/*": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/*"]
         },
         "rootDir": "source",
         "outDir": "lib"
@@ -66,6 +71,8 @@ stdenv.mkDerivation {
     runHook preInstall
     mkdir -p "$out/lib/node_modules" "$out/libexec" "$out/bin" "$out/share/pi-harness"
     cp config/agent/managed-host-policy.json "$out/share/pi-harness/managed-host-policy.json"
+    mkdir -p "$out/lib/node_modules" "$out/libexec" "$out/bin"
+    cp -R ${matrixMarkdown}/lib/node_modules/. "$out/lib/node_modules/"
     cp -R lib/managed-sessions "$out/lib/managed-sessions"
     cp -R lib/matrix-shared "$out/lib/matrix-shared"
     cp -R ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$out/lib/node_modules/typebox"

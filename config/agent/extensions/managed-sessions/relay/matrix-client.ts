@@ -8,6 +8,16 @@ import { MAX_BLOB_BYTES } from "../v2-contracts.js";
 import { MatrixError as ManagedMatrixError, MatrixHttp, MAX_MATRIX_RESPONSE_BYTES, type MatrixRetryOptions } from "../../matrix-shared/http.js";
 export { ManagedMatrixError };
 
+/** Never include homeserver response bodies or credential-bearing URLs in IPC errors. */
+class ForeignMatrixOwnerError extends ManagedMatrixError {
+	constructor() { super("invalid_response", "Matrix room has foreign or ambiguous creators"); }
+}
+export function describeMatrixFailure(error: ManagedMatrixError): string {
+	const reasons = new Set(["Matrix v12 create event does not prove bot ownership", "Matrix room has foreign or ambiguous creators",
+		"Matrix bot lacks authority over required room operations", "Matrix room is not bot-owned with the expected type"]);
+	return `${error.code}${error.status ? ` (HTTP ${error.status})` : ""}${reasons.has(error.message) ? `: ${error.message}` : ""}`;
+}
+
 export interface ManagedMatrixConfig {
 	homeserver: string;
 	accessToken: string;
@@ -506,15 +516,33 @@ export class ManagedMatrixClient {
 			throw new ManagedMatrixError("invalid_response", "Legacy project alias is not a Matrix Space");
 		}
 		if ((create as JsonObject).creator !== undefined && (create as JsonObject).creator !== this.botUserId) return undefined;
+		if ((create as JsonObject).creator === undefined || ["11", "12"].includes(String((create as JsonObject).room_version))) {
+			try { await this.assertCreateSender(roomId, create as JsonObject, signal); }
+			catch (error) { if (error instanceof ForeignMatrixOwnerError) return undefined; throw error; }
+		}
 		this.#managedRoomIds.add(roomId);
 		try { await this.assertRoomAuthority(roomId, true, signal, { spaceChild: true }); }
-		catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
+		catch (error) { this.#managedRoomIds.delete(roomId); if (error instanceof ForeignMatrixOwnerError) return undefined; throw error; }
 		return roomId;
 	}
 	private async assertCreateSender(roomId: string, creation: JsonObject, signal?: AbortSignal): Promise<void> {
-		const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, undefined, signal);
-		const creates = Array.isArray(state) && state.length <= 4096 ? state.filter(event => event?.type === "m.room.create" && event?.state_key === "") : [];
-		if (creates.length !== 1 || !isSoleRoomCreator(creates[0], this.botUserId) || !isDeepStrictEqual(creates[0].content, creation)) {
+		let creates: JsonObject[];
+		if (creation.room_version === "12") {
+			const eventId = `$${roomId.slice(1)}`;
+			const event = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/event/${encodeURIComponent(eventId)}`, undefined, signal);
+			if (!isMatrixRoomId(roomId) || roomId.includes(":") || !event || typeof event !== "object" || Array.isArray(event) ||
+				(event as JsonObject).event_id !== eventId || (event as JsonObject).room_id !== roomId) {
+				throw new ManagedMatrixError("invalid_response", "Matrix v12 create event does not prove bot ownership");
+			}
+			creates = [event as JsonObject];
+		} else {
+			const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, undefined, signal);
+			creates = Array.isArray(state) && state.length <= 4096 ? state.filter(event => event?.type === "m.room.create" && event?.state_key === "") : [];
+		}
+		const event = creates[0]!;
+		if (creates.length === 1 && typeof event.sender === "string" && event.sender !== this.botUserId &&
+			isSoleRoomCreator(event, event.sender) && isDeepStrictEqual(event.content, creation)) throw new ForeignMatrixOwnerError();
+		if (creates.length !== 1 || !isSoleRoomCreator(event, this.botUserId) || !isDeepStrictEqual(event.content, creation)) {
 			throw new ManagedMatrixError("invalid_response", "Matrix room has foreign or ambiguous creators");
 		}
 	}

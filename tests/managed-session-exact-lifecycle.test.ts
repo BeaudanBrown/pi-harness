@@ -30,7 +30,10 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 		roomId: "!room:example.com", piSessionId: sessionId, createdAt: "2026-10-01T00:00:00.000Z",
 		bindingBoundaryEntryId: deriveTranscriptEntryId(sessionId, `managed-boundary-${conversationId.slice(5)}`) };
 	const manifests = new ConversationManifestStore(join(root, "manifests"));
-	if (!roomless) await manifests.write(manifest);
+	if (!roomless) {
+		await durableProjectSession(join(root, "sessions", conversationId, "session.jsonl"), root, conversationId, manifest.creationKey, manifest.concept);
+		await manifests.write(manifest);
+	}
 	let registry = new RelayRegistry(hostId, root, manifests); await registry.load();
 	if (roomless === true) {
 		const session = await durableProjectSession(join(root, "sessions", conversationId, "session.jsonl"), root, conversationId, manifest.creationKey, manifest.concept);
@@ -109,6 +112,14 @@ function request(conversationId: string, operation: "conversation.stop" | "conve
 	return { protocolVersion: "1.0.0" as const, messageId: "request", conversationId, role: "coordinator_adapter" as const, type: "lifecycle.request" as const,
 		payload: { request: { operation, targetConversationId: conversationId } } };
 }
+
+test("registered conversations with missing history fail closed without recreating a session or window", async t => {
+	const f = await fixture(t); const path = join(f.root, "sessions", f.manifest.conversationId, "session.jsonl");
+	await rm(path);
+	await assert.rejects(f.owner().openConversation(f.manifest.conversationId), /persisted Pi session file is unavailable/);
+	assert.equal(f.creates, 0);
+	await assert.rejects(readFile(path), { code: "ENOENT" });
+});
 
 test("saved-session open fences its generation before effects and after asynchronous observation", async t => {
 	const f = await fixture(t); const owner = f.owner(); const id = f.manifest.conversationId;

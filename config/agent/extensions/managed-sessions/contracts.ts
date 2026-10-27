@@ -22,6 +22,7 @@ export const MAX_COMPLETED_CONTROLS = 4_096;
 export const MAX_CONTROL_POLL_OPTIONS = 20;
 export const MAX_CHECKPOINT_POLL_OPTIONS = 8;
 export const MAX_PROJECTION_ENTRIES = 4_096;
+export const MAX_FROZEN_PROJECTION_BYTES = 16 * 1024 * 1024;
 export const MAX_ARTIFACT_EXPORTS = 256;
 
 const strictObject = <T extends Record<string, TSchema>>(properties: T) =>
@@ -95,6 +96,9 @@ const lifecycleArguments = Type.Union([
 	strictObject({ operation: Type.Literal("worktree.conversation.cleanup.apply"), removalKey: WorktreeRemovalKeySchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("worktree.branch.delete"), removalKey: WorktreeRemovalKeySchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("conversation.list") }),
+	strictObject({ operation: Type.Literal("conversation.provisioning.list") }),
+	strictObject({ operation: Type.Literal("conversation.provisioning.resume"), creationKey: identifier, concept: boundedString(128),
+		placement: WorkspaceIdentitySchema, confirmed: Type.Literal(true) }),
 	strictObject({ operation: Type.Literal("conversation.status"), targetConversationId: ConversationIdSchema }),
 	strictObject({ operation: Type.Literal("project.reconcile.preview") }),
 	strictObject({ operation: Type.Literal("project.reconcile.apply"), reconciliationKey: ReconciliationKeySchema, confirmed: Type.Literal(true) }),
@@ -298,6 +302,13 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		epic: Type.Integer({ minimum: 1 }), issue: Type.Optional(Type.Integer({ minimum: 1 })), body: boundedString(1_600), timestamp,
 	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.status", {}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "self.recovery.preview", {}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "self.recovery.retire", {
+		deliveryId: DeliveryIdSchema, previewKey: Type.String({ pattern: "^[a-f0-9]{64}$" }), confirmed: Type.Literal(true),
+	}),
+	clientEnvelope(Type.Literal("ordinary_adapter"), "self.recovery.status", {
+		deliveryId: DeliveryIdSchema, previewKey: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+	}),
 	clientEnvelope(Type.Literal("ordinary_adapter"), "self.delete", { confirmed: Type.Literal(true) }),
 	clientEnvelope(Type.Literal("coordinator_adapter"), "lifecycle.request", {
 		request: lifecycleArguments,
@@ -375,6 +386,11 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 			status: Type.Literal("ok"),
 			conversationState: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 		}),
+		strictObject({ operation: Type.Literal("self.recovery.retire"), status: Type.Literal("ok"), deliveryId: DeliveryIdSchema }),
+		strictObject({ operation: Type.Literal("self.recovery.status"), status: Type.Literal("ok"), deliveryId: DeliveryIdSchema, retired: Type.Boolean() }),
+		strictObject({ operation: Type.Literal("self.recovery.preview"), status: Type.Literal("ok"),
+			deliveryId: DeliveryIdSchema, newerInputCount: Type.Integer({ minimum: 0, maximum: MAX_PENDING_INPUTS }),
+			previewKey: Type.String({ pattern: "^[a-f0-9]{64}$" }) }),
 		strictObject({ operation: Type.Literal("self.delete"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("self.promote"), status: Type.Literal("ok") }),
 		strictObject({ operation: Type.Literal("control.result"), status: Type.Literal("ok") }),
@@ -384,6 +400,10 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		strictObject({ operation: Type.Literal("refresh.result"), status: Type.Literal("ok") }),
 	])),
 	relayEnvelopeWithPayload("lifecycle.result", Type.Union([
+		strictObject({ operation: Type.Literal("conversation.provisioning.list"), hostId: identifier,
+			intents: Type.Array(strictObject({ conversationId: ConversationIdSchema, creationKey: identifier, concept: boundedString(128), createdAt: timestamp,
+				placement: Type.Optional(WorkspaceIdentitySchema), phase: Type.Union([Type.Literal("project_space"), Type.Literal("host_link"), Type.Literal("room"), Type.Literal("room_link"), Type.Literal("manifest")]),
+				inProgress: Type.Boolean(), retry: Type.Literal("manual"), projectSpaceId: Type.Optional(boundedString(255)), roomId: Type.Optional(boundedString(255)) }), { maxItems: 64 }) }),
 		strictObject({
 			operation: Type.Literal("workspace.list"),
 			workspaces: Type.Array(strictObject({ rootKey: identifier, workspace: boundedString(128) }), { maxItems: 4_096 }),
@@ -421,7 +441,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		}),
 		strictObject({
 			operation: Type.Union([
-				Type.Literal("conversation.start"), Type.Literal("conversation.resume"), Type.Literal("conversation.refresh"), Type.Literal("conversation.stop"), Type.Literal("conversation.delete"),
+				Type.Literal("conversation.start"), Type.Literal("conversation.provisioning.resume"), Type.Literal("conversation.resume"), Type.Literal("conversation.refresh"), Type.Literal("conversation.stop"), Type.Literal("conversation.delete"),
 			]),
 			targetConversationId: ConversationIdSchema,
 			conversationState: Type.Optional(Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")])),
@@ -536,6 +556,7 @@ const pendingInput = strictObject({
 	body: Type.Optional(boundedString(MAX_INPUT_TEXT_LENGTH)),
 	senderUserId: Type.Optional(MatrixUserIdSchema),
 	piEntryId: Type.Optional(TranscriptEntryIdSchema),
+	recoveryKey: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	status: Type.Union([
 		Type.Literal("accepted"),
 		Type.Literal("delivered"),
@@ -618,10 +639,13 @@ const projectionEntry = strictObject({
 	status: Type.Union([Type.Literal("offered"), Type.Literal("projecting"), Type.Literal("projected")]),
 	contentHash: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	originDeliveryId: Type.Optional(DeliveryIdSchema),
+	renderingVersion: Type.Optional(Type.Literal(2)),
 	chunks: Type.Array(strictObject({
 		chunkId: ChunkIdSchema,
 		transactionId: MatrixTransactionIdSchema,
 		status: Type.Union([Type.Literal("pending"), Type.Literal("sent")]),
+		body: Type.Optional(boundedString(8_000)),
+		formattedBody: Type.Optional(boundedString(8_000)),
 	}), { maxItems: 64 }),
 });
 const runtimeConversation = strictObject({
@@ -748,7 +772,7 @@ export interface HostRuntimeState {
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string; runtimeId?: string };
 		matrixCursor: { status: "bootstrap" } | { status: "established"; since: string };
-		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string; piEntryId?: string; status: string;
+		pendingInputs: Array<{ deliveryId: string; matrixEventId: string; senderUserId?: string; kind: string; body?: string; piEntryId?: string; recoveryKey?: string; status: string;
 			media?: { blobId: string; sha256: string; mimeType: "image/jpeg" | "image/png" | "image/webp"; byteLength: number; width: number; height: number; chunkCount: number } }>;
 		pendingControls: Array<{ controlId: string; matrixEventId: string; senderUserId?: string; name: "help" | "status" | "model" | "thinking" | "compact" | "new" | "stop"; argument?: string; cancelDeliveryIds?: string[] }>;
 		completedControlIds: string[];
@@ -769,7 +793,8 @@ export interface HostRuntimeState {
 			contentHash?: string;
 			disposition?: "silent" | "notify";
 			originDeliveryId?: string;
-			chunks: Array<{ chunkId: string; transactionId: string; status: string }>;
+			renderingVersion?: 2;
+			chunks: Array<{ chunkId: string; transactionId: string; status: string; body?: string; formattedBody?: string }>;
 		}>;
 		operatorDeparted?: true;
 		treeTransition?: { operationId: string; sessionId: string };
@@ -834,6 +859,12 @@ function assertWorkspaceIdentity(value: WorkspaceIdentity): void {
 	if (/[\u0000-\u001f\u007f/]/.test(value.workspace)) {
 		throw new ManagedSessionContractError("malformed", "workspace must name one immediate child directory");
 	}
+}
+
+export function parseWorkspaceIdentity(value: unknown): WorkspaceIdentity {
+	assertSchema(WorkspaceIdentitySchema, value, "workspace identity");
+	assertWorkspaceIdentity(value as WorkspaceIdentity);
+	return value as WorkspaceIdentity;
 }
 
 function assertInputBody(kind: string, body: string | undefined): void {
@@ -921,9 +952,19 @@ function assertSemanticEnvelope(envelope: ManagedSessionEnvelope): void {
 			throw new ManagedSessionContractError("malformed", "self binding requires absolute source paths");
 		}
 	}
+	if (envelope.type === "lifecycle.result" && envelope.payload.operation === "conversation.provisioning.list") {
+		const payload = envelope.payload as { intents: Array<{ createdAt: string; placement?: WorkspaceIdentity; projectSpaceId?: string; roomId?: string }> };
+		for (const intent of payload.intents) {
+			assertTimestamp(intent.createdAt, "provisioning timestamp");
+			if (intent.placement) assertWorkspaceIdentity(intent.placement);
+			if ([intent.projectSpaceId, intent.roomId].some(id => id !== undefined && !isMatrixRoomId(id))) {
+				throw new ManagedSessionContractError("malformed", "provisioning inspection contains a malformed Matrix room ID");
+			}
+		}
+	}
 	if (envelope.type === "lifecycle.request") {
 		const payload = envelope.payload as { request: { operation: string; placement?: WorkspaceIdentity; workspace?: string } };
-		if (payload.request.operation === "conversation.start" && payload.request.placement) assertWorkspaceIdentity(payload.request.placement);
+		if (["conversation.start", "conversation.provisioning.resume"].includes(String(payload.request.operation)) && payload.request.placement) assertWorkspaceIdentity(payload.request.placement);
 		if (payload.request.operation === "project.create" && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(payload.request.workspace ?? "")) {
 			throw new ManagedSessionContractError("malformed", "project workspace must be one safe immediate-child name");
 		}
@@ -1072,6 +1113,7 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 	}
 	const state = candidate as HostRuntimeState;
 	const conversationIds = new Set<string>();
+	let frozenProjectionBytes = 0;
 	for (const conversation of state.conversations) {
 		if (conversationIds.has(conversation.conversationId)) {
 			throw new ManagedSessionContractError("conflict", `duplicate runtime conversation ${conversation.conversationId}`);
@@ -1100,6 +1142,9 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			deliveries.add(input.deliveryId);
 			matrixEvents.add(input.matrixEventId);
 			assertInputBody(input.kind, input.body);
+			if (input.recoveryKey && (input.piEntryId || !["delivered", "cancelled"].includes(input.status))) {
+				throw new ManagedSessionContractError("invalid_state", `invalid retirement reservation in ${conversation.conversationId}`);
+			}
 			if (input.media) {
 				if (input.kind !== "prompt" || Math.ceil(input.media.byteLength / (32 * 1024)) !== input.media.chunkCount) {
 					throw new ManagedSessionContractError("invalid_state", `invalid pending media in ${conversation.conversationId}`);
@@ -1222,7 +1267,24 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 				if (checkpointOrigins.has(projection.originDeliveryId)) throw new ManagedSessionContractError("conflict", `duplicate checkpoint origin ${projection.originDeliveryId}`);
 				checkpointOrigins.add(projection.originDeliveryId);
 			}
+			if (projection.renderingVersion !== undefined &&
+				(projection.kind === "matrix_user" || !projection.contentHash || projection.chunks.length === 0 ||
+					(projection.status !== "projecting" && projection.status !== "projected") ||
+					(projection.status === "projected") !== projection.chunks.every((chunk) => chunk.status === "sent"))) {
+				throw new ManagedSessionContractError("invalid_state", "Invalid versioned text projection");
+			}
 			for (const chunk of projection.chunks) {
+				const hasPayload = chunk.body !== undefined || chunk.formattedBody !== undefined;
+				if ((hasPayload && (projection.renderingVersion !== 2 || chunk.body === undefined || chunk.formattedBody === undefined)) ||
+					(projection.renderingVersion === 2 && chunk.status === "pending" && !hasPayload)) {
+					throw new ManagedSessionContractError("invalid_state", "Invalid frozen projection payload");
+				}
+				if (hasPayload) {
+					const bytes = [chunk.body!, chunk.formattedBody!].map((body) => Buffer.byteLength(body, "utf8"));
+					if (bytes.some((size) => size > 8_000)) throw new ManagedSessionContractError("invalid_state", "Frozen projection chunk exceeds byte budget");
+					frozenProjectionBytes += bytes[0]! + bytes[1]!;
+					if (frozenProjectionBytes > MAX_FROZEN_PROJECTION_BYTES) throw new ManagedSessionContractError("invalid_state", "Frozen projection capacity reached");
+				}
 				if (chunks.has(chunk.chunkId)) {
 					throw new ManagedSessionContractError("conflict", `duplicate projection chunk ${chunk.chunkId}`);
 				}

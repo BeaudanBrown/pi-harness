@@ -43,9 +43,11 @@ function fixture(options: { sender?: string; additionalCreators?: string[]; room
    assert.equal(++creates, 2, "must not create a replacement host Space");
    rooms.set(coordinatorRoom, body); aliases.set(body.room_alias_name, coordinatorRoom); return Response.json({ room_id: coordinatorRoom });
   }
-  const match = path.match(/\/rooms\/([^/]+)\/state(?:\/(.*))?$/); assert.ok(match);
+  const match = path.match(/\/rooms\/([^/]+)\/(?:state(?:\/(.*))?|event\/.*)$/); assert.ok(match);
   const room = decodeURIComponent(match[1]!); const body = rooms.get(room); assert.ok(body);
   const create = { ...body.creation_content, room_version: options.roomVersion ?? "12", ...(options.additionalCreators ? { additional_creators: options.additionalCreators } : {}) };
+  if (path.includes("/event/")) return Response.json({ type: "m.room.create", state_key: "", event_id: `$${room.slice(1)}`, room_id: room,
+   sender: options.sender ?? bot, content: create });
   if (match[2] === "m.room.create/") return Response.json(create);
   if (match[2] === "m.room.power_levels/") return Response.json({ users: options.numericPower === undefined ? {} : { [bot]: options.numericPower } });
   if (match[2]?.startsWith("m.room.member/")) return Response.json({ membership: "join" });

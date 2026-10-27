@@ -16,6 +16,7 @@ in pkgs.runCommand "pi-bridge-chat" { nativeBuildInputs = [ pkgs.typescript ]; }
   cp ${../config/agent/extensions/managed-sessions/exact-window-contracts.ts} source/managed-sessions/exact-window-contracts.ts
   cp ${../config/agent/extensions/managed-sessions/host-run-contracts.ts} source/managed-sessions/host-run-contracts.ts
   cp ${../config/agent/extensions/managed-sessions/identity-contracts.ts} source/managed-sessions/identity-contracts.ts
+  cp ${../config/agent/extensions/managed-sessions/room-identity.ts} source/managed-sessions/room-identity.ts
   cp ${../config/agent/extensions/managed-sessions/v2-contracts.ts} source/managed-sessions/v2-contracts.ts
   cp ${../config/agent/extensions/managed-sessions/image-validation.ts} source/managed-sessions/image-validation.ts
   cat > tsconfig.json <<EOF
