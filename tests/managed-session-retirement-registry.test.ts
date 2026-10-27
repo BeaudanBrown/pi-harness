@@ -4,6 +4,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
+import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { AtomicJsonFile } from "../config/agent/extensions/managed-sessions/relay/atomic-json.js";
 import { deriveConversationId, deriveGenerationId, deriveTranscriptEntryId, type ConversationManifest, type ManagedSessionEnvelope } from "../config/agent/extensions/managed-sessions/contracts.js";
@@ -45,6 +46,32 @@ test("retirement removes ordinary discovery and rejects stale nonce, attachment,
 	assert.equal(replacement.manifestByConversationId(f.first.conversationId), undefined); assert.equal(replacement.listConversations().length, 1);
 	assert.throws(() => replacement.manifestByCreationKey(f.first.creationKey), /retired/);
 	assert.equal(replacement.pendingRetirements()[0].retirementId, retired.retirementId);
+});
+
+for (const recorded of [true, false]) test(`restart restores ${recorded ? "completed" : "unrecorded"} departures as unlink references, not room mutation scope`, async t => {
+	const f = await fixture(t); const retired = await f.registry.retireConversation(f.first.conversationId, f.targets);
+	const config = { homeserver: "https://matrix.example.com", accessToken: "test-only", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
+	let joined = true;
+	const original = new ManagedMatrixClient(config, async () => { joined = false; return Response.json({}); }, [f.first.roomId]);
+	await original.leaveRoom(f.first.roomId);
+	assert.deepEqual(f.registry.retirementDepartedRoomIds(), []);
+	// Crash after successful leave, optionally before recording its completion.
+	if (recorded) await f.registry.markRetirementCleanup(f.first.conversationId, retired.cleanup!.find(e => e.kind === "bot_leave")!.effectId, "done");
+	const restarted = new RelayRegistry("host", f.runtime, f.manifests); await restarted.load();
+	assert.deepEqual(restarted.retirementDepartedRoomIds(), recorded ? [f.first.roomId] : []);
+	const parent = "!parent:example.com"; const calls: string[] = [];
+	const matrix = new ManagedMatrixClient(config,
+		async input => {
+			const path = new URL(String(input)).pathname; calls.push(path);
+			return Response.json(path.endsWith("/joined_rooms") ? { joined_rooms: joined ? [parent, f.first.roomId] : [parent] } : {});
+		}, [parent, ...restarted.managedRoomIds(), ...restarted.retirementRoomIds()], { maxAttempts: 1 }, restarted.retirementDepartedRoomIds());
+	assert.equal(await matrix.accountJoined(f.first.roomId), false, "cleanup observes departure before deciding whether to replay leave");
+	await matrix.removeSpaceChild(parent, f.first.roomId);
+	await assert.rejects(matrix.sendText(f.first.roomId, "pi_no", "no"), /not owned/);
+	await assert.rejects(matrix.leaveRoom(f.first.roomId), /not owned/);
+	await assert.rejects(matrix.addSpaceChild(parent, f.first.roomId), /not owned/);
+	await assert.rejects(matrix.removeSpaceChild(f.first.roomId, parent), /not owned/);
+	assert.deepEqual(calls, ["/_matrix/client/v3/joined_rooms", `/_matrix/client/v3/rooms/${encodeURIComponent(parent)}/state/m.space.child/${encodeURIComponent(f.first.roomId)}`]);
 });
 
 test("retirement during a tree fence rejects late completion and cannot revive the binding", async t => {

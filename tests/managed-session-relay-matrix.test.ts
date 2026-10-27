@@ -45,6 +45,49 @@ test("self membership observation survives departure without granting discovered
 	assert.equal(calls.filter((call) => call.startsWith("POST")).length, 1);
 });
 
+test("departed owned rooms remain unlinkable references, never mutation targets", async () => {
+	const parent = `!${"p".repeat(43)}`, child = `!${"c".repeat(43)}`;
+	const calls: Array<{ method?: string; path: string; body?: unknown }> = [];
+	const client = new ManagedMatrixClient(config, async (input, init) => {
+		calls.push({ method: init?.method, path: new URL(String(input)).pathname, body: JSON.parse(String(init?.body)) });
+		return Response.json({});
+	}, [parent, child]);
+	await client.leaveRoom(child);
+	await client.removeSpaceChild(parent, child);
+	assert.deepEqual(calls, [
+		{ method: "POST", path: `/_matrix/client/v3/rooms/${child}/leave`, body: {} },
+		{ method: "PUT", path: `/_matrix/client/v3/rooms/${parent}/state/m.space.child/${child}`, body: {} },
+	]);
+	await assert.rejects(client.sendText(child, "pi_no", "no"), /not owned/);
+	await assert.rejects(client.leaveRoom(child), /not owned/);
+	await assert.rejects(client.addSpaceChild(parent, child), /not owned/);
+	await assert.rejects(client.removeSpaceChild(parent, "!foreign:example.com"), /not owned/);
+	await client.leaveRoom(parent);
+	await assert.rejects(client.removeSpaceChild(parent, child), /not owned/);
+	assert.equal(calls.length, 3, "no rejected request reached Matrix");
+});
+
+test("departed-reference saturation fails before leave and retains existing unlink references", async () => {
+	const rooms = Array.from({ length: 16_385 }, (_, i) => `!room${i}:example.com`);
+	let calls = 0; let unblock!: () => void;
+	const client = new ManagedMatrixClient(config, async input => {
+		if (++calls === 16_384) await new Promise<void>(resolve => { unblock = resolve; });
+		return Response.json(new URL(String(input)).pathname.endsWith("/joined_rooms") ? { joined_rooms: [] } : {});
+	}, rooms);
+	for (const room of rooms.slice(0, -2)) await client.leaveRoom(room);
+	const pending = client.leaveRoom(rooms.at(-2)!);
+	await new Promise<void>(resolve => setImmediate(resolve));
+	try {
+		await assert.rejects(client.leaveRoom(rooms.at(-1)!), /reference capacity/);
+		assert.equal(calls, 16_384, "in-flight departures must reserve capacity before leave");
+	} finally { unblock(); await pending; }
+	await client.removeSpaceChild(rooms.at(-1)!, rooms[0]!);
+	assert.equal(calls, 16_385);
+	await assert.rejects(client.accountJoined(rooms.at(-1)!), /reference capacity/);
+	await assert.rejects(client.sendText(rooms.at(-1)!, "pi_no", "no"), /not owned/);
+	assert.equal(calls, 16_386, "confirmed departure revokes mutation scope even at cache capacity");
+});
+
 test("Matrix client exposes only fixed whoami, sync, room, state, send, and leave routes", async () => {
 	const calls: Array<{ url: URL; init?: RequestInit }> = [];
 	const fetchMock: typeof fetch = async (input, init) => {

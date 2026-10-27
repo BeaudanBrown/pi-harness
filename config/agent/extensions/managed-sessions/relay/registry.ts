@@ -1249,6 +1249,11 @@ export class RelayRegistry {
 	retirementRoomIds(): string[] {
 		return [...new Set(this.pendingRetirements().flatMap((record) => (record.cleanup ?? []).flatMap((effect) => effect.kind === "stop" ? [] : [effect.roomId])))];
 	}
+	/** Completed departures are references only while other frozen obligations remain. */
+	retirementDepartedRoomIds(): string[] {
+		return [...new Set(this.pendingRetirements().flatMap((record) => (record.cleanup ?? []).flatMap((effect) =>
+			effect.phase === "done" && (effect.kind === "bot_leave" || effect.kind === "ancestor") ? [effect.roomId] : [])))];
+	}
 	managedRoomIds(): string[] {
 		this.retirements.assertAvailable();
 		return [...new Set([...this.manifests.values()].flatMap((manifest) => [manifest.roomId, manifest.hostSpace, manifest.projectSpace, manifest.checkoutSpace]

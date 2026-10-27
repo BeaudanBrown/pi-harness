@@ -122,7 +122,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			if (healthy) lastSuccessfulSyncAt = new Date().toISOString();
 			await healthFile.write({ status: healthy ? "healthy" : "blocked", lastSuccessfulSyncAt, runtimeBuild });
 		};
-		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch, [...new Set([...registry.managedRoomIds(), ...registry.retirementRoomIds()])], { maxAttempts: 1 });
+		const matrix = new ManagedMatrixClient(managedMatrixConfigFromEnvironment(environment), fetch,
+			[...new Set([...registry.managedRoomIds(), ...registry.retirementRoomIds()])], { maxAttempts: 1 }, registry.retirementDepartedRoomIds());
 		titles = new ConversationTitles({ root: resolve(stateDirectory, "titles"), hostId, botUserId: matrix.botUserId, registry,
 			runtime: () => runtimeObserver?.snapshot() ?? new Map(), ready: () => matrixAuthenticated && matrixHealthy,
 			readName: (roomId, signal) => matrix.conversationName(roomId, signal), writeName: (roomId, name, id, signal) => matrix.setConversationName(roomId, name, id, signal),

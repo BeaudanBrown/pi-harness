@@ -106,11 +106,15 @@ export class ManagedMatrixClient {
 	readonly ignoredSenderUserIds: ReadonlySet<string>;
 	readonly #accessToken: string;
 	readonly #managedRoomIds: Set<string>;
+	// Reference-only scope, reserved before departure to bound concurrent leaves.
+	// Never consulted for operations targeting the departed room itself. Frozen
+	// completed cleanup restores only this scope, not mutation scope, on restart.
+	readonly #departedRoomReferences = new Set<string>();
 	readonly #http: MatrixHttp;
 	readonly #retry: Required<MatrixRetryOptions>;
 	#sendRetryAt = 0;
 
-	constructor(config: ManagedMatrixConfig, private readonly fetchImplementation: FetchLike = fetch, managedRoomIds: Iterable<string> = [], retry: ManagedMatrixRetryOptions = {}) {
+	constructor(config: ManagedMatrixConfig, private readonly fetchImplementation: FetchLike = fetch, managedRoomIds: Iterable<string> = [], retry: ManagedMatrixRetryOptions = {}, departedRoomReferences: Iterable<string> = []) {
 		const parsed = new URL(config.homeserver);
 		if (parsed.protocol !== "https:" || parsed.username || parsed.password || parsed.search || parsed.hash) throw new Error("Matrix homeserver must be a credential-free HTTPS origin");
 		if (!isMatrixUserId(config.botUserId) || !isMatrixUserId(config.operatorUserId) || (config.ignoredSenderUserIds ?? []).length > MAX_IGNORED_SENDERS ||
@@ -119,6 +123,9 @@ export class ManagedMatrixClient {
 		this.homeserver = parsed.toString().replace(/\/$/, ""); this.botUserId = config.botUserId; this.operatorUserId = config.operatorUserId;
 		this.ignoredSenderUserIds = new Set([config.botUserId, ...(config.ignoredSenderUserIds ?? [])]);
 		this.#accessToken = config.accessToken; this.#managedRoomIds = new Set(managedRoomIds);
+		for (const roomId of departedRoomReferences) {
+			this.reserveDepartureReference(roomId); this.#managedRoomIds.delete(roomId);
+		}
 		this.#http = new MatrixHttp(config, fetchImplementation, retry);
 		this.#retry = this.#http.retry;
 	}
@@ -544,7 +551,8 @@ export class ManagedMatrixClient {
 		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/m.space.child/${encodeURIComponent(roomId)}`, { via: [roomServer], suggested: true }, signal);
 	}
 	async removeSpaceChild(spaceId: string, roomId: string, signal?: AbortSignal): Promise<void> {
-		this.assertManagedRoom(spaceId); this.assertManagedRoom(roomId);
+		this.assertManagedRoom(spaceId);
+		if (!this.#departedRoomReferences.has(roomId)) this.assertManagedRoom(roomId);
 		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/m.space.child/${encodeURIComponent(roomId)}`, {}, signal);
 	}
 	async spaceChildren(spaceId: string, signal?: AbortSignal): Promise<string[]> {
@@ -693,7 +701,15 @@ export class ManagedMatrixClient {
 		const rooms = result && typeof result === "object" && !Array.isArray(result) ? (result as JsonObject).joined_rooms : undefined;
 		if (!Array.isArray(rooms) || rooms.length > 16384 || rooms.some((id) => !isMatrixRoomId(id)) || new Set(rooms).size !== rooms.length)
 			throw new ManagedMatrixError("invalid_response", "Matrix self membership is unavailable or oversized");
-		return rooms.includes(roomId);
+		const joined = rooms.includes(roomId);
+		if (!joined && this.#managedRoomIds.has(roomId)) {
+			// Recover an acknowledged or lost-response departure whose durable
+			// effect was not yet marked done. Negative observation never grants
+			// scope for unrelated rooms, and revocation precedes capacity failure.
+			this.#managedRoomIds.delete(roomId);
+			this.reserveDepartureReference(roomId);
+		}
+		return joined;
 	}
 	async operatorMembershipEvent(roomId: string, signal?: AbortSignal): Promise<{ eventId: string; sender: string; membership: string }> {
 		this.assertManagedRoom(roomId);
@@ -707,7 +723,20 @@ export class ManagedMatrixClient {
 	async inviteOperator(roomId: string, signal?: AbortSignal): Promise<void> {
 		this.assertManagedRoom(roomId); await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`, { user_id: this.operatorUserId }, signal);
 	}
-	async leaveRoom(roomId: string, signal?: AbortSignal): Promise<void> { this.assertManagedRoom(roomId); await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {}, signal); this.#managedRoomIds.delete(roomId); }
+	async leaveRoom(roomId: string, signal?: AbortSignal): Promise<void> {
+		this.assertManagedRoom(roomId);
+		// Reserve before awaiting I/O. Failure retains only an already-known
+		// reference; it does not revoke the pre-existing mutation scope.
+		this.reserveDepartureReference(roomId);
+		await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/leave`, {}, signal);
+		this.#managedRoomIds.delete(roomId);
+	}
+	private reserveDepartureReference(roomId: string): void {
+		if (this.#departedRoomReferences.size >= 16_384 && !this.#departedRoomReferences.has(roomId)) {
+			throw new ManagedMatrixError("invalid_response", "Departed room reference capacity reached; restart to recover frozen cleanup");
+		}
+		this.#departedRoomReferences.add(roomId);
+	}
 	private assertManagedRoom(roomId: string): void { if (!this.#managedRoomIds.has(roomId)) throw new ManagedMatrixError("invalid_response", "Matrix room is not owned by this relay"); }
 	private parseMxc(value: string): { serverName: string; mediaId: string } {
 		let parsed: URL; try { parsed = new URL(value); } catch { throw new ManagedMatrixError("invalid_response", "Matrix content URI is malformed"); }
