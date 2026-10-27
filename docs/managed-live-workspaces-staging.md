@@ -7,7 +7,13 @@ recovery. See [remediation evidence](managed-room-v12-evidence.md) and the
 [initial live failure](managed-live-workspaces-live-smoke.md). The offline evidence
 below is historical; broader client/deployment acceptance remains outstanding.
 
-## Current authorization
+**Step-1 follow-up:** separately authorized real-model commentary/final,
+approvals (including actual expiry), fork/tree/guards, stop/resume and retirement
+acceptance now passes. Two live-discovered fixes and review remediations passed
+the final canonical gate. See [behavior evidence](managed-live-behavior-evidence.md).
+Desktop/Element X, publication/lock, activation and migration remain separate.
+
+## Original offline-slice authorization
 
 The operator approved proceeding through cumulative offline review, candidate
 package verification and an isolated smoke test without rebuilding/activating a
