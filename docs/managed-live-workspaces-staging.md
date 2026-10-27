@@ -1,9 +1,11 @@
 # Cumulative review and isolated smoke-test staging (#121)
 
 **Subsequent live result:** the operator provided dedicated test accounts and
-explicitly authorized the test. It failed on room-v12 ID compatibility during
-coordinator bootstrap. See [live smoke evidence](managed-live-workspaces-live-smoke.md).
-The offline evidence below is historical and does not establish a live pass.
+explicitly authorized the test. Its initial room-v12 bootstrap failure was fixed;
+the bounded native-launch/hierarchy/account smoke now passes after same-state
+recovery. See [remediation evidence](managed-room-v12-evidence.md) and the
+[initial live failure](managed-live-workspaces-live-smoke.md). The offline evidence
+below is historical; broader client/deployment acceptance remains outstanding.
 
 ## Current authorization
 
@@ -187,7 +189,8 @@ Offline cumulative review, candidate build and installed-picker smoke are done.
 No real-account smoke, desktop/Element X acceptance, fleet evaluation/build,
 publication/lock refresh, activation or existing-room migration is claimed.
 #120 and #121 remain open. The operator subsequently supplied dedicated test
-identities and private credential paths, and the first real Matrix attempt failed;
-see the live evidence linked above. Next work is compatibility remediation and
-same-state recovery/retest, not credential provisioning or production rollout.
+identities and private credential paths. Room-v12 remediation and the bounded
+same-state recovery/retest now pass; see the evidence linked above. Remaining
+work is broader client acceptance and separately authorized integration/rollout,
+not credential provisioning or repetition of the original failed bootstrap.
 Never fall back to production identities or inspect the private secrets repository.

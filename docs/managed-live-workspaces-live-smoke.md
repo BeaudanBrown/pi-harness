@@ -1,4 +1,9 @@
-# Isolated real-Matrix smoke — blocked at bootstrap (#121)
+# Isolated real-Matrix smoke — initial bootstrap failure (#121)
+
+**Follow-up:** the approved room-v12 fix and same-state recovery now pass the
+bounded native-launch/hierarchy/account smoke. See
+[remediation and retest evidence](managed-room-v12-evidence.md). This document
+preserves the initial failed attempt; it is not the current remediation status.
 
 ## Authorization and scope
 
@@ -52,7 +57,10 @@ Its exact ID and safe metadata are in the local artifacts below.
 
 ## Confirmed source incompatibility
 
-**High / current epic:**
+**High / current epic at the initial failure:** subsequent tracing confirmed
+that the real client rejected the returned/aliased ID even before journal commit.
+The journal and provenance errors below were additional reproduced blockers;
+all are addressed by the linked remediation.
 `config/agent/extensions/managed-sessions/relay/coordinator-provisioning.ts:8`
 requires a legacy `!localpart:server` room ID. Persisting the returned v12 host
 Space therefore throws `Invalid coordinator provisioning intent`.
