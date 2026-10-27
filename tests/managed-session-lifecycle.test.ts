@@ -385,6 +385,7 @@ test("idempotent Matrix provisioning recovers an uncertain create response witho
 		if (path.endsWith("/createRoom")) { postCalls += 1; if (postCalls === 1) throw new TypeError("response lost"); return new Response("alias exists", { status: 400 }); }
 		if (path.includes("/directory/room/")) return Response.json({ room_id: "!stable:example.com" });
 		if (path.includes("/state/m.room.create/")) return Response.json({ creator: matrixConfig.botUserId, type: "m.space" });
+		if (path.endsWith("/state")) return Response.json([{ type: "m.room.create", state_key: "", sender: matrixConfig.botUserId, content: { creator: matrixConfig.botUserId, type: "m.space" } }]);
 		if (path.endsWith("/joined_members")) return Response.json({ joined: { [matrixConfig.operatorUserId]: {} } });
 		if (path.includes("/state/m.room.member/")) return Response.json({ membership: "join" });
 		throw new Error(`unexpected Matrix request ${init?.method} ${path}`);

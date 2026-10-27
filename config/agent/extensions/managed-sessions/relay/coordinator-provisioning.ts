@@ -1,11 +1,12 @@
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { MatrixRoomIdSchema } from "../../matrix-shared/room-id.js";
 import { deriveConversationId } from "../contracts.js";
 import type { ManagedProvenance } from "../managed-provenance.js";
 import { AtomicJsonFile } from "./atomic-json.js";
 import { ManagedMatrixClient, ManagedMatrixError } from "./matrix-client.js";
 
-const room = Type.String({ pattern: "^![^\\s:]{1,200}:[^\\s]{1,200}$", maxLength: 255 });
+const room = MatrixRoomIdSchema;
 const Schema = Type.Object({ version: Type.Literal(1), hostId: Type.String({ minLength: 1, maxLength: 128 }),
 	conversationId: Type.String({ pattern: "^conv_[a-f0-9]{32}$" }),
 	hostAttempted: Type.Boolean(), roomAttempted: Type.Boolean(), linked: Type.Boolean(),

@@ -1,5 +1,7 @@
 import { parseAccountAction, type AccountAction } from "../live-workspace-contracts.js";
 import { isDeepStrictEqual } from "node:util";
+import { isMatrixRoomId } from "../../matrix-shared/room-id.js";
+import { isSoleRoomCreator } from "../../matrix-shared/room-creator.js";
 import { deriveConversationId, type ConversationManifest } from "../contracts.js";
 import { MANAGED_PROVENANCE_EVENT, managedRoomAlias, parseManagedProvenance, safeManagedTitle, type ManagedProvenance } from "../managed-provenance.js";
 import { MAX_BLOB_BYTES } from "../v2-contracts.js";
@@ -348,7 +350,7 @@ export class ManagedMatrixClient {
 
 	/** Read-only recovery from a saved host-owned ID; alias/name changes cannot retarget it. */
 	async recoverManagedRoom(roomId: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<void> {
-		if (!/^![^\s:]{1,200}:[^\s]{1,200}$/.test(roomId) || roomId.length > 255) throw new Error("Invalid saved managed room ID");
+		if (!isMatrixRoomId(roomId)) throw new Error("Invalid saved managed room ID");
 		this.#managedRoomIds.add(roomId);
 		try { await this.assertManagedProvenance(roomId, provenance, signal); }
 		catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
@@ -442,7 +444,7 @@ export class ManagedMatrixClient {
 			const resolved = await this.request("GET", `/_matrix/client/v3/directory/room/${encodeURIComponent(`#${aliasLocalpart}:${server}`)}`, undefined, signal);
 			roomId = requiredString(resolved, "room_id");
 		}
-		if (!/^![^\s:]{1,200}:[^\s]{1,200}$/.test(roomId) || roomId.length > 255) throw new ManagedMatrixError("invalid_response", "Matrix response returned a malformed room ID");
+		if (!isMatrixRoomId(roomId)) throw new ManagedMatrixError("invalid_response", "Matrix response returned a malformed room ID");
 		this.#managedRoomIds.add(roomId);
 		if (aliasLocalpart) {
 			const createEvent = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.create/`, undefined, signal);
@@ -450,6 +452,15 @@ export class ManagedMatrixClient {
 				((createEvent as JsonObject).creator !== undefined && (createEvent as JsonObject).creator !== this.botUserId) || !await this.memberJoined(roomId, this.botUserId, signal) ||
 				(space && (createEvent as JsonObject).type !== "m.space") || (!space && (createEvent as JsonObject).type === "m.space")) {
 				this.#managedRoomIds.delete(roomId); throw new ManagedMatrixError("invalid_response", "Matrix idempotent room identity was not bot-owned");
+			}
+			const creation = createEvent as JsonObject;
+			// Through v10 the immutable create content names its creator. From v11
+			// onward only the full create event's sender proves this identity.
+			const legacyCreator = creation.creator === this.botUserId && (creation.room_version === undefined ||
+				(typeof creation.room_version === "string" && /^(?:[1-9]|10)$/.test(creation.room_version)));
+			if (!legacyCreator) {
+				try { await this.assertCreateSender(roomId, creation, signal); }
+				catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
 			}
 		}
 		return roomId;
@@ -461,7 +472,7 @@ export class ManagedMatrixClient {
 		let roomId: string;
 		try { roomId = requiredString(await this.request("GET", `/_matrix/client/v3/directory/room/${encodeURIComponent(`#${aliasLocalpart}:${server}`)}`, undefined, signal), "room_id"); }
 		catch (error) { if (error instanceof ManagedMatrixError && error.status === 404) return undefined; throw error; }
-		if (!/^![^\s:]{1,200}:[^\s]{1,200}$/.test(roomId) || roomId.length > 255) throw new ManagedMatrixError("invalid_response", "Matrix alias returned a malformed room ID");
+		if (!isMatrixRoomId(roomId)) throw new ManagedMatrixError("invalid_response", "Matrix alias returned a malformed room ID");
 		return roomId;
 	}
 	async resolvePrivateRoomAlias(aliasLocalpart: string, space: boolean, signal?: AbortSignal): Promise<string | undefined> {
@@ -493,6 +504,13 @@ export class ManagedMatrixClient {
 		catch (error) { this.#managedRoomIds.delete(roomId); throw error; }
 		return roomId;
 	}
+	private async assertCreateSender(roomId: string, creation: JsonObject, signal?: AbortSignal): Promise<void> {
+		const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`, undefined, signal);
+		const creates = Array.isArray(state) && state.length <= 4096 ? state.filter(event => event?.type === "m.room.create" && event?.state_key === "") : [];
+		if (creates.length !== 1 || !isSoleRoomCreator(creates[0], this.botUserId) || !isDeepStrictEqual(creates[0].content, creation)) {
+			throw new ManagedMatrixError("invalid_response", "Matrix room has foreign or ambiguous creators");
+		}
+	}
 	async assertRoomAuthority(roomId: string, space: boolean, signal?: AbortSignal, required: { spaceChild?: boolean; kick?: boolean; management?: boolean } = {}): Promise<void> {
 		this.assertManagedRoom(roomId);
 		const create = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.create/`, undefined, signal);
@@ -504,15 +522,25 @@ export class ManagedMatrixClient {
 		}
 		const value = powers as JsonObject; const users = typeof value.users === "object" && value.users !== null && !Array.isArray(value.users) ? value.users as JsonObject : {};
 		const events = typeof value.events === "object" && value.events !== null && !Array.isArray(value.events) ? value.events as JsonObject : {};
-		const bot = Number(users[this.botUserId] ?? value.users_default ?? 0); const stateDefault = Number(value.state_default ?? 50);
+		// v12 creators have immutable infinite power and must not appear in users.
+		// Prove the original create sender, not merely a claimed co-creator or PL.
+		const creation = create as JsonObject;
+		if (creation.room_version !== undefined && (typeof creation.room_version !== "string" || !/^(?:[1-9]|1[0-2])$/.test(creation.room_version))) {
+			throw new ManagedMatrixError("invalid_response", "Matrix room version authority is unsupported");
+		}
+		const creatorPower = creation.room_version === "12";
+		if (creatorPower || creation.room_version === "11" || creation.creator === undefined) await this.assertCreateSender(roomId, creation, signal);
+		const bot = creatorPower ? Infinity : Number(users[this.botUserId] ?? value.users_default ?? 0); const stateDefault = Number(value.state_default ?? 50);
 		const thresholds = [stateDefault, ...(required.management ? [Number(events[MANAGED_PROVENANCE_EVENT] ?? stateDefault)] : []), ...(required.spaceChild ? [Number(events["m.space.child"] ?? stateDefault)] : []), ...(required.kick ? [Number(value.kick ?? 50)] : [])];
-		if (!Number.isFinite(bot) || thresholds.some((threshold) => !Number.isFinite(threshold) || bot < threshold)) {
+		if ((!creatorPower && !Number.isFinite(bot)) || thresholds.some((threshold) => !Number.isFinite(threshold) || bot < threshold)) {
 			throw new ManagedMatrixError("invalid_response", "Matrix bot lacks authority over required room operations");
 		}
 	}
 	async addSpaceChild(spaceId: string, roomId: string, signal?: AbortSignal): Promise<void> {
-		this.assertManagedRoom(spaceId); this.assertManagedRoom(roomId); const roomServer = roomId.slice(roomId.indexOf(":") + 1);
-		if (!roomServer || roomServer === roomId) throw new ManagedMatrixError("invalid_response", "Matrix room ID omitted its server name");
+		this.assertManagedRoom(spaceId); this.assertManagedRoom(roomId);
+		// Room IDs are opaque (v12 has no server suffix). The owning bot's server
+		// participates in these verified rooms and supplies a usable routing hint.
+		const roomServer = this.botUserId.slice(this.botUserId.indexOf(":") + 1);
 		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/m.space.child/${encodeURIComponent(roomId)}`, { via: [roomServer], suggested: true }, signal);
 	}
 	async removeSpaceChild(spaceId: string, roomId: string, signal?: AbortSignal): Promise<void> {
@@ -526,7 +554,7 @@ export class ManagedMatrixClient {
 		for (const event of state) {
 			if (typeof event !== "object" || event === null || Array.isArray(event)) throw new ManagedMatrixError("invalid_response", "Matrix Space state is malformed");
 			const value = event as JsonObject; if (value.type !== "m.space.child") continue;
-			if (typeof value.state_key !== "string" || !/^![^\s:]{1,200}:[^\s]{1,200}$/.test(value.state_key) || typeof value.content !== "object" || value.content === null || Array.isArray(value.content)) {
+			if (!isMatrixRoomId(value.state_key) || typeof value.content !== "object" || value.content === null || Array.isArray(value.content)) {
 				throw new ManagedMatrixError("invalid_response", "Matrix Space child state is malformed");
 			}
 			if (Array.isArray((value.content as JsonObject).via) && ((value.content as JsonObject).via as unknown[]).length > 0) children.push(value.state_key);
@@ -660,10 +688,10 @@ export class ManagedMatrixClient {
 	/** Authenticated self-membership observation, including after a lost leave response.
 	 * Returned room IDs never become discovery or mutation targets. */
 	async accountJoined(roomId: string, signal?: AbortSignal): Promise<boolean> {
-		if (!/^!\S{1,254}$/.test(roomId)) throw new ManagedMatrixError("invalid_response", "Invalid self membership target");
+		if (!isMatrixRoomId(roomId)) throw new ManagedMatrixError("invalid_response", "Invalid self membership target");
 		const result = await this.request("GET", "/_matrix/client/v3/joined_rooms", undefined, signal);
 		const rooms = result && typeof result === "object" && !Array.isArray(result) ? (result as JsonObject).joined_rooms : undefined;
-		if (!Array.isArray(rooms) || rooms.length > 16384 || rooms.some((id) => typeof id !== "string" || !/^!\S{1,254}$/.test(id)) || new Set(rooms).size !== rooms.length)
+		if (!Array.isArray(rooms) || rooms.length > 16384 || rooms.some((id) => !isMatrixRoomId(id)) || new Set(rooms).size !== rooms.length)
 			throw new ManagedMatrixError("invalid_response", "Matrix self membership is unavailable or oversized");
 		return rooms.includes(roomId);
 	}

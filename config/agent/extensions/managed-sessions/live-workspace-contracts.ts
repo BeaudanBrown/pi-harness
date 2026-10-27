@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
+import { MatrixRoomIdSchema } from "../matrix-shared/room-id.js";
 import { ConversationIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 import { ForkSummarySchema, parseForkSummary } from "./fork-context.js";
 
@@ -28,7 +29,7 @@ const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
 const identifier = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" });
 const stable = (prefix: string) => Type.String({ pattern: `^${prefix}_[a-f0-9]{32}$` });
 const digest = Type.String({ pattern: "^[a-f0-9]{64}$" });
-const room = Type.String({ minLength: 4, maxLength: 255, pattern: "^![^\\s:]+:[^\\s]+$" });
+const room = MatrixRoomIdSchema;
 const gitRef = Type.String({ minLength: 1, maxLength: 255, pattern: "^[A-Za-z0-9][A-Za-z0-9._/@+/-]*$" });
 const page = { limit: Type.Optional(Type.Integer({ minimum: 1, maximum: HOST_INVENTORY_MAX_PAGE_SIZE })), cursor: Type.Optional(text(256)) };
 const workspace = { rootKey: identifier, workspace: text(128) };

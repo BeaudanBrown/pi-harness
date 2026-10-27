@@ -1,5 +1,6 @@
 import { MANAGED_PROVENANCE_EVENT, parseManagedProvenance, type ManagedProvenance } from "../managed-sessions/managed-provenance.js";
 import type { AccountAction } from "../managed-sessions/live-workspace-contracts.js";
+import { isSoleRoomCreator } from "../matrix-shared/room-creator.js";
 
 export type EnsureRoom = Extract<AccountAction, { operation: "room.ensure" }>;
 export type AccountRoomProof = { roomId: string; expected: Partial<ManagedProvenance> & { kind: ManagedProvenance["kind"] } };
@@ -36,7 +37,7 @@ function verifyAvailable(events: Map<string, Record<string, unknown>>, expected:
 	const creation = events.get(key("m.room.create"));
 	if (creation) {
 		const content = object(creation.content); const space = expected.expected.kind.endsWith("_space");
-		if (creation.sender !== bot || content["m.federate"] !== false || (space ? content.type !== "m.space" : content.type !== undefined)) throw new AccountProofError("unverified");
+		if (!isSoleRoomCreator(creation, bot) || content["m.federate"] !== false || (space ? content.type !== "m.space" : content.type !== undefined)) throw new AccountProofError("unverified");
 	} else if (complete) throw new AccountProofError("unverified");
 	const joins = events.get(key("m.room.join_rules"));
 	if (joins ? object(joins.content).join_rule !== "invite" : complete) throw new AccountProofError("unverified");

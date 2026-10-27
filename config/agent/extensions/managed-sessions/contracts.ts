@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isAbsolute } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
+import { isMatrixRoomId } from "../matrix-shared/room-id.js";
 import { HostActionSchema, HostResultSchemas, parseHostAction, parseHostResponse } from "./live-workspace-contracts.js";
 import { ExactWindowProofSchema, assertExactWindowBinding, type ExactWindowProof } from "./exact-window-contracts.js";
 import { HostRunWitnessSchema, parseHostRunWitness } from "./host-run-contracts.js";
@@ -1002,7 +1003,7 @@ export function parsePendingLocalConversation(value: unknown): PendingLocalConve
 	validateLogicalConversation(manifest);
 	if (manifest.verifiedBinding) {
 		const rooms = Object.values(manifest.verifiedBinding);
-		if (new Set(rooms).size !== 3 || rooms.some((room) => !/^![^\s:]{1,200}:[^\s]{1,200}$/.test(room))) {
+		if (new Set(rooms).size !== 3 || rooms.some((room) => !isMatrixRoomId(room))) {
 			throw new ManagedSessionContractError("invalid_state", "local binding receipt is invalid");
 		}
 	}

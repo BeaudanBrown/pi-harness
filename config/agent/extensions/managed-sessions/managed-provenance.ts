@@ -2,10 +2,11 @@ import { createHash } from "node:crypto";
 import { isAbsolute, normalize } from "node:path";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { MatrixRoomIdSchema } from "../matrix-shared/room-id.js";
 
 export const MANAGED_PROVENANCE_EVENT = "lol.bepis.pi.managed.v1";
 const identifier = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" });
-const room = Type.String({ pattern: "^![^\\s:]{1,200}:[^\\s]{1,200}$", maxLength: 255 });
+const room = MatrixRoomIdSchema;
 const stable = (prefix: string) => Type.String({ pattern: `^${prefix}_[a-f0-9]{32}$` });
 const common = { version: Type.Literal(1), hostId: identifier, creationKey: identifier };
 const project = { projectKey: stable("project"), parentRoomId: room };

@@ -99,10 +99,10 @@ test("new identity derivation uses the pinned live-v1 domain and fallback titles
 	assert.equal(safeManagedTitle("same name", identity, "conversation", new Set(["same name"])), "same name", "ordinary duplicate titles remain permitted");
 });
 
-test("hierarchy links preserve the complete Matrix server name including its port", async () => {
+test("hierarchy links route via the participating bot server including its port", async () => {
 	let content: unknown;
-	const client = new ManagedMatrixClient(config, async (_input, init) => { content = JSON.parse(String(init?.body)); return Response.json({}); }, ["!space:server:8448", "!child:server:8448"]);
-	await client.addSpaceChild("!space:server:8448", "!child:server:8448");
+	const client = new ManagedMatrixClient({ ...config, botUserId: "@bot:server:8448" }, async (_input, init) => { content = JSON.parse(String(init?.body)); return Response.json({}); }, ["!space:old-server", "!child:old-server"]);
+	await client.addSpaceChild("!space:old-server", "!child:old-server");
 	assert.deepEqual(content, { via: ["server:8448"], suggested: true });
 });
 

@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { MatrixUserIdSchema } from "../identity-contracts.js";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { MatrixRoomIdSchema } from "../../matrix-shared/room-id.js";
 import { deriveConversationId, type ConversationManifest } from "../contracts.js";
 import { deriveCheckoutId, parseManagedProvenance, safeManagedTitle, ManagedProvenanceSchema, type ManagedProvenance } from "../managed-provenance.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
@@ -11,7 +12,7 @@ import { ManagedMatrixClient } from "./matrix-client.js";
 
 const identifier = Type.String({ pattern: "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$" });
 const stable = (prefix: string) => Type.String({ pattern: `^${prefix}_[a-f0-9]{32}$` });
-const room = Type.String({ pattern: "^![^\\s:]{1,200}:[^\\s]{1,200}$", maxLength: 255 });
+const room = MatrixRoomIdSchema;
 const common = { key: identifier, creationKey: identifier, title: Type.String({ minLength: 1, maxLength: 256 }),
 	roomId: Type.Optional(room), parentRoomId: Type.Optional(room), createAttempted: Type.Optional(Type.Literal(true)),
 	preserveNotificationPolicy: Type.Optional(Type.Literal(true)), linked: Type.Boolean() };

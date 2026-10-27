@@ -5,6 +5,7 @@ import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { deriveConversationId, WorkspaceIdentitySchema, type WorkspaceIdentity } from "../contracts.js";
 import { Check } from "typebox/value";
+import { isMatrixRoomId } from "../../matrix-shared/room-id.js";
 import { deriveCheckoutId } from "../managed-provenance.js";
 import { AtomicJsonFile } from "./atomic-json.js";
 import type { ResolvedWorkspace } from "./host-lifecycle.js";
@@ -23,7 +24,7 @@ interface ReconciliationItem {
 interface CleanupSpace { spaceId: string; hostUnlinked: boolean; operatorRemoved: boolean; left: boolean }
 interface ReconciliationIntent { version: 1; reconciliationKey: string; items: ReconciliationItem[]; cleanupSpaces?: CleanupSpace[] }
 
-const id = /^![^\s:]{1,200}:[^\s]{1,200}$/;
+
 const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const planIdentity = (item: ReconciliationItem) => ({ conversationId: item.conversationId, concept: item.concept, workspace: item.workspace,
 	roomId: item.roomId, ...(item.oldProjectSpace ? { oldProjectSpace: item.oldProjectSpace } : {}), projectKey: item.projectKey,
@@ -42,9 +43,9 @@ function parseIntent(value: unknown): ReconciliationIntent {
 		if (Object.keys(entry).some((key) => !allowed.includes(key)) || typeof entry.conversationId !== "string" || !/^conv_[a-f0-9]{32}$/.test(entry.conversationId) ||
 			![entry.concept, entry.workspace].every((field) => typeof field === "string" && field.length > 0 && field.length <= 128 && !/[\u0000-\u001f\u007f]/.test(field)) ||
 			![entry.projectDisplayName, entry.checkoutDisplayName].every((field) => typeof field === "string" && field.length > 0 && field.length <= 128 && !/[\u0000-\u001f\u007f/]/.test(field)) ||
-			typeof entry.roomId !== "string" || !id.test(entry.roomId) || typeof entry.projectKey !== "string" || !/^project_[a-f0-9]{32}$/.test(entry.projectKey) ||
+			typeof entry.roomId !== "string" || !isMatrixRoomId(entry.roomId) || typeof entry.projectKey !== "string" || !/^project_[a-f0-9]{32}$/.test(entry.projectKey) ||
 			typeof entry.sourceManifestHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.sourceManifestHash) ||
-			[entry.oldProjectSpace, entry.plannedProjectSpace, entry.targetProjectSpace, entry.targetCheckoutSpace].some((field) => field !== undefined && (typeof field !== "string" || !id.test(field))) ||
+			[entry.oldProjectSpace, entry.plannedProjectSpace, entry.targetProjectSpace, entry.targetCheckoutSpace].some((field) => field !== undefined && (typeof field !== "string" || !isMatrixRoomId(field))) ||
 			(entry.targetManifestHash !== undefined && (typeof entry.targetManifestHash !== "string" || !/^[a-f0-9]{64}$/.test(entry.targetManifestHash))) ||
 			(entry.plannedProjectSpace !== undefined && entry.targetProjectSpace !== entry.plannedProjectSpace) ||
 			(entry.retired !== undefined && entry.retired !== true) ||
@@ -57,7 +58,7 @@ function parseIntent(value: unknown): ReconciliationIntent {
 			if (!checkout || typeof checkout !== "object" || Object.keys(checkout).sort().join(",") !== "checkoutId,creationKey,hostSpace,placement,root" ||
 				typeof checkout.creationKey !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(checkout.creationKey) ||
 				typeof checkout.root !== "string" || !checkout.root.startsWith("/") || checkout.root.length > 4096 || /[\u0000-\u001f\u007f]/.test(checkout.root) ||
-				!id.test(checkout.hostSpace) || !Check(WorkspaceIdentitySchema, checkout.placement) || !/^checkout_[a-f0-9]{32}$/.test(checkout.checkoutId) ||
+				!isMatrixRoomId(checkout.hostSpace) || !Check(WorkspaceIdentitySchema, checkout.placement) || !/^checkout_[a-f0-9]{32}$/.test(checkout.checkoutId) ||
 				(entry.hostLinked && !entry.targetCheckoutSpace)) throw new RelayRegistryError("invalid_state", "Checkout migration identity is malformed");
 		} else if (entry.targetCheckoutSpace) throw new RelayRegistryError("invalid_state", "Checkout migration source is missing");
 	}
@@ -67,7 +68,7 @@ function parseIntent(value: unknown): ReconciliationIntent {
 	for (const item of (record.cleanupSpaces ?? []) as unknown[]) {
 		if (typeof item !== "object" || item === null || Array.isArray(item) || Object.keys(item).some((key) => !["spaceId", "hostUnlinked", "operatorRemoved", "left"].includes(key))) throw new RelayRegistryError("invalid_state", "Project cleanup intent is malformed");
 		const entry = item as Record<string, unknown>;
-		if (typeof entry.spaceId !== "string" || !id.test(entry.spaceId) || typeof entry.hostUnlinked !== "boolean" || typeof entry.operatorRemoved !== "boolean" || typeof entry.left !== "boolean" || entry.operatorRemoved && !entry.hostUnlinked || entry.left && !entry.operatorRemoved) throw new RelayRegistryError("invalid_state", "Project cleanup intent is malformed");
+		if (typeof entry.spaceId !== "string" || !isMatrixRoomId(entry.spaceId) || typeof entry.hostUnlinked !== "boolean" || typeof entry.operatorRemoved !== "boolean" || typeof entry.left !== "boolean" || entry.operatorRemoved && !entry.hostUnlinked || entry.left && !entry.operatorRemoved) throw new RelayRegistryError("invalid_state", "Project cleanup intent is malformed");
 	}
 	const cleanup = (record.cleanupSpaces ?? []) as unknown as CleanupSpace[];
 	if (new Set(cleanup.map((item) => item.spaceId)).size !== cleanup.length) throw new RelayRegistryError("invalid_state", "Project cleanup identity is inconsistent");

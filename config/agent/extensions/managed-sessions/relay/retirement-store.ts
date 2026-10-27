@@ -4,6 +4,7 @@ import { open, readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Type, type Static } from "typebox";
 import { Check } from "typebox/value";
+import { MatrixRoomIdSchema } from "../../matrix-shared/room-id.js";
 import { ConversationIdSchema, GenerationIdSchema, MatrixUserIdSchema } from "../identity-contracts.js";
 import { ExactWindowProofSchema, assertExactWindowBinding } from "../exact-window-contracts.js";
 import { ManagedProvenanceSchema } from "../managed-provenance.js";
@@ -11,7 +12,7 @@ import { deriveConversationId } from "../contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 
 const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
-const room = Type.String({ pattern: "^!\\S{1,254}$" });
+const room = MatrixRoomIdSchema;
 const phase = Type.Enum(["pending", "blocked", "done"]);
 const effectBase = { effectId: Type.String({ pattern: "^cleanup_[a-f0-9]{32}$" }), phase };
 const window = Type.Object({ sessionName: text(128), windowId: text(64), paneId: text(64),
