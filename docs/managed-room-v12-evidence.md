@@ -84,7 +84,10 @@ create event sender. v12 creator power does not depend on a users power entry.
 
 Reports are `.pi/tmp/live-smoke-{recovery,continuation,account-settle}-report.json`.
 The private local root remains `/tmp/pi-live-smoke-2dsA99`. All test processes were
-stopped and temporary credential copies removed. Five disposable Matrix rooms
+stopped and temporary credential copies removed. A final filesystem check found tmux's
+stale socket pathname: a bounded connect returned ECONNREFUSED, then the exact
+current-user-owned socket inode was unlinked. No listening server remained.
+Five disposable Matrix rooms
 and original test credentials are retained; no production rooms/accounts,
 shared tmux/services, server settings, fleet lock or model credentials were used.
 
