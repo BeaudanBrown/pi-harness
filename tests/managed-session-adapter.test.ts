@@ -453,6 +453,18 @@ class FakeRelay {
 		for (const socket of this.sockets) socket.destroy();
 	}
 
+	async pause(): Promise<void> {
+		this.disconnect();
+		await new Promise<void>((resolve) => this.server!.close(() => resolve()));
+	}
+
+	async resume(): Promise<void> {
+		await new Promise<void>((resolve, reject) => {
+			this.server!.once("error", reject);
+			this.server!.listen(this.socketPath, resolve);
+		});
+	}
+
 	send(envelope: ManagedSessionEnvelope): void {
 		const socket = [...this.sockets].at(-1);
 		if (!socket) throw new Error("No adapter socket");
@@ -1000,10 +1012,46 @@ test("project and coordinator expose the same compact host controls without coor
 	}
 });
 
+for (const role of ["ordinary_adapter", "coordinator_adapter"] as const) test(`${role} warns once per missing-socket outage while retrying and reports recovery once`, async (t) => {
+	const relay = await FakeRelay.start(); t.after(() => relay.close()); await relay.pause();
+	const handlers = new Map<string, (...args: any[]) => any>();
+	const notices: Array<{ message: string; level: string }> = []; let statuses = 0;
+	const api = { on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler), registerCommand: () => undefined,
+		registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined } as unknown as ExtensionAPI;
+	createManagedSessionAdapterExtension(role, { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const branch = [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }),
+		custom("binding", BINDING_ENTRY_TYPE, { ...binding, role })];
+	const ctx: any = { hasUI: true, ui: { notify: (message: string, level: string) => notices.push({ message, level }), setStatus: () => { statuses++; } },
+		isIdle: () => true, hasPendingMessages: () => false,
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding" } };
+	t.after(() => handlers.get("session_shutdown")!({ reason: "quit" }, ctx));
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	const warnings = () => notices.filter(n => n.level === "warning");
+	assert.equal(warnings().length, 1); assert.match(warnings()[0]!.message, /ENOENT/);
+	const firstStatuses = statuses;
+	await activityWait(() => statuses >= firstStatuses + 2);
+	assert.equal(warnings().length, 1, "automatic failed retries must not repeat the warning");
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	assert.equal(warnings().length, 1, "repeated startup of the same binding must stay quiet");
+	await relay.resume();
+	await activityWait(() => notices.some(n => n.message === "Managed-session relay connection restored."));
+	assert.equal(notices.filter(n => n.message === "Managed-session relay connection restored.").length, 1);
+	await handlers.get("session_start")!({ reason: "resume" }, ctx);
+	assert.equal(notices.filter(n => n.message === "Managed-session relay connection restored.").length, 1, "healthy repeated startup is quiet");
+	await relay.pause();
+	await activityWait(() => warnings().length === 2);
+	const secondStatuses = statuses;
+	await activityWait(() => statuses > secondStatuses);
+	assert.equal(warnings().length, 2, "the next outage has its own single warning");
+	await relay.resume();
+	await activityWait(() => notices.filter(n => n.message === "Managed-session relay connection restored.").length === 2);
+});
+
 test("a shutdown racing attachment startup cannot reactivate managed conversation tools", async (t) => {
 	const relay = await FakeRelay.start(0, 100); t.after(() => relay.close());
 	const handlers = new Map<string, (...args: any[]) => any>();
 	let activeTools = ["read", "remote_checkpoint", "remote_artifact_export"];
+	const notices: string[] = [];
 	const api = {
 		on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
 		registerCommand: () => undefined, registerTool: () => undefined, getCommands: () => [], appendEntry: () => undefined,
@@ -1011,12 +1059,14 @@ test("a shutdown racing attachment startup cannot reactivate managed conversatio
 	} as unknown as ExtensionAPI;
 	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
 	const branch = [custom("binding", BINDING_ENTRY_TYPE, binding)];
-	const ctx: any = { hasUI: false, sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding" } };
+	const ctx: any = { hasUI: true, ui: { notify: (message: string) => notices.push(message), setStatus: () => undefined },
+		sessionManager: { getSessionId: () => sessionId, getBranch: () => branch, getLeafId: () => "binding" } };
 	const startup = handlers.get("session_start")!({ reason: "resume" }, ctx);
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	await handlers.get("session_shutdown")!({ reason: "quit" }, ctx);
 	await startup;
 	assert.deepEqual(activeTools, ["read"]);
+	assert.deepEqual(notices, [], "a stale failed attachment after shutdown must not warn or report recovery");
 });
 
 test("managed adapter serializes concurrent startup attachment attempts", async (t) => {
@@ -1042,17 +1092,24 @@ test("session switch invalidates an in-flight attachment before connecting the n
 		registerTool: () => undefined, registerEntryRenderer: () => undefined, getCommands: () => [], appendEntry: () => undefined,
 	} as unknown as ExtensionAPI;
 	createManagedSessionAdapterExtension("ordinary_adapter", { PI_MANAGED_SESSIONS_SOCKET: relay.socketPath, PI_MANAGED_SESSION_ATTACHMENT_NONCE: nonce })(api);
+	const notices: Array<{ session: string; message: string }> = []; const statusSessions: string[] = [];
 	const secondSessionId = "session-second"; const secondConversationId = deriveConversationId("host", "second");
 	const secondBinding = { ...binding, sessionId: secondSessionId, conversationId: secondConversationId,
 		bindingBoundaryEntryId: deriveTranscriptEntryId(secondSessionId, "boundary") };
-	const context = (session: string, branchBinding: SessionBinding) => ({ hasUI: false, isIdle: () => true, hasPendingMessages: () => false,
-		sessionManager: { getSessionId: () => session, getBranch: () => [custom("binding", BINDING_ENTRY_TYPE, branchBinding)], getLeafId: () => "binding" } }) as any;
+	const context = (session: string, branchBinding: SessionBinding) => ({ hasUI: true, isIdle: () => true, hasPendingMessages: () => false,
+		ui: { notify: (message: string) => notices.push({ session, message }), setStatus: () => statusSessions.push(session) },
+		sessionManager: { getSessionId: () => session, getBranch: () => [custom("boundary", BINDING_BOUNDARY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION }),
+			custom("binding", BINDING_ENTRY_TYPE, branchBinding)], getLeafId: () => "binding" } }) as any;
 	const first = handlers.get("session_start")!({ reason: "resume" }, context(sessionId, binding));
-	await new Promise((resolve) => setTimeout(resolve, 15));
+	await activityWait(() => relay.frames.some(frame => frame.type === "attachment.attach"));
+	const oldStatusCount = statusSessions.filter(session => session === sessionId).length;
 	const secondCtx = context(secondSessionId, secondBinding);
 	await Promise.all([first, handlers.get("session_start")!({ reason: "switch" }, secondCtx)]);
 	assert.deepEqual(relay.frames.filter((frame) => frame.type === "attachment.attach").map((frame) => frame.conversationId), [conversationId, secondConversationId]);
 	assert.equal(relay.sockets.size, 1, "the stale session transport is closed before the current binding remains attached");
+	assert.deepEqual(notices, [], "closing the old pending attachment must not emit stale failure/recovery notices into either UI");
+	assert.equal(statusSessions.filter(session => session === sessionId).length, oldStatusCount, "the failed old attempt must not update shared UI status after the switch");
+	assert.ok(statusSessions.includes(secondSessionId), "the new binding still updates its own status");
 	await handlers.get("session_shutdown")!({ reason: "quit" }, secondCtx);
 });
 

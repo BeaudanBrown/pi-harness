@@ -298,6 +298,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		let bindingRecovery: { client: BoundAdapterClient; work: Promise<void> } | undefined;
 		let bindingEpoch = 0;
 		let reconnectAttempt = 0;
+		let notifiedConnectionOutage: string | undefined;
 		let stopped = false;
 		let deliveries = new Map<string, DeliveryMarker>();
 		let projections = restoreProjections([]);
@@ -1161,6 +1162,9 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				notify(ctx, "Managed-session attachment nonce is unavailable", "error");
 				return;
 			}
+			const outageKey = JSON.stringify([epoch, attemptBinding.conversationId, attemptBinding.sessionId]);
+			const currentAttempt = () => !stopped && bindingEpoch === epoch &&
+				binding?.conversationId === attemptBinding.conversationId && binding.sessionId === attemptBinding.sessionId;
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
@@ -1173,7 +1177,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				onEnvelope: (envelope) => { if (client === next && bindingEpoch === epoch) return handleEnvelope(envelope); },
 				onMedia: async (image) => { const boundary = tree; await boundary?.ready(); if (!stopped && !treeFault && binding === attemptBinding && tree === boundary) await handleMedia(image, ctx); },
 				onDisconnect: () => {
-					if (client !== next || bindingEpoch !== epoch) return;
+					if (client !== next || !currentAttempt()) return;
 					client = undefined;
 					setCheckpointActive(false);
 					setStatus(ctx);
@@ -1185,9 +1189,14 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				await next.connect();
 			} catch (error) {
 				await next.close("shutdown").catch(() => undefined);
+				if (!currentAttempt() || (client && client !== next)) return;
 				if (client === next) client = undefined;
 				setCheckpointActive(false);
-				notify(ctx, error instanceof Error ? error.message : "Managed-session relay connection failed", "warning");
+				if (notifiedConnectionOutage !== outageKey) {
+					notifiedConnectionOutage = outageKey;
+					const message = error instanceof Error ? error.message : "Managed-session relay connection failed";
+					notify(ctx, `${message}; reconnecting automatically. Further connection warnings are suppressed until recovery.`, "warning");
+				}
 				scheduleReconnect(ctx);
 				setStatus(ctx);
 				return;
@@ -1198,6 +1207,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				return;
 			}
 			await tree?.recover(client?.pendingTreeOperation);
+			if (!currentAttempt() || client !== next || !next.connected) {
+				await next.close("shutdown").catch(() => undefined);
+				return;
+			}
 			if (next.supports("title-v1")) {
 				try { titleSync ??= new AdapterTitleSync({ conversationId: attemptBinding.conversationId, sessionId: attemptBinding.sessionId,
 					entries: ctx.sessionManager.getEntries(), persist: state => pi.appendEntry(TITLE_ENTRY, state), client: () => client,
@@ -1208,6 +1221,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			}
 			if (next.placement) config.placement = next.placement;
 			reconnectAttempt = 0;
+			if (notifiedConnectionOutage === outageKey) notify(ctx, "Managed-session relay connection restored.");
+			notifiedConnectionOutage = undefined;
 			setStatus(ctx);
 			if (next.matrixBindingPending) { setCheckpointActive(false); return; }
 			await recoverBoundConnection(ctx, next, epoch);
