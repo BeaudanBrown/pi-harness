@@ -1450,6 +1450,26 @@ test("coalescing retains tool changes made during a slow initial activity reques
 	f.answer(); await f.settle(); assert.deepEqual(f.errors, []);
 });
 
+test("a turn completed offline finalizes after reconnect without blocking its answer or later turns", async t => {
+	const f = await activityIntegration(t);
+	let disconnected = false;
+	f.ctx.ui.setStatus = (_key: string, text?: string) => { if (text?.includes("relay offline")) disconnected = true; };
+	await f.relay.pause();
+	await activityWait(() => disconnected);
+	await f.start(); f.answer(); await f.settle();
+	assert.equal(f.frames().length, 0);
+	await f.relay.resume();
+	await activityWait(() => f.frames().some(e => e.type === "activity.finalize"));
+	const first = f.frames().find(e => e.type === "activity.finalize")!;
+	assert.equal(first.payload.revision, 1, "a final without any earlier update still needs a valid positive revision");
+	await activityWait(() => f.relay.frames.some(e => e.type === "transcript.offer" && e.payload.kind === "assistant_final"));
+	await f.start(); f.answer(); await f.settle();
+	assert.equal(f.frames().filter(e => e.type === "activity.finalize").length, 2);
+	assert.equal(f.relay.frames.filter(e => e.type === "transcript.offer" && e.payload.kind === "assistant_final").length, 2);
+	assert.deepEqual(f.errors, []);
+	assert.ok(f.notices.every(message => !message.includes("managed-session envelope")));
+});
+
 test("real adapter/projector single-flight overlapping settlement", async t => {
 	const f = await activityIntegration(t); await f.start(); f.answer();
 	await Promise.all([f.settle(), f.settle()]);

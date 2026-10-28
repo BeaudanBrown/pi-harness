@@ -507,7 +507,10 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				if (!binding || binding.conversationId !== closing.conversationId || (target.generation ?? 1) !== closing.generation) {
 					throw new ManagedAdapterError("Activity finalization binding changed", "invalid_state");
 				}
-				const freeze = () => closing.final ??= Object.freeze({ ...closing.snapshot, activityId: closing.span.activityId, revision: ++closing.span.revision });
+				// A fully offline span has never sent update revision zero. Its first
+				// final must still be positive; freeze once so uncertain retries stay exact.
+				const freeze = () => closing.final ??= Object.freeze({ ...closing.snapshot, activityId: closing.span.activityId,
+					revision: (closing.span.revision = Math.max(1, closing.span.revision + 1)) });
 				try { await target.updateActivity(freeze(), true); }
 				catch (error) {
 					if (!(error instanceof ManagedAdapterError) || error.code !== "activity_interrupted" || !target.connected) throw error;
