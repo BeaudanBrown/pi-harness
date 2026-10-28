@@ -22,6 +22,8 @@ test("managed host has a flat provider schema and exact operation-specific valid
 test("terminal and room controls parse arguments without shell evaluation or prompt construction", () => {
 	assert.deepEqual(hostCommandAction('conversation create --creation-key one --title "Two words" --root-key projects --workspace app'), { operation: "conversation.create", creationKey: "one", title: "Two words", placement: { rootKey: "projects", workspace: "app", relativeCwd: "" } });
 	assert.deepEqual(roomHostCommand("!start", conversationId), { operation: "conversation.resume", conversationId });
+	assert.deepEqual(hostCommandAction(`conversation migrate ${conversationId} --confirmed`), { operation: "conversation.migrate", conversationId, confirmed: true });
+	assert.throws(() => hostCommandAction(`conversation migrate ${conversationId}`));
 	assert.deepEqual(roomHostCommand("!close --confirm", conversationId), { operation: "conversation.delete", conversationId, confirmed: true });
 	for (const alias of ["delete", "close"]) assert.deepEqual(hostCommandAction(`${alias} ${conversationId} --confirm`), { operation: "conversation.delete", conversationId, confirmed: true });
 	for (const text of ["!abort", "!model", "!thinking high", "!compact", "!new", "ordinary task"]) assert.equal(roomHostCommand(text, conversationId), undefined);

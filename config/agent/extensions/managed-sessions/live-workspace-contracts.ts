@@ -59,6 +59,7 @@ export const HostActionSchema = Type.Union([
 	action("conversation.resume", target),
 	action("conversation.stop", target),
 	action("conversation.refresh", { ...target, confirmed: Type.Literal(true) }),
+	action("conversation.migrate", { ...target, confirmed: Type.Literal(true) }),
 	action("conversation.delete", { ...target, confirmed: Type.Literal(true) }),
 	action("conversation.delete.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 100, uniqueItems: true }) }),
 	action("conversation.delete.apply", preview),
@@ -103,7 +104,7 @@ export function requiresModelApproval(action: HostAction): boolean { return isHo
 
 // protectedConversationId is resolved by the host, never supplied by the model.
 export function hostActionPolicy(action: HostAction, actor: HostActor, protectedConversationId: string): "forbidden" | "approval" | "direct" {
-	const destructive = ["conversation.stop", "conversation.delete"];
+	const destructive = ["conversation.stop", "conversation.delete", "conversation.migrate"];
 	if (destructive.includes(action.operation) && "conversationId" in action && action.conversationId === protectedConversationId) return "forbidden";
 	// Preview-based apply also revalidates all resolved targets before execution.
 	return actor.kind === "model" && isHostMutation(action) ? "approval" : "direct";
@@ -162,6 +163,7 @@ export const HostResultSchemas = {
 	"conversation.resume": launched,
 	"conversation.stop": strict({ conversationId: ConversationIdSchema, runtimeState }),
 	"conversation.refresh": launched,
+	"conversation.migrate": strict({ conversationId: ConversationIdSchema, migrationState: enumeration(["awaiting_exit", "ready"]), message: text(512) }),
 	"conversation.delete": strict({ conversationId: ConversationIdSchema, retirementId: stable("retirement"), cleanupState }),
 	"conversation.delete.preview": previewResult,
 	"conversation.delete.apply": cleanup,

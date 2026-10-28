@@ -25,7 +25,7 @@ const commands = [
 	`worktree conversation cleanup preview ${cid}`, `worktree conversation cleanup apply ${apply}`, `worktree branch delete ${apply}`, `worktree branch preview ${workspace} --branch feature/test --merge-target main`,
 	"conversation list", `conversation status ${cid}`, `conversation create ${workspace} ${creation}`,
 	...["open", "resume", "stop"].map((word) => `conversation ${word} ${cid}`),
-	...["refresh", "delete"].map((word) => `conversation ${word} ${cid} --confirmed`),
+	...["refresh", "delete", "migrate"].map((word) => `conversation ${word} ${cid} --confirmed`),
 	`conversation delete preview --conversation-ids ${cid}`, `conversation delete apply ${apply}`,
 	"space reconcile preview", `space reconcile apply ${apply}`, "space cleanup preview", `space cleanup apply ${apply}`,
 	"coordinator membership restore --confirmed",

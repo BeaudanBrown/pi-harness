@@ -46,6 +46,8 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 	}
 	let proof: ExactWindowProof | undefined; let state: "match" | "gone" | "changed" = "gone";
 	let inspectError = false;
+	let legacyState: "running" | "gone" | "error" = "running";
+	let beforeLegacyCheck: (() => Promise<void>) | undefined;
 	let attach = true; let retainedAlive = false; let unknownCreate = false; let invalidProof = false; let exits = true; let creates = 0;
 	let beforeCreate: (() => Promise<void>) | undefined;
 	let beforeCheck: (() => Promise<void>) | undefined;
@@ -67,6 +69,10 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 					commonDir: join(root, ".git"), mainPath: root, targetPath: root, baseRef: "refs/heads/main", baseCommit: "a".repeat(40), branch: "topic" };
 				case "worktree-create-apply": return { rootKey: "projects", workspace: "project", branch: "topic", baseCommit: "a".repeat(40) };
 				case "root-resolve": return { sessionName: "project" };
+				case "window-legacy-observe":
+					if (legacyState === "error") throw Error("private launcher stderr");
+					if (request.evidence) { await beforeLegacyCheck?.(); return { state: legacyState }; }
+					return { bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processes: [{ pid: "789", startTicks: "123" }] };
 				case "window-inspect-exact":
 					if (inspectError) throw Error("tmux server cannot be contacted");
 					if (state === "changed") throw Error("retained dead pane: close it manually");
@@ -96,6 +102,8 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 	}
 	return { root, manifest, owner, calls, server, matrix, get registry() { return registry; }, get creates() { return creates; },
 		set inspectError(value: boolean) { inspectError = value; },
+		set legacyState(value: typeof legacyState) { legacyState = value; },
+		set beforeLegacyCheck(value: () => Promise<void>) { beforeLegacyCheck = value; },
 		set attach(value: boolean) { attach = value; }, set retainedAlive(value: boolean) { retainedAlive = value; }, set unknownCreate(value: boolean) { unknownCreate = value; },
 		set beforeCreate(value: () => Promise<void>) { beforeCreate = value; },
 		set beforeCheck(value: () => Promise<void>) { beforeCheck = value; },
@@ -112,6 +120,118 @@ function request(conversationId: string, operation: "conversation.stop" | "conve
 	return { protocolVersion: "1.0.0" as const, messageId: "request", conversationId, role: "coordinator_adapter" as const, type: "lifecycle.request" as const,
 		payload: { request: { operation, targetConversationId: conversationId } } };
 }
+
+const legacyWindow = { sessionName: "project", windowId: "@3", paneId: "%3" };
+
+test("legacy stop/start returns actionable errors without cancellation, signalling or adoption", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; const owner = f.owner();
+	await f.registry.setManagedWindow(id, legacyWindow);
+	await f.registry.recordAcceptedInput(id, { deliveryId: `delivery_${"a".repeat(32)}`, matrixEventId: "$legacy-input", kind: "prompt", body: "queued work", status: "accepted" });
+	const inputs = f.registry.pendingInputs(id);
+	let terminations = 0;
+	f.server.sendToAttachment = () => { terminations++; return true; };
+	for (const run of [() => owner.stopConversation(id), () => owner.resumeConversation(id), () => owner.refreshApproved(id), () => owner.requestNewGeneration(f.manifest, `control_${"c".repeat(32)}`, {})]) {
+		await assert.rejects(run(), (error: unknown) => error instanceof Error && "code" in error && error.code === "upgrade_required" && /conversation.migrate/.test(error.message));
+	}
+	await assert.rejects(f.registry.beginGenerationTransition(id, `control_${"c".repeat(32)}`, {}), /Legacy window requires/);
+	assert.deepEqual(f.registry.generationTransitions(), []);
+	await assert.rejects(readFile(join(f.root, "sessions", id, "generation-2.jsonl")), { code: "ENOENT" });
+	assert.equal(f.registry.isRefreshing(id), false);
+	assert.deepEqual(f.registry.pendingInputs(id), inputs); assert.equal(terminations, 0); assert.equal(f.creates, 0);
+	assert.deepEqual(f.registry.managedWindow(id), legacyWindow);
+	assert.ok(!f.calls.includes("window-inspect-exact")); assert.ok(!f.calls.includes("window-terminate-exact"));
+});
+
+test("confirmed legacy migration survives restart, verifies manual exit, fences old nonce and preserves identity/history/input", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId;
+	await f.registry.setManagedWindow(id, legacyWindow); await f.registry.setAttachmentNonce(id, "n".repeat(32));
+	await f.registry.markDormant(id);
+	await f.registry.recordAcceptedInput(id, { deliveryId: `delivery_${"a".repeat(32)}`, matrixEventId: "$queued", kind: "prompt", body: "queued work", status: "accepted" });
+	const path = join(f.root, "sessions", id, "session.jsonl"), history = await readFile(path, "utf8");
+	const manifest = f.registry.registeredConversation(id), inputs = f.registry.pendingInputs(id);
+	const invoke = async () => {
+		const lifecycle = f.owner();
+		const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+		try {
+			const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
+			return await mutations.executeHuman({ version: "1.0.0", actor: { kind: "human_local", requestId: "migrate" }, action: { operation: "conversation.migrate", conversationId: id, confirmed: true } }) as { migrationState: string };
+		} finally { await retirement.close(); }
+	};
+	assert.equal((await invoke()).migrationState, "awaiting_exit");
+	await f.reload();
+	assert.equal((await invoke()).migrationState, "awaiting_exit");
+	assert.deepEqual(f.registry.managedWindow(id), legacyWindow); assert.equal(f.creates, 0);
+	f.legacyState = "gone";
+	assert.equal((await invoke()).migrationState, "ready");
+	assert.equal(f.registry.managedWindow(id), null); assert.equal(f.registry.snapshot().conversations[0].attachmentNonceHash, undefined);
+	await f.reload();
+	assert.equal((await invoke()).migrationState, "ready", "crash after clearing metadata does not replay effects");
+	assert.deepEqual(f.registry.registeredConversation(id), manifest); assert.deepEqual(f.registry.pendingInputs(id), inputs);
+	assert.equal(await readFile(path, "utf8"), history); assert.equal(f.creates, 0);
+	assert.ok(!f.calls.includes("window-terminate-exact"));
+	await f.owner().resumeConversation(id);
+	assert.equal(f.creates, 1); assert.ok(f.registry.managedWindow(id)?.ownership?.processBootId);
+	assert.equal(await readFile(path, "utf8"), history);
+	await assert.rejects(invoke(), /already has exact ownership/);
+});
+
+test("legacy migration fails closed on inspection failure, missing history, changed target", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; const owner = f.owner();
+	await f.registry.setManagedWindow(id, legacyWindow);
+	f.legacyState = "error";
+	await assert.rejects(owner.migrateConversation(id), /Cannot verify the legacy window/);
+	assert.deepEqual(f.registry.managedWindow(id), legacyWindow);
+	f.legacyState = "running"; await owner.migrateConversation(id);
+	f.legacyState = "gone";
+	f.beforeLegacyCheck = async () => { await f.registry.setManagedWindow(id, { ...legacyWindow, paneId: "%99" }); };
+	await assert.rejects(owner.migrateConversation(id), /target changed/);
+	await assert.rejects(owner.migrateConversation(id), /metadata changed/);
+	await f.registry.setManagedWindow(id, legacyWindow);
+	await rm(join(f.root, "sessions", id, "session.jsonl"));
+	await assert.rejects(owner.migrateConversation(id), /persisted Pi session file is unavailable/);
+	assert.equal(f.creates, 0);
+});
+
+test("migration generation races cannot clear metadata and consent freezes the target", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; const lifecycle = f.owner();
+	await f.registry.setManagedWindow(id, legacyWindow);
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+	try {
+		const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
+		const input: ModelHostRequest = { version: "1.0.0", actor: { kind: "model", requestId: "migrate", conversationId: id,
+			generationId: deriveGenerationId(id, 1), runId: "run", toolCallId: "tool", presentation: "local_dialog" },
+			action: { operation: "conversation.migrate", conversationId: id, confirmed: true } };
+		const approval = prepareHostApproval("host", input, await mutations.freeze(input), Date.now());
+		assert.equal(await mutations.revalidate(approval), true);
+		await f.registry.setManagedWindow(id, { ...legacyWindow, paneId: "%99" });
+		assert.equal(await mutations.revalidate(approval), false);
+		await assert.rejects(mutations.execute(approval), /Frozen targets/);
+		await f.registry.setManagedWindow(id, legacyWindow);
+		await lifecycle.migrateConversation(id);
+		f.legacyState = "gone";
+		f.beforeLegacyCheck = async () => {
+			await f.registry.setManagedWindow(id, null);
+			await f.registry.beginGenerationTransition(id, `control_${"3".repeat(32)}`, {});
+			await f.registry.setManagedWindow(id, legacyWindow);
+		};
+		await assert.rejects(lifecycle.migrateConversation(id), /target changed/);
+		await assert.rejects(lifecycle.migrateConversation(id), /pending control, generation change/);
+		assert.deepEqual(f.registry.managedWindow(id), legacyWindow);
+		assert.equal(f.creates, 0);
+	} finally { await retirement.close(); }
+});
+
+test("legacy migration rejects busy live targets before capture or effects", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; const lifecycle = f.owner();
+	await f.registry.setManagedWindow(id, legacyWindow);
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+	try {
+		const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement,
+			server: { attachment: () => ({ attachmentId: "live" }) } as unknown as Pick<ManagedSessionIpcServer, "attachment">, activeRun: async () => ({ runId: "busy" }) });
+		await assert.rejects(mutations.freeze({ action: { operation: "conversation.migrate", conversationId: id, confirmed: true } }), /Finish the active run/);
+		assert.deepEqual(f.calls, []);
+	} finally { await retirement.close(); }
+});
 
 test("registered conversations with missing history fail closed without recreating a session or window", async t => {
 	const f = await fixture(t); const path = join(f.root, "sessions", f.manifest.conversationId, "session.jsonl");

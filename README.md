@@ -348,6 +348,11 @@ Element X-compatible room link. Managed Pi uses run-scoped project approval and
 never persists trust for unrelated interactive launches. Project room text routes directly
 without host addressing; dormant input resumes the same persisted session.
 Stop terminates only the exact managed window and leaves the conversation dormant.
+Legacy windows without exact ownership require explicit, two-step
+`conversation migrate <id> --confirmed` recovery: capture exit evidence before
+manual window closure, then verify exit before clearing stale metadata. It does
+not restart tmux, adopt a live legacy process, or replace saved history. See
+[legacy window migration](docs/managed-legacy-window-migration.md).
 Confirmed deletion permanently retires the identity, stops only proven owned
 processes, and retries exact room/Space cleanup. Saved Pi/Matrix histories,
 workspaces and project files are preserved; this is not unbind-only deletion. The relay pins managed tmux operations to `XDG_RUNTIME_DIR`, matching the existing interactive `tmux_project` server. Marked live conversation windows appear as additional candidates in that same launcher and switch the requesting client to the existing Pi process; selection never creates or resumes work, and dormant conversations remain lifecycle-only. A confirmation-gated host operation previews and removes only marked windows from the obsolete `/tmp` tmux socket during the one-time deployment cutover.

@@ -11,6 +11,9 @@ pkgs.writeShellApplication {
     [[ "''${1-}" == managed ]]
     operation="''${2-}"
     request=$(cat)
+    if [[ "$operation" == window-legacy-observe ]]; then
+      exec ${pkgs.python3}/bin/python3 ${../scripts/managed-legacy-observe.py} ${pkgs.tmux}/bin/tmux <<<"$request"
+    fi
     derive_project_key() {
       local domain="$1" first="$2" second="$3"
       { printf 'pi-managed-sessions:%s:v1\0' "$domain"

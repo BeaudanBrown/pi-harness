@@ -153,6 +153,11 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 				const restore = await this.options.account.freezeMembership();
 				return { effects: [action], targets: [{ kind: "conversation", conversationId: restore.conversationId }], preconditions: { restore: detached(restore) } };
 			}
+			case "conversation.migrate": {
+				if (this.options.registry.registeredConversation(action.conversationId)?.kind !== "project") throw new HostControlError("forbidden", "Only project conversations support legacy migration");
+				if ((await this.activeRuns([action.conversationId])).length) throw new HostControlError("busy", "Finish the active run before preparing legacy migration");
+				return { effects: [action], preconditions: { target: this.target(action.conversationId) } };
+			}
 			case "conversation.open": case "conversation.resume": case "conversation.stop": case "conversation.refresh":
 				if (action.operation === "conversation.refresh" && this.options.registry.manifestByConversationId(action.conversationId)?.kind === "coordinator") throw new HostControlError("upgrade_required", "Coordinator refresh is unavailable");
 				return { effects: [action], preconditions: { target: this.target(action.conversationId) } };
@@ -217,10 +222,11 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (action.operation === "project.create" || action.operation === "conversation.create" || action.operation === "worktree.create" || action.operation === "worktree.conversation.create" || action.operation === "worktree.conversation.fork") {
 			return this.options.lifecycle.executeCreation(action, frozen.preconditions.creation!);
 		}
-		if (!["conversation.open", "conversation.resume", "conversation.stop", "conversation.refresh"].includes(action.operation)) throw new HostControlError("upgrade_required", "This host mutation owner is not available yet");
-		const target = action as Extract<HostAction, { operation: "conversation.open" | "conversation.resume" | "conversation.stop" | "conversation.refresh" }>;
+		if (!["conversation.open", "conversation.resume", "conversation.stop", "conversation.refresh", "conversation.migrate"].includes(action.operation)) throw new HostControlError("upgrade_required", "This host mutation owner is not available yet");
+		const target = action as Extract<HostAction, { operation: "conversation.open" | "conversation.resume" | "conversation.stop" | "conversation.refresh" | "conversation.migrate" }>;
 		// Synchronous target recheck and lifecycle admission have no intervening await.
 		if (!isDeepStrictEqual(this.target(target.conversationId), frozen.preconditions.target)) throw stale();
+		if (target.operation === "conversation.migrate") return this.options.lifecycle.migrateConversation(target.conversationId);
 		if (target.operation === "conversation.open") return this.options.lifecycle.openConversation(target.conversationId, target.expectedGenerationId);
 		if (target.operation === "conversation.resume") return this.options.lifecycle.resumeConversation(target.conversationId);
 		if (target.operation === "conversation.refresh") {

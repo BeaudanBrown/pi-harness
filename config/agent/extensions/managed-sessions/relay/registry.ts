@@ -652,6 +652,7 @@ export class RelayRegistry {
 			const manifest = this.manifests.get(conversationId);
 			if (manifest && !hasMatrixBinding(manifest)) throw new RelayRegistryError("matrix_unavailable", "Matrix binding is pending");
 			if (!manifest || manifest.kind !== "project") throw new RelayRegistryError("permission_denied", "Only project conversations support fresh generations");
+			if (conversation.managedWindow && !conversation.managedWindow.ownership) throw new RelayRegistryError("invalid_state", "Legacy window requires confirmed conversation.migrate before changing generation");
 			if (conversation.generationTransition) {
 				if (conversation.generationTransition.sourceControlId !== sourceControlId) throw new RelayRegistryError("invalid_state", "Another generation transition is unresolved");
 				return structuredClone(conversation.generationTransition);
@@ -1029,6 +1030,26 @@ export class RelayRegistry {
 				conversation.launch.observed = true;
 			}
 			conversation.managedWindow = window ? structuredClone(window) : null;
+			conversation.lastLaunchError = undefined;
+		});
+	}
+
+	/** Only the confirmed legacy migration owner may call this after verified exit.
+	 * Commit metadata removal and old-adapter fencing together; retain all history,
+	 * delivery receipts, queued inputs and logical conversation/generation identity.
+	 */
+	async completeLegacyWindowMigration(conversationId: string, generationId: string, window: NonNullable<RuntimeConversation["managedWindow"]>): Promise<void> {
+		await this.mutate(async () => {
+			const conversation = this.runtimeConversation(conversationId);
+			const manifest = this.registeredConversation(conversationId);
+			if (!manifest || manifest.kind !== "project" || this.retirement(conversationId) || this.activeGeneration(manifest).generationId !== generationId ||
+				conversation.state !== "dormant" || conversation.attachment || conversation.launch || window.ownership ||
+				!isDeepStrictEqual(conversation.managedWindow, window) || this.hasGenerationBoundary(conversationId) || this.isRefreshing(conversationId) ||
+				conversation.pendingControls.length || conversation.promotion && conversation.promotion.phase !== "adopted") {
+				throw new RelayRegistryError("invalid_state", "Legacy migration target changed or remains active; no metadata was cleared");
+			}
+			conversation.managedWindow = null;
+			conversation.attachmentNonceHash = undefined;
 			conversation.lastLaunchError = undefined;
 		});
 	}

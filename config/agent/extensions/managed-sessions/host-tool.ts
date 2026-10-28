@@ -37,6 +37,7 @@ export function managedHostHelp(): string {
 		"The coordinator cannot be stopped/deleted. No account credentials, arbitrary commands, or model-supplied actor/origin fields.",
 		...HostActionSchema.anyOf.map(s => `${s.properties.operation.const}: ${Object.keys(s.properties).filter(k => k !== "operation").flatMap(k => k === "placement" ? ["rootKey", "workspace", "relativeCwd (optional)"] : [k]).join(", ") || "no fields"}`),
 		"worktree.conversation.fork: sourceConversationId must be this conversation; rootKey/workspace must match it. Use an explicit committed baseRef and a concise summary. Creates a new room with visible inherited context, idle until the next message. No uncommitted changes or execution state are copied.",
+		"conversation.migrate: confirmed two-step legacy recovery, never a stop or launch. First capture exit evidence while the old window still exists; ask the operator to quit Pi and close only that window, then repeat with fresh consent. Ambiguous/absent evidence stays blocked. Use resume only after migration reports ready.",
 		"Creation keys are stable caller-chosen identifiers. title is bounded display text. list limit/cursor and preview mergeTarget (except branch.preview) are optional.",
 		"Capability/upgrade errors are not permission to use legacy mutation paths. Timeout means inspect before explicitly trying again.",
 	].join("\n");

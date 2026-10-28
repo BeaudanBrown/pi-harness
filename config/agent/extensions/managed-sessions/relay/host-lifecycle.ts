@@ -2,6 +2,8 @@ import { createHash, randomBytes } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof } from "../exact-window-contracts.js";
 import { ExactWindowClient } from "./exact-window-client.js";
+import { legacyOwnershipError, migrateLegacyWindow } from "./legacy-window-migration.js";
+import { HostControlError } from "./host-control-error.js";
 import { launchCoordinator as ensureCoordinatorWindow } from "./coordinator-launcher.js";
 import type { RetirementRecord } from "./retirement-store.js";
 import { spawn } from "node:child_process";
@@ -736,6 +738,8 @@ export class HostLifecycle {
 	}
 
 	async requestNewGeneration(manifest: ConversationManifest, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<void> {
+		const window = this.options.registry.managedWindow(manifest.conversationId);
+		if (window && !window.ownership) throw legacyOwnershipError();
 		const transition = await this.options.registry.beginGenerationTransition(manifest.conversationId, sourceControlId, metadata);
 		try { await this.runGenerationTransition(manifest.conversationId, transition.transitionId, false); }
 		catch (error) { this.scheduleGenerationRetry(manifest.conversationId, transition.transitionId); throw error; }
@@ -766,6 +770,8 @@ export class HostLifecycle {
 		let manifest = this.projectManifest(conversationId);
 		let transition = this.options.registry.generationTransitions().find((item) => item.conversationId === conversationId)?.transition;
 		if (!transition || transition.transitionId !== transitionId) return;
+		const legacyWindow = this.options.registry.managedWindow(conversationId);
+		if (legacyWindow && !legacyWindow.ownership) throw legacyOwnershipError();
 		try {
 			await this.options.projectNotice?.(`${transitionId}:${recovering ? "recovered" : "requested"}`, manifest, recovering
 				? `Recovering fresh Pi session generation ${transition.ordinal}; the Matrix room and prior sessions remain preserved.`
@@ -1344,6 +1350,7 @@ export class HostLifecycle {
 		if (launch) await launch.window;
 		else await ready;
 		const window = this.options.registry.managedWindow(conversationId);
+		if (window && !window.ownership) throw legacyOwnershipError();
 		if (!window?.ownership) throw new RelayRegistryError("invalid_state", "Open requires exact managed window ownership");
 		assertExactWindowBinding(conversationId, window);
 		if (await this.exactWindows.check(window.ownership) !== "match") {
@@ -1421,6 +1428,12 @@ export class HostLifecycle {
 
 	private async refresh(conversationId: string, expected?: { attachmentId: string; desiredRuntimeId?: string }): Promise<Record<string, unknown>> {
 		const manifest = this.ownedProjectManifest(conversationId);
+		const initialWindow = this.options.registry.managedWindow(conversationId);
+		if (initialWindow && !initialWindow.ownership) throw legacyOwnershipError();
+		if (initialWindow?.ownership) {
+			assertExactWindowBinding(conversationId, initialWindow);
+			if (!initialWindow.ownership.processBootId || initialWindow.ownership.processStartTicks === undefined) throw new HostControlError("conflict", "Refresh requires process-birth evidence; inspect the window manually");
+		}
 		this.options.registry.beginRefresh(conversationId);
 		try {
 			return await this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), async () => {
@@ -1433,6 +1446,8 @@ export class HostLifecycle {
 					}
 				}
 				const window = this.options.registry.managedWindow(conversationId);
+				if (!isDeepStrictEqual(window, initialWindow)) throw new HostControlError("conflict", "Refresh window changed during admission; no shutdown was requested");
+				if (window?.ownership && await this.exactWindows.check(window.ownership) === "changed") throw new HostControlError("conflict", "Refresh window ownership changed; inspect it manually");
 				if (this.options.registry.conversationState(conversationId) === "active") {
 					if (!window) throw new RelayRegistryError("invalid_state", "Refresh requires an exact managed window");
 					const refreshId = `refresh-${randomBytes(16).toString("hex")}`;
@@ -1466,6 +1481,22 @@ export class HostLifecycle {
 		}
 	}
 
+	migrateConversation(conversationId: string): Promise<HostResult<"conversation.migrate">> {
+		const manifest = this.ownedProjectManifest(conversationId);
+		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => migrateLegacyWindow({
+			registry: this.options.registry, conversationId, sessionDirectory: resolve(this.options.projectSessionDirectory),
+			invoke: (operation, request) => this.invoke(operation, request),
+			validateSession: async () => {
+				const current = this.ownedProjectManifest(conversationId);
+				const generation = this.options.registry.activeGeneration(current);
+				const resolved = await this.resolveWorkspaceIdentity(current.placement!);
+				const file = join(resolve(this.options.projectSessionDirectory), conversationId, generation.ordinal === 1 ? "session.jsonl" : `generation-${generation.ordinal}.jsonl`);
+				const saved = await durableProjectSession(file, resolved.cwd, conversationId, current.creationKey, current.concept, generation.ordinal, true);
+				if (saved.sessionId !== generation.piSessionId || saved.boundaryEntryId !== generation.bindingBoundaryEntryId) throw new HostControlError("conflict", "Saved Pi identity changed; migration is blocked");
+			},
+		}));
+	}
+
 	stopConversation(conversationId: string): Promise<Record<string, unknown>> {
 		const manifest = this.ownedProjectManifest(conversationId);
 		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => this.stopOnce(conversationId));
@@ -1475,6 +1506,13 @@ export class HostLifecycle {
 		this.ownedProjectManifest(conversationId);
 		const window = this.options.registry.managedWindow(conversationId);
 		if (!window) throw new RelayRegistryError("invalid_state", "Active managed conversation has no exact window identity");
+		// Preflight before cancellation or graceful termination: a legacy/changed
+		// target must not partially stop and then fail its ownership check.
+		if (!window.ownership) throw legacyOwnershipError();
+		assertExactWindowBinding(conversationId, window);
+		if (!window.ownership.processBootId || window.ownership.processStartTicks === undefined) throw new HostControlError("conflict", "Window lacks process-birth evidence; inspect it manually before stopping");
+		const state = await this.exactWindows.check(window.ownership);
+		if (state === "changed") throw new HostControlError("conflict", "Window ownership changed; inspect the retained window manually before stopping");
 		const attachment = this.options.server.attachment(conversationId);
 		const commandFeedback = this.options.registry.pendingInputs(conversationId).filter((input) => input.kind === "prompt" && input.body?.startsWith("/")).map((input) => input.deliveryId);
 		await this.options.registry.cancelPendingInputs(conversationId);
@@ -1631,6 +1669,7 @@ export class HostLifecycle {
 
 	private async inspectProjectWindow(manifest: RegisteredConversation, expectedSessionName: string): Promise<ManagedWindow | undefined> {
 		const persisted = this.options.registry.managedWindow(manifest.conversationId);
+		if (persisted && !persisted.ownership) throw legacyOwnershipError();
 		const launch = this.options.registry.launchIdentity(manifest.conversationId);
 		// A first admission can create the first tmux server/window. The launcher
 		// independently rejects duplicate markers; no inspection error is treated as absence.
@@ -1653,7 +1692,7 @@ export class HostLifecycle {
 	}
 
 	private async stopExactWindow(conversationId: string, window: Pick<ManagedWindow, "ownership" | "sessionName" | "windowId" | "paneId">, force = true): Promise<void> {
-		if (!window.ownership) throw new RelayRegistryError("invalid_state", "Window has no exact process ownership; inspect it manually");
+		if (!window.ownership) throw legacyOwnershipError();
 		assertExactWindowBinding(conversationId, window);
 		const state = await this.exactWindows.check(window.ownership);
 		if (state === "gone") return;

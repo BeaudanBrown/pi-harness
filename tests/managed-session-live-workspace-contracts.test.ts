@@ -32,7 +32,7 @@ const fixtures: Array<[unknown, boolean]> = [
 	[{ operation: "conversation.status", conversationId }, false],
 	[{ operation: "conversation.create", ...creation, placement }, true],
 	...["open", "resume", "stop"].map((name): [unknown, boolean] => [{ operation: `conversation.${name}`, conversationId }, true]),
-	...["refresh", "delete"].map((name): [unknown, boolean] => [{ operation: `conversation.${name}`, conversationId, confirmed: true }, true]),
+	...["refresh", "delete", "migrate"].map((name): [unknown, boolean] => [{ operation: `conversation.${name}`, conversationId, confirmed: true }, true]),
 	[{ operation: "conversation.delete.preview", conversationIds: [conversationId] }, false],
 	[{ operation: "conversation.delete.apply", ...preview }, true],
 	...["reconcile", "cleanup"].flatMap((name): Array<[unknown, boolean]> => [
@@ -148,8 +148,8 @@ test("coordinator stop/delete are forbidden before approval for every actor", ()
 			const { actor } = parseHostRequest({ version: "1.0.0", actor: actorValue, action });
 			assert.equal(hostActionPolicy(action, actor, coordinator), "direct", "read-only protected previews remain free and expose blockers");
 		}
-		for (const operation of ["conversation.stop", "conversation.delete"]) {
-			const action = parseHostAction({ operation, conversationId: coordinator, ...(operation.endsWith("delete") ? { confirmed: true } : {}) });
+		for (const operation of ["conversation.stop", "conversation.delete", "conversation.migrate"]) {
+			const action = parseHostAction({ operation, conversationId: coordinator, ...(operation !== "conversation.stop" ? { confirmed: true } : {}) });
 			const { actor } = parseHostRequest({ version: "1.0.0", actor: actorValue, action });
 			assert.equal(hostActionPolicy(action, actor, coordinator), "forbidden");
 			assert.equal(hostActionPolicy({ ...action, conversationId: project } as typeof action, actor, coordinator), actor.kind === "model" ? "approval" : "direct");
@@ -191,6 +191,7 @@ test("operation-specific response fixtures reject extras, malformed errors and o
 		"conversation.open": { ...launched, window: { sessionName: "default", windowId: "@1", paneId: "%1", conversationId } },
 		"conversation.resume": launched, "conversation.stop": { conversationId, runtimeState: "stopped" },
 		"conversation.refresh": launched,
+		"conversation.migrate": { conversationId, migrationState: "awaiting_exit", message: "Close the old window manually, then repeat migration" },
 		"conversation.delete": { conversationId, retirementId: id("retirement"), cleanupState: "pending" },
 		"conversation.delete.preview": previewData, "conversation.delete.apply": cleanup,
 		"space.reconcile.preview": previewData, "space.reconcile.apply": cleanup,

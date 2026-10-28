@@ -17,6 +17,7 @@ const actionNames: Record<string, string> = {
 	"project.create": "Create a project", "worktree.create": "Create a new checkout",
 	"worktree.conversation.create": "Create a new checkout and conversation", "worktree.conversation.fork": "Fork into a new checkout and conversation",
 	"conversation.create": "Create a new conversation", "conversation.open": "Open the native session", "conversation.resume": "Resume the native session",
+	"conversation.migrate": "Prepare legacy migration or verify manual window closure (no automatic stop or launch)",
 	"conversation.stop": "Stop the native session", "conversation.refresh": "Refresh the native runtime", "conversation.delete": "Retire the room and native session",
 	"conversation.delete.apply": "Retire the selected conversations", "worktree.remove.apply": "Remove the selected checkout",
 	"worktree.conversation.cleanup.apply": "Clean up the selected checkout and conversation", "worktree.branch.delete": "Delete the selected branch",
