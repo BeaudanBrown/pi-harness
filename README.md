@@ -353,6 +353,11 @@ Legacy windows without exact ownership require explicit, two-step
 manual window closure, then verify exit before clearing stale metadata. It does
 not restart tmux, adopt a live legacy process, or replace saved history. See
 [legacy window migration](docs/managed-legacy-window-migration.md).
+Already-closed legacy windows instead support individually previewed and confirmed
+[manual recovery](docs/managed-manual-recovery.md): operator attestation is recorded
+separately from verified exit, with incomplete inspection disclosed and detected
+conflicts blocking. The same preview identifies retired targets explicitly and
+resolves only their process-cleanup obligation, never resurrecting them.
 Confirmed deletion permanently retires the identity, stops only proven owned
 processes, and retries exact room/Space cleanup. Saved Pi/Matrix histories,
 workspaces and project files are preserved; this is not unbind-only deletion. The relay pins managed tmux operations to `XDG_RUNTIME_DIR`, matching the existing interactive `tmux_project` server. Marked live conversation windows appear as additional candidates in that same launcher and switch the requesting client to the existing Pi process; selection never creates or resumes work, and dormant conversations remain lifecycle-only. A confirmation-gated host operation previews and removes only marked windows from the obsolete `/tmp` tmux socket during the one-time deployment cutover.

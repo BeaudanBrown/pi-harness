@@ -60,6 +60,8 @@ export const HostActionSchema = Type.Union([
 	action("conversation.stop", target),
 	action("conversation.refresh", { ...target, confirmed: Type.Literal(true) }),
 	action("conversation.migrate", { ...target, confirmed: Type.Literal(true) }),
+	action("conversation.recover.preview", target),
+	action("conversation.recover.apply", { ...preview, operatorClosed: Type.Literal(true), acceptIncompleteInspection: Type.Literal(true) }),
 	action("conversation.delete", { ...target, confirmed: Type.Literal(true) }),
 	action("conversation.delete.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 100, uniqueItems: true }) }),
 	action("conversation.delete.apply", preview),
@@ -94,7 +96,7 @@ export const HOST_ERROR_EXITS = {
 const readOperationNames = [
 	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status",
 	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "worktree.branch.preview", "conversation.delete.preview",
-	"space.reconcile.preview", "space.cleanup.preview",
+	"space.reconcile.preview", "space.cleanup.preview", "conversation.recover.preview",
 ] as const satisfies readonly HostAction["operation"][];
 const readOperations = new Set<HostAction["operation"]>(readOperationNames);
 export type HostReadAction = Extract<HostAction, { operation: typeof readOperationNames[number] }>;
@@ -104,7 +106,7 @@ export function requiresModelApproval(action: HostAction): boolean { return isHo
 
 // protectedConversationId is resolved by the host, never supplied by the model.
 export function hostActionPolicy(action: HostAction, actor: HostActor, protectedConversationId: string): "forbidden" | "approval" | "direct" {
-	const destructive = ["conversation.stop", "conversation.delete", "conversation.migrate"];
+	const destructive = ["conversation.stop", "conversation.delete", "conversation.migrate", "conversation.recover.preview"];
 	if (destructive.includes(action.operation) && "conversationId" in action && action.conversationId === protectedConversationId) return "forbidden";
 	// Preview-based apply also revalidates all resolved targets before execution.
 	return actor.kind === "model" && isHostMutation(action) ? "approval" : "direct";
@@ -138,7 +140,7 @@ export const HostPreviewTargetSchema = Type.Union([
 	strict({ kind: Type.Literal("space"), roomId: room }),
 	strict({ kind: Type.Literal("branch"), checkoutId: stable("checkout"), branch: gitRef, tip: Type.String({ pattern: "^[a-f0-9]{40,64}$" }), mergeTarget: gitRef, mergeCommit: Type.String({ pattern: "^[a-f0-9]{40,64}$" }) }),
 ]);
-const previewResult = strict({ previewId: stable("preview"), expiresAt: Type.String({ format: "date-time" }), targets: Type.Array(HostPreviewTargetSchema, { maxItems: 100 }), activeRuns: Type.Array(strict({ conversationId: ConversationIdSchema, runId: identifier }), { maxItems: 100 }), blockers: Type.Array(text(512), { maxItems: 100 }) });
+const previewResult = strict({ previewId: stable("preview"), expiresAt: Type.String({ format: "date-time" }), targets: Type.Array(HostPreviewTargetSchema, { maxItems: 100 }), activeRuns: Type.Array(strict({ conversationId: ConversationIdSchema, runId: identifier }), { maxItems: 100 }), blockers: Type.Array(text(512), { maxItems: 100 }), warnings: Type.Optional(Type.Array(text(512), { maxItems: 10 })) });
 export const HostResultSchemas = {
 	"host.status": strict({ hostId: identifier, relayState: enumeration(["ready", "disconnected"]), capabilities, accountState: enumeration(["ready", "pending", "unavailable"]) }),
 	"workspace.list": listResult(Type.Union([
@@ -165,6 +167,8 @@ export const HostResultSchemas = {
 	"conversation.refresh": launched,
 	"conversation.migrate": strict({ conversationId: ConversationIdSchema, migrationState: enumeration(["awaiting_exit", "ready"]), message: text(512) }),
 	"conversation.delete": strict({ conversationId: ConversationIdSchema, retirementId: stable("retirement"), cleanupState }),
+	"conversation.recover.preview": previewResult,
+	"conversation.recover.apply": cleanup,
 	"conversation.delete.preview": previewResult,
 	"conversation.delete.apply": cleanup,
 	"space.reconcile.preview": previewResult,

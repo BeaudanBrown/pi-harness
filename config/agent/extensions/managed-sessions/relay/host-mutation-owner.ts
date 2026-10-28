@@ -13,7 +13,7 @@ import type { HostAccountOwner, MembershipRestore } from "./host-account-owner.j
 import { HostControlError } from "./host-control-error.js";
 
 const detached = (value: unknown): FrozenJson => JSON.parse(JSON.stringify(value)) as FrozenJson;
-type PreviewAction = Extract<HostReadAction, { operation: "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
+type PreviewAction = Extract<HostReadAction, { operation: "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
 type PreviewResult = HostResult<"conversation.delete.preview">;
 type Removal = Awaited<ReturnType<HostLifecycle["removalApprovalPreview"]>>;
 interface Preview {
@@ -21,6 +21,8 @@ interface Preview {
 	retirements?: RetirementPlan[]; removal?: Removal;
 	branch?: Awaited<ReturnType<HostLifecycle["branchApprovalPreview"]>>;
 	spaces?: LiveSpacePreview;
+	recovery?: Awaited<ReturnType<HostLifecycle["manualRecoveryPreview"]>>;
+	warnings?: string[];
 }
 export function isManagedHostPreview(action: HostAction): action is PreviewAction { return action.operation.endsWith(".preview"); }
 const stale = () => new HostControlError("stale_preview", "Frozen targets changed or expired; obtain a new preview and consent");
@@ -66,6 +68,15 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (source.operation === "worktree.conversation.cleanup.preview" && source.conversationId === coordinatorId) {
 			conversations = [coordinatorId]; preview.targets = [{ kind: "conversation", conversationId: coordinatorId }];
 			preview.blockers.push("The protected coordinator cannot be retired or included in destructive cleanup");
+		} else if (source.operation === "conversation.recover.preview") {
+			preview.recovery = await this.options.lifecycle.manualRecoveryPreview(source.conversationId);
+			conversations = [source.conversationId];
+			preview.targets = [{ kind: "conversation", conversationId: source.conversationId }];
+			preview.warnings = [
+				`Mode: ${preview.recovery.mode}. Approval asserts the old Pi was manually closed; this is NOT verified process exit.`,
+				`Generation ${preview.recovery.generationId}; old window ${preview.recovery.window.windowId}/${preview.recovery.window.paneId} in ${JSON.stringify(preview.recovery.window.sessionName)}.`,
+				`${preview.recovery.observation.unreadableProcesses.length} processes could not be inspected. Approval accepts this uncertainty. No automatic stop or launch.`,
+			];
 		} else if (source.operation === "conversation.delete.preview") {
 			conversations = [...source.conversationIds].sort();
 			if (conversations.includes(coordinatorId)) preview.blockers.push("The protected coordinator cannot be retired");
@@ -106,7 +117,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		}
 		preview.activeRuns = await this.activeRuns(conversations);
 		const previewId = `preview_${createHash("sha256").update("pi-managed-sessions:preview:live-v1\0").update(this.options.registry.hostId).update("\0").update(JSON.stringify(preview)).digest("hex").slice(0, 32)}`;
-		const result = { previewId, expiresAt: new Date(preview.expiresAt).toISOString(), targets: preview.targets, activeRuns: preview.activeRuns, blockers: preview.blockers };
+		const result = { previewId, expiresAt: new Date(preview.expiresAt).toISOString(), targets: preview.targets, activeRuns: preview.activeRuns, blockers: preview.blockers, ...(preview.warnings ? { warnings: preview.warnings } : {}) };
 		try { parseHostResponse(source.operation, { version: "1.0.0", requestId: "preview", ok: true, data: result }); }
 		catch { throw new HostControlError("unavailable", "Preview exceeds target bounds; request a smaller operation"); }
 		if (Buffer.byteLength(JSON.stringify(result)) > 60 * 1024) throw new HostControlError("unavailable", "Preview exceeds frame bounds; request a smaller operation");
@@ -116,6 +127,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 	private async previewFor(action: Extract<HostAction, { previewId: string }>): Promise<Preview> {
 		const saved = this.previews.get(action.previewId); if (!saved || saved.expiresAt <= this.now()) throw stale();
 		const expected = {
+			"conversation.recover.apply": "conversation.recover.preview",
 			"conversation.delete.apply": "conversation.delete.preview", "worktree.remove.apply": "worktree.remove.preview",
 			"worktree.conversation.cleanup.apply": "worktree.conversation.cleanup.preview", "space.reconcile.apply": "space.reconcile.preview", "space.cleanup.apply": "space.cleanup.preview",
 		};
@@ -124,6 +136,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 	}
 	private async validPreview(preview: Preview, branch = false): Promise<boolean> {
 		if (preview.expiresAt <= this.now() || preview.blockers.length) return false;
+		if (preview.source.operation === "conversation.recover.preview" && (!preview.recovery || !isDeepStrictEqual(preview.recovery, await this.options.lifecycle.manualRecoveryPreview(preview.source.conversationId)))) return false;
 		if (preview.branch && (preview.source.operation !== "worktree.branch.preview" || !isDeepStrictEqual(preview.branch, await this.options.lifecycle.branchApprovalPreview(preview.source)))) return false;
 		if (preview.retirements && !isDeepStrictEqual(preview.retirements, preview.retirements.map((plan) => this.options.retirement.prepare(plan.conversationId)))) return false;
 		if (preview.source.operation === "space.reconcile.preview" || preview.source.operation === "space.cleanup.preview") {
@@ -189,7 +202,11 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			const preview = frozen.preconditions.preview as unknown as Preview;
 			if (!await this.validPreview(preview, action.operation === "worktree.branch.delete")) throw stale();
 			let pending = false;
-			if (action.operation === "conversation.delete.apply") {
+			if (action.operation === "conversation.recover.apply") {
+				if (!preview.recovery) throw stale();
+				await this.options.lifecycle.executeManualRecovery(preview.recovery, operationId);
+				pending = preview.recovery.mode === "retired_cleanup" && Boolean(this.options.registry.retirement(preview.recovery.conversationId)?.cleanup);
+			} else if (action.operation === "conversation.delete.apply") {
 				for (const plan of preview.retirements!) await this.options.retirement.retirePrepared(plan);
 				pending = true;
 			} else if (action.operation === "space.reconcile.apply" || action.operation === "space.cleanup.apply") {

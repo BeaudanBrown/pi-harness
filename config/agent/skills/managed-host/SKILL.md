@@ -15,6 +15,16 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
 - `conversation.open` is window-first; `conversation.resume` waits for readiness.
   Neither includes a prompt. Reuse the saved conversation rather than creating a
   replacement after a timeout. Inspect uncertain outcomes before any explicit retry.
+- For legacy windows still present, `conversation.migrate` captures exit evidence
+  before manual closure and verifies it on a separately confirmed repeat.
+  For already-closed legacy windows, use `conversation.recover.preview`, inspect
+  its mode and uncertainty warnings, then `conversation.recover.apply` with the
+  returned preview ID, `confirmed`, `operatorClosed`, and `acceptIncompleteInspection`
+  all true. Obtain the operator's actual closure confirmation; never invent it.
+  Each model apply still needs independent live approval. Detected conflicts block;
+  changed observations need fresh preview and consent. Recovery records operator
+  attestation, not verified exit. It never stops or launches Pi. For a retired target,
+  it only resolves the stop obligation; account cleanup remains independent.
 - `conversation.delete` permanently retires the identity and cleans up its exact
   owned resources. It preserves saved Pi/Matrix history and workspace files.
   The coordinator cannot be stopped or deleted.

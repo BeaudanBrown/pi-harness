@@ -14,6 +14,7 @@ import { CoordinatorRouter } from "./coordinator-router.js";
 import { ConversationManifestStore } from "./manifest-store.js";
 import { ManagedSessionIpcServer } from "./ipc-server.js";
 import { HostLifecycle } from "./host-lifecycle.js";
+import { wakeFailureNotice } from "./legacy-window-migration.js";
 import { RelayEventProjector } from "./event-projector.js";
 import { managedMatrixConfigFromEnvironment, ManagedMatrixClient } from "./matrix-client.js";
 import { peerUidFromHelper } from "./peer-uid.js";
@@ -541,7 +542,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			}, async (sourceId, manifest, error) => {
 				const transient = error instanceof MatrixError && error.retryable;
 				await eventProjector.projectNotice(manifest.conversationId, `${sourceId}:launch-${transient ? "retry" : "failed"}`,
-					"Managed conversation wake failed; queued input remains available for retry.", transient ? "silent" : "notify");
+					wakeFailureNotice(error), transient ? "silent" : "notify");
 			}, async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
 			(message) => process.stderr.write(`pi-managed-session-relay: managed routing unavailable: ${redactManagedValue(message, environment)}\n`),
 			(conversationId) => controlPollPublisher.reconcile(conversationId), (conversationId) => eventProjector!.checkpointPollPublisher.reconcile(conversationId), media,

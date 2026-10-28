@@ -21,8 +21,16 @@ function parseIntent(value: unknown): Intent {
 	if (!Check(IntentSchema, value)) throw new HostControlError("conflict", "Legacy migration evidence is invalid; manual investigation is required");
 	return value;
 }
-export function legacyOwnershipError(): HostControlError {
-	return new HostControlError("upgrade_required", "Legacy window ownership cannot be used by stop/start. Use confirmed conversation.migrate BEFORE closing the old window, then close it manually and repeat migration. Do not delete the conversation or restart tmux.");
+class LegacyOwnershipError extends HostControlError {
+	constructor() {
+		super("upgrade_required", "Legacy window ownership cannot be used by stop/start. If the old window exists, use confirmed conversation.migrate BEFORE closing it. If already closed, use conversation.recover.preview and separately confirmed apply. Do not delete the conversation or restart tmux.");
+	}
+}
+export function legacyOwnershipError(): HostControlError { return new LegacyOwnershipError(); }
+export function wakeFailureNotice(error: unknown): string {
+	return error instanceof LegacyOwnershipError
+		? `Queued input is preserved, but launch is blocked. ${error.message}`
+		: "Managed conversation wake failed; queued input remains available for retry. Use !status to inspect its state before retrying.";
 }
 
 /** Called only under the lifecycle workspace lock and explicit per-call consent.

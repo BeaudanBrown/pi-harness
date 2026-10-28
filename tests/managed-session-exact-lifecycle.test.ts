@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test, { type TestContext } from "node:test";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, stat, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { hostApprovalQuestion } from "../config/agent/extensions/managed-sessions/relay/host-approval-prompts.js";
+import { legacyOwnershipError, wakeFailureNotice } from "../config/agent/extensions/managed-sessions/relay/legacy-window-migration.js";
 import { HostControlServer } from "../config/agent/extensions/managed-sessions/relay/host-control-server.js";
 import { HostDispatcher } from "../config/agent/extensions/managed-sessions/relay/host-dispatcher.js";
 import { ManagedHostMutationOwner } from "../config/agent/extensions/managed-sessions/relay/host-mutation-owner.js";
@@ -47,6 +49,7 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 	let proof: ExactWindowProof | undefined; let state: "match" | "gone" | "changed" = "gone";
 	let inspectError = false;
 	let legacyState: "running" | "gone" | "error" = "running";
+	let unreadableProcesses: string[] = [];
 	let beforeLegacyCheck: (() => Promise<void>) | undefined;
 	let attach = true; let retainedAlive = false; let unknownCreate = false; let invalidProof = false; let exits = true; let creates = 0;
 	let beforeCreate: (() => Promise<void>) | undefined;
@@ -71,6 +74,7 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 				case "root-resolve": return { sessionName: "project" };
 				case "window-legacy-observe":
 					if (legacyState === "error") throw Error("private launcher stderr");
+					if (request.manualClosure) { await beforeLegacyCheck?.(); return { conflicts: legacyState !== "gone", bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", unreadableProcesses }; }
 					if (request.evidence) { await beforeLegacyCheck?.(); return { state: legacyState }; }
 					return { bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processes: [{ pid: "789", startTicks: "123" }] };
 				case "window-inspect-exact":
@@ -103,6 +107,7 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 	return { root, manifest, owner, calls, server, matrix, get registry() { return registry; }, get creates() { return creates; },
 		set inspectError(value: boolean) { inspectError = value; },
 		set legacyState(value: typeof legacyState) { legacyState = value; },
+		set unreadableProcesses(value: string[]) { unreadableProcesses = value; },
 		set beforeLegacyCheck(value: () => Promise<void>) { beforeLegacyCheck = value; },
 		set attach(value: boolean) { attach = value; }, set retainedAlive(value: boolean) { retainedAlive = value; }, set unknownCreate(value: boolean) { unknownCreate = value; },
 		set beforeCreate(value: () => Promise<void>) { beforeCreate = value; },
@@ -122,6 +127,139 @@ function request(conversationId: string, operation: "conversation.stop" | "conve
 }
 
 const legacyWindow = { sessionName: "project", windowId: "@3", paneId: "%3" };
+
+test("manual recovery preserves history and queues, fences nonce, and requires fresh consent after restart", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone"; f.unreadableProcesses = ["123"];
+	await f.registry.setManagedWindow(id, legacyWindow); await f.registry.setAttachmentNonce(id, "n".repeat(32));
+	await f.registry.recordAcceptedInput(id, { deliveryId: `delivery_${"a".repeat(32)}`, matrixEventId: "$manual-input", kind: "prompt", body: "queued work", status: "accepted" });
+	const before = f.registry.snapshot(); const manifest = f.registry.registeredConversation(id);
+	const file = join(f.root, "sessions", id, "session.jsonl"); const bytes = await readFile(file);
+	const lifecycle = f.owner(); const snapshot = await lifecycle.manualRecoveryPreview(id);
+	assert.deepEqual(snapshot.observation.unreadableProcesses, ["123"]);
+	await lifecycle.executeManualRecovery(snapshot, `operation_${"1".repeat(32)}`);
+	assert.equal(f.registry.managedWindow(id), null);
+	assert.equal(f.registry.snapshot().conversations[0]!.attachmentNonceHash, undefined);
+	assert.deepEqual(f.registry.snapshot().conversations[0]!.pendingInputs, before.conversations[0]!.pendingInputs);
+	assert.deepEqual(f.registry.registeredConversation(id), manifest); assert.deepEqual(await readFile(file), bytes);
+	const receipt = JSON.parse(await readFile(join(f.root, "sessions", id, `manual-recovery-operation_${"1".repeat(32)}.json`), "utf8"));
+	assert.equal(receipt.closureBasis, "operator_confirmed"); assert.equal(f.creates, 0);
+	await f.reload();
+	await assert.rejects(f.owner().executeManualRecovery(snapshot, `operation_${"2".repeat(32)}`), /requires a dormant legacy window/);
+	assert.equal(f.registry.managedWindow(id), null);
+});
+
+test("manual recovery blocks detected conflicts, changed inspection, history changes and changed windows", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId;
+	await f.registry.setManagedWindow(id, legacyWindow); const owner = f.owner();
+	await assert.rejects(owner.manualRecoveryPreview(id), /still exists/);
+	f.legacyState = "gone"; const snapshot = await owner.manualRecoveryPreview(id);
+	f.unreadableProcesses = ["42"];
+	await assert.rejects(owner.executeManualRecovery(snapshot, `operation_${"3".repeat(32)}`), /changed/);
+	f.unreadableProcesses = [];
+	await f.registry.setManagedWindow(id, { ...legacyWindow, paneId: "%99" });
+	await assert.rejects(owner.executeManualRecovery(snapshot, `operation_${"3".repeat(32)}`), /changed/);
+	await f.registry.setManagedWindow(id, legacyWindow);
+	await writeFile(join(f.root, "sessions", id, "session.jsonl"), "invalid history");
+	await assert.rejects(owner.executeManualRecovery(snapshot, `operation_${"3".repeat(32)}`));
+	assert.deepEqual(f.registry.managedWindow(id), legacyWindow); assert.equal(f.creates, 0);
+});
+
+test("manual retirement reconciliation completes only stop and preserves permanent retirement", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone";
+	await f.registry.setManagedWindow(id, legacyWindow); const lifecycle = f.owner();
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+	try {
+		await retirement.retire(id); await retirement.drain();
+		const before = f.registry.retirement(id)!;
+		const snapshot = await lifecycle.manualRecoveryPreview(id); assert.equal(snapshot.mode, "retired_cleanup");
+		await lifecycle.executeManualRecovery(snapshot, `operation_${"4".repeat(32)}`);
+		const after = f.registry.retirement(id)!;
+		assert.equal(after.retirementId, before.retirementId);
+		assert.deepEqual(after.cleanup!.filter(e => e.kind !== "stop"), before.cleanup!.filter(e => e.kind !== "stop"));
+		assert.equal(after.cleanup!.find(e => e.kind === "stop")!.phase, "done");
+		assert.equal(f.registry.registeredConversation(id), undefined);
+		await retirement.drain(); await f.reload();
+		assert.equal(f.registry.retirement(id)!.cleanup!.find(e => e.kind === "stop")!.phase, "done");
+	} finally { await retirement.close(); }
+});
+
+test("even adopted promotion blocks manual preview and atomic recovery commit", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone";
+	await f.registry.setManagedWindow(id, legacyWindow);
+	const frozen = await f.owner().manualRecoveryPreview(id);
+	const snapshot = f.registry.snapshot();
+	snapshot.conversations[0]!.promotion = { phase: "adopted", sourceSessionFile: join(f.root, "original.jsonl"), requestedAt: new Date().toISOString() };
+	await writeFile(join(f.root, "registry.json"), JSON.stringify(snapshot)); await f.reload();
+	await assert.rejects(f.owner().manualRecoveryPreview(id), /pending promotion/);
+	await assert.rejects(f.registry.completeLegacyWindowMigration(id, frozen.generationId, frozen.window), /target changed or remains active/);
+	assert.deepEqual(f.registry.managedWindow(id), legacyWindow);
+});
+
+test("manual recovery preview does not repair history permissions", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone";
+	await f.registry.setManagedWindow(id, legacyWindow);
+	const file = join(f.root, "sessions", id, "session.jsonl"); await chmod(file, 0o644);
+	await assert.rejects(f.owner().manualRecoveryPreview(id), /permissions require manual correction/);
+	assert.equal((await stat(file)).mode & 0o777, 0o644);
+	assert.deepEqual(f.registry.managedWindow(id), legacyWindow);
+});
+
+test("interrupted manual recovery never replays an attestation after restart", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone";
+	await f.registry.setManagedWindow(id, legacyWindow); const lifecycle = f.owner();
+	const snapshot = await lifecycle.manualRecoveryPreview(id);
+	let checks = 0;
+	f.beforeLegacyCheck = async () => { if (++checks === 2) await f.registry.setManagedWindow(id, { ...legacyWindow, paneId: "%99" }); };
+	await assert.rejects(lifecycle.executeManualRecovery(snapshot, `operation_${"5".repeat(32)}`), /target changed/);
+	const receipt = JSON.parse(await readFile(join(f.root, "sessions", id, `manual-recovery-operation_${"5".repeat(32)}.json`), "utf8"));
+	assert.equal(receipt.closureBasis, "operator_confirmed");
+	await f.reload(); assert.equal(f.registry.managedWindow(id)!.paneId, "%99"); assert.equal(f.creates, 0);
+});
+
+test("manual recovery model approval discloses uncertainty and expires on target changes", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone"; f.unreadableProcesses = ["123"];
+	await f.registry.setManagedWindow(id, legacyWindow); const lifecycle = f.owner();
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+	try {
+		const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
+		const preview = await mutations.preview({ operation: "conversation.recover.preview", conversationId: id });
+		const request: ModelHostRequest = { version: "1.0.0", actor: { kind: "model", requestId: "recover", conversationId: id,
+			generationId: deriveGenerationId(id, 1), runId: "run", toolCallId: "tool", presentation: "local_dialog" },
+			action: { operation: "conversation.recover.apply", previewId: preview.previewId, confirmed: true, operatorClosed: true, acceptIncompleteInspection: true } };
+		const approval = prepareHostApproval("host", request, await mutations.freeze(request), Date.now());
+		assert.match(hostApprovalQuestion(approval), /NOT verified process exit/);
+		assert.match(hostApprovalQuestion(approval), /1 processes could not be inspected/);
+		assert.equal(await mutations.revalidate(approval), true);
+		await assert.rejects(mutations.executeHuman(request), /independent consent/);
+		f.unreadableProcesses = ["123", "456"];
+		assert.equal(await mutations.revalidate(approval), false);
+		await assert.rejects(mutations.execute(approval), /Frozen targets changed/);
+		const restarted = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
+		await assert.rejects(restarted.freeze(request), /Frozen targets changed/);
+	} finally { await retirement.close(); }
+});
+
+test("manual recovery rejects exact-owned conversations and legacy notices stay actionable and redacted", async t => {
+	const f = await fixture(t); const lifecycle = f.owner(); await lifecycle.wake(f.manifest);
+	await assert.rejects(lifecycle.manualRecoveryPreview(f.manifest.conversationId), /requires a dormant legacy window/);
+	assert.match(wakeFailureNotice(legacyOwnershipError()), /conversation.recover.preview/);
+	assert.ok(!wakeFailureNotice(Error("private token secret")).includes("secret"));
+});
+
+test("manual recovery preview freezes disclosure and human apply requires both attestations", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone"; f.unreadableProcesses = ["123"];
+	await f.registry.setManagedWindow(id, legacyWindow); const lifecycle = f.owner();
+	const retirement = new ConversationRetirement({ registry: f.registry, server: f.server, matrix: f.matrix, matrixAuthenticated: () => false, windows: lifecycle.exactWindows });
+	try {
+		const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle, retirement, server: f.server });
+		const preview = await mutations.preview({ operation: "conversation.recover.preview", conversationId: id });
+		assert.match(preview.warnings!.join(" "), /1 processes could not be inspected/);
+		const result = await mutations.executeHuman({ version: "1.0.0", actor: { kind: "human_local", requestId: "manual" },
+			action: { operation: "conversation.recover.apply", previewId: preview.previewId, confirmed: true, operatorClosed: true, acceptIncompleteInspection: true } });
+		assert.equal((result as { cleanupState: string }).cleanupState, "complete");
+		assert.equal(f.registry.managedWindow(id), null);
+	} finally { await retirement.close(); }
+});
 
 test("legacy stop/start returns actionable errors without cancellation, signalling or adoption", async t => {
 	const f = await fixture(t); const id = f.manifest.conversationId; const owner = f.owner();

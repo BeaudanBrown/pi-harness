@@ -24,6 +24,13 @@ test("terminal and room controls parse arguments without shell evaluation or pro
 	assert.deepEqual(roomHostCommand("!start", conversationId), { operation: "conversation.resume", conversationId });
 	assert.deepEqual(hostCommandAction(`conversation migrate ${conversationId} --confirmed`), { operation: "conversation.migrate", conversationId, confirmed: true });
 	assert.throws(() => hostCommandAction(`conversation migrate ${conversationId}`));
+	assert.deepEqual(hostCommandAction(`conversation recover preview ${conversationId}`), { operation: "conversation.recover.preview", conversationId });
+	const recovery = { operation: "conversation.recover.apply", previewId: `preview_${"1".repeat(32)}`, confirmed: true, operatorClosed: true, acceptIncompleteInspection: true };
+	assert.deepEqual(hostCommandAction(`conversation recover apply --preview-id ${recovery.previewId} --confirmed --operator-closed --accept-incomplete-inspection`), recovery);
+	assert.deepEqual(managedHostAction(recovery), recovery);
+	for (const field of ["confirmed", "operatorClosed", "acceptIncompleteInspection"]) {
+		const invalid = { ...recovery } as Record<string, unknown>; delete invalid[field]; assert.throws(() => managedHostAction(invalid));
+	}
 	assert.deepEqual(roomHostCommand("!close --confirm", conversationId), { operation: "conversation.delete", conversationId, confirmed: true });
 	for (const alias of ["delete", "close"]) assert.deepEqual(hostCommandAction(`${alias} ${conversationId} --confirm`), { operation: "conversation.delete", conversationId, confirmed: true });
 	for (const text of ["!abort", "!model", "!thinking high", "!compact", "!new", "ordinary task"]) assert.equal(roomHostCommand(text, conversationId), undefined);

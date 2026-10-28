@@ -23,7 +23,7 @@ def birth(proc, pid):
     return {"pid": str(pid), "startTicks": fields[19]}, int(fields[1]), fields[0]
 
 
-def inventory(proc, conversation_id, session_file):
+def inventory(proc, conversation_id, session_file, unreadable=None, session_directory=None):
     rows = {}
     matches = set()
     for path in proc.iterdir():
@@ -50,14 +50,42 @@ def inventory(proc, conversation_id, session_file):
             rows[path.name] = (before[0], before[1])
             if (f"PI_MANAGED_SESSION_CONVERSATION_ID={conversation_id}".encode() in env
                     or f"PI_MANAGED_PROJECT_SESSION_FILE={session_file}".encode() in env
-                    or any(arg == os.fsencode(session_file) and i > 0 and argv[i - 1] == b"--session" for i, arg in enumerate(argv))):
+                    or any(arg == os.fsencode(session_file) and i > 0 and argv[i - 1] == b"--session" for i, arg in enumerate(argv))
+                    or session_directory and (any(entry.startswith(b"PI_MANAGED_PROJECT_SESSION_FILE=" + os.fsencode(session_directory) + b"/") for entry in env)
+                        or any(arg.startswith(os.fsencode(session_directory) + b"/") and i > 0 and argv[i - 1] == b"--session" for i, arg in enumerate(argv)))):
                 matches.add(path.name)
         except FileNotFoundError:
             continue
+        except PermissionError:
+            if unreadable is None:
+                raise
+            unreadable.append(path.name)
+            if len(unreadable) > MAX_PROCESSES:
+                raise ValueError("unreadable process inventory exceeds bounds")
     return rows, matches
 
 
+def observe_manual(request, panes, proc=Path("/proc")):
+    if set(request) != {"conversationId", "window", "sessionDirectory", "manualClosure"} or request["manualClosure"] is not True:
+        raise ValueError("invalid manual observation request")
+    cid, window, directory = request["conversationId"], request["window"], request["sessionDirectory"]
+    if not re.fullmatch(r"conv_[a-f0-9]{32}", cid) or not isinstance(directory, str) or not directory.startswith("/") or Path(directory).name != cid:
+        raise ValueError("invalid manual observation identity")
+    if set(window) != {"sessionName", "windowId", "paneId"} or not re.fullmatch(r"@[0-9]+", window["windowId"]) or not re.fullmatch(r"%[0-9]+", window["paneId"]):
+        raise ValueError("invalid saved window")
+    lines = [line.split("|") for line in panes.splitlines() if line]
+    if any(len(line) != 9 for line in lines):
+        raise ValueError("ambiguous tmux inventory")
+    unreadable = []
+    _, writers = inventory(proc, cid, directory + "/session.jsonl", unreadable, directory)
+    conflicts = bool(writers or any(line[4] == cid or line[1] == window["windowId"] or line[2] == window["paneId"] for line in lines))
+    return {"conflicts": conflicts, "unreadableProcesses": sorted(unreadable, key=int),
+            "bootId": (proc / "sys/kernel/random/boot_id").read_text().strip()}
+
+
 def observe(request, panes, proc=Path("/proc")):
+    if "manualClosure" in request:
+        return observe_manual(request, panes, proc)
     if set(request) not in ({"conversationId", "window", "sessionFile"}, {"conversationId", "window", "sessionFile", "evidence"}):
         raise ValueError("invalid observation request")
     cid, window, session = request["conversationId"], request["window"], request["sessionFile"]

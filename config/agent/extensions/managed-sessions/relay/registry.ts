@@ -1034,18 +1034,19 @@ export class RelayRegistry {
 		});
 	}
 
-	/** Only the confirmed legacy migration owner may call this after verified exit.
+	/** Only confirmed recovery owners may call this after verified exit or audited operator attestation.
 	 * Commit metadata removal and old-adapter fencing together; retain all history,
 	 * delivery receipts, queued inputs and logical conversation/generation identity.
 	 */
-	async completeLegacyWindowMigration(conversationId: string, generationId: string, window: NonNullable<RuntimeConversation["managedWindow"]>): Promise<void> {
+	async completeLegacyWindowMigration(conversationId: string, generationId: string, window: NonNullable<RuntimeConversation["managedWindow"]>, identityDigest?: string): Promise<void> {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
 			const manifest = this.registeredConversation(conversationId);
 			if (!manifest || manifest.kind !== "project" || this.retirement(conversationId) || this.activeGeneration(manifest).generationId !== generationId ||
 				conversation.state !== "dormant" || conversation.attachment || conversation.launch || window.ownership ||
+				identityDigest !== undefined && createHash("sha256").update(JSON.stringify(manifest)).digest("hex") !== identityDigest ||
 				!isDeepStrictEqual(conversation.managedWindow, window) || this.hasGenerationBoundary(conversationId) || this.isRefreshing(conversationId) ||
-				conversation.pendingControls.length || conversation.promotion && conversation.promotion.phase !== "adopted") {
+				conversation.pendingControls.length || conversation.promotion) {
 				throw new RelayRegistryError("invalid_state", "Legacy migration target changed or remains active; no metadata was cleared");
 			}
 			conversation.managedWindow = null;

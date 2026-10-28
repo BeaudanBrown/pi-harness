@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof } from "../exact-window-contracts.js";
 import { ExactWindowClient } from "./exact-window-client.js";
 import { legacyOwnershipError, migrateLegacyWindow } from "./legacy-window-migration.js";
+import { manualRecoverySnapshot, applyManualRecovery, type ManualRecoverySnapshot } from "./manual-legacy-recovery.js";
 import { HostControlError } from "./host-control-error.js";
 import { launchCoordinator as ensureCoordinatorWindow } from "./coordinator-launcher.js";
 import type { RetirementRecord } from "./retirement-store.js";
@@ -286,7 +287,7 @@ async function readPrivateIntent<T>(file: AtomicJsonFile<T>): Promise<T | undefi
 	return value;
 }
 
-export async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1, mustExist = false, forkContext?: ForkContext): Promise<{ sessionId: string; boundaryEntryId: string }> {
+export async function durableProjectSession(path: string, cwd: string, conversationId: string, creationKey: string, concept: string, ordinal = 1, mustExist = false, forkContext?: ForkContext, readOnly = false): Promise<{ sessionId: string; boundaryEntryId: string }> {
 	const context = forkContext === undefined ? undefined : parseForkContext(forkContext);
 	if (context && (ordinal !== 1 || context.sourceConversationId === conversationId)) throw new RelayRegistryError("invalid_state", "Fork context requires an independent initial generation");
 	try {
@@ -317,11 +318,14 @@ export async function durableProjectSession(path: string, cwd: string, conversat
 			if (seeds.length !== 1) throw new RelayRegistryError("invalid_state", "Existing project Pi session has no unique fork context");
 			verifyForkContextEntry(seeds[0], context, boundary.id);
 		}
-		if ((info.mode & 0o077) !== 0) await chmod(path, 0o600);
+		if ((info.mode & 0o077) !== 0) {
+			if (readOnly) throw new RelayRegistryError("invalid_state", "Saved Pi history permissions require manual correction before recovery");
+			await chmod(path, 0o600);
+		}
 		return { sessionId: header.id, boundaryEntryId: deriveTranscriptEntryId(header.id, boundary.id) };
 	} catch (error) {
 		if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
-		if (mustExist) throw new RelayRegistryError("invalid_state", "The persisted Pi session file is unavailable");
+		if (mustExist || readOnly) throw new RelayRegistryError("invalid_state", "The persisted Pi session file is unavailable");
 	}
 	const directory = await ensurePrivateDirectory(dirname(path));
 	const sessionId = ordinal === 1 ? `managed-${conversationId.slice(5)}` : `managed-${conversationId.slice(5)}-g${ordinal}`;
@@ -1479,6 +1483,28 @@ export class HostLifecycle {
 			this.options.registry.endRefresh(conversationId);
 			if (this.options.registry.conversationState(conversationId) === "active") await this.options.generationReady?.(conversationId);
 		}
+	}
+
+	private manualRecoveryOptions() {
+		return { registry: this.options.registry, sessionDirectory: resolve(this.options.projectSessionDirectory),
+			attached: (id: string) => Boolean(this.options.server.attachment(id)),
+			invoke: (operation: string, request: object) => this.invoke(operation, request),
+			validateSession: async (id: string) => {
+				const manifest = this.ownedProjectManifest(id); const generation = this.options.registry.activeGeneration(manifest);
+				const resolved = await this.resolveWorkspaceIdentity(manifest.placement!);
+				const file = join(resolve(this.options.projectSessionDirectory), id, generation.ordinal === 1 ? "session.jsonl" : `generation-${generation.ordinal}.jsonl`);
+				const saved = await durableProjectSession(file, resolved.cwd, id, manifest.creationKey, manifest.concept, generation.ordinal, true, undefined, true);
+				if (saved.sessionId !== generation.piSessionId || saved.boundaryEntryId !== generation.bindingBoundaryEntryId) throw new HostControlError("conflict", "Saved Pi identity changed; recovery is blocked");
+			},
+		};
+	}
+	manualRecoveryPreview(conversationId: string): Promise<ManualRecoverySnapshot> {
+		return manualRecoverySnapshot(this.manualRecoveryOptions(), conversationId);
+	}
+	executeManualRecovery(frozen: ManualRecoverySnapshot, operationId: string): Promise<void> {
+		const manifest = this.options.registry.registeredConversation(frozen.conversationId);
+		const key = manifest?.placement ? this.workspaceOperationKey(manifest.placement) : `retired:${frozen.conversationId}`;
+		return this.runWorktreeOperation(key, () => applyManualRecovery(this.manualRecoveryOptions(), frozen, operationId));
 	}
 
 	migrateConversation(conversationId: string): Promise<HostResult<"conversation.migrate">> {

@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location("legacy", "scripts/managed-legacy-observe.py")
 legacy = importlib.util.module_from_spec(spec)
@@ -86,6 +87,39 @@ class LegacyExitTests(unittest.TestCase):
         (self.proc / "123/stat").write_text("corrupt")
         with self.assertRaises(ValueError):
             self.observe("", evidence)
+
+    def manual(self, panes=""):
+        return legacy.observe({"conversationId": CID, "window": self.request["window"],
+                               "sessionDirectory": "/private/" + CID, "manualClosure": True}, panes, self.proc)
+
+    def test_manual_closure_reports_conflicts_never_exit_proof(self):
+        self.assertTrue(self.manual()["conflicts"])
+        self.process(123, 1, 100)
+        result = self.manual()
+        self.assertFalse(result["conflicts"])
+        self.assertNotIn("state", result)
+        for pane in [self.pane, self.pane.replace(CID, ""), self.pane.replace("@3", "@99").replace("%54", "%3").replace(CID, "")]:
+            self.assertTrue(self.manual(pane)["conflicts"])
+
+    def test_manual_closure_scans_all_saved_generations(self):
+        self.process(123, 1, 100)
+        for file in ["session.jsonl", "generation-5.jsonl"]:
+            self.process(124, 1, 200, argv=f"pi\0--session\0/private/{CID}/{file}\0".encode())
+            self.assertTrue(self.manual()["conflicts"])
+        self.process(124, 1, 200, argv=b"pi\0--session\0/private/unrelated/session.jsonl\0")
+        self.assertFalse(self.manual()["conflicts"])
+
+    def test_manual_closure_discloses_unreadable_processes_but_verified_path_still_fails(self):
+        original = Path.read_bytes
+        def read(path):
+            if path.name == "environ":
+                raise PermissionError("private detail")
+            return original(path)
+        with patch.object(Path, "read_bytes", read):
+            result = self.manual()
+            self.assertEqual(result["unreadableProcesses"], ["123"])
+            with self.assertRaises(PermissionError):
+                self.observe()
 
     def test_helper_is_read_only(self):
         before = {str(p): p.read_bytes() for p in self.proc.rglob("*") if p.is_file()}

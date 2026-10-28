@@ -56,7 +56,8 @@ background migration and no automatic busy-session upgrade.
   exit, never to adopt or signal the pane. A marker on an unrelated replacement
   shell is insufficient. A pane change during observation also blocks capture.
 - A window already closed before evidence capture cannot be recovered by this
-  path. It needs separate manual investigation, **not** registry deletion.
+  path. After manual investigation, use the separately previewed and confirmed
+  [operator-attested recovery](managed-manual-recovery.md), **not** registry deletion.
 - Surviving descendants or detached processes carrying the session identity block
   recovery even after window closure. Investigate their ownership; do not blindly
   kill them. The private `/proc` scan reads identity fields only and never logs
