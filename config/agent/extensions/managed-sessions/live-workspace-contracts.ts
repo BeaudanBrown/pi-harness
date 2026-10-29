@@ -67,7 +67,7 @@ export const HostActionSchema = Type.Union([
 	action("conversation.delete", { ...target, confirmed: Type.Literal(true) }),
 	action("conversation.delete.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 100, uniqueItems: true }) }),
 	action("conversation.delete.apply", preview),
-	action("space.reconcile.preview", {}),
+	action("space.reconcile.preview", { conversationIds: Type.Optional(Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 64, uniqueItems: true })) }),
 	action("space.reconcile.apply", preview),
 	action("space.cleanup.preview", {}),
 	action("space.cleanup.apply", preview),

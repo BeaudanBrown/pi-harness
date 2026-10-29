@@ -31,7 +31,7 @@ const commands = [
 	`conversation recover apply --preview-id preview_${"1".repeat(32)} --confirmed --operator-closed --accept-incomplete-inspection`,
 	...["refresh", "delete", "migrate"].map((word) => `conversation ${word} ${cid} --confirmed`),
 	`conversation delete preview --conversation-ids ${cid}`, `conversation delete apply ${apply}`,
-	"space reconcile preview", `space reconcile apply ${apply}`, "space cleanup preview", `space cleanup apply ${apply}`,
+	`space reconcile preview --conversation-ids ${cid}`, `space reconcile apply ${apply}`, "space cleanup preview", `space cleanup apply ${apply}`,
 	"coordinator membership restore --confirmed",
 ];
 

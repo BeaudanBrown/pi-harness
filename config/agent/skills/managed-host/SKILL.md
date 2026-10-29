@@ -35,6 +35,14 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
 - `conversation.delete` permanently retires the identity and cleans up its exact
   owned resources. It preserves saved Pi/Matrix history and workspace files.
   The coordinator cannot be stopped or deleted.
+- `space.reconcile.preview` accepts optional exact `conversationIds` (1–64).
+  Select only intended conversations; missing-workspace blockers require narrowing
+  the selection or explicit restoration, never silent skipping/recreation. Apply
+  preserves rooms/history and unrelated links. Newly created migration Spaces grant
+  the configured operator admin; existing permissions are unchanged. Interrupted
+  scoped plans retain their original selection with fresh approval. Older unscoped
+  plans permit an explicitly selected subset; excluded entries remain untouched.
+  Pre-checkout plans may need a second preview/apply for the checkout hierarchy.
 - Bulk deletion and worktree/Space changes use preview, inspect, then apply the
   returned `previewId`. One approval covers only those frozen targets. Changed
   scope requires a new preview and new consent. Branch deletion is separate.

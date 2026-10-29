@@ -115,8 +115,11 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 				tip: intent.head, mergeTarget: intent.mergeTarget, mergeCommit: intent.mergeCommit });
 		} else {
 			const cleanup = source.operation === "space.cleanup.preview";
-			preview.spaces = await this.options.lifecycle.spaceApprovalPreview(cleanup);
+			preview.spaces = await this.options.lifecycle.spaceApprovalPreview(cleanup, source.operation === "space.reconcile.preview" ? source.conversationIds : undefined);
+			preview.blockers.push(...(preview.spaces.blockers ?? []));
+			if (!cleanup) (preview.warnings ??= []).push("Reconcile only the frozen conversations and ancestor links. Preserve rooms and history; newly created migration Spaces grant the configured operator admin power 100. Existing Space permissions are not changed.");
 			const targets = new Map<string, PreviewResult["targets"][number]>();
+			for (const id of preview.spaces.selection ?? []) targets.set(id, { kind: "conversation", conversationId: id });
 			for (const link of preview.spaces.links) {
 				const proof = link.child.provenance;
 				targets.set(proof.kind === "conversation" ? proof.conversationId : link.child.roomId, proof.kind === "conversation" ? { kind: "conversation", conversationId: proof.conversationId } : { kind: "space", roomId: link.child.roomId });
@@ -125,6 +128,8 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			for (const item of preview.spaces.migration?.items ?? []) {
 				if (item.retired) continue;
 				targets.set(item.conversationId, { kind: "conversation", conversationId: item.conversationId });
+				if (item.checkout) targets.set(item.checkout.checkoutId, { kind: "worktree", checkoutId: item.checkout.checkoutId,
+					rootKey: item.checkout.placement.rootKey, workspace: item.checkout.placement.workspace });
 				for (const roomId of [item.checkout?.hostSpace, item.oldProjectSpace, item.targetProjectSpace, item.targetCheckoutSpace]) if (roomId) targets.set(roomId, { kind: "space", roomId });
 			}
 			for (const saved of preview.spaces.legacyPlacements ?? []) targets.set(saved.hostSpace, { kind: "space", roomId: saved.hostSpace });
@@ -162,7 +167,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (preview.branch && (preview.source.operation !== "worktree.branch.preview" || !isDeepStrictEqual(preview.branch, await this.options.lifecycle.branchApprovalPreview(preview.source)))) return false;
 		if (preview.retirements && !isDeepStrictEqual(preview.retirements, preview.retirements.map((plan) => this.options.retirement.prepare(plan.conversationId)))) return false;
 		if (preview.source.operation === "space.reconcile.preview" || preview.source.operation === "space.cleanup.preview") {
-			if (!preview.spaces || !isDeepStrictEqual(preview.spaces, await this.options.lifecycle.spaceApprovalPreview(preview.source.operation === "space.cleanup.preview"))) return false;
+			if (!preview.spaces || !isDeepStrictEqual(preview.spaces, await this.options.lifecycle.spaceApprovalPreview(preview.source.operation === "space.cleanup.preview", preview.source.operation === "space.reconcile.preview" ? preview.source.conversationIds : undefined))) return false;
 		}
 		if (preview.removal && !isDeepStrictEqual(preview.removal.intent, await this.options.lifecycle.removalApprovalSnapshot(preview.removal.intent.removalKey))) return false;
 		// Admin state changes do not signal or interrupt attached Pi runs.

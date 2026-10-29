@@ -346,13 +346,14 @@ export class ManagedMatrixClient {
 	async createPrivateSpaceIdempotent(name: string, aliasLocalpart: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, true, signal, aliasLocalpart); }
 	async createPrivateRoomIdempotent(name: string, aliasLocalpart: string, signal?: AbortSignal): Promise<string> { return this.createRoom(name, false, signal, aliasLocalpart); }
 	/** New live-workspace objects carry their proof in the atomic create, not a later best-effort write. */
-	async ensureManagedRoom(name: string, provenance: ManagedProvenance, signal?: AbortSignal): Promise<string> {
+	async ensureManagedRoom(name: string, provenance: ManagedProvenance, signal?: AbortSignal, migrationAdmin = false): Promise<string> {
 		const expected = structuredClone(parseManagedProvenance(provenance));
 		const alias = managedRoomAlias(expected);
 		const space = expected.kind.endsWith("_space");
+		if (migrationAdmin && !["project_space", "worktree_space"].includes(expected.kind)) throw new Error("Admin creation policy requires a migration Space");
 		let roomId = await this.lookupPrivateRoomAlias(alias, signal);
 		try {
-			if (!roomId) roomId = await this.createRoom(safeManagedTitle(name, alias), space, signal, alias, expected);
+			if (!roomId) roomId = await this.createRoom(safeManagedTitle(name, alias), space, signal, alias, expected, migrationAdmin);
 			this.#managedRoomIds.add(roomId);
 			await this.assertManagedProvenance(roomId, expected, signal);
 			return roomId;
@@ -447,11 +448,31 @@ export class ManagedMatrixClient {
 		return events;
 	}
 
-	private async createRoom(name: string, space: boolean, signal?: AbortSignal, aliasLocalpart?: string, provenance?: ManagedProvenance): Promise<string> {
+	async assertOperatorSpaceAdmin(roomId: string, signal?: AbortSignal): Promise<void> {
+		const snapshot = await this.operatorAdminSnapshot({ roomId, space: true }, signal);
+		if (snapshot.change) throw new ManagedMatrixError("invalid_response", "Migration Space lacks operator admin; use a separately approved admin migration");
+	}
+
+	private async migrationSpacePower(signal?: AbortSignal): Promise<JsonObject> {
+		const response = await this.request("GET", "/_matrix/client/v3/capabilities", undefined, signal);
+		const capabilities = (response as JsonObject)?.capabilities as JsonObject | undefined;
+		const versions = capabilities?.["m.room_versions"] as JsonObject | undefined;
+		const available = versions?.available as JsonObject | undefined;
+		const preferred = versions?.default;
+		const version = typeof preferred === "string" && /^(?:[1-9]|10|11|12)$/.test(preferred) && available?.[preferred] === "stable"
+			? preferred : available?.["10"] === "stable" ? "10" : undefined;
+		if (!version || this.operatorUserId === this.botUserId) throw new ManagedMatrixError("invalid_response", "No supported stable room version for migration Space admin policy");
+		return { room_version: version, power_level_content_override: { users: {
+			...(version === "12" ? {} : { [this.botUserId]: 100 }), [this.operatorUserId]: 100,
+		} } };
+	}
+
+	private async createRoom(name: string, space: boolean, signal?: AbortSignal, aliasLocalpart?: string, provenance?: ManagedProvenance, migrationAdmin = false): Promise<string> {
 		if (aliasLocalpart !== undefined && !/^[a-z0-9._=-]{1,128}$/.test(aliasLocalpart)) throw new Error("Matrix room alias localpart is malformed");
+		const creationPolicy = migrationAdmin ? await this.migrationSpacePower(signal) : {};
 		let roomId: string;
 		try {
-			const response = await this.request("POST", "/_matrix/client/v3/createRoom", { visibility: "private", preset: "private_chat", name,
+			const response = await this.request("POST", "/_matrix/client/v3/createRoom", { ...creationPolicy, visibility: "private", preset: "private_chat", name,
 				invite: [this.operatorUserId], is_direct: false, ...(aliasLocalpart ? { room_alias_name: aliasLocalpart } : {}),
 				...(provenance ? { initial_state: [{ type: MANAGED_PROVENANCE_EVENT, state_key: "", content: provenance }] } : {}),
 				creation_content: { ...(space ? { type: "m.space" } : {}), "m.federate": false } }, signal);
@@ -573,12 +594,12 @@ export class ManagedMatrixClient {
 			throw new ManagedMatrixError("invalid_response", "Matrix bot lacks authority over required room operations");
 		}
 	}
-	async operatorAdminSnapshot(target: AdminRoom): Promise<AdminPowerSnapshot> {
-		await this.assertRoomAuthority(target.roomId, target.space);
+	async operatorAdminSnapshot(target: AdminRoom, signal?: AbortSignal): Promise<AdminPowerSnapshot> {
+		await this.assertRoomAuthority(target.roomId, target.space, signal);
 		const base = `/_matrix/client/v3/rooms/${encodeURIComponent(target.roomId)}/state/`;
-		const creation = await this.request("GET", `${base}m.room.create/`) as JsonObject;
-		const powers = await this.request("GET", `${base}m.room.power_levels/`);
-		const member = await this.request("GET", `${base}m.room.member/${encodeURIComponent(this.operatorUserId)}`) as JsonObject;
+		const creation = await this.request("GET", `${base}m.room.create/`, undefined, signal) as JsonObject;
+		const powers = await this.request("GET", `${base}m.room.power_levels/`, undefined, signal);
+		const member = await this.request("GET", `${base}m.room.member/${encodeURIComponent(this.operatorUserId)}`, undefined, signal) as JsonObject;
 		if (!member || !["join", "invite"].includes(String(member.membership))) throw new HostControlError("conflict", "Operator is neither joined nor invited; admin migration will not restore membership");
 		return { ...planOperatorAdmin({ ...target, operatorUserId: this.operatorUserId, botUserId: this.botUserId, creation, powers }),
 			operatorMembership: member.membership as "join" | "invite" };

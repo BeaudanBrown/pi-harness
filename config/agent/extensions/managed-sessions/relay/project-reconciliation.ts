@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import { HostControlError } from "./host-control-error.js";
 import { LiveHierarchy, type HierarchyLink, type HierarchySpaceIdentity } from "./live-hierarchy.js";
 import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -22,7 +23,13 @@ interface ReconciliationItem {
 	hostLinked: boolean; roomLinked: boolean; manifestUpdated: boolean; oldUnlinked: boolean;
 }
 interface CleanupSpace { spaceId: string; hostUnlinked: boolean; operatorRemoved: boolean; left: boolean }
-interface ReconciliationIntent { version: 1; reconciliationKey: string; items: ReconciliationItem[]; cleanupSpaces?: CleanupSpace[] }
+interface ReconciliationIntent { version: 1; reconciliationKey: string; items: ReconciliationItem[]; selection?: string[]; cleanupSpaces?: CleanupSpace[] }
+interface ReconciliationPlan extends ReconciliationIntent { continuationOf?: string }
+const selectionIds = (ids: string[]): string[] => {
+	if (!Array.isArray(ids) || !ids.length || ids.length > 64 || new Set(ids).size !== ids.length || ids.some(id => !/^conv_[a-f0-9]{32}$/.test(id))) throw new RelayRegistryError("invalid_state", "Select 1–64 unique exact conversation IDs");
+	return [...ids].sort();
+};
+const planKey = (items: ReconciliationItem[], selection?: string[]) => `reconcile_${hash(selection ? { selection, items: items.map(planIdentity) } : items.map(planIdentity)).slice(0, 32)}`;
 
 
 const hash = (value: unknown): string => createHash("sha256").update(JSON.stringify(value)).digest("hex");
@@ -34,7 +41,7 @@ const planIdentity = (item: ReconciliationItem) => ({ conversationId: item.conve
 function parseIntent(value: unknown): ReconciliationIntent {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new RelayRegistryError("invalid_state", "Project reconciliation intent is malformed");
 	const record = value as Record<string, unknown>;
-	if (Object.keys(record).some((key) => !["version", "reconciliationKey", "items", "cleanupSpaces"].includes(key)) || record.version !== 1 ||
+	if (Object.keys(record).some((key) => !["version", "reconciliationKey", "items", "selection", "cleanupSpaces"].includes(key)) || record.version !== 1 ||
 		typeof record.reconciliationKey !== "string" || !/^reconcile_[a-f0-9]{32}$/.test(record.reconciliationKey) || !Array.isArray(record.items) || record.items.length > 64 ||
 		(record.cleanupSpaces !== undefined && (!Array.isArray(record.cleanupSpaces) || record.cleanupSpaces.length > 64))) throw new RelayRegistryError("invalid_state", "Project reconciliation intent is malformed");
 	for (const item of record.items as unknown[]) {
@@ -63,8 +70,10 @@ function parseIntent(value: unknown): ReconciliationIntent {
 		} else if (entry.targetCheckoutSpace) throw new RelayRegistryError("invalid_state", "Checkout migration source is missing");
 	}
 	const typedItems = record.items as unknown as ReconciliationItem[];
+	const selection = record.selection === undefined ? undefined : selectionIds(record.selection as string[]);
+	if (selection && (!isDeepStrictEqual(selection, record.selection) || typedItems.some(item => !selection.includes(item.conversationId)))) throw new RelayRegistryError("invalid_state", "Reconciliation selection is inconsistent");
 	if (new Set(typedItems.map((item) => item.conversationId)).size !== typedItems.length ||
-		`reconcile_${hash(typedItems.map(planIdentity)).slice(0, 32)}` !== record.reconciliationKey) throw new RelayRegistryError("invalid_state", "Project reconciliation identity is inconsistent");
+		planKey(typedItems, selection) !== record.reconciliationKey) throw new RelayRegistryError("invalid_state", "Project reconciliation identity is inconsistent");
 	for (const item of (record.cleanupSpaces ?? []) as unknown[]) {
 		if (typeof item !== "object" || item === null || Array.isArray(item) || Object.keys(item).some((key) => !["spaceId", "hostUnlinked", "operatorRemoved", "left"].includes(key))) throw new RelayRegistryError("invalid_state", "Project cleanup intent is malformed");
 		const entry = item as Record<string, unknown>;
@@ -81,7 +90,8 @@ export interface ReconciliationPreview extends Record<string, unknown> {
 	obsoleteSpaces: number;
 }
 
-export interface LiveSpacePreview { links: HierarchyLink[]; operatorUserId: string; botUserId: string; migration?: ReconciliationIntent;
+export interface LiveSpacePreview { links: HierarchyLink[]; operatorUserId: string; botUserId: string; migration?: ReconciliationPlan;
+	selection?: string[]; blockers?: string[]; continuationJournal?: string;
 	legacyPlacements?: Array<{ conversationId: string; hostSpace: string; workspace: ResolvedWorkspace }> }
 export interface SpaceCleanupAccount {
 	leaveAndForget(target: HierarchySpaceIdentity, signal: AbortSignal): Promise<boolean>;
@@ -105,18 +115,65 @@ export class ProjectReconciler {
 	apply(reconciliationKey: string): Promise<Record<string, unknown>> { return this.serial(() => this.applyOnce(reconciliationKey)); }
 	cleanup(reconciliationKey: string): Promise<Record<string, unknown>> { return this.serial(() => this.cleanupOnce(reconciliationKey)); }
 
+	/** A completed subset of an older broad plan may need the newer checkout
+	 * migration. Keep that follow-on journal separate; never rewrite the old
+	 * plan's identity or the excluded entries. Once created, always recover it. */
+	private async continuationOwner(selection?: string[]): Promise<ProjectReconciler | undefined> {
+		if (!selection) return undefined;
+		const child = new ProjectReconciler({ ...this.options, intentDirectory: join(this.options.intentDirectory, `scoped-${hash(selection).slice(0, 32)}`) });
+		if (await child.readIntent()) return child;
+		const existing = await this.readIntent();
+		if (existing && !existing.selection && selection.every(id => !existing.items.some(item => item.conversationId === id) || existing.items.some(item => item.conversationId === id && (item.oldUnlinked || item.retired)))
+			&& existing.items.some(item => !item.oldUnlinked && !item.retired)) return child;
+		return undefined;
+	}
+
 	/** Read-only preview: saved live links plus the explicit, frozen legacy migration plan. */
-	async previewLive(cleanup: boolean): Promise<LiveSpacePreview> {
+	async previewLive(cleanup: boolean, conversationIds?: string[]): Promise<LiveSpacePreview> {
 		const hierarchy = this.options.hierarchy; if (!hierarchy) throw new RelayRegistryError("invalid_state", "Live hierarchy is unavailable");
-		const links = hierarchy.maintenanceLinks(cleanup);
+		const selection = conversationIds ? selectionIds(conversationIds) : undefined;
+		if (cleanup && selection) throw new RelayRegistryError("invalid_state", "Selection is not cleanup authority");
+		const continuation = await this.continuationOwner(selection);
+		if (continuation) return { ...await continuation.previewLive(cleanup, selection), continuationJournal: hash(selection) };
+		const manifests = this.options.registry.listManifests().filter(item => selection?.includes(item.conversationId));
+		if (selection) {
+			const blockers: string[] = [];
+			const admitted = await this.readIntent();
+			for (const id of selection) {
+				// A retired member of this exact admitted plan is skipped by apply,
+				// never restored; it must not prevent finishing the other members.
+				if (this.options.registry.retirement(id) && admitted && (!admitted.selection || isDeepStrictEqual(admitted.selection, selection)) && admitted.items.some(item => item.conversationId === id)) continue;
+				const manifest = manifests.find(item => item.conversationId === id);
+				if (!manifest || manifest.kind !== "project" || !manifest.placement || this.options.registry.retirement(id)) { blockers.push(`${id}: select an existing, non-retired project conversation`); continue; }
+				try { await this.options.resolveWorkspace(manifest.placement); }
+				catch { blockers.push(`${id} (${manifest.concept}): cannot resolve workspace ${manifest.placement.rootKey}/${manifest.placement.workspace}; restore the checkout or exclude this conversation`.slice(0, 512)); }
+			}
+			if (blockers.length) return { links: [], selection, blockers, operatorUserId: this.options.matrix.operatorUserId, botUserId: this.options.matrix.botUserId };
+		}
+		const projects = new Set(manifests.map(item => item.projectKey));
+		const checkouts = new Set(manifests.map(item => item.checkoutId));
+		for (const link of hierarchy.maintenanceLinks(false)) if (link.child.provenance.kind === "conversation" && selection?.includes(link.child.provenance.conversationId)) {
+			projects.add(link.child.provenance.projectKey); checkouts.add(link.child.provenance.checkoutId);
+		}
+		const links = hierarchy.maintenanceLinks(cleanup).filter(link => !selection || (link.child.provenance.kind === "conversation" ? selection.includes(link.child.provenance.conversationId)
+			: link.child.provenance.kind === "worktree_space" ? checkouts.has(link.child.provenance.checkoutId) : projects.has(link.projectKey)));
 		if (links.length > 100) throw new RelayRegistryError("invalid_state", "Live Space preview exceeds bounds");
 		const result: HierarchyLink[] = [];
 		for (const link of links) {
 			if (cleanup && hierarchy.spaceRetirement(this.spaceIdentity(link)) === "pending" && !await this.options.matrix.accountJoined(link.child.roomId)) { result.push(link); continue; }
-			await this.verifyLink(link);
+			try { await this.verifyLink(link); }
+			catch (error) {
+				if (!selection) throw error;
+				return { links: [], selection, blockers: [`Cannot verify ownership or permissions for hierarchy link ${link.parent.roomId} -> ${link.child.roomId}; inspect these rooms before reconciliation`.slice(0, 512)], operatorUserId: this.options.matrix.operatorUserId, botUserId: this.options.matrix.botUserId };
+			}
 			if (!cleanup || await this.emptySpace(link)) result.push(link);
 		}
-		const migration = cleanup ? undefined : await this.planOnce();
+		let migration: ReconciliationPlan | undefined;
+		try { migration = cleanup ? undefined : await this.planOnce(selection); }
+		catch (error) {
+			if (!selection) throw error;
+			return { links: [], selection, blockers: [error instanceof HostControlError ? error.message : "Selected hierarchy planning failed host/project ownership or saved-intent validation; inspect the existing plan and Space authority before retrying"], operatorUserId: this.options.matrix.operatorUserId, botUserId: this.options.matrix.botUserId };
+		}
 		const legacyPlacements: NonNullable<LiveSpacePreview["legacyPlacements"]> = [];
 		for (const item of migration?.items ?? []) if (!item.checkout && !item.retired && !item.oldUnlinked) {
 			const manifest = this.options.registry.manifestByConversationId(item.conversationId);
@@ -132,16 +189,23 @@ export class ProjectReconciler {
 			legacyPlacements.push({ conversationId: item.conversationId, hostSpace, workspace });
 		}
 		return { links: result, operatorUserId: this.options.matrix.operatorUserId, botUserId: this.options.matrix.botUserId,
+			...(selection ? { selection } : {}),
 			...(migration?.items.length ? { migration } : {}), ...(legacyPlacements.length ? { legacyPlacements } : {}) };
 	}
 	applyLive(frozen: LiveSpacePreview, cleanup: boolean): Promise<{ remaining: number }> {
 		const snapshot = structuredClone(frozen);
 		return this.serial(async () => {
-			const hierarchy = this.options.hierarchy; if (!hierarchy || !isDeepStrictEqual(await this.previewLive(cleanup), snapshot)) throw new RelayRegistryError("invalid_state", "Live Space preview changed");
+			const hierarchy = this.options.hierarchy; if (!hierarchy || snapshot.blockers?.length || !isDeepStrictEqual(await this.previewLive(cleanup, snapshot.selection), snapshot)) throw new RelayRegistryError("invalid_state", "Live Space preview changed");
+			if (snapshot.continuationJournal) {
+				const continuation = await this.continuationOwner(snapshot.selection);
+				if (!continuation || snapshot.continuationJournal !== hash(snapshot.selection)) throw new RelayRegistryError("invalid_state", "Continuation journal changed");
+				const { continuationJournal: _journal, ...childSnapshot } = snapshot;
+				return continuation.applyLive(childSnapshot, cleanup);
+			}
 			let remaining = 0;
 			if (snapshot.migration) {
 				if (cleanup) throw new RelayRegistryError("invalid_state", "Migration is not cleanup authority");
-				await this.applyOnce(snapshot.migration.reconciliationKey, snapshot.legacyPlacements);
+				await this.applyOnce(snapshot.migration.reconciliationKey, snapshot.legacyPlacements, snapshot.selection, snapshot.migration.continuationOf);
 			}
 			for (const link of snapshot.links) await hierarchy.withProjectCleanup(link.projectKey, async (signal) => {
 				if (!hierarchy.maintenanceLinks(cleanup).some((current) => isDeepStrictEqual(current, link))) throw new RelayRegistryError("invalid_state", "Live Space ownership changed before mutation");
@@ -214,24 +278,34 @@ export class ProjectReconciler {
 			obsoleteSpaces: 0 };
 	}
 	private async previewOnce(): Promise<ReconciliationPreview> { return this.summary(await this.planOnce()); }
-	private async planOnce(): Promise<ReconciliationIntent> {
+	private async planOnce(selection?: string[]): Promise<ReconciliationPlan> {
 		const existing = await this.readIntent();
 		// Complete an already admitted #68 plan without expanding its frozen effects.
 		// A subsequent explicit preview may then migrate the resulting grouping.
 		const completed = existing?.items.every(item => item.oldUnlinked || item.retired);
 		for (const item of existing?.items ?? []) {
+			if (selection && !selection.includes(item.conversationId)) continue;
 			const retired = this.options.registry.retirement(item.conversationId);
 			if (item.retired && !retired) throw new RelayRegistryError("invalid_state", "Migration retirement authority is missing");
 			if (retired) item.retired = true;
 		}
-		if (existing && !(this.options.hierarchy && completed)) return existing;
+		if (existing && !(this.options.hierarchy && completed)) {
+			if (!isDeepStrictEqual(existing.selection, selection)) {
+				if (selection && !existing.selection && selection.every(id => existing.items.some(item => item.conversationId === id))) {
+					const items = existing.items.filter(item => selection.includes(item.conversationId));
+					return { version: 1, selection, items, reconciliationKey: planKey(items, selection), continuationOf: existing.reconciliationKey };
+				}
+				throw new HostControlError("conflict", "An unfinished reconciliation must retain its original selection; finish that plan before selecting different conversations");
+			}
+			return existing;
+		}
 		const stableSpaces = new Map<string, string>();
-		for (const manifest of this.options.registry.listManifests()) if (manifest.kind === "project" && manifest.projectKey && manifest.projectSpace) {
+		for (const manifest of this.options.registry.listManifests()) if ((!selection || selection.includes(manifest.conversationId)) && manifest.kind === "project" && manifest.projectKey && manifest.projectSpace) {
 			const preferred = this.options.hierarchy?.migrationProjectSpace(manifest.projectKey);
 			const prior = stableSpaces.get(manifest.projectKey); if (!preferred && prior && prior !== manifest.projectSpace) throw new RelayRegistryError("invalid_state", "Stable project identity maps to conflicting Matrix Spaces");
 			stableSpaces.set(manifest.projectKey, preferred ?? manifest.projectSpace);
 		}
-		const compatibility = this.options.registry.listManifests().filter((item) => item.kind === "project" && (this.options.hierarchy ? !item.checkoutSpace : !item.projectKey)).sort((a, b) => a.conversationId.localeCompare(b.conversationId));
+		const compatibility = this.options.registry.listManifests().filter((item) => (!selection || selection.includes(item.conversationId)) && item.kind === "project" && (this.options.hierarchy ? !item.checkoutSpace : !item.projectKey)).sort((a, b) => a.conversationId.localeCompare(b.conversationId));
 		const coordinator = this.options.registry.listManifests().find((item) => item.kind === "coordinator");
 		if (compatibility.length > 0 && coordinator?.kind === "coordinator" && coordinator.hostSpace) {
 			await this.options.matrix.assertRoomAuthority(coordinator.hostSpace, true, undefined, { spaceChild: true });
@@ -240,9 +314,13 @@ export class ProjectReconciler {
 		}
 		const items: ReconciliationItem[] = [];
 		for (const manifest of compatibility) {
+			let stage = "workspace and identity verification";
+			try {
 			if (!manifest.placement) throw new RelayRegistryError("invalid_state", "Compatibility project manifest omitted workspace placement");
 			if (this.options.hierarchy && manifest.conversationId !== deriveConversationId(this.options.registry.hostId, manifest.creationKey)) throw new RelayRegistryError("invalid_state", "Legacy conversation identity requires explicit recovery");
-			const resolved = await this.options.resolveWorkspace(manifest.placement); await this.options.matrix.assertRoomAuthority(manifest.roomId, false);
+			const resolved = await this.options.resolveWorkspace(manifest.placement);
+			stage = "Matrix room and ancestor ownership verification";
+			await this.options.matrix.assertRoomAuthority(manifest.roomId, false);
 			if (manifest.projectKey && manifest.projectKey !== resolved.projectKey) throw new RelayRegistryError("invalid_state", "Saved project identity differs from current placement");
 			let targetProjectSpace = this.options.hierarchy?.migrationProjectSpace(resolved.projectKey) ?? stableSpaces.get(resolved.projectKey);
 			if (!targetProjectSpace) targetProjectSpace = await this.spaces.find(resolved.projectKey);
@@ -268,9 +346,13 @@ export class ProjectReconciler {
 					checkoutId: deriveCheckoutId(this.options.registry.hostId, resolved.projectKey, resolved.workspacePath) },
 					...(targetProjectSpace ? { plannedProjectSpace: targetProjectSpace, targetProjectSpace } : {}) } : {}), ...(target ? { plannedProjectSpace: targetProjectSpace, targetProjectSpace, targetManifestHash: hash(target) } : {}),
 				hostLinked: false, roomLinked: false, manifestUpdated: false, oldUnlinked: false });
+			} catch (error) {
+				if (!selection) throw error;
+				throw new HostControlError("conflict", `${manifest.conversationId} (${manifest.concept}): ${stage} failed; inspect this target or exclude it from the selection`);
+			}
 		}
 		if (items.length > 64) throw new RelayRegistryError("capacity_reached", "Project reconciliation preview exceeds 64 conversations");
-		const intent: ReconciliationIntent = { version: 1, reconciliationKey: `reconcile_${hash(items.map(planIdentity)).slice(0, 32)}`, items };
+		const intent: ReconciliationIntent = { version: 1, reconciliationKey: planKey(items, selection), items, ...(selection ? { selection } : {}) };
 		return parseIntent(intent);
 	}
 	private async verifyLegacyParent(roomId: string, projectKey: string): Promise<void> {
@@ -278,11 +360,14 @@ export class ProjectReconciler {
 		if (proof && (proof.hostId !== this.options.registry.hostId || proof.kind !== "project_space" || proof.projectKey !== projectKey))
 			throw new RelayRegistryError("invalid_state", "Legacy parent ownership changed");
 	}
-	private async applyOnce(reconciliationKey: string, legacyPlacements?: LiveSpacePreview["legacyPlacements"]): Promise<Record<string, unknown>> {
+	private async applyOnce(reconciliationKey: string, legacyPlacements?: LiveSpacePreview["legacyPlacements"], selection?: string[], continuationOf?: string): Promise<Record<string, unknown>> {
 		let intent = await this.readIntent(); const retry = intent !== undefined;
-		if (!intent || this.options.hierarchy && intent.items.every(item => item.oldUnlinked || item.retired)) {
+		if (continuationOf && (!intent || intent.selection || intent.reconciliationKey !== continuationOf || !selection ||
+			!selection.every(id => intent!.items.some(item => item.conversationId === id)) ||
+			planKey(intent.items.filter(item => selection.includes(item.conversationId)), selection) !== reconciliationKey)) throw new RelayRegistryError("invalid_state", "Original broad reconciliation changed");
+		if (!intent || !continuationOf && this.options.hierarchy && intent.items.every(item => item.oldUnlinked || item.retired)) {
 			const previous = intent;
-			intent = await this.planOnce();
+			intent = await this.planOnce(selection);
 			if (intent.reconciliationKey !== reconciliationKey) throw new RelayRegistryError("invalid_state", "Reconciliation preview changed before apply");
 			if (previous) {
 				const receipt = new AtomicJsonFile(join(resolve(this.options.intentDirectory), `project-reconciliation-${previous.reconciliationKey}.json`), parseIntent);
@@ -292,10 +377,12 @@ export class ProjectReconciler {
 			}
 			await this.file.write(intent);
 		}
-		if (intent.reconciliationKey !== reconciliationKey) throw new RelayRegistryError("invalid_state", "Reconciliation key does not match the durable intent");
+		if (intent.reconciliationKey !== (continuationOf ?? reconciliationKey)) throw new RelayRegistryError("invalid_state", "Reconciliation key does not match the durable intent");
 		const coordinator = this.options.registry.listManifests().find((item) => item.kind === "coordinator");
 		for (let index = 0; index < intent.items.length; index += 1) {
 			let item = intent.items[index]!;
+			if (continuationOf && !selection!.includes(item.conversationId)) continue;
+			if (item.oldUnlinked) continue;
 			if (this.options.registry.retirement(item.conversationId)) {
 				if (!item.retired) { item = { ...item, retired: true }; intent.items[index] = item; await this.file.write(intent); }
 				continue;
@@ -314,6 +401,9 @@ export class ProjectReconciler {
 				if (item.oldProjectSpace) await this.verifyLegacyParent(item.oldProjectSpace, item.projectKey);
 				const binding = await this.options.hierarchy.migrateExisting({ creationKey: frozen.creationKey, projectKey: item.projectKey,
 					canonicalCheckoutRoot: frozen.root, projectTitle: item.projectDisplayName, checkoutTitle: item.checkoutDisplayName, conversationTitle: item.concept }, item.roomId, item.targetProjectSpace);
+				for (const [parent, child] of [[binding.hostSpace, binding.projectSpace], [binding.projectSpace, binding.checkoutSpace], [binding.checkoutSpace, binding.roomId]]) {
+					if (!(await this.options.matrix.spaceChildren(parent!)).includes(child!)) throw new HostControlError("conflict", "New hierarchy link readback failed; old links and manifest are retained until verification succeeds");
+				}
 				const identity = { projectKey: item.projectKey, projectDisplayName: item.projectDisplayName, checkoutDisplayName: item.checkoutDisplayName,
 					projectSpace: binding.projectSpace, checkoutId: binding.checkoutId, checkoutSpace: binding.checkoutSpace };
 				item = { ...item, targetProjectSpace: binding.projectSpace, targetCheckoutSpace: binding.checkoutSpace,
@@ -355,7 +445,7 @@ export class ProjectReconciler {
 		// Old parent IDs stay in the item/receipt, not in new destructive authority.
 		// Pre-existing #68 cleanup records remain readable for backup/recovery only.
 		if (!intent.cleanupSpaces) { intent = { ...intent, cleanupSpaces: [] }; await this.file.write(intent); }
-		return { operation: "project.reconcile.apply", reconciliationKey, reconciled: intent.items.filter(item => !item.retired).length, obsoleteSpaces: 0 };
+		return { operation: "project.reconcile.apply", reconciliationKey, reconciled: intent.items.filter(item => !item.retired && (!continuationOf || selection!.includes(item.conversationId))).length, obsoleteSpaces: 0 };
 	}
 	private async cleanupOnce(_reconciliationKey: string): Promise<Record<string, unknown>> {
 		throw new RelayRegistryError("permission_denied", "Legacy Space cleanup requires a fresh modern ownership preview; retained IDs are not destructive authority");

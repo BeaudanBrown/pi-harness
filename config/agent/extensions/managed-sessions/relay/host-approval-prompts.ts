@@ -88,6 +88,10 @@ export function hostApprovalQuestion(record: HostApprovalRecord): string {
 		details = `${describeAction(scope)} ${describeScope({ baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId })}?\nNew independent room; inherited summary only; idle until next message` +
 			`\n\nInherited summary (context only):\n${summary}\n\nEnd inherited summary.`;
 	}
+	if (operation === "space.reconcile.apply") {
+		const preview = record.frozen.preconditions.preview as { warnings?: string[] } | undefined;
+		details += `\n\n${preview?.warnings?.join("\n") || "New migration Spaces grant the configured operator admin power 100; existing room permissions and histories are preserved."}`;
+	}
 	if (operation === "conversation.recover.apply" || operation === "conversation.admin.apply") {
 		const preview = record.frozen.preconditions.preview as { warnings?: string[] } | undefined;
 		if (!preview?.warnings?.length) throw new HostControlError("unavailable", "Required uncertainty disclosure is missing");

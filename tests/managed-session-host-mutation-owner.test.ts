@@ -125,6 +125,25 @@ test("public Space preview freezes exact live links and cannot expand approved s
 	operatorUserId = "@operator:test"; assert.equal(await owner.revalidate(record), true); await owner.execute(record); assert.equal(executions, 1);
 });
 
+test("selected Space consent preserves selection and blocks missing-workspace previews", async () => {
+	let blocked = true; let executions = 0; const selection = [conversationId];
+	const owner = new ManagedHostMutationOwner({ registry: { hostId: "host" } as RelayRegistry, server: { attachment: () => undefined }, now: () => 1000,
+		retirement: {} as ConversationRetirement, lifecycle: {
+			spaceApprovalPreview: async (cleanup: boolean, ids?: string[]) => { assert.equal(cleanup, false); assert.deepEqual(ids, selection);
+				return { links: [], selection: [...selection], operatorUserId: "@operator:test", botUserId: "@bot:test", ...(blocked ? { blockers: ["Missing workspace projects/old"] } : {}) }; },
+			executeSpaceApproval: async (snapshot: LiveSpacePreview) => { assert.deepEqual(snapshot.selection, selection); executions++; return { remaining: 0 }; },
+		} as unknown as HostLifecycle });
+	let preview = await owner.preview({ operation: "space.reconcile.preview", conversationIds: selection });
+	assert.deepEqual(preview.targets, [{ kind: "conversation", conversationId }]); assert.equal(preview.blockers.length, 1);
+	const input = (id: string): ModelHostRequest => ({ ...request(id), action: { operation: "space.reconcile.apply", previewId: id, confirmed: true } });
+	await assert.rejects(owner.freeze(input(preview.previewId)), /Frozen targets/);
+	blocked = false; preview = await owner.preview({ operation: "space.reconcile.preview", conversationIds: selection });
+	const record = prepareHostApproval("host", input(preview.previewId), await owner.freeze(input(preview.previewId)), 1000);
+	assert.match(hostApprovalQuestion(record), /admin power 100/);
+	blocked = true; assert.equal(await owner.revalidate(record), false); await assert.rejects(owner.execute(record), /Frozen targets/); assert.equal(executions, 0);
+	blocked = false; await owner.execute(record); assert.equal(executions, 1);
+});
+
 test("worktree creation rechecks the frozen base inside lifecycle admission before applying anything", async (t) => {
 	const root = await mkdtemp(join(tmpdir(), "frozen-worktree-admission-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const calls = join(root, "calls"); const launcher = join(root, "launcher");

@@ -30,6 +30,8 @@ const coordinator: ConversationManifest = { schemaVersion: MANAGED_SESSION_STATE
 const placement: HierarchyPlacement = { creationKey: "first", projectKey: `project_${"a".repeat(32)}`, canonicalCheckoutRoot: "/projects/repository",
 	projectTitle: "Project", checkoutTitle: "Main", conversationTitle: "Conversation" };
 class MatrixFixture {
+	readonly admins = new Set<string>();
+	async assertOperatorSpaceAdmin(roomId: string): Promise<void> { assert.ok(this.admins.has(roomId), "operator admin missing"); }
 	readonly aliases = new Map<string, string>();
 	readonly rooms = new Map<string, ManagedProvenance>();
 	readonly legacy = new Set<string>();
@@ -69,11 +71,11 @@ class MatrixFixture {
 			this.rooms.set("!host:test", { version: 1, hostId, creationKey: "host", kind: "host_space" }); return "!host:test";
 		});
 	}
-	async ensureManagedRoom(_title: string, proof: ManagedProvenance): Promise<string> {
+	async ensureManagedRoom(_title: string, proof: ManagedProvenance, _signal?: AbortSignal, migrationAdmin = false): Promise<string> {
 		const alias = managedRoomAlias(proof);
 		return this.effect(`create:${proof.kind}`, () => {
 			const existing = this.aliases.get(alias); if (existing) { assert.deepEqual(this.rooms.get(existing), proof); return existing; }
-			const id = `!room-${this.rooms.size}:test`; this.aliases.set(alias, id); this.rooms.set(id, structuredClone(proof)); return id;
+			const id = `!room-${this.rooms.size}:test`; this.aliases.set(alias, id); this.rooms.set(id, structuredClone(proof)); if (migrationAdmin) this.admins.add(id); return id;
 		});
 	}
 	async recoverManagedAlias(proof: ManagedProvenance): Promise<string | undefined> {
@@ -133,10 +135,114 @@ test("host hierarchy producer and NAS consumer roundtrip preserves existing rule
 	await assert.rejects(account.leaveAndForget({ ...effect, userId: "@foreign:test" }, new AbortController().signal));
 });
 
+test("healthy subsets continue old broad journals without touching missing siblings, including pre-checkout plans", async t => {
+	for (const legacy of [false, true]) for (const excludedRetired of [false, true]) {
+		const root = await mkdtemp(join(tmpdir(), "broad-subset-")); t.after(() => rm(root, { recursive: true, force: true }));
+		const matrix = new MatrixFixture({ point: "link:conversation", timing: "after" });
+		const store = new ConversationManifestStore(join(root, "manifests")); await store.write(coordinator);
+		const { hostSpace: _host, ...base } = coordinator;
+		const ids = ["healthy", "removed"].map(key => deriveConversationId(hostId, key));
+		for (const [index, key] of ["healthy", "removed"].entries()) {
+			await store.write({ ...base, kind: "project", conversationId: ids[index]!, creationKey: key, concept: key, roomId: `!${key}:test`, piSessionId: key,
+				bindingBoundaryEntryId: deriveTranscriptEntryId(key, "boundary"), projectSpace: "!old:test", placement: { rootKey: "projects", workspace: key, relativeCwd: "" } });
+			matrix.legacy.add(`!${key}:test`); matrix.links.add(`!old:test/!${key}:test`);
+		}
+		matrix.legacy.add("!host:test"); matrix.legacy.add("!old:test");
+		const registry = new RelayRegistry(hostId, join(root, "runtime"), store); await registry.load();
+		let hierarchy = new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator); await hierarchy.load();
+		let missing = false;
+		const make = () => new ProjectReconciler({ registry, matrix: matrix as unknown as ManagedMatrixClient, hierarchy, intentDirectory: join(root, "intents"),
+			resolveWorkspace: async p => { if (missing && p.workspace === "removed") throw Error("workspace removed");
+				return { ...p, workspacePath: `/projects/${p.workspace}`, cwd: `/projects/${p.workspace}`, projectKey: placement.projectKey, projectDisplayName: "Project", checkoutDisplayName: p.workspace }; } });
+		let reconciler = make(); let broad = (await reconciler.previewLive(false)).migration!;
+		if (legacy) {
+			const digest = (value: unknown) => createHash("sha256").update(JSON.stringify(value)).digest("hex");
+			const plans = broad.items.map(item => ({ conversationId: item.conversationId, concept: item.concept, workspace: item.workspace, roomId: item.roomId,
+				oldProjectSpace: item.oldProjectSpace, projectKey: item.projectKey, projectDisplayName: item.projectDisplayName, checkoutDisplayName: item.checkoutDisplayName,
+				sourceManifestHash: digest(registry.manifestByConversationId(item.conversationId)), plannedProjectSpace: "!old:test" }));
+			broad = { version: 1, reconciliationKey: `reconcile_${digest(plans).slice(0, 32)}`, items: plans.map(item => ({ ...item, targetProjectSpace: "!old:test",
+				targetManifestHash: digest({ ...registry.manifestByConversationId(item.conversationId), projectKey: item.projectKey, projectDisplayName: item.projectDisplayName, checkoutDisplayName: item.checkoutDisplayName, projectSpace: "!old:test" }),
+				hostLinked: false, roomLinked: false, manifestUpdated: false, oldUnlinked: false })) };
+			matrix.resolvePrivateRoomAlias = async () => "!old:test";
+		}
+		await mkdir(join(root, "intents"), { mode: 0o700 }); const journal = join(root, "intents", "project-reconciliation.json");
+		await writeFile(journal, JSON.stringify(broad), { mode: 0o600 }); missing = true;
+		if (excludedRetired) {
+			const candidate = registry.retirementCandidate(ids[1]!);
+			await registry.retireConversation(ids[1]!, retirementTargets({ hostId, manifest: candidate.manifest, operatorUserId: matrix.operatorUserId, botUserId: matrix.botUserId,
+				stop: { kind: "stop", generationId: candidate.generationId } }));
+		}
+		const excluded = broad.items.find(item => item.conversationId === ids[1]); const original = registry.manifestByConversationId(ids[1]!);
+		for (let attempt = 0; attempt < 4 && !registry.manifestByConversationId(ids[0]!)?.checkoutSpace; attempt++) {
+			const selected = await reconciler.previewLive(false, [ids[0]!]); assert.equal(selected.blockers, undefined);
+			try { await reconciler.applyLive(selected, false); } catch (error) { assert.match(String(error), /injected/); }
+			await hierarchy.close(); hierarchy = new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator); await hierarchy.load(); reconciler = make();
+		}
+		const current = registry.manifestByConversationId(ids[0]!)!; assert.ok(current.checkoutSpace); assert.equal(current.roomId, "!healthy:test");
+		const saved = JSON.parse(await readFile(journal, "utf8")); assert.equal(saved.reconciliationKey, broad.reconciliationKey); assert.equal(saved.selection, undefined);
+		assert.deepEqual(saved.items.find((item: any) => item.conversationId === ids[1]), excluded); assert.deepEqual(registry.manifestByConversationId(ids[1]!), original);
+		assert.ok(matrix.links.has("!old:test/!removed:test")); assert.ok(!matrix.links.has("!old:test/!healthy:test"));
+		assert.equal([...matrix.rooms.values()].filter(proof => proof.kind === "worktree_space").length, 1, "one selected checkout Space across retries");
+		await hierarchy.close();
+	}
+});
+
+test("selected reconciliation isolates missing workspaces, freezes retry scope, and verifies new Space admin after restart", async t => {
+	const root = await mkdtemp(join(tmpdir(), "scoped-hierarchy-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const matrix = new MatrixFixture({ point: "link:conversation", timing: "after" });
+	const store = new ConversationManifestStore(join(root, "manifests")); await store.write(coordinator);
+	const { hostSpace: _host, ...base } = coordinator;
+	const ids = ["chosen", "missing"].map(key => deriveConversationId(hostId, key));
+	for (const [index, key] of ["chosen", "missing"].entries()) {
+		await store.write({ ...base, kind: "project", conversationId: ids[index]!, creationKey: key, concept: key, roomId: `!${key}:test`, piSessionId: key, bindingBoundaryEntryId: deriveTranscriptEntryId(key, "boundary"),
+			projectSpace: "!old:test", placement: { rootKey: "projects", workspace: key, relativeCwd: "" } });
+		matrix.legacy.add(`!${key}:test`); matrix.links.add(`!old:test/!${key}:test`);
+	}
+	matrix.legacy.add("!host:test"); matrix.legacy.add("!old:test");
+	const registry = new RelayRegistry(hostId, join(root, "runtime"), store); await registry.load();
+	let hierarchy = new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator); await hierarchy.load();
+	const resolved: string[] = [];
+	const make = () => new ProjectReconciler({ registry, matrix: matrix as unknown as ManagedMatrixClient, hierarchy, intentDirectory: join(root, "intents"),
+		resolveWorkspace: async p => { resolved.push(p.workspace); if (p.workspace === "missing") throw Error("missing checkout");
+			return { ...p, workspacePath: "/projects/chosen", cwd: "/projects/chosen", projectKey: placement.projectKey, projectDisplayName: "Project", checkoutDisplayName: "Chosen" }; } });
+	let reconciler = make();
+	const blocked = await reconciler.previewLive(false, ids);
+	assert.equal(blocked.blockers?.length, 1); assert.match(blocked.blockers![0]!, /missing.*cannot resolve workspace projects\/missing/);
+	assert.equal(matrix.calls, 0); await assert.rejects(reconciler.applyLive(blocked, false));
+	resolved.length = 0;
+	const selected = await reconciler.previewLive(false, [ids[0]!]);
+	assert.deepEqual(selected.selection, [ids[0]]); assert.ok(!resolved.includes("missing"));
+	assert.equal(selected.migration?.items.length, 1);
+	const runtime = registry.snapshot(); const absent = registry.manifestByConversationId(ids[1]!);
+	await assert.rejects(reconciler.applyLive(selected, false), /injected/);
+	await assert.rejects(reconciler.previewLive(false), /original selection/);
+	assert.ok(matrix.links.has("!old:test/!chosen:test"), "old link retained until verification and commit");
+	await hierarchy.close(); hierarchy = new LiveHierarchy(join(root, "hierarchy"), hostId, matrix, () => coordinator); await hierarchy.load(); reconciler = make();
+	const roomCount = matrix.rooms.size;
+	await reconciler.applyLive(await reconciler.previewLive(false, [ids[0]!]), false);
+	assert.equal(matrix.rooms.size, roomCount, "restart does not duplicate Spaces");
+	const manifest = registry.manifestByConversationId(ids[0]!)!;
+	assert.equal(manifest.roomId, "!chosen:test"); assert.ok(matrix.admins.has(manifest.projectSpace!)); assert.ok(matrix.admins.has(manifest.checkoutSpace!));
+	assert.ok(matrix.links.has(`${manifest.checkoutSpace}/!chosen:test`)); assert.ok(!matrix.links.has("!old:test/!chosen:test"));
+	assert.deepEqual(registry.manifestByConversationId(ids[1]!), absent); assert.ok(matrix.links.has("!old:test/!missing:test"));
+	assert.deepEqual(registry.snapshot(), runtime);
+	const modern = await reconciler.previewLive(false, [ids[0]!]);
+	assert.equal(modern.links.length, 3); assert.ok(!modern.links.some(link => link.child.roomId === "!missing:test"));
+	await hierarchy.close();
+});
+
 test("legacy migration preserves old attachments, pending input and history across proof/link/store/unlink interruptions", async () => {
-	for (const point of ["host", "create:project_space", "create:worktree_space", "stamp:conversation", "link:conversation", "unlink", "manifest", "placement", "foreign", "retirement", "retire-mid", "legacy-receipt", "legacy-pending"]) {
+	for (const point of ["admin-readback", "link-readback", "host", "create:project_space", "create:worktree_space", "stamp:conversation", "link:conversation", "unlink", "manifest", "placement", "foreign", "retirement", "retire-mid", "legacy-receipt", "legacy-pending"]) {
 		const root = await mkdtemp(join(tmpdir(), "legacy-hierarchy-")); const matrix = new MatrixFixture(point === "manifest" ? undefined : { point, timing: "after" });
 		const store = new ConversationManifestStore(join(root, "manifests"));
+		if (point === "admin-readback") {
+			const verify = matrix.assertOperatorSpaceAdmin.bind(matrix); let fail = true;
+			matrix.assertOperatorSpaceAdmin = async room => { if (fail) { fail = false; throw Error("injected admin readback failure"); } await verify(room); };
+		}
+		if (point === "link-readback") {
+			const children = matrix.spaceChildren.bind(matrix); let fail = true;
+			matrix.spaceChildren = async room => { if (fail) { fail = false; return []; } return children(room); };
+		}
 		const { hostSpace: _host, ...base } = coordinator;
 		const id = deriveConversationId(hostId, "legacy");
 		const original: ConversationManifest = { ...base, kind: "project", conversationId: id, creationKey: "legacy", roomId: "!legacy:test",
@@ -201,7 +307,7 @@ test("legacy migration preserves old attachments, pending input and history acro
 				await reconciler.applyLive(preview, false);
 				assert.equal(registry.manifestByConversationId(id)?.checkoutSpace, undefined, "first consent finishes only the original #68 scope");
 			} else if (point === "retire-mid") await assert.rejects(reconciler.applyLive(preview, false));
-			else if (point !== "legacy-receipt") await assert.rejects(reconciler.applyLive(preview, false), /injected/);
+			else if (point !== "legacy-receipt") await assert.rejects(reconciler.applyLive(preview, false), point === "link-readback" ? /readback failed/ : /injected/);
 			await hierarchy.close(); hierarchy = makeHierarchy(); await hierarchy.load(); reconciler = make();
 			await reconciler.applyLive(await reconciler.previewLive(false), false);
 			if (point === "retire-mid") {

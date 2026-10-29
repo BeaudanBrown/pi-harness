@@ -429,7 +429,7 @@ export class HostLifecycle {
 	executeAdminApproval(snapshot: AdminMigrationSnapshot, operationId: string): Promise<void> { return this.operatorAdmins.apply(snapshot, operationId); }
 
 	pendingReconciliationCount(): number { return this.reconciler.pendingCount(); }
-	spaceApprovalPreview(cleanup: boolean): Promise<LiveSpacePreview> { return this.reconciler.previewLive(cleanup); }
+	spaceApprovalPreview(cleanup: boolean, conversationIds?: string[]): Promise<LiveSpacePreview> { return this.reconciler.previewLive(cleanup, conversationIds); }
 	executeSpaceApproval(snapshot: LiveSpacePreview, cleanup: boolean): Promise<{ remaining: number }> { return this.reconciler.applyLive(snapshot, cleanup); }
 
 	async request(envelope: ManagedSessionEnvelope): Promise<Record<string, unknown>> {

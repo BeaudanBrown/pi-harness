@@ -15,7 +15,7 @@ const stable = (prefix: string) => Type.String({ pattern: `^${prefix}_[a-f0-9]{3
 const room = MatrixRoomIdSchema;
 const common = { key: identifier, creationKey: identifier, title: Type.String({ minLength: 1, maxLength: 256 }),
 	roomId: Type.Optional(room), parentRoomId: Type.Optional(room), createAttempted: Type.Optional(Type.Literal(true)),
-	preserveNotificationPolicy: Type.Optional(Type.Literal(true)), linked: Type.Boolean() };
+	preserveNotificationPolicy: Type.Optional(Type.Literal(true)), migrationAdmin: Type.Optional(Type.Literal(true)), linked: Type.Boolean() };
 const NodeSchema = Type.Union([
 	Type.Object({ ...common, kind: Type.Literal("host_space") }, { additionalProperties: false }),
 	Type.Object({ ...common, kind: Type.Literal("project_space"), parentKey: identifier, projectKey: stable("project") }, { additionalProperties: false }),
@@ -44,6 +44,7 @@ function parse(value: unknown): State {
 	const rooms = value.nodes.flatMap((node) => node.roomId ? [node.roomId] : []);
 	if (nodes.size !== value.nodes.length || new Set(rooms).size !== rooms.length) throw Error("Duplicate live hierarchy identity");
 	for (const node of value.nodes) {
+		if (node.migrationAdmin && !["project_space", "worktree_space"].includes(node.kind)) throw Error("Admin creation policy requires a migration Space");
 		if (node.linked && !node.roomId) throw Error("Linked hierarchy node lacks its room");
 		if (node.kind === "host_space") {
 			if (node.key !== "host" || node.creationKey !== "host" || node.parentRoomId || node.createAttempted) throw Error("Invalid host hierarchy identity");
@@ -71,7 +72,7 @@ function provenance(hostId: string, node: Node): ManagedProvenance {
 		...(node.kind === "conversation" ? { conversationId: node.conversationId } : {}) });
 }
 type HierarchyMatrix = Pick<ManagedMatrixClient, "ensureLegacyHostProvenance" | "ensureManagedRoom" | "recoverManagedAlias" | "recoverManagedRoom" | "addSpaceChild">
-	& Partial<Pick<ManagedMatrixClient, "ensureLegacyProvenance">>;
+	& Partial<Pick<ManagedMatrixClient, "ensureLegacyProvenance" | "assertOperatorSpaceAdmin">>;
 export interface HierarchyPlacement {
 	creationKey: string; projectKey: string; canonicalCheckoutRoot: string;
 	projectTitle: string; checkoutTitle: string; conversationTitle: string;
@@ -172,6 +173,9 @@ export class LiveHierarchy {
 					check(); await this.update(node.key, { roomId: projectSpace, preserveNotificationPolicy: true });
 				}
 			}
+			// Persist creation policy before any new Space effect. Alias recovery must
+			// verify this policy, never silently promote an existing room.
+			for (const key of [input.projectKey, reserved.checkoutId]) if (!this.node(key).roomId) await this.update(key, { migrationAdmin: true });
 			const checkoutSpace = await this.ensure(reserved.checkoutId); check();
 			const node = this.node(reserved.conversationId);
 			if (node.roomId && node.roomId !== roomId) throw Error("Frozen migration conversation room changed");
@@ -356,14 +360,18 @@ export class LiveHierarchy {
 				if (!roomId) throw Error("Uncertain room creation has no verifiable alias; explicit reconciliation required");
 			} else {
 				await this.update(key, { createAttempted: true });
-				roomId = await this.matrix.ensureManagedRoom(node.title, proof, this.controller.signal);
+				roomId = await this.matrix.ensureManagedRoom(node.title, proof, this.controller.signal, node.migrationAdmin === true);
 			}
 			await this.update(key, { roomId });
+		}
+		if (node.migrationAdmin) {
+			if (!this.matrix.assertOperatorSpaceAdmin) throw Error("Migration Space admin verification is unavailable");
+			await this.matrix.assertOperatorSpaceAdmin(roomId, this.controller.signal);
 		}
 		if (!node.linked) { await this.matrix.addSpaceChild(parentRoomId, roomId, this.controller.signal); await this.update(key, { linked: true }); }
 		return roomId;
 	}
-	private update(key: string, fields: { roomId?: string; parentRoomId?: string; createAttempted?: true; preserveNotificationPolicy?: true; linked?: boolean }): Promise<void> {
+	private update(key: string, fields: { roomId?: string; parentRoomId?: string; createAttempted?: true; preserveNotificationPolicy?: true; migrationAdmin?: true; linked?: boolean }): Promise<void> {
 		return this.mutate((state) => { Object.assign(state.nodes.find((item) => item.key === key)!, fields); });
 	}
 	private mutate(change: (state: State) => void, retirement = false): Promise<void> {

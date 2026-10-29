@@ -388,6 +388,12 @@ not lose or duplicate participant turns. Generation changes durably create the n
 
 ## Managed Matrix operations
 
+[Scoped Space reconciliation](docs/managed-scoped-reconciliation.md) accepts
+`space reconcile preview --conversation-ids <exact-ids>`. A separately approved
+apply migrates only the selected conversations and their ancestor links. Missing
+workspaces are reported as blockers, not recreated. New migration Spaces grant
+the configured operator admin; existing rooms, histories and permissions remain.
+
 Existing host-owned rooms can explicitly preview/apply an
 [operator-admin migration](docs/managed-operator-admin.md) using
 `conversation admin preview --conversation-ids <exact-ids>` (optionally
