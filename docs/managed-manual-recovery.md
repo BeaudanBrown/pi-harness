@@ -47,6 +47,8 @@ recovery operations require the new deployed host frontend and policy.
 | --- | --- | --- |
 | Per-target consent, stale target rejection | Frozen recovery preview and existing approval owner | Frontend and approval tests |
 | Conflicts block; incomplete inspection disclosed | Read-only launcher observation | Python observer tests |
+| Ordinary scheduling changes do not invalidate process identity | Compare birth and parent, not volatile non-zombie state | Scheduling-transition regression through manual preview and legacy evidence capture |
+| PID reuse, parent changes, disappearance and zombie transitions remain fenced | Retain identity/ancestry and zombie-read-branch checks | Observer race and stable-zombie tests |
 | Room/generations/history/queue retained; nonce fenced | Existing atomic legacy migration commit | Registry and recovery tests |
 | Retirement remains terminal; account effects independent | Exact stop-effect completion only | Retirement recovery tests |
 | Operator attestation is not exit verification | Private audit receipt before commit | Recovery interruption tests |
@@ -71,11 +73,25 @@ the downstream picker label and full-ID display change is implemented in
 acknowledgements and individual live recovery are deployment-only acceptance.
 No Nix evaluation/build or live mutation is authorized during implementation.
 
-## Local verification and review
+## Scheduling-state correction (2026-10-29)
+
+Staging recovery exposed a false rejection when the relay changed from sleeping
+(`S`) to running (`R`) during inspection with identical PID/start time and parent.
+The observer now ignores ordinary scheduling-state differences, retaining all
+identity, parent, and zombie-transition checks. This changes only read-only
+observation before the audit boundary; no retry, consent, or commit policy changes.
+
+Regression tests failed on the old comparison and pass with the fix: 13 Python
+observer tests and 43 affected Node tests, no skips. No LSP errors or diff errors.
+Canonical Nix/package checks remain deferred under the no-build constraint; the
+operator rebuild and a fresh staging recovery approval are separate acceptance.
+
+## Original implementation verification and review (2026-10-28)
 
 - TypeScript test compilation passed with the existing local toolchain.
 - Affected Node suites: **217 passed, 7 packaged integration skips**, zero failures.
-  This includes the Python observer suite (10 tests).
+  That historical run included 10 Python observer tests; the scheduling-state
+  correction above expands the current suite to 13.
 - Downstream nix-dotfiles picker: **15 top-level Go tests passed, zero skips**,
   including disposable private-tmux/fzf fixtures; gofmt and diff checks passed.
 - LSP: no compilation errors. External Go files are outside the active workspace;

@@ -45,7 +45,10 @@ def inventory(proc, conversation_id, session_file, unreadable=None, session_dire
                     raise ValueError("process inventory exceeds bounds")
                 env, argv = env_bytes.split(b"\0"), argv_bytes.split(b"\0")
             after = birth(proc, path.name)
-            if before != after:
+            # Scheduling state (e.g. sleeping -> running) is not identity.
+            # Keep birth/parent fencing and reject changes to the zombie branch
+            # above, which determines whether environment/arguments are read.
+            if after is None or before[:2] != after[:2] or (before[2] == "Z") != (after[2] == "Z"):
                 raise ValueError("process inventory changed; retry")
             rows[path.name] = (before[0], before[1])
             if (f"PI_MANAGED_SESSION_CONVERSATION_ID={conversation_id}".encode() in env

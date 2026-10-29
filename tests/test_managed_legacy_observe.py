@@ -121,6 +121,39 @@ class LegacyExitTests(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 self.observe()
 
+    def test_scheduling_changes_preserve_conflicts_and_exit_evidence(self):
+        birth = legacy.birth(self.proc, "123")
+        for before_state, after_state in [("S", "R"), ("R", "S"), ("D", "R"), ("T", "S")]:
+            samples = [(*birth[:2], before_state), (*birth[:2], after_state)]
+            with self.subTest(states=(before_state, after_state)):
+                with patch.object(legacy, "birth", side_effect=samples):
+                    self.assertTrue(self.manual()["conflicts"])
+                with patch.object(legacy, "birth", side_effect=samples):
+                    self.assertEqual(self.observe()["processes"], [birth[0]])
+        self.process(123, 1, 100)  # Unrelated process changing state must not block.
+        with patch.object(legacy, "birth", side_effect=[(*birth[:2], "S"), (*birth[:2], "R")]):
+            self.assertFalse(self.manual()["conflicts"])
+
+    def test_identity_parent_exit_and_zombie_changes_still_fail_closed(self):
+        birth = legacy.birth(self.proc, "123")
+        for after in [({"pid": "123", "startTicks": "200"}, 1, "S"),
+                      (birth[0], 2, "S"), None, (*birth[:2], "Z")]:
+            with self.subTest(after=after):
+                for observe in [self.manual, self.observe]:
+                    with patch.object(legacy, "birth", side_effect=[birth, after]):
+                        with self.assertRaisesRegex(ValueError, "inventory changed"):
+                            observe()
+        with patch.object(legacy, "birth", side_effect=[(*birth[:2], "Z"), birth]):
+            with self.assertRaisesRegex(ValueError, "inventory changed"):
+                self.manual()
+
+    def test_stable_zombie_retains_birth_evidence_without_reading_environment(self):
+        birth = legacy.birth(self.proc, "123")
+        zombie = (*birth[:2], "Z")
+        with patch.object(legacy, "birth", return_value=zombie), patch.object(Path, "read_bytes", side_effect=AssertionError("Zombie environment read")):
+            self.assertFalse(self.manual()["conflicts"])
+            self.assertEqual(self.observe("", {"bootId": BOOT, "processes": [birth[0]]}), {"state": "running"})
+
     def test_helper_is_read_only(self):
         before = {str(p): p.read_bytes() for p in self.proc.rglob("*") if p.is_file()}
         evidence = self.observe()
