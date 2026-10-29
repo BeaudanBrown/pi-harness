@@ -117,6 +117,8 @@ export class BoundAdapterClient {
 	#received = 0;
 	#lastSentType?: string;
 	#lastReceivedType?: string;
+	#failedReceivedType?: string;
+	#failureCode?: "timeout" | "capacity_reached" | "other";
 	#buffer = Buffer.alloc(0);
 	#pending = new Map<string, PendingRequest>();
 	#attachmentId?: string;
@@ -164,6 +166,7 @@ export class BoundAdapterClient {
 		this.#socket = socket;
 		this.#connectionId = randomUUID(); this.#disconnectReason = undefined;
 		this.#sent = this.#received = 0; this.#lastSentType = this.#lastReceivedType = undefined;
+		this.#failedReceivedType = this.#failureCode = undefined;
 		socket.on("data", (chunk) => this.consume(chunk));
 		socket.on("error", () => { this.#disconnectReason ??= "socket_error"; });
 		socket.on("close", () => this.handleClose());
@@ -253,8 +256,18 @@ export class BoundAdapterClient {
 
 	async confirmRecovery(requestId: string, ready: boolean, checkpointId: string | null): Promise<void> {
 		if (!this.supports("recovery-attention-v1")) throw new ManagedAdapterError("Recovery capability was not negotiated");
-		await this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("recovery-confirm"),
-			conversationId: this.options.binding.conversationId, role: this.options.role, type: "recovery.confirm", payload: { requestId, ready, checkpointId } });
+		await this.replyToProbe(() => this.request({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: messageId("recovery-confirm"),
+			conversationId: this.options.binding.conversationId, role: this.options.role, type: "recovery.confirm", payload: { requestId, ready, checkpointId } }));
+	}
+
+	/** Probe owners enforce their own freshness deadlines. A timeout or admission
+	 * limit supplies no new evidence; never retry it or tear down durable traffic.
+	 * Other errors still propagate to the fail-closed inbound handler boundary. */
+	private async replyToProbe(reply: () => Promise<unknown>): Promise<void> {
+		try { await reply(); }
+		catch (error) {
+			if (!(error instanceof ManagedAdapterError) || !["timeout", "capacity_reached"].includes(error.code)) throw error;
+		}
 	}
 
 	async refreshResult(refreshId: string, status: "ready" | "busy"): Promise<void> {
@@ -427,7 +440,8 @@ export class BoundAdapterClient {
 		await this.hostMessage("host.run.observe", { witness: parseHostRunWitness(witness) });
 	}
 	async confirmHostRun(checkId: string, witness: HostRunWitness | null): Promise<void> {
-		await this.hostMessage("host.run.confirm", { checkId, witness: witness === null ? null : parseHostRunWitness(witness) });
+		const payload = { checkId, witness: witness === null ? null : parseHostRunWitness(witness) };
+		await this.replyToProbe(() => this.hostMessage("host.run.confirm", payload));
 	}
 	async answerHostApproval(input: { approvalId: string; generationId: string; runId: string; toolCallId: string; choice: "approve" | "deny" | "unavailable" }): Promise<void> {
 		await this.hostMessage("host.approval.answer", structuredClone(input));
@@ -512,7 +526,13 @@ export class BoundAdapterClient {
 			this.#inboundWork = this.#inboundWork
 				.then(() => this.consumeUnsolicited(envelope))
 				.then(() => undefined)
-				.catch(() => { this.disconnect("unsolicited_handler_failed"); });
+				.catch(error => {
+					if (!this.#disconnectReason) {
+						this.#failedReceivedType = envelope.type;
+						this.#failureCode = error instanceof ManagedAdapterError && (error.code === "timeout" || error.code === "capacity_reached") ? error.code : "other";
+					}
+					this.disconnect("unsolicited_handler_failed");
+				});
 		}
 	}
 
@@ -567,7 +587,8 @@ export class BoundAdapterClient {
 	private handleClose(): void {
 		reportConnectionDiagnostic(this.options.onConnectionDiagnostic, { side: "adapter", reason: this.#disconnectReason ?? "peer_closed",
 			connectionId: this.#connectionId, conversationId: this.options.binding.conversationId, attachmentId: this.#attachmentId,
-			lastSentType: this.#lastSentType, lastReceivedType: this.#lastReceivedType, sent: this.#sent, received: this.#received, pending: this.#pending.size });
+			lastSentType: this.#lastSentType, lastReceivedType: this.#lastReceivedType, failedReceivedType: this.#failedReceivedType,
+			failureCode: this.#failureCode, sent: this.#sent, received: this.#received, pending: this.#pending.size });
 		this.#socket = undefined;
 		this.#attachmentId = undefined;
 		this.#buffer = Buffer.alloc(0);

@@ -879,13 +879,38 @@ for (const failure of ["invalid_frame", "frame_too_large", "unsolicited_handler_
 		else if (failure === "frame_too_large") [...relay.sockets][0]!.write(Buffer.alloc(65537, 32));
 		else if (failure === "peer_closed") relay.disconnect();
 		else if (failure === "local_shutdown") await client.close();
-		else relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "probe", conversationId, role: "relay", type: "host.run.check", payload: { checkId: "probe" } });
+		else [...relay.sockets][0]!.write([
+			encodeNdjsonEnvelope({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "probe", conversationId, role: "relay", type: "host.run.check", payload: { checkId: "probe" } }),
+			encodeNdjsonEnvelope({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "later-input", conversationId, role: "relay", type: "input.deliver",
+				payload: { deliveryId: deriveDeliveryId(conversationId, "$later"), matrixEventId: "$later", kind: "prompt", body: "secret body" } }),
+		].join(""));
 		await disconnected;
 		assert.equal(diagnostics.length, 1); assert.equal(diagnostics[0]!.reason, failure);
 		assert.equal(diagnostics[0]!.conversationId, conversationId); assert.ok(!JSON.stringify(diagnostics).includes("secret"));
+		if (failure === "unsolicited_handler_failed") {
+			assert.equal(diagnostics[0]!.failedReceivedType, "host.run.check"); assert.equal(diagnostics[0]!.failureCode, "other");
+			assert.equal(diagnostics[0]!.lastReceivedType, "input.deliver", "last received is not necessarily the failing callback");
+		}
 		assert.equal(client.connected, false);
 	});
 }
+
+test("probe replies tolerate only timeout/capacity and never retry or weaken ordinary requests", async () => {
+	for (const code of ["timeout", "capacity_reached", "permission_denied", "invalid_response", "invalid_delivery", "attachment_conflict"]) {
+		let attempts = 0;
+		class RejectedClient extends BoundAdapterClient {
+			override supports(): boolean { return true; }
+			protected override request(): Promise<ManagedSessionEnvelope> { attempts++; return Promise.reject(new ManagedAdapterError("secret rejected request", code)); }
+		}
+		const client = new RejectedClient({ socketPath: "/unused", role: "ordinary_adapter", attachmentNonce: nonce, binding, onEnvelope: () => undefined });
+		for (const reply of [() => client.confirmRecovery("probe", false, null), () => client.confirmHostRun("probe", null)]) {
+			if (["timeout", "capacity_reached"].includes(code)) await reply();
+			else await assert.rejects(reply, (error: unknown) => error instanceof ManagedAdapterError && error.code === code);
+		}
+		assert.equal(attempts, 2, "each probe gets one attempt only");
+		await assert.rejects(client.selfStatus(), (error: unknown) => error instanceof ManagedAdapterError && error.code === code);
+	}
+});
 
 test("adapter request concurrency is bounded", async (t) => {
 	assert.throws(() => new BoundAdapterClient({ socketPath: "/tmp/unopened", role: "ordinary_adapter", attachmentNonce: nonce, binding,

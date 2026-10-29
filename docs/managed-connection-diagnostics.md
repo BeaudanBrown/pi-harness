@@ -32,7 +32,9 @@ conversation ID, and rejected attachments may have no shared attachment ID.
 successful delivery. `sent` counts send attempts; `received` counts successfully
 parsed envelopes (including a duplicate/rejected envelope). `lastReceivedType`
 is the last successfully parsed type, **not** the type of a malformed frame or
-necessarily the asynchronous handler that failed. `pending` counts pending
+necessarily the asynchronous handler that failed. `failedReceivedType` identifies
+that callback when available; `failureCode` is limited to `timeout`,
+`capacity_reached`, or `other`, never raw exception text. `pending` counts pending
 requests on the adapter and active host requests on the relay, respectively.
 Missing fields mean unavailable/filtered metadata, not zero.
 
@@ -69,12 +71,14 @@ infer successful Matrix projection from a restored socket.
 
 ## Verification
 
-TypeScript compilation and the six focused Node suites passed: 69 tests passed,
-14 packaged SDK/security-helper cases skipped. The suites cover connection
-diagnostics, adapter, relay IPC, relay/adapter integration, host adapter controls
-and startup IPC (`tests/managed-session-*.test.ts`). Both Standards and Spec
-reviews reported no findings; LSP diagnostics are clean. Detailed artifacts are
-recorded in #132.
+For the probe-reply follow-up, full TypeScript and recipe-selected relay source
+compilation passed; 105 tests passed across 11 affected Node suites, with 14
+packaged SDK/security-helper cases skipped. Two timeout repros failed before the
+fix. Coverage includes adapter/relay transport, native host proofs and recovery
+attention. See [the probe-reply acceptance matrix](managed-probe-reply-backpressure.md).
+Standards review had no findings; Spec review requested this verification-count
+update, now addressed. LSP diagnostics are clean. Detailed artifacts are recorded
+in #132.
 
 Canonical Nix verification, production builds, activation and live diagnostic
 acceptance remain pending separate authorization. No deployed root cause or

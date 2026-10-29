@@ -7,7 +7,8 @@ export type DisconnectReason = typeof reasons[number];
 export interface ConnectionDiagnostic {
 	side: "adapter" | "relay"; reason: DisconnectReason;
 	connectionId?: string; conversationId?: string; attachmentId?: string;
-	lastSentType?: string; lastReceivedType?: string;
+	lastSentType?: string; lastReceivedType?: string; failedReceivedType?: string;
+	failureCode?: "timeout" | "capacity_reached" | "other";
 	sent?: number; received?: number; pending?: number;
 }
 export type ConnectionDiagnosticSink = (record: ConnectionDiagnostic) => void;
@@ -31,7 +32,8 @@ export function connectionDiagnosticLogger(write: (line: string) => void, limit 
 			["conversationId", /^conv_[a-f0-9]{32}$/],
 			["attachmentId", /^attachment-[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/],
 		] as const) { const value = input[key]; if (typeof value === "string" && pattern.test(value)) record[key] = value; }
-		for (const key of ["lastSentType", "lastReceivedType"] as const) {
+		if (["timeout", "capacity_reached", "other"].includes(input.failureCode ?? "")) record.failureCode = input.failureCode!;
+		for (const key of ["lastSentType", "lastReceivedType", "failedReceivedType"] as const) {
 			const value = input[key]; if (typeof value === "string" && messageTypes.has(value)) record[key] = value;
 		}
 		for (const key of ["sent", "received", "pending"] as const) {

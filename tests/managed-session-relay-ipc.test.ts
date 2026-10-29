@@ -341,6 +341,56 @@ test("IPC keeps authenticated attachments after recoverable operation errors", a
 	assert.equal((await response).type, "self.result");
 });
 
+for (const probe of ["recovery.check", "host.run.check"] as const) for (const pressure of ["timeout", "capacity"] as const) {
+	test(`${probe} ${pressure} behind replay acknowledgements preserves the attachment and queue`, { timeout: 5000 }, async t => {
+		let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
+		let entered!: () => void; const replayEntered = new Promise<void>(resolve => { entered = resolve; });
+		const seen: string[] = []; const diagnostics: ConnectionDiagnostic[] = [];
+		const f = await setup(undefined, async (envelope, attachment) => {
+			seen.push(envelope.type);
+			const base = { protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay" as const, messageId: `reply-${envelope.messageId}`, conversationId: attachment.conversationId, inReplyTo: envelope.messageId };
+			if (envelope.type === "input.acknowledge") {
+				entered(); await blocked;
+				return { ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: envelope.payload.status } };
+			}
+			if (envelope.type === "recovery.confirm") return { ...base, type: "recovery.acknowledge", payload: { requestId: envelope.payload.requestId } };
+			if (envelope.type === "host.run.confirm") return { ...base, type: "host.acknowledge", payload: {} };
+			return { ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } };
+		}, true);
+		t.after(async () => { release(); await f.server.close(); await rm(f.root, { recursive: true, force: true }); });
+		const value = f.values[0]!; const deliveryId = deriveDeliveryId(value.conversationId, "$queued-preserved");
+		await f.registry.recordAcceptedInput(value.conversationId, { deliveryId, matrixEventId: "$queued-preserved", kind: "prompt", body: "preserved", status: "accepted" });
+		const before = structuredClone(f.registry.pendingInputs(value.conversationId));
+		let client!: BoundAdapterClient; let handled!: () => void; const handlerDone = new Promise<void>(resolve => { handled = resolve; });
+		client = new BoundAdapterClient({ socketPath: f.server.socketPath, role: "ordinary_adapter", attachmentNonce: nonce,
+			binding: { version: MANAGED_SESSION_STATE_VERSION, role: "ordinary_adapter", conversationId: value.conversationId, concept: value.concept, sessionId: value.piSessionId, bindingBoundaryEntryId: value.bindingBoundaryEntryId },
+			requestedCapabilities: ["recovery-attention-v1", "approval-v1"], timeouts: { requestMs: 50, relaySideEffectMs: 2000 },
+			onConnectionDiagnostic: record => diagnostics.push(record),
+			onEnvelope: async envelope => {
+				try {
+					if (envelope.type === "recovery.check") await client.confirmRecovery(String(envelope.payload.requestId), false, null);
+					else if (envelope.type === "host.run.check") await client.confirmHostRun(String(envelope.payload.checkId), null);
+				} finally { handled(); }
+			} });
+		t.after(() => client.close()); await client.connect();
+		const attachmentId = f.server.attachment(value.conversationId)!.attachmentId;
+		const replayCount = pressure === "capacity" ? 256 : 1;
+		const replay = Promise.all(Array.from({ length: replayCount }, () => client.acknowledgeInput(deliveryId, "accepted").then(() => true, () => false)));
+		await replayEntered;
+		f.server.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay", messageId: "fresh-probe", conversationId: value.conversationId,
+			type: probe, payload: probe === "recovery.check" ? { requestId: "probe" } : { checkId: "probe" } });
+		await handlerDone; await new Promise(resolve => setTimeout(resolve, 20));
+		release();
+		assert.equal(client.connected, true, "a short-lived probe timeout must not abort the queued durable replay");
+		assert.deepEqual(await replay, Array(replayCount).fill(true));
+		await client.selfStatus(); // Also drains the late correlated probe response.
+		assert.equal(client.connected, true); assert.equal(f.server.attachment(value.conversationId)!.attachmentId, attachmentId);
+		assert.deepEqual(diagnostics, []); assert.deepEqual(f.registry.pendingInputs(value.conversationId), before);
+		assert.equal(seen.filter(type => type === "input.acknowledge").length, replayCount, "no replay retry or input injection");
+		assert.equal(seen.filter(type => type === (probe === "recovery.check" ? "recovery.confirm" : "host.run.confirm")).length, pressure === "capacity" ? 0 : 1, "no stale probe retry");
+	});
+}
+
 test("disconnect diagnostics distinguish attachment rejection and the per-connection ID limit", { timeout: 15000 }, async t => {
 	const relayDiagnostics: ConnectionDiagnostic[] = [];
 	const adapterDiagnostics: ConnectionDiagnostic[] = [];
