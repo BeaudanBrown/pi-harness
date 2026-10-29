@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof } from "../exact-window-contracts.js";
 import { ExactWindowClient } from "./exact-window-client.js";
 import { legacyOwnershipError, migrateLegacyWindow } from "./legacy-window-migration.js";
+import { OperatorAdminMigration, type AdminSelection, type AdminMigrationSnapshot } from "./operator-admin.js";
 import { manualRecoverySnapshot, applyManualRecovery, type ManualRecoverySnapshot } from "./manual-legacy-recovery.js";
 import { HostControlError } from "./host-control-error.js";
 import { launchCoordinator as ensureCoordinatorWindow } from "./coordinator-launcher.js";
@@ -358,6 +359,7 @@ export async function durableProjectSession(path: string, cwd: string, conversat
 }
 
 export class HostLifecycle {
+	private readonly operatorAdmins: OperatorAdminMigration;
 	private readonly launches = new Map<string, { window: Promise<void>; ready: Promise<void> }>();
 	private readonly creations = new Map<string, Promise<Record<string, unknown>>>();
 	private readonly worktreeOperations = new Map<string, { identity?: string; promise: Promise<unknown> }>();
@@ -416,11 +418,15 @@ export class HostLifecycle {
 		if (options.attachmentTimeoutMs !== undefined && (!Number.isSafeInteger(options.attachmentTimeoutMs) || options.attachmentTimeoutMs < 100 || options.attachmentTimeoutMs > 10 * 60_000)) {
 			throw new Error("Managed lifecycle attachment timeout must be between 100ms and 10 minutes");
 		}
+		this.operatorAdmins = new OperatorAdminMigration({ registry: options.registry, matrix: options.matrix, directory: join(options.projectSessionDirectory, "operator-admin") });
 		this.exactWindows = new ExactWindowClient((operation, request) => this.invoke(operation, request));
 		this.projectSpaces = new ProjectSpaces(options.registry, options.matrix);
 		this.reconciler = new ProjectReconciler({ registry: options.registry, matrix: options.matrix, intentDirectory: options.projectSessionDirectory,
 			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement), hierarchy: options.hierarchy, account: options.spaceCleanupAccount });
 	}
+
+	adminApprovalPreview(selection: AdminSelection): Promise<AdminMigrationSnapshot> { return this.operatorAdmins.preview(selection); }
+	executeAdminApproval(snapshot: AdminMigrationSnapshot, operationId: string): Promise<void> { return this.operatorAdmins.apply(snapshot, operationId); }
 
 	pendingReconciliationCount(): number { return this.reconciler.pendingCount(); }
 	spaceApprovalPreview(cleanup: boolean): Promise<LiveSpacePreview> { return this.reconciler.previewLive(cleanup); }

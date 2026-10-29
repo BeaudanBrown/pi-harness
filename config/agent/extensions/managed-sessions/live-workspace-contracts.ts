@@ -60,6 +60,8 @@ export const HostActionSchema = Type.Union([
 	action("conversation.stop", target),
 	action("conversation.refresh", { ...target, confirmed: Type.Literal(true) }),
 	action("conversation.migrate", { ...target, confirmed: Type.Literal(true) }),
+	action("conversation.admin.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 100, uniqueItems: true }), includeSpaces: Type.Optional(Type.Literal(true)) }),
+	action("conversation.admin.apply", preview),
 	action("conversation.recover.preview", target),
 	action("conversation.recover.apply", { ...preview, operatorClosed: Type.Literal(true), acceptIncompleteInspection: Type.Literal(true) }),
 	action("conversation.delete", { ...target, confirmed: Type.Literal(true) }),
@@ -96,7 +98,7 @@ export const HOST_ERROR_EXITS = {
 const readOperationNames = [
 	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status",
 	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "worktree.branch.preview", "conversation.delete.preview",
-	"space.reconcile.preview", "space.cleanup.preview", "conversation.recover.preview",
+	"space.reconcile.preview", "space.cleanup.preview", "conversation.recover.preview", "conversation.admin.preview",
 ] as const satisfies readonly HostAction["operation"][];
 const readOperations = new Set<HostAction["operation"]>(readOperationNames);
 export type HostReadAction = Extract<HostAction, { operation: typeof readOperationNames[number] }>;
@@ -167,6 +169,8 @@ export const HostResultSchemas = {
 	"conversation.refresh": launched,
 	"conversation.migrate": strict({ conversationId: ConversationIdSchema, migrationState: enumeration(["awaiting_exit", "ready"]), message: text(512) }),
 	"conversation.delete": strict({ conversationId: ConversationIdSchema, retirementId: stable("retirement"), cleanupState }),
+	"conversation.admin.preview": previewResult,
+	"conversation.admin.apply": cleanup,
 	"conversation.recover.preview": previewResult,
 	"conversation.recover.apply": cleanup,
 	"conversation.delete.preview": previewResult,

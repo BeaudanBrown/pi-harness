@@ -25,6 +25,13 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
   changed observations need fresh preview and consent. Recovery records operator
   attestation, not verified exit. It never stops or launches Pi. For a retired target,
   it only resolves the stop obligation; account cleanup remains independent.
+- `conversation.admin.preview` takes exact `conversationIds` and optional
+  `includeSpaces=true`. Its separately approved apply grants only the configured
+  operator room admin power, not arbitrary users. Inspect all frozen targets and
+  concurrency warnings. Avoid concurrent permission edits: Matrix has no conditional
+  state writes. Inspect uncertain outcomes with a new preview; never blindly replay.
+  This neither restarts Pi nor removes participants. Do not use shell/API calls to
+  bypass the approval gate.
 - `conversation.delete` permanently retires the identity and cleans up its exact
   owned resources. It preserves saved Pi/Matrix history and workspace files.
   The coordinator cannot be stopped or deleted.

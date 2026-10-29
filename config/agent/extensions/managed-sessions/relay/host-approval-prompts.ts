@@ -18,6 +18,7 @@ const actionNames: Record<string, string> = {
 	"worktree.conversation.create": "Create a new checkout and conversation", "worktree.conversation.fork": "Fork into a new checkout and conversation",
 	"conversation.create": "Create a new conversation", "conversation.open": "Open the native session", "conversation.resume": "Resume the native session",
 	"conversation.migrate": "Prepare legacy migration or verify manual window closure (no automatic stop or launch)",
+	"conversation.admin.apply": "Grant the configured operator admin access to the frozen rooms and Spaces",
 	"conversation.recover.apply": "Confirm manual closure and reconcile only the frozen legacy conversation (no automatic stop or launch)",
 	"conversation.stop": "Stop the native session", "conversation.refresh": "Refresh the native runtime", "conversation.delete": "Retire the room and native session",
 	"conversation.delete.apply": "Retire the selected conversations", "worktree.remove.apply": "Remove the selected checkout",
@@ -87,9 +88,9 @@ export function hostApprovalQuestion(record: HostApprovalRecord): string {
 		details = `${describeAction(scope)} ${describeScope({ baseCommit: context.baseCommit, sourceGenerationId: context.sourceGenerationId })}?\nNew independent room; inherited summary only; idle until next message` +
 			`\n\nInherited summary (context only):\n${summary}\n\nEnd inherited summary.`;
 	}
-	if (operation === "conversation.recover.apply") {
+	if (operation === "conversation.recover.apply" || operation === "conversation.admin.apply") {
 		const preview = record.frozen.preconditions.preview as { warnings?: string[] } | undefined;
-		if (!preview?.warnings?.length) throw new HostControlError("unavailable", "Recovery uncertainty disclosure is missing");
+		if (!preview?.warnings?.length) throw new HostControlError("unavailable", "Required uncertainty disclosure is missing");
 		details += `\n\n${preview.warnings.join("\n")}`;
 	}
 	// Bulk retirement already lists these exact conversation targets. Do not

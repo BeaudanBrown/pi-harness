@@ -22,6 +22,8 @@
     "conversation.stop": { "human": "direct", "model": "approval" },
     "conversation.refresh": { "human": "confirmed", "model": "approval" },
     "conversation.migrate": { "human": "confirmed", "model": "approval" },
+    "conversation.admin.preview": { "human": "direct", "model": "direct" },
+    "conversation.admin.apply": { "human": "confirmed", "model": "approval" },
     "conversation.recover.preview": { "human": "direct", "model": "direct" },
     "conversation.recover.apply": { "human": "confirmed", "model": "approval" },
     "conversation.delete": { "human": "confirmed", "model": "approval" },

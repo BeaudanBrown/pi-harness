@@ -13,7 +13,7 @@ import type { HostAccountOwner, MembershipRestore } from "./host-account-owner.j
 import { HostControlError } from "./host-control-error.js";
 
 const detached = (value: unknown): FrozenJson => JSON.parse(JSON.stringify(value)) as FrozenJson;
-type PreviewAction = Extract<HostReadAction, { operation: "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
+type PreviewAction = Extract<HostReadAction, { operation: "conversation.admin.preview" | "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
 type PreviewResult = HostResult<"conversation.delete.preview">;
 type Removal = Awaited<ReturnType<HostLifecycle["removalApprovalPreview"]>>;
 interface Preview {
@@ -22,7 +22,12 @@ interface Preview {
 	branch?: Awaited<ReturnType<HostLifecycle["branchApprovalPreview"]>>;
 	spaces?: LiveSpacePreview;
 	recovery?: Awaited<ReturnType<HostLifecycle["manualRecoveryPreview"]>>;
+	/** JSON chunks preserve arbitrary Matrix user/event keys without widening approval's private-key grammar. */
+	adminJson?: string[];
 	warnings?: string[];
+}
+function adminSnapshot(preview: Preview): Awaited<ReturnType<HostLifecycle["adminApprovalPreview"]>> | undefined {
+	return preview.adminJson ? JSON.parse(preview.adminJson.join("")) : undefined;
 }
 export function isManagedHostPreview(action: HostAction): action is PreviewAction { return action.operation.endsWith(".preview"); }
 const stale = () => new HostControlError("stale_preview", "Frozen targets changed or expired; obtain a new preview and consent");
@@ -68,6 +73,17 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (source.operation === "worktree.conversation.cleanup.preview" && source.conversationId === coordinatorId) {
 			conversations = [coordinatorId]; preview.targets = [{ kind: "conversation", conversationId: coordinatorId }];
 			preview.blockers.push("The protected coordinator cannot be retired or included in destructive cleanup");
+		} else if (source.operation === "conversation.admin.preview") {
+			const admins = await this.options.lifecycle.adminApprovalPreview({ conversationIds: source.conversationIds, ...(source.includeSpaces ? { includeSpaces: true } : {}) });
+			const json = JSON.stringify(admins);
+			preview.adminJson = Array.from({ length: Math.ceil(json.length / 4096) }, (_, i) => json.slice(i * 4096, (i + 1) * 4096));
+			preview.targets = source.conversationIds.map(conversationId => ({ kind: "conversation", conversationId }));
+			for (const room of admins.rooms) if (room.space) preview.targets.push({ kind: "space", roomId: room.roomId });
+			preview.warnings = [
+				`Grant configured operator ${admins.rooms[0]?.operatorUserId} admin power 100 where needed; preserve higher power. ${admins.rooms.filter(room => room.change).length} of ${admins.rooms.length} rooms/Spaces need an update.`,
+				"Preserve other members, permissions and history. This does not remove anyone or grant guests admin access.",
+				"Matrix has no conditional power-state writes. Avoid concurrent permission edits: a change between inspection and write could be overwritten. Uncertain writes are never automatically retried.",
+			];
 		} else if (source.operation === "conversation.recover.preview") {
 			preview.recovery = await this.options.lifecycle.manualRecoveryPreview(source.conversationId);
 			conversations = [source.conversationId];
@@ -116,6 +132,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			conversations = preview.targets.flatMap((target) => target.kind === "conversation" ? [target.conversationId] : []);
 		}
 		preview.activeRuns = await this.activeRuns(conversations);
+		if (preview.adminJson && Buffer.byteLength(JSON.stringify(preview)) > 48 * 1024) throw new HostControlError("unavailable", "Admin permission snapshots exceed approval bounds; select fewer conversations");
 		const previewId = `preview_${createHash("sha256").update("pi-managed-sessions:preview:live-v1\0").update(this.options.registry.hostId).update("\0").update(JSON.stringify(preview)).digest("hex").slice(0, 32)}`;
 		const result = { previewId, expiresAt: new Date(preview.expiresAt).toISOString(), targets: preview.targets, activeRuns: preview.activeRuns, blockers: preview.blockers, ...(preview.warnings ? { warnings: preview.warnings } : {}) };
 		try { parseHostResponse(source.operation, { version: "1.0.0", requestId: "preview", ok: true, data: result }); }
@@ -127,6 +144,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 	private async previewFor(action: Extract<HostAction, { previewId: string }>): Promise<Preview> {
 		const saved = this.previews.get(action.previewId); if (!saved || saved.expiresAt <= this.now()) throw stale();
 		const expected = {
+			"conversation.admin.apply": "conversation.admin.preview",
 			"conversation.recover.apply": "conversation.recover.preview",
 			"conversation.delete.apply": "conversation.delete.preview", "worktree.remove.apply": "worktree.remove.preview",
 			"worktree.conversation.cleanup.apply": "worktree.conversation.cleanup.preview", "space.reconcile.apply": "space.reconcile.preview", "space.cleanup.apply": "space.cleanup.preview",
@@ -136,6 +154,10 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 	}
 	private async validPreview(preview: Preview, branch = false): Promise<boolean> {
 		if (preview.expiresAt <= this.now() || preview.blockers.length) return false;
+		if (preview.source.operation === "conversation.admin.preview") {
+			const admins = adminSnapshot(preview);
+			if (!admins || !isDeepStrictEqual(admins, await this.options.lifecycle.adminApprovalPreview(admins.selection))) return false;
+		}
 		if (preview.source.operation === "conversation.recover.preview" && (!preview.recovery || !isDeepStrictEqual(preview.recovery, await this.options.lifecycle.manualRecoveryPreview(preview.source.conversationId)))) return false;
 		if (preview.branch && (preview.source.operation !== "worktree.branch.preview" || !isDeepStrictEqual(preview.branch, await this.options.lifecycle.branchApprovalPreview(preview.source)))) return false;
 		if (preview.retirements && !isDeepStrictEqual(preview.retirements, preview.retirements.map((plan) => this.options.retirement.prepare(plan.conversationId)))) return false;
@@ -143,7 +165,8 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			if (!preview.spaces || !isDeepStrictEqual(preview.spaces, await this.options.lifecycle.spaceApprovalPreview(preview.source.operation === "space.cleanup.preview"))) return false;
 		}
 		if (preview.removal && !isDeepStrictEqual(preview.removal.intent, await this.options.lifecycle.removalApprovalSnapshot(preview.removal.intent.removalKey))) return false;
-		if (!branch) {
+		// Admin state changes do not signal or interrupt attached Pi runs.
+		if (!branch && !preview.adminJson) {
 			const ids = preview.removal?.activeConversations ?? preview.targets.filter((target) => target.kind === "conversation").map((target) => target.conversationId);
 			if (!isDeepStrictEqual(preview.activeRuns, await this.activeRuns(ids))) return false;
 		}
@@ -202,7 +225,10 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			const preview = frozen.preconditions.preview as unknown as Preview;
 			if (!await this.validPreview(preview, action.operation === "worktree.branch.delete")) throw stale();
 			let pending = false;
-			if (action.operation === "conversation.recover.apply") {
+			if (action.operation === "conversation.admin.apply") {
+				const admins = adminSnapshot(preview); if (!admins) throw stale();
+				await this.options.lifecycle.executeAdminApproval(admins, operationId);
+			} else if (action.operation === "conversation.recover.apply") {
 				if (!preview.recovery) throw stale();
 				await this.options.lifecycle.executeManualRecovery(preview.recovery, operationId);
 				pending = preview.recovery.mode === "retired_cleanup" && Boolean(this.options.registry.retirement(preview.recovery.conversationId)?.cleanup);

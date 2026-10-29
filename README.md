@@ -388,6 +388,16 @@ not lose or duplicate participant turns. Generation changes durably create the n
 
 ## Managed Matrix operations
 
+Existing host-owned rooms can explicitly preview/apply an
+[operator-admin migration](docs/managed-operator-admin.md) using
+`conversation admin preview --conversation-ids <exact-ids>` (optionally
+`--include-spaces`) followed by a separately confirmed apply. It grants only the
+configured operator normal admin power, preserving other users and room history.
+It does not remove participants or restart Pi. Matrix has no conditional state
+writes: avoid concurrent permission changes and inspect uncertain outcomes rather
+than replaying them. Future provisioning's automatic admin grant remains a separate
+planned slice; existing room creation still uses the current invitation policy.
+
 The legacy per-Pi `remote-session` bridge and `services.pi-harness.remoteSession`
 option are not loaded or exposed. Legacy rooms, bindings, and sidecar state are
 not imported. Enabled hosts use only the relay-owned managed-session path above.

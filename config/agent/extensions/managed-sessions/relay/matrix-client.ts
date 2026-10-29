@@ -1,5 +1,7 @@
 import { parseAccountAction, type AccountAction } from "../live-workspace-contracts.js";
 import { isDeepStrictEqual } from "node:util";
+import { planOperatorAdmin, type AdminRoom, type AdminPowerSnapshot } from "./operator-admin.js";
+import { HostControlError } from "./host-control-error.js";
 import { isMatrixRoomId } from "../../matrix-shared/room-id.js";
 import { isSoleRoomCreator } from "../../matrix-shared/room-creator.js";
 import { deriveConversationId, type ConversationManifest } from "../contracts.js";
@@ -571,6 +573,29 @@ export class ManagedMatrixClient {
 			throw new ManagedMatrixError("invalid_response", "Matrix bot lacks authority over required room operations");
 		}
 	}
+	async operatorAdminSnapshot(target: AdminRoom): Promise<AdminPowerSnapshot> {
+		await this.assertRoomAuthority(target.roomId, target.space);
+		const base = `/_matrix/client/v3/rooms/${encodeURIComponent(target.roomId)}/state/`;
+		const creation = await this.request("GET", `${base}m.room.create/`) as JsonObject;
+		const powers = await this.request("GET", `${base}m.room.power_levels/`);
+		const member = await this.request("GET", `${base}m.room.member/${encodeURIComponent(this.operatorUserId)}`) as JsonObject;
+		if (!member || !["join", "invite"].includes(String(member.membership))) throw new HostControlError("conflict", "Operator is neither joined nor invited; admin migration will not restore membership");
+		return { ...planOperatorAdmin({ ...target, operatorUserId: this.operatorUserId, botUserId: this.botUserId, creation, powers }),
+			operatorMembership: member.membership as "join" | "invite" };
+	}
+	async applyOperatorAdmin(snapshot: AdminPowerSnapshot, revalidateScope?: () => void): Promise<void> {
+		if (this.#http.retry.maxAttempts !== 1) throw new HostControlError("unavailable", "Admin migration requires one-attempt Matrix transport");
+		const fresh = await this.operatorAdminSnapshot(snapshot);
+		if (!isDeepStrictEqual(fresh, snapshot)) throw new HostControlError("stale_preview", "Room power state changed; obtain a new admin preview and consent");
+		if (!snapshot.change) return;
+		revalidateScope?.();
+		// Matrix has no conditional state PUT. Do not retry an uncertain response.
+		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(snapshot.roomId)}/state/m.room.power_levels/`, snapshot.proposed);
+		const readback = await this.operatorAdminSnapshot(snapshot);
+		if (readback.change || !isDeepStrictEqual(readback.powers, snapshot.proposed) || readback.operatorMembership !== snapshot.operatorMembership)
+			throw new HostControlError("conflict", "Admin update readback changed or is uncertain; inspect with a new preview, never blindly retry");
+	}
+
 	async addSpaceChild(spaceId: string, roomId: string, signal?: AbortSignal): Promise<void> {
 		this.assertManagedRoom(spaceId); this.assertManagedRoom(roomId);
 		// Room IDs are opaque (v12 has no server suffix). The owning bot's server
