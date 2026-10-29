@@ -21,6 +21,7 @@ stdenv.mkDerivation {
     runHook preBuild
     mkdir -p source/managed-sessions
     cp config/agent/extensions/managed-sessions/contracts.ts source/managed-sessions/contracts.ts
+    cp config/agent/extensions/managed-sessions/connection-diagnostics.ts source/managed-sessions/connection-diagnostics.ts
     cp config/agent/extensions/managed-sessions/identity-contracts.ts source/managed-sessions/identity-contracts.ts
     cp config/agent/extensions/managed-sessions/host-run-contracts.ts source/managed-sessions/host-run-contracts.ts
     cp config/agent/extensions/managed-sessions/host-tool.ts source/managed-sessions/host-tool.ts
