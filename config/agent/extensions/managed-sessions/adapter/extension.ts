@@ -1,4 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { connectionDiagnosticLogger } from "../connection-diagnostics.js";
 import { existsSync, readFileSync } from "node:fs";
 import { AdapterTree } from "./tree.js";
 import { latestTreeChange, treeBoundaryIndex } from "./tree-boundary.js";
@@ -293,6 +294,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 		});
 		let client: BoundAdapterClient | undefined;
 		let currentContext: ExtensionContext | undefined;
+		const connectionDiagnostics = connectionDiagnosticLogger(line => process.stderr.write(`${line}\n`));
 		let reconnectTimer: NodeJS.Timeout | undefined;
 		let connectWork: Promise<void> | undefined;
 		let bindingRecovery: { client: BoundAdapterClient; work: Promise<void> } | undefined;
@@ -1171,6 +1173,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const Client = role === "coordinator_adapter" ? CoordinatorAdapterClient : BoundAdapterClient;
 			const next = new Client({
 				socketPath: config.socketPath, role, attachmentNonce: config.attachmentNonce, binding: attemptBinding,
+				onConnectionDiagnostic: connectionDiagnostics,
 				requestedCapabilities: ["commentary-v1", "notification-disposition-v1", "recovery-attention-v1", "local-enrollment-v1", "approval-v1", "host-control-v1", "title-v1", "branch-v1"],
 				runtimeId: role === "ordinary_adapter" ? process.env.PI_MANAGED_SESSION_RUNTIME_ID : undefined,
 				beforeMatrixBindingReady: () => {

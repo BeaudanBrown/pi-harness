@@ -14,6 +14,7 @@ import type { AdapterRole, SessionBinding } from "./state.js";
 import { APPROVAL_LIFETIME_MS, HOST_CONTROL_VERSION, parseHostAction, parseHostResponse, type HostAction, type HostResponse } from "../live-workspace-contracts.js";
 import { parseHostRunWitness, type HostRunWitness } from "../host-run-contracts.js";
 import { artifactChunks, type WorkspaceArtifact } from "./artifact-export.js";
+import { reportConnectionDiagnostic, type ConnectionDiagnosticSink, type DisconnectReason } from "../connection-diagnostics.js";
 
 export const MAX_NODE_TIMER_DELAY_MS = 2_147_483_647;
 const REQUEST_TIMEOUT_MS = 5_000;
@@ -103,12 +104,19 @@ export interface BoundAdapterOptions {
 	onEnvelope: (envelope: ManagedSessionEnvelope) => Promise<void> | void;
 	onMedia?: (image: ReceivedImage) => Promise<void> | void;
 	onDisconnect?: () => void;
+	onConnectionDiagnostic?: ConnectionDiagnosticSink;
 	/** Test seam for exercising timeout boundaries without waiting on production durations. */
 	timeouts?: { requestMs?: number; relaySideEffectMs?: number };
 }
 
 export class BoundAdapterClient {
 	#socket?: Socket;
+	#connectionId?: string;
+	#disconnectReason?: DisconnectReason;
+	#sent = 0;
+	#received = 0;
+	#lastSentType?: string;
+	#lastReceivedType?: string;
 	#buffer = Buffer.alloc(0);
 	#pending = new Map<string, PendingRequest>();
 	#attachmentId?: string;
@@ -154,8 +162,10 @@ export class BoundAdapterClient {
 		this.#closing = false;
 		const socket = await openSocket(this.options.socketPath);
 		this.#socket = socket;
+		this.#connectionId = randomUUID(); this.#disconnectReason = undefined;
+		this.#sent = this.#received = 0; this.#lastSentType = this.#lastReceivedType = undefined;
 		socket.on("data", (chunk) => this.consume(chunk));
-		socket.on("error", () => undefined);
+		socket.on("error", () => { this.#disconnectReason ??= "socket_error"; });
 		socket.on("close", () => this.handleClose());
 		try {
 			const response = await this.request({
@@ -186,6 +196,7 @@ export class BoundAdapterClient {
 			this.#placement = response.payload.placement as WorkspaceIdentity | undefined;
 			this.#generation = Number.isSafeInteger(response.payload.generation) ? Number(response.payload.generation) : 1;
 		} catch (error) {
+			this.#disconnectReason ??= error instanceof ManagedAdapterError && error.code === "attachment_conflict" ? "attachment_conflict" : "connect_failed";
 			socket.destroy();
 			throw error;
 		}
@@ -380,6 +391,7 @@ export class BoundAdapterClient {
 
 	async close(reason: "shutdown" | "session_change" | "stop" | "bridge_delete" = "shutdown"): Promise<void> {
 		this.#closing = true;
+		this.#disconnectReason ??= "local_shutdown";
 		const socket = this.#socket;
 		if (!socket) return;
 		if (this.#attachmentId && !socket.destroyed) {
@@ -388,6 +400,7 @@ export class BoundAdapterClient {
 				messageId: messageId("detach"), conversationId: this.options.binding.conversationId,
 				role: this.options.role, type: "attachment.detach", payload: { attachmentId: this.#attachmentId, reason },
 			};
+			this.#lastSentType = envelope.type; this.#sent++;
 			socket.write(encodeNdjsonEnvelope(envelope));
 		}
 		socket.end();
@@ -445,6 +458,7 @@ export class BoundAdapterClient {
 			}, effectiveTimeoutMs);
 			this.#pending.set(envelope.messageId, { resolve, reject, timer });
 			try {
+				this.#lastSentType = envelope.type; this.#sent++;
 				socket.write(encodeNdjsonEnvelope(envelope));
 			} catch (error) {
 				clearTimeout(timer);
@@ -454,24 +468,30 @@ export class BoundAdapterClient {
 		});
 	}
 
+	private disconnect(reason: DisconnectReason): void {
+		this.#disconnectReason ??= reason;
+		this.#socket?.destroy();
+	}
+
 	private consume(chunk: Buffer): void {
 		this.#buffer = Buffer.concat([this.#buffer, chunk]);
 		while (true) {
 			const newline = this.#buffer.indexOf(0x0a);
 			if (newline === -1) {
-				if (this.#buffer.length > MAX_NDJSON_FRAME_BYTES) this.#socket?.destroy();
+				if (this.#buffer.length > MAX_NDJSON_FRAME_BYTES) this.disconnect("frame_too_large");
 				return;
 			}
 			if (newline + 1 > MAX_NDJSON_FRAME_BYTES) {
-				this.#socket?.destroy();
+				this.disconnect("frame_too_large");
 				return;
 			}
 			const frame = this.#buffer.subarray(0, newline + 1);
 			this.#buffer = this.#buffer.subarray(newline + 1);
 			let envelope: ManagedSessionEnvelope;
-			try { envelope = parseNdjsonEnvelope(frame); } catch { this.#socket?.destroy(); return; }
+			try { envelope = parseNdjsonEnvelope(frame); } catch { this.disconnect("invalid_frame"); return; }
+			this.#received++; this.#lastReceivedType = envelope.type;
 			if (envelope.role !== "relay" || envelope.conversationId !== this.options.binding.conversationId) {
-				this.#socket?.destroy();
+				this.disconnect("wrong_peer");
 				return;
 			}
 			if (envelope.inReplyTo) {
@@ -481,7 +501,7 @@ export class BoundAdapterClient {
 					if (expectation && matchesExpectedResponse(expectation, envelope)) {
 						this.#expiredRequests.delete(envelope.inReplyTo); continue;
 					}
-					this.#socket?.destroy(); return;
+					this.disconnect("unexpected_reply"); return;
 				}
 				clearTimeout(pending.timer);
 				this.#pending.delete(envelope.inReplyTo);
@@ -492,7 +512,7 @@ export class BoundAdapterClient {
 			this.#inboundWork = this.#inboundWork
 				.then(() => this.consumeUnsolicited(envelope))
 				.then(() => undefined)
-				.catch(() => { this.#socket?.destroy(); });
+				.catch(() => { this.disconnect("unsolicited_handler_failed"); });
 		}
 	}
 
@@ -539,12 +559,15 @@ export class BoundAdapterClient {
 		if (this.#expiredRequests.size >= MAX_EXPIRED_REQUEST_IDS) {
 			// Do not evict a correlation while its valid response could still arrive on
 			// this connection. Reconnect instead and discard all old-socket responses.
-			this.#socket?.destroy(); return;
+			this.disconnect("expired_reply_limit"); return;
 		}
 		this.#expiredRequests.set(requestId, expectation);
 	}
 
 	private handleClose(): void {
+		reportConnectionDiagnostic(this.options.onConnectionDiagnostic, { side: "adapter", reason: this.#disconnectReason ?? "peer_closed",
+			connectionId: this.#connectionId, conversationId: this.options.binding.conversationId, attachmentId: this.#attachmentId,
+			lastSentType: this.#lastSentType, lastReceivedType: this.#lastReceivedType, sent: this.#sent, received: this.#received, pending: this.#pending.size });
 		this.#socket = undefined;
 		this.#attachmentId = undefined;
 		this.#buffer = Buffer.alloc(0);

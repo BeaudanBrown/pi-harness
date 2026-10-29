@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { randomUUID } from "node:crypto";
+import { connectionDiagnosticLogger } from "../connection-diagnostics.js";
 import { MatrixError } from "../../matrix-shared/http.js";
 import { resolve } from "node:path";
 import {
@@ -169,6 +170,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			payload,
 		});
 		server = new ManagedSessionIpcServer(registry, {
+			onConnectionDiagnostic: connectionDiagnosticLogger(line => process.stderr.write(`${line}\n`)),
 			runtimeDirectory,
 			socketPath: environment.PI_MANAGED_SESSIONS_SOCKET,
 			expectedUid,

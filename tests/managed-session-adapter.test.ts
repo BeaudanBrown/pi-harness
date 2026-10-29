@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { ConnectionDiagnostic } from "../config/agent/extensions/managed-sessions/connection-diagnostics.js";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -850,7 +851,9 @@ test("a valid response arriving just after an IPC timeout does not disconnect th
 test("a mismatched late correlation fails closed", async (t) => {
 	const relay = await FakeRelay.start(0, 0, 0, 500);
 	t.after(() => relay.close());
+	const diagnostics: ConnectionDiagnostic[] = [];
 	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+		onConnectionDiagnostic: record => { diagnostics.push(record); throw Error("diagnostic sink failure"); },
 		onEnvelope: () => undefined, timeouts: { requestMs: 100 } });
 	t.after(() => client.close());
 	await client.connect();
@@ -860,7 +863,29 @@ test("a mismatched late correlation fails closed", async (t) => {
 		inReplyTo: requestId, type: "input.result", payload: { deliveryId: deriveDeliveryId(conversationId, "$unrelated"), status: "accepted" } });
 	await new Promise((resolve) => setTimeout(resolve, 20));
 	assert.equal(client.connected, false);
+	assert.equal(diagnostics.length, 1); assert.equal(diagnostics[0]!.reason, "unexpected_reply");
+	assert.equal(diagnostics[0]!.lastReceivedType, "input.result");
 });
+
+for (const failure of ["invalid_frame", "frame_too_large", "unsolicited_handler_failed", "peer_closed", "local_shutdown"] as const) {
+	test(`adapter disconnect diagnostic: ${failure}`, { timeout: 5000 }, async t => {
+		const relay = await FakeRelay.start(); t.after(() => relay.close());
+		const diagnostics: ConnectionDiagnostic[] = [];
+		let closed!: () => void; const disconnected = new Promise<void>(resolve => { closed = resolve; });
+		const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding,
+			onConnectionDiagnostic: record => { diagnostics.push(record); closed(); }, onEnvelope: () => { throw Error("secret handler error"); } });
+		t.after(() => client.close()); await client.connect();
+		if (failure === "invalid_frame") [...relay.sockets][0]!.write("secret malformed frame\n");
+		else if (failure === "frame_too_large") [...relay.sockets][0]!.write(Buffer.alloc(65537, 32));
+		else if (failure === "peer_closed") relay.disconnect();
+		else if (failure === "local_shutdown") await client.close();
+		else relay.send({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: "probe", conversationId, role: "relay", type: "host.run.check", payload: { checkId: "probe" } });
+		await disconnected;
+		assert.equal(diagnostics.length, 1); assert.equal(diagnostics[0]!.reason, failure);
+		assert.equal(diagnostics[0]!.conversationId, conversationId); assert.ok(!JSON.stringify(diagnostics).includes("secret"));
+		assert.equal(client.connected, false);
+	});
+}
 
 test("adapter request concurrency is bounded", async (t) => {
 	assert.throws(() => new BoundAdapterClient({ socketPath: "/tmp/unopened", role: "ordinary_adapter", attachmentNonce: nonce, binding,

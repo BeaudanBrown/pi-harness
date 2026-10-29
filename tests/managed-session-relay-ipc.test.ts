@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import type { ConnectionDiagnostic, ConnectionDiagnosticSink } from "../config/agent/extensions/managed-sessions/connection-diagnostics.js";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
@@ -159,7 +160,7 @@ function waitForClose(socket: Socket): Promise<void> {
 	return new Promise((resolve) => socket.once("close", () => resolve()));
 }
 
-async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler, hostApprovalsEnabled = false, onAttachmentDisconnect?: AttachmentDisconnectHandler): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[]; registry: RelayRegistry }> {
+async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHandler, hostApprovalsEnabled = false, onAttachmentDisconnect?: AttachmentDisconnectHandler, onConnectionDiagnostic?: ConnectionDiagnosticSink): Promise<{ root: string; server: ManagedSessionIpcServer; values: ConversationManifest[]; registry: RelayRegistry }> {
 	const root = await mkdtemp(join(tmpdir(), "pi-managed-ipc-"));
 	const values = [manifest("one"), manifest("two")];
 	const store = new ConversationManifestStore(join(root, "manifests"));
@@ -172,7 +173,7 @@ async function setup(peerUidOverride?: PeerUidResolver, onEnvelope?: EnvelopeHan
 		runtimeDirectory: join(root, "run"),
 		expectedUid: process.getuid?.(),
 		peerUid: peerUidOverride ?? (peerUidHelper ? (socket) => peerUidFromHelper(peerUidHelper, socket) : () => process.getuid?.()),
-		onEnvelope, hostApprovalsEnabled, onAttachmentDisconnect,
+		onEnvelope, hostApprovalsEnabled, onAttachmentDisconnect, onConnectionDiagnostic,
 	});
 	await server.start();
 	return { root, server, values, registry };
@@ -340,8 +341,32 @@ test("IPC keeps authenticated attachments after recoverable operation errors", a
 	assert.equal((await response).type, "self.result");
 });
 
+test("disconnect diagnostics distinguish attachment rejection and the per-connection ID limit", { timeout: 15000 }, async t => {
+	const relayDiagnostics: ConnectionDiagnostic[] = [];
+	const adapterDiagnostics: ConnectionDiagnostic[] = [];
+	const f = await setup(undefined, async envelope => ({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay", messageId: `reply-${envelope.messageId}`,
+		conversationId: envelope.conversationId, inReplyTo: envelope.messageId, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } }), false, undefined, record => relayDiagnostics.push(record));
+	t.after(async () => { await f.server.close(); await rm(f.root, { recursive: true, force: true }); });
+	const value = f.values[0]!;
+	const options = { socketPath: f.server.socketPath, role: "ordinary_adapter" as const, attachmentNonce: nonce,
+		binding: { version: MANAGED_SESSION_STATE_VERSION, role: "ordinary_adapter" as const, conversationId: value.conversationId, concept: value.concept, sessionId: value.piSessionId, bindingBoundaryEntryId: value.bindingBoundaryEntryId },
+		onEnvelope: () => undefined, onConnectionDiagnostic: (record: ConnectionDiagnostic) => adapterDiagnostics.push(record) };
+	const client = new BoundAdapterClient(options); const competing = new BoundAdapterClient(options);
+	t.after(() => client.close()); t.after(() => competing.close());
+	await client.connect(); await assert.rejects(competing.connect(), /already has an attached adapter/); await competing.close();
+	assert.equal(client.connected, true);
+	for (let i = 1; i < 4096; i++) await client.selfStatus();
+	await assert.rejects(client.selfStatus(), /connection closed/);
+	await f.server.close();
+	assert.deepEqual(relayDiagnostics.map(record => record.reason), ["attachment_conflict", "request_id_limit"]);
+	assert.equal(relayDiagnostics.at(-1)!.received, 4097);
+	assert.equal(relayDiagnostics.at(-1)!.lastReceivedType, "self.status");
+	assert.equal(adapterDiagnostics[0]!.reason, "attachment_conflict");
+});
+
 test("IPC fails closed on malformed, oversized, duplicate-ID, and wrong-UID clients", async (t) => {
-	const { root, server, values } = await setup();
+	const diagnostics: ConnectionDiagnostic[] = [];
+	const { root, server, values } = await setup(undefined, undefined, false, undefined, record => { diagnostics.push(record); });
 	t.after(() => server.close());
 	const credentialFrame = Buffer.from(`${JSON.stringify({
 		...attach(values[0]!, "credential-attempt"),
@@ -363,11 +388,15 @@ test("IPC fails closed on malformed, oversized, duplicate-ID, and wrong-UID clie
 	await closed;
 
 	await server.close({ preserveAttachments: true });
+	assert.deepEqual(diagnostics.map(record => record.reason), ["invalid_frame", "invalid_frame", "frame_too_large", "duplicate_id"]);
+	assert.equal(diagnostics.at(-1)!.lastReceivedType, "attachment.attach");
+	assert.ok(!JSON.stringify(diagnostics).includes("must-not-cross-ipc"));
 	const store = new ConversationManifestStore(join(root, "manifests"));
 	const registry = new RelayRegistry(hostId, join(root, "runtime"), store);
 	await registry.load();
 	const wrongUidServer = new ManagedSessionIpcServer(registry, {
 		runtimeDirectory: join(root, "wrong-uid-run"), expectedUid: process.getuid?.(), peerUid: () => (process.getuid?.() ?? 0) + 1,
+		onConnectionDiagnostic: record => { diagnostics.push(record); throw Error("sink failure must not admit peer"); },
 	});
 	await wrongUidServer.start();
 	t.after(() => wrongUidServer.close());
@@ -375,4 +404,6 @@ test("IPC fails closed on malformed, oversized, duplicate-ID, and wrong-UID clie
 	const wrongUidClosed = waitForClose(wrongUid);
 	wrongUid.write(encodeNdjsonEnvelope(attach(values[1]!, "wrong-uid")));
 	await wrongUidClosed;
+	assert.equal(diagnostics.at(-1)!.reason, "peer_check_failed");
+	assert.equal(diagnostics.at(-1)!.conversationId, undefined);
 });

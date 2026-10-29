@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { reportConnectionDiagnostic, type ConnectionDiagnosticSink, type DisconnectReason } from "../connection-diagnostics.js";
 import { chmod, lstat, rm } from "node:fs/promises";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname, resolve } from "node:path";
@@ -29,6 +30,11 @@ interface ConnectionState {
 	detachReason?: "shutdown" | "session_change" | "stop" | "bridge_delete";
 	work: Promise<void>;
 	hostRequests: number;
+	disconnectReason?: DisconnectReason;
+	sent: number;
+	received: number;
+	lastSentType?: string;
+	lastReceivedType?: string;
 }
 
 function relayError(conversationId: string, inReplyTo: string, error: unknown): ManagedSessionEnvelope {
@@ -52,6 +58,7 @@ function relayError(conversationId: string, inReplyTo: string, error: unknown): 
 export class ManagedSessionIpcServer {
 	private server?: Server;
 	private readonly sockets = new Set<Socket>();
+	private readonly connectionStates = new WeakMap<Socket, ConnectionState>();
 	private readonly attachedSockets = new Map<string, Socket>();
 	private readonly attachedCapabilities = new Map<string, string[]>();
 	private readonly attachedIdentities = new Map<string, AcceptedAttachment>();
@@ -86,6 +93,7 @@ export class ManagedSessionIpcServer {
 			onUnboundEnvelope?: UnboundEnvelopeHandler;
 			onAttachment?: AttachmentHandler;
 			onAttachmentDisconnect?: AttachmentDisconnectHandler;
+			onConnectionDiagnostic?: ConnectionDiagnosticSink;
 		},
 	) {
 		if (options.hostApprovalsEnabled && (!options.peerUid || options.expectedUid === undefined)) throw new Error("Host approvals require OS peer verification");
@@ -99,6 +107,7 @@ export class ManagedSessionIpcServer {
 		this.onUnboundEnvelope = options.onUnboundEnvelope;
 		this.onAttachment = options.onAttachment;
 		this.onAttachmentDisconnect = options.onAttachmentDisconnect;
+		this.onConnectionDiagnostic = options.onConnectionDiagnostic;
 	}
 
 	private readonly hostApprovalsEnabled: boolean;
@@ -108,6 +117,7 @@ export class ManagedSessionIpcServer {
 	private readonly onUnboundEnvelope?: UnboundEnvelopeHandler;
 	private readonly onAttachment?: AttachmentHandler;
 	private readonly onAttachmentDisconnect?: AttachmentDisconnectHandler;
+	private readonly onConnectionDiagnostic?: ConnectionDiagnosticSink;
 
 	sendToConversation(envelope: ManagedSessionEnvelope): boolean {
 		if (envelope.role !== "relay" || !envelope.conversationId || envelope.inReplyTo) throw new Error("Server push must be an uncorrelated relay envelope");
@@ -166,34 +176,40 @@ export class ManagedSessionIpcServer {
 	private async accept(socket: Socket): Promise<void> {
 		socket.pause();
 		this.sockets.add(socket);
-		socket.on("error", () => undefined);
+		socket.on("error", () => { const state = this.connectionStates.get(socket); if (state) state.disconnectReason ??= "socket_error"; });
 		socket.once("close", () => this.sockets.delete(socket));
 		if (this.closing) { socket.destroy(); return; }
 		if (this.peerUid) {
 			try {
 				const uid = await this.peerUid(socket);
 				if (uid === undefined || this.expectedUid === undefined || uid !== this.expectedUid) {
+					reportConnectionDiagnostic(this.onConnectionDiagnostic, { side: "relay", reason: "peer_check_failed" });
 					socket.destroy();
 					return;
 				}
 			} catch {
+				reportConnectionDiagnostic(this.onConnectionDiagnostic, { side: "relay", reason: "peer_check_failed" });
 				socket.destroy();
 				return;
 			}
 		}
 		if (this.closing || socket.destroyed) return;
 		const state: ConnectionState = {
-			id: randomUUID(), buffer: Buffer.alloc(0), messageIds: new Set(), closed: false, work: Promise.resolve(), hostRequests: 0,
+			id: randomUUID(), buffer: Buffer.alloc(0), messageIds: new Set(), closed: false, work: Promise.resolve(), hostRequests: 0, sent: 0, received: 0,
 		};
+		this.connectionStates.set(socket, state);
 		socket.on("data", (chunk) => {
 			socket.pause();
 			state.work = state.work
 				.then(() => this.consume(socket, state, chunk))
-				.catch(() => { socket.destroy(); })
+				.catch(() => { this.disconnect(socket, state, "connection_handler_failed"); })
 				.finally(() => { socket.resume(); });
 			this.track(state.work);
 		});
 		socket.on("close", () => {
+			reportConnectionDiagnostic(this.onConnectionDiagnostic, { side: "relay", reason: state.disconnectReason ?? (this.closing ? "local_shutdown" : "peer_closed"),
+				connectionId: state.id, conversationId: state.attachment?.conversationId, attachmentId: state.attachment?.attachmentId,
+				lastSentType: state.lastSentType, lastReceivedType: state.lastReceivedType, sent: state.sent, received: state.received, pending: state.hostRequests });
 			state.closed = true;
 			this.sockets.delete(socket);
 			if (state.attachment && this.attachedSockets.get(state.attachment.conversationId) === socket) {
@@ -218,17 +234,22 @@ export class ManagedSessionIpcServer {
 		} catch (error) { if (!state.closed) this.send(socket, relayError(attachment.conversationId, envelope.messageId, error)); }
 	}
 
+	private disconnect(socket: Socket, state: ConnectionState, reason: DisconnectReason): void {
+		state.disconnectReason ??= reason;
+		socket.destroy();
+	}
+
 	private async consume(socket: Socket, state: ConnectionState, chunk: Buffer): Promise<void> {
 		if (state.closed) return;
 		state.buffer = Buffer.concat([state.buffer, chunk]);
 		while (true) {
 			const newline = state.buffer.indexOf(0x0a);
 			if (newline === -1) {
-				if (state.buffer.length > MAX_NDJSON_FRAME_BYTES) socket.destroy();
+				if (state.buffer.length > MAX_NDJSON_FRAME_BYTES) this.disconnect(socket, state, "frame_too_large");
 				return;
 			}
 			if (newline + 1 > MAX_NDJSON_FRAME_BYTES) {
-				socket.destroy();
+				this.disconnect(socket, state, "frame_too_large");
 				return;
 			}
 			const frame = state.buffer.subarray(0, newline + 1);
@@ -237,11 +258,12 @@ export class ManagedSessionIpcServer {
 			try {
 				envelope = parseNdjsonEnvelope(frame);
 			} catch {
-				socket.destroy();
+				this.disconnect(socket, state, "invalid_frame");
 				return;
 			}
+			state.received++; state.lastReceivedType = envelope.type;
 			if (state.messageIds.size >= 4_096 || state.messageIds.has(envelope.messageId) || envelope.role === "relay") {
-				socket.destroy();
+				this.disconnect(socket, state, state.messageIds.size >= 4_096 ? "request_id_limit" : state.messageIds.has(envelope.messageId) ? "duplicate_id" : "invalid_role");
 				return;
 			}
 			state.messageIds.add(envelope.messageId);
@@ -305,6 +327,7 @@ export class ManagedSessionIpcServer {
 					const payload = envelope.payload as { attachmentId: string; reason: "shutdown" | "session_change" | "stop" | "bridge_delete" };
 					state.detachReason = payload.reason;
 					await this.registry.detach(state.id, state.attachment, payload.attachmentId, payload.reason);
+					state.disconnectReason ??= "managed_detach";
 					socket.end();
 					return;
 				}
@@ -321,6 +344,7 @@ export class ManagedSessionIpcServer {
 				const recoverable = state.attachment && (error instanceof MatrixError || error instanceof RelayRegistryError &&
 					["not_found", "invalid_state", "capacity_reached", "launch_failed", "matrix_unavailable", "activity_interrupted"].includes(error.code));
 				if (recoverable) continue;
+				state.disconnectReason ??= error instanceof RelayRegistryError && error.code === "attachment_conflict" ? "attachment_conflict" : "handler_rejected";
 				socket.destroySoon();
 				return;
 			}
@@ -328,6 +352,7 @@ export class ManagedSessionIpcServer {
 	}
 
 	private send(socket: Socket, envelope: ManagedSessionEnvelope): void {
+		const state = this.connectionStates.get(socket); if (state) { state.lastSentType = envelope.type; state.sent++; }
 		socket.write(encodeNdjsonEnvelope(envelope));
 	}
 }
