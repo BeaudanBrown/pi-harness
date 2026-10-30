@@ -21,6 +21,36 @@ test("connection diagnostics allowlist metadata and bound output across reconnec
 	assert.ok(lines.every(line => line.length < 700));
 });
 
+test("rate windows resume details and summarize suppressed categories without retaining identities", () => {
+	let time = 0; const lines: string[] = [];
+	const log = connectionDiagnosticLogger(line => lines.push(line), 2, { now: () => time, windowMs: 1000 });
+	const record = { side: "adapter" as const, reason: "unexpected_reply" as const };
+	log(record); log(record);
+	for (let i = 0; i < 1000; i++) log({ ...record, conversationId: `secret-identity-${i}` });
+	log({ side: "relay", reason: "socket_error" });
+	log({ side: "relay", reason: "secret-reason" } as unknown as ConnectionDiagnostic);
+	assert.equal(lines.length, 2);
+	time = 1000; log(record);
+	assert.equal(lines.length, 4, "one summary and a new detail; logger is not permanently exhausted");
+	const summary = JSON.parse(lines[2]!.slice("[managed-connection] ".length));
+	assert.equal(summary.event, "suppressed_connections");
+	assert.deepEqual(summary.counts, { "adapter:unexpected_reply": 1000, "relay:socket_error": 1 });
+	assert.ok(!lines.join().includes("secret"));
+	log(record); log(record); assert.equal(lines.length, 5);
+	time = 2000; log(record);
+	assert.deepEqual(JSON.parse(lines[5]!.slice("[managed-connection] ".length)).counts, { "adapter:unexpected_reply": 1 });
+	time = 3000; log(record); assert.equal(lines.length, 8, "no empty summary on a quiet window");
+});
+
+test("rate-window summaries cannot throw into cleanup and invalid window sizes reject", () => {
+	let time = 0; let attempts = 0;
+	const log = connectionDiagnosticLogger(() => { attempts++; throw Error("sink failed"); }, 1, { now: () => time, windowMs: 1000 });
+	const record = { side: "relay" as const, reason: "peer_closed" as const };
+	assert.doesNotThrow(() => { log(record); log(record); time = 1000; log(record); });
+	assert.equal(attempts, 3);
+	for (const windowMs of [0, -1, Infinity, 1.5]) assert.throws(() => connectionDiagnosticLogger(() => undefined, 1, { windowMs }));
+});
+
 test("diagnostics cannot throw into connection cleanup or turn arbitrary error strings into categories", () => {
 	const lines: string[] = []; const log = connectionDiagnosticLogger(line => lines.push(line));
 	log({ side: "adapter", reason: "secret-error" } as unknown as ConnectionDiagnostic);

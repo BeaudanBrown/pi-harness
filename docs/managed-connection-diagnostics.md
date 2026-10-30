@@ -9,7 +9,7 @@ cause and restoration of the missing Matrix reply remain open in #132.
 | --- | --- | --- |
 | Identify which endpoint closed and why | Fixed reason categories on existing adapter and relay close paths; first observed reason wins | Adapter fault tests, malformed/oversized/duplicate IPC tests, competing attachment and 4096-ID limit test |
 | Correlate without content | UTC time, process ID, connection/conversation/attachment IDs, protocol message types and counters only | Logger allowlist/redaction tests |
-| Bound logs across reconnects | One logger retained by each adapter extension instance / relay startup, maximum 64 records; maximum 256 permitted in the helper | Budget test |
+| Bound logs across reconnects | One logger retained by each adapter extension instance / relay startup; up to 64 detail records per 60-second window plus one suppression summary | Budget and fake-clock window tests |
 | Preserve fail-closed behavior | Same socket shutdown branches, registry detach and reconnect logic; diagnostic sink exceptions contained | Existing adapter and IPC suites plus throwing-sink tests |
 | No operational mutation | No schema, durable state, replay, restart or migration changes | Diff inspection; deployment remains separately authorized |
 
@@ -52,9 +52,18 @@ Examples of useful categories:
 
 No raw exceptions, credentials, nonces, message IDs, bodies, paths or frame bytes
 are recorded. Unknown fields and protocol types are discarded by the logger.
-Diagnostics stop after 64 records per logger lifetime, including normal closes;
-absence of further records is **not** evidence that an outage ended. Do not
-restart processes to reset this budget without separate approval.
+Diagnostics allow up to 64 detail records per 60-second monotonic window,
+including normal closes. On the next valid event after a window expires, logging
+resumes and emits one `event: "suppressed_connections"` summary if records were
+dropped. Its `counts` keys are fixed side/reason categories, never conversation
+IDs or message content, and each count saturates at 1,000,000. Memory is bounded
+by the finite category set. At most 65 records are emitted per window by the
+default logger; the helper permits at most 256 details plus one summary.
+
+This is event-driven: no timer, background I/O, durable state or transport retry
+is added. A quiet logger does not flush a pending summary until another event
+arrives. Absence of further records is **not** evidence that an outage ended.
+There is no need to restart a process to replenish its diagnostic budget.
 
 ## Deployment-only follow-up
 
@@ -79,6 +88,11 @@ attention. See [the probe-reply acceptance matrix](managed-probe-reply-backpress
 Standards review had no findings; Spec review requested this verification-count
 update, now addressed. LSP diagnostics are clean. Detailed artifacts are recorded
 in #132.
+
+The #135 rate-window follow-up passes the cumulative managed suite: 633 tests
+passed, zero failed, 48 packaged/environment cases skipped. Full TypeScript and
+recipe-selected relay source compilation also pass. Queue/latency metrics and
+loaded-adapter inventory reporting remain separate, unfinished #135 work.
 
 Canonical Nix verification, production builds, activation and live diagnostic
 acceptance remain pending separate authorization. No deployed root cause or

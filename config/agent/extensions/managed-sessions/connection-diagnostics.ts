@@ -1,3 +1,4 @@
+import { performance } from "node:perf_hooks";
 import { ManagedSessionEnvelopeSchema } from "./contracts.js";
 
 const reasons = ["peer_closed", "socket_error", "local_shutdown", "peer_check_failed", "invalid_frame", "frame_too_large",
@@ -19,13 +20,30 @@ export function reportConnectionDiagnostic(sink: ConnectionDiagnosticSink | unde
 	try { sink?.(record); } catch { /* No diagnostic failure may interrupt cleanup. */ }
 }
 
-/** Fixed allowlist, bounded process-local output. No raw errors, frames, paths,
- * bodies, request IDs, nonces or tokens. Unrecognized fields are discarded. */
-export function connectionDiagnosticLogger(write: (line: string) => void, limit = 64): ConnectionDiagnosticSink {
+/** Fixed allowlist and event-driven rate window; no timers or raw error text.
+ * At most `limit` detail records plus one suppression summary per window.
+ * Suppression keys are fixed side/reason categories, never conversation IDs. */
+export function connectionDiagnosticLogger(write: (line: string) => void, limit = 64,
+	options: { windowMs?: number; now?: () => number } = {}): ConnectionDiagnosticSink {
 	if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) throw Error("Invalid diagnostic limit");
-	let emitted = 0;
+	const windowMs = options.windowMs ?? 60_000;
+	if (!Number.isSafeInteger(windowMs) || windowMs < 1) throw Error("Invalid diagnostic window");
+	const now = options.now ?? (() => performance.now());
+	let windowStart = now(); let emitted = 0;
+	const suppressed = new Map<string, number>();
+	const emit = (record: object) => { try { write(`[managed-connection] ${JSON.stringify(record)}`); } catch { /* Best effort only. */ } };
 	return input => {
-		if (emitted >= limit || !["adapter", "relay"].includes(input.side) || !reasons.includes(input.reason)) return;
+		if (!["adapter", "relay"].includes(input.side) || !reasons.includes(input.reason)) return;
+		const time = now();
+		if (time - windowStart >= windowMs) {
+			if (suppressed.size) emit({ at: new Date().toISOString(), pid: process.pid, event: "suppressed_connections", counts: Object.fromEntries(suppressed) });
+			suppressed.clear(); emitted = 0; windowStart = time;
+		}
+		if (emitted >= limit) {
+			const key = `${input.side}:${input.reason}`;
+			suppressed.set(key, Math.min(1_000_000, (suppressed.get(key) ?? 0) + 1));
+			return;
+		}
 		const record: Record<string, string | number> = { at: new Date().toISOString(), pid: process.pid, side: input.side, reason: input.reason };
 		for (const [key, pattern] of [
 			["connectionId", /^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/],
@@ -40,6 +58,6 @@ export function connectionDiagnosticLogger(write: (line: string) => void, limit 
 			const value = input[key]; if (typeof value === "number" && Number.isSafeInteger(value) && value >= 0) record[key] = Math.min(value, 1_000_000);
 		}
 		emitted++;
-		try { write(`[managed-connection] ${JSON.stringify(record)}`); } catch { /* Best effort only. */ }
+		emit(record);
 	};
 }
