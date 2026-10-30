@@ -12,6 +12,9 @@ const common = { version: Type.Literal(1), hostId: identifier, creationKey: iden
 const project = { projectKey: stable("project"), parentRoomId: room };
 export const ManagedProvenanceSchema = Type.Union([
 	Type.Object({ ...common, kind: Type.Literal("host_space") }, { additionalProperties: false }),
+	Type.Object({ ...common, kind: Type.Literal("archive_root_space"), parentRoomId: room }, { additionalProperties: false }),
+	Type.Object({ ...common, kind: Type.Literal("archive_project_space"), ...project }, { additionalProperties: false }),
+	Type.Object({ ...common, kind: Type.Literal("archive_worktree_space"), ...project, checkoutId: stable("checkout") }, { additionalProperties: false }),
 	Type.Object({ ...common, kind: Type.Literal("project_space"), ...project }, { additionalProperties: false }),
 	Type.Object({ ...common, kind: Type.Literal("worktree_space"), ...project, checkoutId: stable("checkout") }, { additionalProperties: false }),
 	Type.Object({ ...common, kind: Type.Literal("conversation"), ...project, checkoutId: stable("checkout"), conversationId: stable("conv") }, { additionalProperties: false }),

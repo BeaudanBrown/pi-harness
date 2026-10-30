@@ -231,11 +231,12 @@ export function parseHostRequest(value: unknown): HostRequest {
 const accountBase = { version: Type.Literal(ACCOUNT_ACTION_VERSION), requestId: stable("account"), hostId: identifier, payloadDigest: digest };
 const placementProof = {
 	hostSpaceId: room,
+	archiveRootSpaceId: Type.Optional(room),
 	project: Type.Optional(strict({ projectKey: stable("project"), spaceId: room })),
 	checkout: Type.Optional(strict({ checkoutId: stable("checkout"), spaceId: room })),
 };
 export const AccountActionSchema = Type.Union([
-	strict({ ...accountBase, operation: Type.Literal("room.ensure"), roomId: room, kind: Type.Union([Type.Literal("host_space"), Type.Literal("project_space"), Type.Literal("worktree_space"), Type.Literal("conversation"), Type.Literal("coordinator")]),
+	strict({ ...accountBase, operation: Type.Literal("room.ensure"), roomId: room, kind: Type.Union([Type.Literal("host_space"), Type.Literal("project_space"), Type.Literal("worktree_space"), Type.Literal("conversation"), Type.Literal("coordinator"), Type.Literal("archive_root_space"), Type.Literal("archive_project_space"), Type.Literal("archive_worktree_space")]),
 		...placementProof, conversationId: Type.Optional(ConversationIdSchema), creationKey: identifier,
 		notificationSetup: Type.Union([Type.Literal("new_room"), Type.Literal("preserve")]) }),
 	strict({ ...accountBase, operation: Type.Literal("room.retire"), roomId: room, conversationId: ConversationIdSchema, retirementId: stable("retirement") }),
@@ -277,12 +278,15 @@ export function parseAccountAction(value: unknown): AccountAction {
 	if (action.operation !== "room.ensure") return action;
 	const isConversation = action.kind === "conversation" || action.kind === "coordinator";
 	if (isConversation !== (action.conversationId !== undefined)) throw new Error("Conversation identity mismatch");
-	const needsProject = action.kind === "project_space" || action.kind === "worktree_space" || action.kind === "conversation";
-	const needsCheckout = action.kind === "worktree_space" || action.kind === "conversation";
+	const archived = action.kind.startsWith("archive_");
+	if (archived !== (action.archiveRootSpaceId !== undefined)) throw new Error("Archive hierarchy identity mismatch");
+	const needsProject = action.kind === "project_space" || action.kind === "worktree_space" || action.kind === "conversation" || action.kind === "archive_project_space" || action.kind === "archive_worktree_space";
+	const needsCheckout = action.kind === "worktree_space" || action.kind === "conversation" || action.kind === "archive_worktree_space";
 	if (needsProject !== (action.project !== undefined) || needsCheckout !== (action.checkout !== undefined)) throw new Error("Hierarchy identity mismatch");
 	if ((action.kind === "host_space" && action.roomId !== action.hostSpaceId) ||
-		(action.kind === "project_space" && action.roomId !== action.project!.spaceId) ||
-		(action.kind === "worktree_space" && action.roomId !== action.checkout!.spaceId)) throw new Error("Space identity mismatch");
+		(action.kind === "archive_root_space" && action.roomId !== action.archiveRootSpaceId) ||
+		((action.kind === "project_space" || action.kind === "archive_project_space") && action.roomId !== action.project!.spaceId) ||
+		((action.kind === "worktree_space" || action.kind === "archive_worktree_space") && action.roomId !== action.checkout!.spaceId)) throw new Error("Space identity mismatch");
 	if (!isConversation && action.notificationSetup !== "preserve") throw new Error("Space notification setup is forbidden");
 	return action;
 }

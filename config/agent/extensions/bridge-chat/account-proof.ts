@@ -23,8 +23,9 @@ function state(events: unknown): Map<string, Record<string, unknown>> {
 const key = (type: string, id = "") => JSON.stringify([type, id]);
 export function accountRoomProofs(action: EnsureRoom): AccountRoomProof[] {
 	const rooms: AccountRoomProof[] = [{ roomId: action.hostSpaceId, expected: { version: 1, hostId: action.hostId, kind: "host_space" } }];
-	if (action.project) rooms.push({ roomId: action.project.spaceId, expected: { version: 1, hostId: action.hostId, kind: "project_space", projectKey: action.project.projectKey, parentRoomId: action.hostSpaceId } });
-	if (action.checkout) rooms.push({ roomId: action.checkout.spaceId, expected: { version: 1, hostId: action.hostId, kind: "worktree_space", projectKey: action.project!.projectKey, checkoutId: action.checkout.checkoutId, parentRoomId: action.project!.spaceId } });
+	if (action.archiveRootSpaceId) rooms.push({ roomId: action.archiveRootSpaceId, expected: { version: 1, hostId: action.hostId, kind: "archive_root_space", parentRoomId: action.hostSpaceId } });
+	if (action.project) rooms.push({ roomId: action.project.spaceId, expected: { version: 1, hostId: action.hostId, kind: action.archiveRootSpaceId ? "archive_project_space" : "project_space", projectKey: action.project.projectKey, parentRoomId: action.archiveRootSpaceId ?? action.hostSpaceId } });
+	if (action.checkout) rooms.push({ roomId: action.checkout.spaceId, expected: { version: 1, hostId: action.hostId, kind: action.archiveRootSpaceId ? "archive_worktree_space" : "worktree_space", projectKey: action.project!.projectKey, checkoutId: action.checkout.checkoutId, parentRoomId: action.project!.spaceId } });
 	if (action.kind === "conversation") rooms.push({ roomId: action.roomId, expected: { version: 1, hostId: action.hostId, kind: action.kind, creationKey: action.creationKey,
 		conversationId: action.conversationId!, projectKey: action.project!.projectKey, checkoutId: action.checkout!.checkoutId, parentRoomId: action.checkout!.spaceId } });
 	if (action.kind === "coordinator") rooms.push({ roomId: action.roomId, expected: { version: 1, hostId: action.hostId, kind: action.kind, creationKey: action.creationKey, conversationId: action.conversationId!, parentRoomId: action.hostSpaceId } });

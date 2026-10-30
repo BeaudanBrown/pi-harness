@@ -2,6 +2,8 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { HostControlError } from "./host-control-error.js";
 import { LiveHierarchy, type HierarchyLink, type HierarchySpaceIdentity } from "./live-hierarchy.js";
+import { LiveSpaceCleanup, type SpaceCleanupAccount } from "./live-space-cleanup.js";
+export type { SpaceCleanupAccount } from "./live-space-cleanup.js";
 import { lstat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { deriveConversationId, WorkspaceIdentitySchema, type WorkspaceIdentity } from "../contracts.js";
@@ -93,10 +95,6 @@ export interface ReconciliationPreview extends Record<string, unknown> {
 export interface LiveSpacePreview { links: HierarchyLink[]; operatorUserId: string; botUserId: string; migration?: ReconciliationPlan;
 	selection?: string[]; blockers?: string[]; continuationJournal?: string;
 	legacyPlacements?: Array<{ conversationId: string; hostSpace: string; workspace: ResolvedWorkspace }> }
-export interface SpaceCleanupAccount {
-	leaveAndForget(target: HierarchySpaceIdentity, signal: AbortSignal): Promise<boolean>;
-	completed(target: HierarchySpaceIdentity, signal: AbortSignal): Promise<boolean>;
-}
 
 export class ProjectReconciler {
 	private readonly path: string;
@@ -228,35 +226,11 @@ export class ProjectReconciler {
 		await matrix.recoverManagedRoom(link.child.roomId, link.child.provenance, signal);
 		await matrix.assertRoomAuthority(link.parent.roomId, true, signal, { spaceChild: true });
 	}
-	private async emptySpace(link: HierarchyLink, signal?: AbortSignal): Promise<boolean> {
-		const { matrix, hierarchy, registry } = this.options; const roomId = link.child.roomId;
-		if (!["project_space", "worktree_space"].includes(link.child.provenance.kind) || hierarchy!.hasReferences(roomId, (id) => Boolean(registry.retirement(id)))) return false;
-		if ([...registry.listManifests(), ...registry.localConversations()].some((manifest) => {
-			const binding = "verifiedBinding" in manifest ? manifest.verifiedBinding : manifest;
-			return binding && (binding.projectSpace === roomId || ("checkoutSpace" in binding && binding.checkoutSpace === roomId));
-		})) return false;
-		await matrix.assertRoomAuthority(roomId, true, signal, { spaceChild: true });
-		if ((await matrix.spaceChildren(roomId, signal)).length) return false;
-		return [...await matrix.joinedMemberIds(roomId, signal)].every((id) => id === matrix.operatorUserId || id === matrix.botUserId);
+	private emptySpace(link: HierarchyLink, signal?: AbortSignal): Promise<boolean> {
+		return new LiveSpaceCleanup({ ...this.options, hierarchy: this.options.hierarchy! }).empty(link, signal);
 	}
-	private async cleanupLiveSpace(link: HierarchyLink, signal: AbortSignal): Promise<boolean> {
-		const { matrix, hierarchy, account } = this.options; const target = this.spaceIdentity(link);
-		if (hierarchy!.spaceRetirement(target) === "pending" && !await matrix.accountJoined(target.roomId, signal)) {
-			if (!await account?.completed(target, signal)) return false;
-			await hierarchy!.completeSpace(target); return true;
-		}
-		await this.verifyLink(link, signal); if (!await this.emptySpace(link, signal)) throw new RelayRegistryError("invalid_state", "Live Space is no longer empty or exclusively managed");
-		await hierarchy!.fenceSpace(target);
-		// No kicks or credential fallback. Account execution is the separately configured NAS port.
-		if (!account) return false;
-		await this.verifyLink(link, signal); if (!await this.emptySpace(link, signal)) return false;
-		if (!await account.leaveAndForget(target, signal)) return false;
-		await this.verifyLink(link, signal); if (!await this.emptySpace(link, signal)) return false;
-		if ((await matrix.spaceChildren(link.parent.roomId, signal)).includes(target.roomId)) await matrix.removeSpaceChild(link.parent.roomId, target.roomId, signal);
-		await this.verifyLink(link, signal); if (!await this.emptySpace(link, signal)) return false;
-		signal.throwIfAborted(); await matrix.leaveRoom(target.roomId, signal);
-		if (await matrix.accountJoined(target.roomId, signal) || !await account.completed(target, signal)) return false;
-		await hierarchy!.completeSpace(target); return true;
+	private cleanupLiveSpace(link: HierarchyLink, signal: AbortSignal): Promise<boolean> {
+		return new LiveSpaceCleanup({ ...this.options, hierarchy: this.options.hierarchy! }).apply(link, signal);
 	}
 
 	private serial<T>(operation: () => Promise<T>): Promise<T> {

@@ -428,7 +428,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		if (coordinatorValues.every((value) => value?.trim())) {
 			hierarchy = new LiveHierarchy(resolve(stateDirectory, "live-workspaces"), hostId, matrix,
 				() => registry.listManifests().find((manifest) => manifest.kind === "coordinator"),
-				(conversationId) => Boolean(registry.retirement(conversationId)));
+				(conversationId) => Boolean(registry.retirement(conversationId) || registry.archiveRecord(conversationId)));
 			await hierarchy.load();
 			const accountDevice = environment.PI_MANAGED_ACCOUNT_DEVICE_ID?.trim();
 			if (accountDevice) {

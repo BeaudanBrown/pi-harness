@@ -96,7 +96,7 @@ test("host hierarchy producer and NAS consumer roundtrip preserves existing rule
 	const first = await hierarchy.prepare(placement); const old = await hierarchy.provision(first.conversationId);
 	matrix.rooms.set(coordinator.roomId, { version: 1, hostId, kind: "coordinator", creationKey: "coordinator", conversationId: coordinator.conversationId, parentRoomId: coordinator.hostSpace! }); matrix.links.add(`${coordinator.hostSpace}/${coordinator.roomId}`);
 	let pending: RetirementRecord[] = []; let active = [coordinator]; let now = 1000; let release = () => {};
-	const registry = { hostId, listManifests: () => active, manifestByConversationId: (id: string) => active.find(m => m.conversationId === id), retirement: (id: string) => retired.has(id) ? {} : undefined, pendingRetirements: () => pending } as unknown as RelayRegistry;
+	const registry = { hostId, listManifests: () => active, manifestByConversationId: (id: string) => active.find(m => m.conversationId === id), archiveRecord: () => undefined, retirement: (id: string) => retired.has(id) ? {} : undefined, pendingRetirements: () => pending } as unknown as RelayRegistry;
 	const nas = new AccountStore(join(root, "nas.sqlite"), matrix.operatorUserId); const joined = new Set<string>(); const forgotten: string[] = []; let rules = 0;
 	let worker!: AccountWorker;
 	const client = new HostAccountClient(join(root, "host"), hostId, matrix.operatorUserId, "NAS", { sendAccountRequest: async (recipient, device, _txn, action: AccountAction) => {
@@ -351,7 +351,7 @@ test("live reconciliation repairs only frozen proven links, rejects new scope, a
 	const hierarchy = new LiveHierarchy(root, hostId, matrix, () => coordinator); await hierarchy.load();
 	t.after(async () => { await hierarchy.close(); await rm(root, { recursive: true, force: true }); });
 	const first = await hierarchy.prepare(placement); const bound = await hierarchy.provision(first.conversationId);
-	const registry = { listManifests: () => [], localConversations: () => [], retirement: () => undefined } as unknown as RelayRegistry;
+	const registry = { listManifests: () => [], localConversations: () => [], archiveRecord: () => undefined, retirement: () => undefined } as unknown as RelayRegistry;
 	const reconciler = new ProjectReconciler({ registry, matrix: matrix as unknown as ManagedMatrixClient, hierarchy, intentDirectory: root,
 		resolveWorkspace: async () => { throw Error("Live reconciliation must not run legacy discovery"); } });
 	matrix.links.delete(`${bound.checkoutSpace}/${bound.roomId}`);
@@ -369,7 +369,7 @@ test("standalone cleanup fences exact empty Spaces, waits for account ownership 
 	const root = await mkdtemp(join(tmpdir(), "hierarchy-standalone-cleanup-")); const matrix = new MatrixFixture(); const retired = new Set<string>();
 	const make = () => new LiveHierarchy(root, hostId, matrix, () => coordinator, (id) => retired.has(id));
 	let hierarchy = make(); await hierarchy.load(); t.after(async () => { await hierarchy.close(); await rm(root, { recursive: true, force: true }); });
-	const registry = { listManifests: () => [], localConversations: () => [], retirement: (id: string) => retired.has(id) ? {} : undefined } as unknown as RelayRegistry;
+	const registry = { listManifests: () => [], localConversations: () => [], archiveRecord: () => undefined, retirement: (id: string) => retired.has(id) ? {} : undefined } as unknown as RelayRegistry;
 	const reconciler = (account?: SpaceCleanupAccount) => new ProjectReconciler({ registry, matrix: matrix as unknown as ManagedMatrixClient,
 		hierarchy, account, intentDirectory: root, resolveWorkspace: async () => { throw Error("No legacy lookup"); } });
 	const first = await hierarchy.prepare(placement); const old = await hierarchy.provision(first.conversationId);
@@ -391,11 +391,11 @@ test("standalone cleanup fences exact empty Spaces, waits for account ownership 
 	await assert.rejects(reconciler(account).applyLive(frozen, true), /lost leave reply/);
 	const afterLostLeave = matrix.calls;
 	await hierarchy.close(); hierarchy = make(); await hierarchy.load();
-	assert.deepEqual(await reconciler(account).applyLive(frozen, true), { remaining: 0 });
-	assert.equal(matrix.calls, afterLostLeave, "verified prior bot/account departure completes only local bookkeeping after restart");
+	assert.deepEqual(await reconciler(account).applyLive(frozen, true), { remaining: 1 });
+	assert.equal(matrix.calls, afterLostLeave, "departure without current emptiness proof remains pending without rejoin or further effects");
 	assert.deepEqual(accountCalls, [old.checkoutSpace]); assert.deepEqual([...matrix.left], [old.checkoutSpace]);
 	assert.ok(matrix.links.has(`${fresh.projectSpace}/${fresh.checkoutSpace}`)); assert.ok(matrix.links.has(`${fresh.checkoutSpace}/${fresh.roomId}`));
-	assert.deepEqual((await reconciler(account).previewLive(true)).links, []);
+	assert.deepEqual((await reconciler(account).previewLive(true)).links, frozen.links);
 });
 
 test("retired Space fences survive restart and only explicit new reservations create fresh ancestor identities", async (t) => {

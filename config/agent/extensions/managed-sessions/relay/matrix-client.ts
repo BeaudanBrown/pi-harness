@@ -350,7 +350,7 @@ export class ManagedMatrixClient {
 		const expected = structuredClone(parseManagedProvenance(provenance));
 		const alias = managedRoomAlias(expected);
 		const space = expected.kind.endsWith("_space");
-		if (migrationAdmin && !["project_space", "worktree_space"].includes(expected.kind)) throw new Error("Admin creation policy requires a migration Space");
+		if (migrationAdmin && !["project_space", "worktree_space", "archive_root_space", "archive_project_space", "archive_worktree_space"].includes(expected.kind)) throw new Error("Admin creation policy requires a migration Space");
 		let roomId = await this.lookupPrivateRoomAlias(alias, signal);
 		try {
 			if (!roomId) roomId = await this.createRoom(safeManagedTitle(name, alias), space, signal, alias, expected, migrationAdmin);
@@ -628,6 +628,19 @@ export class ManagedMatrixClient {
 		this.assertManagedRoom(spaceId);
 		if (!this.#departedRoomReferences.has(roomId)) this.assertManagedRoom(roomId);
 		await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state/m.space.child/${encodeURIComponent(roomId)}`, {}, signal);
+	}
+	/** Exact state-key snapshot for conservative archive unlink checks. No mutation/adoption. */
+	async spaceChildContent(spaceId: string, roomId: string, signal?: AbortSignal): Promise<JsonObject | null> {
+		this.assertManagedRoom(spaceId);
+		if (!isMatrixRoomId(roomId)) throw Error("Invalid Space child identity");
+		const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state`, undefined, signal);
+		if (!Array.isArray(state) || state.length > 4096 || state.some(event => !event || typeof event !== "object" || Array.isArray(event) || typeof event.type !== "string" || typeof event.state_key !== "string")) throw Error("Invalid Space state snapshot");
+		const matches = state.filter(event => event && typeof event === "object" && event.type === "m.space.child" && event.state_key === roomId);
+		if (!matches.length) return null; // Only a successful full-state read establishes absence.
+		if (matches.length !== 1) throw Error("Ambiguous Space child state");
+		const value = matches[0].content;
+		if (typeof value !== "object" || value === null || Array.isArray(value) || Buffer.byteLength(JSON.stringify(value)) > 16384) throw Error("Invalid or oversized Space child state");
+		return value as JsonObject;
 	}
 	async spaceChildren(spaceId: string, signal?: AbortSignal): Promise<string[]> {
 		this.assertManagedRoom(spaceId); const state = await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(spaceId)}/state`, undefined, signal);

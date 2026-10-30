@@ -5,7 +5,7 @@ import { MANAGED_PROVENANCE_EVENT, type ManagedProvenance } from "../config/agen
 
 const config = { homeserver: "https://matrix.example.com", accessToken: "token", botUserId: "@bot:example.com", operatorUserId: "@operator:example.com" };
 const proof: ManagedProvenance = { version: 1, hostId: "host", kind: "project_space", projectKey: `project_${"a".repeat(32)}`, creationKey: `project_${"a".repeat(32)}`, parentRoomId: "!host:example.com" };
-function fixture(version: string, options: { existing?: boolean; capabilities?: unknown; loseReply?: boolean } = {}) {
+function fixture(version: string, options: { existing?: boolean; capabilities?: unknown; loseReply?: boolean; proof?: ManagedProvenance } = {}) {
 	const room = version === "12" ? `!${"a".repeat(42)}A` : "!space:example.com";
 	let exists = options.existing ?? false, lose = options.loseReply ?? false;
 	let powers: any = { users: version === "12" ? {} : { [config.botUserId]: 100 } };
@@ -24,7 +24,7 @@ function fixture(version: string, options: { existing?: boolean; capabilities?: 
 		if (path.includes("/event/")) return Response.json(event);
 		if (path.endsWith("/state")) return Response.json([event,
 			{ type: "m.room.join_rules", state_key: "", content: { join_rule: "invite" } },
-			{ type: MANAGED_PROVENANCE_EVENT, state_key: "", sender: config.botUserId, content: proof }]);
+			{ type: MANAGED_PROVENANCE_EVENT, state_key: "", sender: config.botUserId, content: options.proof ?? proof }]);
 		throw Error(`Unexpected ${method} ${path}`);
 	}, [], { maxAttempts: 1 });
 	return { client, calls, room, revoke: () => { delete powers.users[config.operatorUserId]; } };
@@ -50,6 +50,28 @@ test("existing alias without admin is not promoted and uncertain creation does n
 	await uncertain.client.assertOperatorSpaceAdmin(uncertain.room);
 	assert.equal(await uncertain.client.recoverManagedAlias(proof), uncertain.room);
 	assert.equal(uncertain.calls.filter(call => call.path.endsWith("/createRoom")).length, 1);
+});
+for (const kind of ["archive_root_space", "archive_project_space", "archive_worktree_space"] as const) test(`${kind} uses pinned v12 admin policy without rewriting power state`, async () => {
+	const archived: ManagedProvenance = { version: 1, hostId: "host", kind, creationKey: "archive-space", parentRoomId: "!parent:example.com",
+		...(kind !== "archive_root_space" ? { projectKey: `project_${"a".repeat(32)}` } : {}), ...(kind === "archive_worktree_space" ? { checkoutId: `checkout_${"b".repeat(32)}` } : {}) } as ManagedProvenance;
+	const f = fixture("12", { proof: archived, loseReply: true });
+	await f.client.ensureManagedRoom("Archive", archived, undefined, true); await f.client.assertOperatorSpaceAdmin(f.room);
+	assert.equal(await f.client.recoverManagedAlias(archived), f.room);
+	const creates = f.calls.filter(call => call.path.endsWith("/createRoom")); assert.equal(creates.length, 1);
+	assert.equal(creates[0]!.body.room_version, "12"); assert.deepEqual(creates[0]!.body.power_level_content_override.users, { [config.operatorUserId]: 100 });
+	assert.equal(creates[0]!.body.creation_content.type, "m.space"); assert.ok(!f.calls.some(call => call.method === "PUT"));
+});
+test("archive link snapshots require a successful bounded unambiguous state read", async () => {
+	const roomId = "!space:example.com", child = "!child:example.com";
+	let status = 200; let state: unknown = [];
+	const client = new ManagedMatrixClient(config, async () => Response.json(state, { status }), [roomId], { maxAttempts: 1 });
+	assert.equal(await client.spaceChildContent(roomId, child), null);
+	const event = { type: "m.space.child", state_key: child, content: { via: ["example.com"], order: "operator-order" } }; state = [event];
+	assert.deepEqual(await client.spaceChildContent(roomId, child), event.content);
+	for (const malformed of [[event, event], [null], [{ ...event, content: { huge: "x".repeat(16385) } }]]) {
+		state = malformed; await assert.rejects(client.spaceChildContent(roomId, child));
+	}
+	status = 404; state = {}; await assert.rejects(client.spaceChildContent(roomId, child), "HTTP failure must never be interpreted as an absent child");
 });
 test("unsupported capabilities fail before create", async () => {
 	for (const capabilities of [{}, { capabilities: { "m.room_versions": { default: "13", available: { "13": "stable" } } } }]) {

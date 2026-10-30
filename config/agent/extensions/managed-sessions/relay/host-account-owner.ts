@@ -7,6 +7,7 @@ import { HostAccountClient, type AccountActionBody } from "./host-account-client
 import type { LiveHierarchy, HierarchySpaceIdentity } from "./live-hierarchy.js";
 import type { RelayRegistry } from "./registry.js";
 import type { ManagedMatrixClient } from "./matrix-client.js";
+import type { ArchiveHierarchy } from "./archive-hierarchy.js";
 import type { RetirementAccountPort } from "./conversation-retirement.js";
 
 export type MembershipRestore = { conversationId: string; roomId: string; hostSpaceId: string; departureEventId: string; operatorUserId: string; botUserId: string };
@@ -33,10 +34,10 @@ export class HostAccountOwner {
 		})();
 	}
 	async close(): Promise<void> { this.stop.abort(); await this.client.close(); await this.work; }
-	constructor(readonly client: HostAccountClient, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly hierarchy?: LiveHierarchy) {}
+	constructor(readonly client: HostAccountClient, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly hierarchy?: LiveHierarchy, private readonly archives?: Pick<ArchiveHierarchy, "accountBaseline" | "accountInventory">) {}
 	async initialize(): Promise<void> {
 		await this.client.load();
-		await this.client.initializeBaseline([...(this.hierarchy?.accountBaseline() ?? []), ...this.registry.listManifests().map(m => `${m.kind === "coordinator" ? "coordinator" : "conversation"}:${m.creationKey}`)]);
+		await this.client.initializeBaseline([...(this.hierarchy?.accountBaseline() ?? []), ...(this.archives?.accountBaseline() ?? []), ...this.registry.listManifests().map(m => `${m.kind === "coordinator" ? "coordinator" : "conversation"}:${m.creationKey}`)]);
 	}
 	private coordinator() { return this.registry.manifestByConversationId(deriveConversationId(this.registry.hostId, "coordinator")); }
 	async provision(): Promise<void> {
@@ -46,14 +47,15 @@ export class HostAccountOwner {
 			actions.push({ operation: "room.ensure", kind: "coordinator", roomId: coordinator.roomId, hostSpaceId: coordinator.hostSpace,
 				conversationId: coordinator.conversationId, creationKey: coordinator.creationKey, notificationSetup: this.client.notificationSetup("coordinator", coordinator.creationKey) });
 		}
-		for (const node of this.hierarchy?.accountInventory() ?? []) {
+		for (const node of [...this.hierarchy?.accountInventory() ?? [], ...this.archives?.accountInventory() ?? []]) {
 			if (!node.roomId || !node.hostSpaceId) continue;
 			const proof = node.provenance;
 			actions.push({ operation: "room.ensure", kind: proof.kind, roomId: node.roomId, hostSpaceId: node.hostSpaceId, creationKey: proof.creationKey,
+				...("archiveRootSpaceId" in node && typeof node.archiveRootSpaceId === "string" ? { archiveRootSpaceId: node.archiveRootSpaceId } : {}),
 				...(node.project ? { project: node.project } : {}), ...(node.checkout ? { checkout: node.checkout } : {}),
 				...("conversationId" in proof ? { conversationId: proof.conversationId } : {}), notificationSetup: node.preserveNotificationPolicy ? "preserve" : this.client.notificationSetup(proof.kind, proof.creationKey) });
 		}
-		await this.client.cancelRetired(id => Boolean(this.registry.retirement(id)));
+		await this.client.cancelRetired(id => Boolean(this.registry.retirement(id) || this.registry.archiveRecord(id)));
 		await this.client.requestMany(actions);
 	}
 	async freezeMembership(): Promise<MembershipRestore> {
