@@ -160,6 +160,44 @@ missing fresh inspection on already-admitted retries; this is fixed and covered 
 a restart/conflict/incomplete-inspection/audit-receipt regression. Generated Python
 bytecode was removed and ignored.
 
-Final verification/review/publication remains #143. Nothing is deployed, and
-no live conversation was archived. Do not describe the feature as rebuild-ready
-until #143 records canonical verification, cumulative review and publication.
+## Final release verification (#143)
+
+Verified implementation revision: `0b54268b9748264f87123518d7fd44a786d8288f`.
+The complete epic was reviewed against baseline `e585a12` (before #140):
+Standards found no violations; Spec reported one medium dependent acceptance item,
+namely these final release gates. That item is now satisfied by the following results.
+
+| Acceptance | Final evidence |
+| --- | --- |
+| Archive fence, restart, uncertain effects, sibling preservation and consent | Canonical managed-session suite: 731 passed, zero failures/skips, including packaged real-Pi tests |
+| Shared utilities and unaffected ordinary features | Canonical unit suite: 135 passed, zero failures/skips |
+| NAS account/provenance compatibility and isolation | Canonical bridge suite: 87 passed, zero failures/skips |
+| Whole deterministic repository contract | `nix run .#verify` passed all 12 reported checks, including schemas, source/module/package contracts, Pi-R integration, evaluation and preflight |
+| Actual production packages, not just selected-source compilation | `nix build .#managed-session-relay .#bridge-chat --no-link` passed |
+| Legacy observer and isolated preview refactor | 14 Python cases and 31 isolated refactor tests passed as recorded above |
+
+Canonical gate plus production builds completed in approximately 120 seconds.
+Realized outputs:
+
+- relay: `/nix/store/k27c8953qzg10n9gys3y9sg7bswpncss-pi-managed-session-relay-0.1.0`
+- bridge: `/nix/store/n47mpgkfa1dbgxwzm43sc37y3w0pvjrl-pi-bridge-chat`
+
+Local evidence directories:
+
+- cumulative review: `.pi/tmp/reviews/2026-10-30T10-59-39-539Z-e585a12a3499-f2889f241ec5/`
+- final gates: `.pi/tmp/workers/2026-10-30T11-00-34-914Z-archive-epic-final-nix-release-gates-f2db72196354/`
+- canonical totals/output paths: `.pi/tmp/workers/2026-10-30T11-02-47-401Z-archive-release-evidence-totals-4090364bd701/`
+
+This evidence-only documentation update follows the verified code revision; it
+changes no executable/configuration source. A focused diff check suffices without
+repeating the canonical gate for this documentation-only change.
+
+Publication/pinning remains separately authorized work under #143. Nothing is
+activated and no live conversation was archived. Do not tell the operator to rebuild
+until the verified feature is published and its downstream pin is updated. Deploy
+updated host/agent resources and compatible bridge account support; existing agent
+processes may still expose old tool schemas until refreshed separately. After
+activation, inspect capabilities/readiness and request fresh exact-ID previews and
+independent archive approval. The original eleven candidates remain untouched.
+No reactivation or implicit membership restoration is supported; uncertain cleanup
+remains pending, and the deferred fleet stability watch is not claimed as evidence.
