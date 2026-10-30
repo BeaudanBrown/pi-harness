@@ -1,7 +1,7 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { deriveConversationId, hasMatrixBinding } from "../contracts.js";
-import { APPROVAL_LIFETIME_MS, parseHostResponse, type HostAction, type HostReadAction, type HostRequest, type HostResult } from "../live-workspace-contracts.js";
+import { type HostAction, type HostReadAction, type HostRequest, type HostResult } from "../live-workspace-contracts.js";
 import type { FrozenHostEffects, FrozenJson, HostApprovalRecord } from "./host-approval-record.js";
 import type { HostMutationOwner } from "./host-approval-runtime.js";
 import type { HostLifecycle } from "./host-lifecycle.js";
@@ -11,6 +11,7 @@ import type { ManagedSessionIpcServer } from "./ipc-server.js";
 import type { ConversationRetirement, RetirementPlan } from "./conversation-retirement.js";
 import type { HostAccountOwner, MembershipRestore } from "./host-account-owner.js";
 import { HostControlError } from "./host-control-error.js";
+import { HostPreviewStore, staleHostPreview, freezeJsonChunks } from "./host-preview-store.js";
 
 const detached = (value: unknown): FrozenJson => JSON.parse(JSON.stringify(value)) as FrozenJson;
 type PreviewAction = Extract<HostReadAction, { operation: "conversation.admin.preview" | "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
@@ -30,17 +31,17 @@ function adminSnapshot(preview: Preview): Awaited<ReturnType<HostLifecycle["admi
 	return preview.adminJson ? JSON.parse(preview.adminJson.join("")) : undefined;
 }
 export function isManagedHostPreview(action: HostAction): action is PreviewAction { return action.operation.endsWith(".preview"); }
-const stale = () => new HostControlError("stale_preview", "Frozen targets changed or expired; obtain a new preview and consent");
+const stale = staleHostPreview;
 
 /** Private frozen owner data, not additional model-controlled arguments or replay receipts. */
 export class ManagedHostMutationOwner implements HostMutationOwner {
-	private readonly previews = new Map<string, Preview>();
+	private readonly previews: HostPreviewStore<Preview>;
 	private readonly now: () => number;
 	constructor(private readonly options: {
 		registry: RelayRegistry; lifecycle: HostLifecycle; retirement: ConversationRetirement; server: Pick<ManagedSessionIpcServer, "attachment">;
 		account?: Pick<HostAccountOwner, "freezeMembership" | "restoreMembership">;
 		activeRun?: (conversationId: string) => Promise<{ runId: string } | undefined>; now?: () => number;
-	}) { this.now = options.now ?? Date.now; }
+	}) { this.now = options.now ?? Date.now; this.previews = new HostPreviewStore(options.registry.hostId, this.now); }
 
 	private target(conversationId: string): FrozenJson {
 		const { registry } = this.options;
@@ -65,9 +66,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 	}
 
 	async preview(source: PreviewAction): Promise<PreviewResult> {
-		for (const [id, value] of this.previews) if (value.expiresAt <= this.now()) this.previews.delete(id);
-		if (this.previews.size >= 128) throw new HostControlError("busy", "Too many pending previews; retry after expiry");
-		const preview: Preview = { source: structuredClone(source), expiresAt: this.now() + APPROVAL_LIFETIME_MS, targets: [], activeRuns: [], blockers: [] };
+		const preview: Preview = { source: structuredClone(source), expiresAt: this.previews.expiresAt(), targets: [], activeRuns: [], blockers: [] };
 		let conversations: string[] = [];
 		const coordinatorId = deriveConversationId(this.options.registry.hostId, "coordinator");
 		if (source.operation === "worktree.conversation.cleanup.preview" && source.conversationId === coordinatorId) {
@@ -75,8 +74,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			preview.blockers.push("The protected coordinator cannot be retired or included in destructive cleanup");
 		} else if (source.operation === "conversation.admin.preview") {
 			const admins = await this.options.lifecycle.adminApprovalPreview({ conversationIds: source.conversationIds, ...(source.includeSpaces ? { includeSpaces: true } : {}) });
-			const json = JSON.stringify(admins);
-			preview.adminJson = Array.from({ length: Math.ceil(json.length / 4096) }, (_, i) => json.slice(i * 4096, (i + 1) * 4096));
+			preview.adminJson = freezeJsonChunks(admins);
 			preview.targets = source.conversationIds.map(conversationId => ({ kind: "conversation", conversationId }));
 			for (const room of admins.rooms) if (room.space) preview.targets.push({ kind: "space", roomId: room.roomId });
 			preview.warnings = [
@@ -141,25 +139,11 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			conversations = cleanup ? preview.targets.flatMap((target) => target.kind === "conversation" ? [target.conversationId] : []) : [];
 		}
 		preview.activeRuns = await this.activeRuns(conversations);
-		if (preview.adminJson && Buffer.byteLength(JSON.stringify(preview)) > 48 * 1024) throw new HostControlError("unavailable", "Admin permission snapshots exceed approval bounds; select fewer conversations");
-		const previewId = `preview_${createHash("sha256").update("pi-managed-sessions:preview:live-v1\0").update(this.options.registry.hostId).update("\0").update(JSON.stringify(preview)).digest("hex").slice(0, 32)}`;
-		const result = { previewId, expiresAt: new Date(preview.expiresAt).toISOString(), targets: preview.targets, activeRuns: preview.activeRuns, blockers: preview.blockers, ...(preview.warnings ? { warnings: preview.warnings } : {}) };
-		try { parseHostResponse(source.operation, { version: "1.0.0", requestId: "preview", ok: true, data: result }); }
-		catch { throw new HostControlError("unavailable", "Preview exceeds target bounds; request a smaller operation"); }
-		if (Buffer.byteLength(JSON.stringify(result)) > 60 * 1024) throw new HostControlError("unavailable", "Preview exceeds frame bounds; request a smaller operation");
-		this.previews.set(previewId, structuredClone(preview)); return structuredClone(result);
+		return this.previews.save(preview);
 	}
 
 	private async previewFor(action: Extract<HostAction, { previewId: string }>): Promise<Preview> {
-		const saved = this.previews.get(action.previewId); if (!saved || saved.expiresAt <= this.now()) throw stale();
-		const expected = {
-			"conversation.admin.apply": "conversation.admin.preview",
-			"conversation.recover.apply": "conversation.recover.preview",
-			"conversation.delete.apply": "conversation.delete.preview", "worktree.remove.apply": "worktree.remove.preview",
-			"worktree.conversation.cleanup.apply": "worktree.conversation.cleanup.preview", "space.reconcile.apply": "space.reconcile.preview", "space.cleanup.apply": "space.cleanup.preview",
-		};
-		if (saved.source.operation !== (action.operation === "worktree.branch.delete" ? "worktree.branch.preview" : expected[action.operation])) throw stale();
-		return structuredClone(saved);
+		return this.previews.get(action);
 	}
 	private async validPreview(preview: Preview, branch = false): Promise<boolean> {
 		if (preview.expiresAt <= this.now() || preview.blockers.length) return false;
