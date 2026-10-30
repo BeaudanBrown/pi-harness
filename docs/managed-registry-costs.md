@@ -4,7 +4,7 @@ This is the first code slice of #133 and the proposal in
 [managed-relay-performance-plan.md](managed-relay-performance-plan.md), not a
 claim of completed fleet recovery. #135 owns sustainable observability, #136
 owns bounded reconnect reconciliation/scheduling, #137 owns separately approved
-rollout/live acceptance, and #138 owns two pre-existing verification failures.
+rollout/live acceptance, and #138 owns the two pre-existing verification fixture repairs.
 Storage format, delivery order, transport authorization and deployment are unchanged.
 
 ## Changes and acceptance evidence
@@ -75,14 +75,16 @@ on post-rollout evidence and separate authorization.
 - Full repository TypeScript compiles; LSP diagnostics clean.
 - Final focused registry/contracts/recovery/routing/Matrix/projection checks:
   90 pass, no failures or skips.
-- Final full managed suite: 629 pass, 2 fail, 48 packaged/environment skips. Both failures
-  reproduce with the preserved pre-change build and are tracked in #138. This is
-  **not** a green canonical gate.
+- After the #138 fixture repairs, full managed suite: 631 pass, zero failures,
+  48 packaged/environment skips. The stale lifecycle mock now supplies its read
+  methods; the unsafe-permissions fixture uses explicit chmod and verifies its
+  mode rather than relying on a creation mode filtered by the process umask.
+  This is **not** the canonical Nix gate.
 - Relay and bridge-chat recipe-selected source compilation pass using existing
   local dependencies. These checks are not actual Nix derivation builds.
 - Canonical Nix verification, package builds, activation, adapter refreshes and
   live performance/message-delivery acceptance were not run; authorization and
-  baseline failure resolution remain required.
+  live acceptance remain required.
 
 Standards review found no issues. Spec review identified asymmetric completion-
 kind validation; the missing direction is now rejected and regression-tested.

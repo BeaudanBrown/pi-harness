@@ -89,6 +89,7 @@ test("notification outages cannot hold an attached generation transitioning", as
 	const transition = { transitionId: "reset", toGenerationId: "next", ordinal: 2 };
 	const lifecycle = new HostLifecycle({ launcher: "/never-invoked", projectSessionDirectory: root,
 		registry: { manifestByConversationId: () => manifest, generationTransitions: () => [{ conversationId: "room", transition }],
+			managedWindow: () => undefined, retirement: () => undefined,
 			isActiveGenerationAttached: () => true, markGenerationAttached: async () => {}, completeGenerationTransition: async () => { completed = true; },
 			failGenerationTransition: async () => assert.fail("notification failure must not fail activation") },
 		projectNotice: async (sourceId: string, _manifest: unknown, body: string) => outbox.enqueue({ conversationId: "room", sourceId, piSessionId: "session", roomId: "!room:test", body }),

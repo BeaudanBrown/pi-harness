@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -72,7 +72,12 @@ for (const fault of ["malformed", "symlink", "permissions", "partial", "foreign-
 		const f = await fixture(t);
 		if (fault === "malformed") await writeFile(join(f.runtime, "registry.json"), "{");
 		if (fault === "symlink") await symlink(join(f.runtime, "registry.json"), join(f.runtime, "activities.json"));
-		if (fault === "permissions") await writeFile(join(f.runtime, "activities.json"), "{}", { mode: 0o644 });
+		if (fault === "permissions") {
+			const path = join(f.runtime, "activities.json");
+			await writeFile(path, '{"schemaVersion":"2.0.0","activities":[]}\n', { mode: 0o600 });
+			await chmod(path, 0o644); // Explicit chmod bypasses the process umask when constructing this unsafe fixture.
+			assert.equal((await stat(path)).mode & 0o777, 0o644);
+		}
 		if (fault === "partial") { await rm(join(f.runtime, "registry.json")); await mkdir(join(f.runtime, "media-spool"), { mode: 0o700 }); }
 		await assert.rejects(() => prepareRelayStateDirectory(fault === "foreign-host" ? "wrong-host" : f.host, f.state, f.runtime, f.store));
 		await assert.rejects(() => stat(f.state), { code: "ENOENT" });
