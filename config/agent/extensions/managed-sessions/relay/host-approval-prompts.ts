@@ -21,6 +21,8 @@ const actionNames: Record<string, string> = {
 	"conversation.admin.apply": "Grant the configured operator admin access to the frozen rooms and Spaces",
 	"conversation.recover.apply": "Confirm manual closure and reconcile only the frozen legacy conversation (no automatic stop or launch)",
 	"conversation.stop": "Stop the native session", "conversation.refresh": "Refresh the native runtime", "conversation.delete": "Retire the room and native session",
+	"conversation.archive.apply": "Archive the selected conversations, preserving readable history and disabling managed execution",
+	"conversation.archive.cleanup.apply": "Clean up only the frozen empty original ancestor Spaces",
 	"conversation.delete.apply": "Retire the selected conversations", "worktree.remove.apply": "Remove the selected checkout",
 	"worktree.conversation.cleanup.apply": "Clean up the selected checkout and conversation", "worktree.branch.delete": "Delete the selected branch",
 	"space.reconcile.apply": "Reconcile room grouping", "space.cleanup.apply": "Clean up the selected Spaces",
@@ -92,7 +94,7 @@ export function hostApprovalQuestion(record: HostApprovalRecord): string {
 		const preview = record.frozen.preconditions.preview as { warnings?: string[] } | undefined;
 		details += `\n\n${preview?.warnings?.join("\n") || "New migration Spaces grant the configured operator admin power 100; existing room permissions and histories are preserved."}`;
 	}
-	if (operation === "conversation.recover.apply" || operation === "conversation.admin.apply") {
+	if (operation === "conversation.recover.apply" || operation === "conversation.admin.apply" || operation === "conversation.archive.apply" || operation === "conversation.archive.cleanup.apply") {
 		const preview = record.frozen.preconditions.preview as { warnings?: string[] } | undefined;
 		if (!preview?.warnings?.length) throw new HostControlError("unavailable", "Required uncertainty disclosure is missing");
 		details += `\n\n${preview.warnings.join("\n")}`;

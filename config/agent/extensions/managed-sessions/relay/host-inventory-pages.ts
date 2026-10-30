@@ -2,7 +2,7 @@ import { createHash, createHmac, randomBytes, timingSafeEqual } from "node:crypt
 import { HOST_INVENTORY_PAGE_SIZE, parseHostAction, type HostAction } from "../live-workspace-contracts.js";
 import { HostControlError } from "./host-control-error.js";
 
-type PageAction = Extract<HostAction, { operation: "conversation.list" | "workspace.list" | "worktree.list" }>;
+type PageAction = Extract<HostAction, { operation: "conversation.list" | "conversation.archive.list" | "workspace.list" | "worktree.list" }>;
 interface Snapshot { scope: string; revision: string; expiresAt: number; rows: unknown[]; bytes: number }
 const LIFETIME_MS = 60_000;
 const MAX_SNAPSHOTS = 8;
@@ -20,7 +20,7 @@ export class HostInventoryPages {
 
 	page<T>(action: PageAction, rows: readonly T[]): { items: T[]; nextCursor: string | null } {
 		parseHostAction(action);
-		if (!["conversation.list", "workspace.list", "worktree.list"].includes(action.operation)) throw new HostControlError("invalid_request", "Action has no inventory pages");
+		if (!["conversation.list", "conversation.archive.list", "workspace.list", "worktree.list"].includes(action.operation)) throw new HostControlError("invalid_request", "Action has no inventory pages");
 		if (rows.length > MAX_ROWS) throw new HostControlError("unavailable", "Inventory exceeds the bounded snapshot capacity");
 		const encoded = JSON.stringify(rows); const bytes = Buffer.byteLength(encoded);
 		if (bytes > MAX_SNAPSHOT_BYTES) throw new HostControlError("unavailable", "Inventory exceeds the bounded snapshot capacity");

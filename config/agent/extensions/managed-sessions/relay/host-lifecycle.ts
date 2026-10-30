@@ -1529,6 +1529,14 @@ export class HostLifecycle {
 		}));
 	}
 
+	/** Fixed read-only launcher operation; historical session identity needs no checkout resolution. */
+	observeArchiveClosure(conversationId: string, window: ReturnType<RelayRegistry["managedWindow"]>): Promise<unknown> {
+		if (!/^conv_[a-f0-9]{32}$/.test(conversationId)) throw new HostControlError("invalid_request", "Invalid archive identity");
+		return this.invoke("window-legacy-observe", { conversationId, archiveClosure: true,
+			window: window ? { sessionName: window.sessionName, windowId: window.windowId, paneId: window.paneId } : null,
+			sessionDirectory: join(resolve(this.options.projectSessionDirectory), conversationId) });
+	}
+
 	stopConversation(conversationId: string): Promise<Record<string, unknown>> {
 		const manifest = this.ownedProjectManifest(conversationId);
 		return this.runWorktreeOperation(this.workspaceOperationKey(manifest.placement!), () => this.stopOnce(conversationId));

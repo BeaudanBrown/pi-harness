@@ -32,6 +32,19 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
   state writes. Inspect uncertain outcomes with a new preview; never blindly replay.
   This neither restarts Pi nor removes participants. Do not use shell/API calls to
   bypass the approval gate.
+- `conversation.archive.preview` selects 1–16 exact `conversationIds`; its
+  separately approved apply preserves original rooms, history and membership under
+  host -> Archive -> historical project -> worktree. It disables managed execution
+  without deleting/restoring checkouts. No reactivation is supported. Known active
+  runtimes, unfinished inputs, controls and publications block; never cancel them
+  implicitly. If exact exit evidence is unavailable, `legacyClosure=true` requests
+  **operator attestation that the old Pi was closed**, with fresh complete conflict
+  screening. This is not verified exit; never assert closure on the operator's behalf.
+  Inspect `conversation.archive.list` for archived/archiving status before an explicit
+  retry with fresh preview and consent. New Space joins may remain pending while
+  original links are preserved. Ancestor cleanup has its own
+  `conversation.archive.cleanup.preview/apply` approval; shared/untracked Spaces
+  remain preserved, uncertain departure stays pending, and no implicit rejoin occurs.
 - `conversation.delete` permanently retires the identity and cleans up its exact
   owned resources. It preserves saved Pi/Matrix history and workspace files.
   The coordinator cannot be stopped or deleted.
@@ -72,3 +85,7 @@ operations still require explicit confirmation. No `!notify` command exists.
 Other legacy model lifecycle tool names are replaced by `managed_host`; capability
 errors require an upgrade, never a backend-bypassing fallback. Same-Unix-user shell
 authority is not a sandbox.
+
+For implementation and maintenance, see `docs/managed-host-tooling-map.md` in the
+harness repository: operation owners, authority files, tests and the adding-operation
+checklist. Runtime capability errors still require an upgrade, not a bypass.

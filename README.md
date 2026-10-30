@@ -323,7 +323,16 @@ noun/action grammar; room-local `!start` launches without a prompt and
 `!close --confirm` permanently retires the conversation. Destructive/apply actions
 retain confirmation. Matrix `/host` is routed as Matrix authority, never executed
 as a local slash command. The coordinator stays protected from stop/delete and
-has no engineering tools. See [frontend evidence and migration](docs/managed-host-frontends-evidence.md). Project creation
+has no engineering tools. See [frontend evidence and migration](docs/managed-host-frontends-evidence.md)
+and the [tooling module map and adding-operation checklist](docs/managed-host-tooling-map.md).
+Readable archival uses `conversation.archive.preview/apply` and a separate
+`conversation.archive.list`; ancestor cleanup has its own preview/apply. It preserves
+original rooms/history/membership under Archive and disables managed execution,
+without restoring deleted checkouts. Exact exit evidence is preferred; an explicitly
+approved `legacyClosure` attestation requires complete conflict screening and is not
+verified exit. See [archive safety and release status](docs/managed-readable-archives.md)
+before deployment; these controls require updated host/agent code and archive account
+support for automatic NAS joins. Project creation
 accepts only a configured root, safe absent immediate-child name, and creation
 label. The trusted launcher creates no
 scaffold or remote: it initializes local Git on `main`, records a durable retry

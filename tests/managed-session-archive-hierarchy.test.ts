@@ -3,6 +3,13 @@ import test from "node:test";
 import { mkdtemp, rm, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { ArchiveHostControls } from "../config/agent/extensions/managed-sessions/relay/archive-host-controls.js";
+import { ArchiveRuntimeChecks } from "../config/agent/extensions/managed-sessions/relay/archive-runtime.js";
+import { ManagedHostMutationOwner } from "../config/agent/extensions/managed-sessions/relay/host-mutation-owner.js";
+import { prepareHostApproval, type ModelHostRequest } from "../config/agent/extensions/managed-sessions/relay/host-approval-record.js";
+import { hostApprovalQuestion } from "../config/agent/extensions/managed-sessions/relay/host-approval-prompts.js";
+import type { HostLifecycle } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import type { ConversationRetirement } from "../config/agent/extensions/managed-sessions/relay/conversation-retirement.js";
 import { ArchiveHierarchy, historicalCheckoutId } from "../config/agent/extensions/managed-sessions/relay/archive-hierarchy.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
@@ -65,20 +72,20 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, sibling = fa
 	}
 	let closureError = false; let closureChecks = 0; let accountReady = true;
 	const owners: ArchiveHierarchy[] = [];
-	const owner = async () => {
+	const owner = async (runtime?: ArchiveRuntimeChecks) => {
 		const value = new ArchiveHierarchy({ directory: join(directory, "archive"), registry, hierarchy, matrix: matrix as unknown as ManagedMatrixClient,
-			assertRuntimeAbsent: async () => { closureChecks++; if (closureError) throw Error("No fresh process-absence proof"); },
+			assertRuntimeAbsent: async (source, signal, legacy) => { closureChecks++; if (closureError) throw Error("No fresh process-absence proof"); if (runtime) return runtime.inspect(source, legacy, signal); return { window: null, receipt: { basis: "operator_attested", windowDigest: "0".repeat(64), checkedAt: new Date().toISOString() } }; },
 			account: { leaveAndForget: async target => { if (!accountReady) return false; matrix.members.get(target.roomId)!.delete(matrix.operatorUserId); return true; }, completed: async () => accountReady } });
 		await value.load(); owners.push(value); return value;
 	};
 	t.after(async () => { for (const value of owners) await value.close(); await hierarchy.close(); await rm(directory, { recursive: true, force: true }); });
-	matrix.effects = []; return { directory, registry, hierarchy, matrix, first, second, owner, closureChecks: () => closureChecks, setClosureError: () => { closureError = true; }, setAccountReady: (value: boolean) => { accountReady = value; } };
+	matrix.effects = []; return { directory, registry, hierarchy, matrix, first, second, owner, closureChecks: () => closureChecks, setClosureError: (value = true) => { closureError = value; }, setAccountReady: (value: boolean) => { accountReady = value; } };
 }
 
 test("deleted checkout archives original room with admin Spaces; leaves live sibling and history intact", async t => {
 	const f = await fixture(t, true); const owner = await f.owner(); const plan = await owner.preview(f.first.conversationId);
 	assert.equal(f.matrix.effects.length, 0); assert.equal(f.registry.archiveRecord(f.first.conversationId), undefined);
-	const result = await owner.apply(plan); assert.equal(result?.phase, "archived"); assert.equal(f.closureChecks(), 1);
+	const result = await owner.apply((plan), true, `operation_${"a".repeat(32)}`); assert.equal(result?.phase, "archived"); assert.equal(f.closureChecks(), 2);
 	assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3);
 	assert.ok(await f.matrix.memberJoined(f.first.roomId, f.matrix.operatorUserId));
 	assert.deepEqual(await f.matrix.spaceChildren(f.first.checkoutSpace!), [f.second.roomId]);
@@ -97,23 +104,23 @@ test("deleted checkout archives original room with admin Spaces; leaves live sib
 
 for (const fault of ["create", "link", "unlink"] as const) test(`restart recovers ${fault} accepted before acknowledgement without new identities`, async t => {
 	const f = await fixture(t); let owner = await f.owner(); const plan = await owner.preview(f.first.conversationId);
-	f.matrix.fault = fault; await assert.rejects(owner.apply(plan), /Injected/);
+	f.matrix.fault = fault; await assert.rejects(owner.apply((plan), true, `operation_${"a".repeat(32)}`), /Injected/);
 	assert.ok(f.registry.archiveRecord(f.first.conversationId)); await owner.close(); owner = await f.owner();
-	assert.equal((await owner.apply(await owner.preview(f.first.conversationId)))?.phase, "archived");
-	assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3); assert.equal(f.closureChecks(), 1);
+	assert.equal((await owner.apply((await owner.preview(f.first.conversationId)), true, `operation_${"a".repeat(32)}`))?.phase, "archived");
+	assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3); assert.equal(f.closureChecks(), 3);
 });
 
 test("uncertain creation with no alias never allocates a replacement Space", async t => {
 	const f = await fixture(t); let owner = await f.owner(); const plan = await owner.preview(f.first.conversationId);
-	f.matrix.fault = "create"; await assert.rejects(owner.apply(plan)); await owner.close(); owner = await f.owner(); f.matrix.absentAlias = true;
-	await assert.rejects(owner.apply(plan), /Uncertain archive creation/); assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 1);
+	f.matrix.fault = "create"; await assert.rejects(owner.apply((plan), true, `operation_${"a".repeat(32)}`)); await owner.close(); owner = await f.owner(); f.matrix.absentAlias = true;
+	await assert.rejects(owner.apply((plan), true, `operation_${"a".repeat(32)}`), /Uncertain archive creation/); assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 1);
 });
 
 test("no process-absence proof or changed original link prevents admission and Matrix effects", async t => {
 	const f = await fixture(t); const owner = await f.owner(); const plan = await owner.preview(f.first.conversationId); f.setClosureError();
-	await assert.rejects(owner.apply(plan), /process-absence/); assert.equal(f.registry.archiveRecord(f.first.conversationId), undefined); assert.deepEqual(f.matrix.effects, []);
-	f.matrix.children.get(f.first.checkoutSpace!)!.set(f.first.roomId, { via: ["example.com"], order: "operator-change" });
-	await assert.rejects(owner.apply(plan), /source link changed/); assert.equal(f.registry.archiveRecord(f.first.conversationId), undefined);
+	await assert.rejects(owner.apply((plan), true, `operation_${"a".repeat(32)}`), /process-absence/); assert.equal(f.registry.archiveRecord(f.first.conversationId), undefined); assert.deepEqual(f.matrix.effects, []);
+	f.setClosureError(false); f.matrix.children.get(f.first.checkoutSpace!)!.set(f.first.roomId, { via: ["example.com"], order: "operator-change" });
+	await assert.rejects(owner.apply((plan), true, `operation_${"a".repeat(32)}`), /changed/); assert.equal(f.registry.archiveRecord(f.first.conversationId), undefined);
 });
 
 test("existing missing operator membership is a blocker, not permission to restore it", async t => {
@@ -123,13 +130,13 @@ test("existing missing operator membership is a blocker, not permission to resto
 
 test("pending joins to new archive Spaces preserve original links until readable", async t => {
 	const f = await fixture(t); const owner = await f.owner(); const plan = await owner.preview(f.first.conversationId); f.matrix.autoJoin = false;
-	assert.equal((await owner.apply(plan))?.phase, "archiving"); assert.deepEqual(await f.matrix.spaceChildren(f.first.checkoutSpace!), [f.first.roomId]);
+	assert.equal((await owner.apply((plan), true, `operation_${"a".repeat(32)}`))?.phase, "archiving"); assert.deepEqual(await f.matrix.spaceChildren(f.first.checkoutSpace!), [f.first.roomId]);
 	for (const room of owner.status(f.first.conversationId)!.archiveSpaces) f.matrix.members.get(room)!.add(f.matrix.operatorUserId);
-	assert.equal((await owner.apply(plan))?.phase, "archived"); assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3);
+	assert.equal((await owner.apply((plan), true, `operation_${"a".repeat(32)}`))?.phase, "archived"); assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3);
 });
 
 test("archive survives account cleanup outage; exact empty ancestors can be retried separately", async t => {
-	const f = await fixture(t); const owner = await f.owner(); await owner.apply(await owner.preview(f.first.conversationId));
+	const f = await fixture(t); const owner = await f.owner(); await owner.apply((await owner.preview(f.first.conversationId)), true, `operation_${"a".repeat(32)}`);
 	f.setAccountReady(false); const pending = await owner.cleanup(f.first.conversationId); assert.equal(pending?.phase, "archived"); assert.ok(pending!.cleanupPending > 0);
 	assert.ok(await f.matrix.memberJoined(f.first.roomId, f.matrix.operatorUserId));
 	f.setAccountReady(true); const done = await owner.cleanup(f.first.conversationId); assert.equal(done?.cleanupPending, 0);
@@ -138,7 +145,7 @@ test("archive survives account cleanup outage; exact empty ancestors can be retr
 });
 
 test("lost cleanup departure cannot infer fresh emptiness after an external change", async t => {
-	const f = await fixture(t); const owner = await f.owner(); await owner.apply(await owner.preview(f.first.conversationId));
+	const f = await fixture(t); const owner = await f.owner(); await owner.apply((await owner.preview(f.first.conversationId)), true, `operation_${"a".repeat(32)}`);
 	const leave = f.matrix.leaveRoom.bind(f.matrix); let lost = false;
 	f.matrix.leaveRoom = async roomId => { await leave(roomId); if (!lost) { lost = true; throw Error("lost leave reply"); } };
 	assert.ok((await owner.cleanup(f.first.conversationId))!.cleanupPending > 0);
@@ -150,7 +157,7 @@ test("lost cleanup departure cannot infer fresh emptiness after an external chan
 
 test("unrelated children or members preserve empty-looking shared ancestors", async t => {
 	const f = await fixture(t); const owner = await f.owner(); const plan = await owner.preview(f.first.conversationId);
-	await owner.apply(plan); f.matrix.children.get(f.first.checkoutSpace!)!.set("!unrelated:example.com", { via: ["example.com"] });
+	await owner.apply((plan), true, `operation_${"a".repeat(32)}`); f.matrix.children.get(f.first.checkoutSpace!)!.set("!unrelated:example.com", { via: ["example.com"] });
 	assert.ok((await owner.cleanup(f.first.conversationId))!.preservedSpaces.includes(f.first.checkoutSpace!));
 	f.matrix.children.get(f.first.checkoutSpace!)!.delete("!unrelated:example.com"); f.matrix.members.get(f.first.checkoutSpace!)!.add("@other:example.com");
 	assert.ok((await owner.cleanup(f.first.conversationId))!.preservedSpaces.includes(f.first.checkoutSpace!)); assert.equal(f.matrix.effects.filter(e => e.startsWith("leave:")).length, 0);
@@ -165,13 +172,13 @@ test("loss of an archive ancestor link before unlink preserves the old conversat
 		}
 		return read(parent, child);
 	};
-	await assert.rejects(owner.apply(plan), /path is no longer readable/);
+	await assert.rejects(owner.apply((plan), true, `operation_${"a".repeat(32)}`), /path is no longer readable/);
 	assert.deepEqual(await f.matrix.spaceChildren(f.first.checkoutSpace!), [f.first.roomId]); assert.ok(!f.matrix.effects.some(e => e.startsWith("unlink:")));
 });
 
 test("shared checkout archives reuse the same Spaces and clean ancestors exactly once", async t => {
 	const f = await fixture(t, true); const owner = await f.owner(); const a = await owner.preview(f.first.conversationId), b = await owner.preview(f.second.conversationId);
-	await Promise.all([owner.apply(a), owner.apply(b)]);
+	await Promise.all([owner.apply((a), true, `operation_${"a".repeat(32)}`), owner.apply((b), true, `operation_${"a".repeat(32)}`)]);
 	assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3);
 	assert.deepEqual(owner.status(f.first.conversationId)?.archiveSpaces, owner.status(f.second.conversationId)?.archiveSpaces);
 	await owner.cleanup(f.first.conversationId); await owner.cleanup(f.second.conversationId);
@@ -182,19 +189,19 @@ test("unpublished reservations and legacy saved identity remain independent of c
 	const f = await fixture(t); const owner = await f.owner(); const plan = await owner.preview(f.first.conversationId);
 	const legacy = structuredClone(plan.source); delete legacy.checkoutId;
 	assert.equal(historicalCheckoutId("host", legacy), historicalCheckoutId("host", { ...legacy, title: "renamed", placement: { ...legacy.placement, relativeCwd: "subdir" } }));
-	await owner.apply(plan);
+	await owner.apply((plan), true, `operation_${"a".repeat(32)}`);
 	await f.hierarchy.prepare({ creationKey: "new-reservation", projectKey: plan.source.projectKey, canonicalCheckoutRoot: "/never/existed/deleted-worktree", projectTitle: "historical-project", checkoutTitle: "deleted-worktree", conversationTitle: "new" });
 	assert.ok((await owner.cleanup(f.first.conversationId))!.preservedSpaces.includes(f.first.checkoutSpace!)); assert.equal(f.matrix.effects.filter(e => e.startsWith("leave:")).length, 0);
 });
 
 test("missing archive hierarchy journal cannot reallocate after durable admission", async t => {
-	const f = await fixture(t); const owner = await f.owner(); await owner.apply(await owner.preview(f.first.conversationId)); await owner.close();
+	const f = await fixture(t); const owner = await f.owner(); await owner.apply((await owner.preview(f.first.conversationId)), true, `operation_${"a".repeat(32)}`); await owner.close();
 	await rm(join(f.directory, "archive", "archive-hierarchy.json")); await assert.rejects(f.owner(), /journal is missing/);
 	assert.ok(f.registry.archiveRecord(f.first.conversationId));
 });
 
 test("NAS validates the archive parent chain and rejects cross-kind or substituted roots", async t => {
-	const f = await fixture(t); const owner = await f.owner(); await owner.apply(await owner.preview(f.first.conversationId));
+	const f = await fixture(t); const owner = await f.owner(); await owner.apply((await owner.preview(f.first.conversationId)), true, `operation_${"a".repeat(32)}`);
 	const node = owner.accountInventory().at(-1)!;
 	const body = { version: "1.0.0", hostId: "host", operation: "room.ensure", kind: node.provenance.kind, creationKey: node.provenance.creationKey, roomId: node.roomId,
 		hostSpaceId: node.hostSpaceId, archiveRootSpaceId: node.archiveRootSpaceId, project: node.project, checkout: node.checkout, notificationSetup: "preserve" };
@@ -212,14 +219,95 @@ test("NAS validates the archive parent chain and rejects cross-kind or substitut
 	if (forged.operation === "room.ensure") assert.throws(() => verifyManagedHierarchy(forged, f.matrix.botUserId, snapshots));
 });
 
+test("archive host controls require independent disclosed legacy consent, revalidate, and retain the receipt", async t => {
+	const f = await fixture(t); let observation = { conflicts: false, bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", unreadableProcesses: [] as string[] }; let now = 1000;
+	const runtime = new ArchiveRuntimeChecks({ registry: f.registry, attached: () => false, exact: { check: async () => "gone", inspect: async () => undefined }, observeLegacy: async () => observation });
+	const hierarchy = await f.owner(runtime); const controls = new ArchiveHostControls({ registry: f.registry, hierarchy, runtime });
+	const owner = new ManagedHostMutationOwner({ registry: f.registry, lifecycle: {} as HostLifecycle, retirement: {} as ConversationRetirement, server: { attachment: () => undefined }, archives: controls, now: () => now });
+	const strict = await owner.preview({ operation: "conversation.archive.preview", conversationIds: [f.first.conversationId] }); assert.match(strict.blockers.join(), /No exact exit evidence/);
+	const preview = await owner.preview({ operation: "conversation.archive.preview", conversationIds: [f.first.conversationId], legacyClosure: true }); assert.deepEqual(preview.blockers, []);
+	assert.match(preview.warnings!.join(), /NOT verified process exit/); assert.deepEqual(f.matrix.effects, []);
+	const input: ModelHostRequest = { version: "1.0.0", actor: { kind: "model", conversationId: f.second.conversationId, generationId: `generation_${"a".repeat(32)}`, requestId: "archive-request", runId: "run", toolCallId: "tool", presentation: "local_dialog" }, action: { operation: "conversation.archive.apply", previewId: preview.previewId, confirmed: true } };
+	const record = prepareHostApproval("host", input, await owner.freeze(input), now);
+	assert.match(hostApprovalQuestion(record), /LEGACY ATTESTATION/); await assert.rejects(owner.executeHuman(input), /independent consent/);
+	observation.unreadableProcesses = ["123"]; assert.equal(await owner.revalidate(record), false); await assert.rejects(owner.execute(record), /changed or expired/); assert.equal(f.registry.archiveRecords().length, 0);
+	observation.unreadableProcesses = []; now = Date.parse(preview.expiresAt) + 1; assert.equal(await owner.revalidate(record), false);
+	const fresh = await owner.preview({ operation: "conversation.archive.preview", conversationIds: [f.first.conversationId], legacyClosure: true });
+	const next = { ...input, action: { ...input.action, previewId: fresh.previewId } } as ModelHostRequest;
+	const approved = prepareHostApproval("host", next, await owner.freeze(next), now); await owner.execute(approved);
+	assert.equal(controls.list({ operation: "conversation.archive.list" }).items[0]!.closureBasis, "operator_attested");
+	assert.ok(!f.registry.listConversations().some(c => c.conversationId === f.first.conversationId));
+	const journal = JSON.parse(await readFile(join(f.directory, "archive", "archive-hierarchy.json"), "utf8"));
+	assert.equal(journal.entries[0].closure.operationId, `operation_${approved.approvalId.slice("approval_".length)}`);
+	const cleanup = await owner.preview({ operation: "conversation.archive.cleanup.preview", conversationIds: [f.first.conversationId] });
+	await assert.rejects(owner.freeze({ action: { operation: "conversation.archive.apply", previewId: cleanup.previewId, confirmed: true } }), /changed or expired/);
+});
+
+test("archive runtime distinguishes exact exit from live, changed, replacement or incomplete legacy evidence", async t => {
+	const f = await fixture(t); const id = f.first.conversationId; const source = f.registry.archiveCandidate(id).source;
+	let attached = false; let state: "gone" | "match" | "changed" = "gone"; let replacement = false; let observed = 0;
+	const proof = { conversationId: id, launchId: `launch_${"a".repeat(32)}`, serverId: `123:456:${"a".repeat(32)}`, sessionName: "project", windowId: "@1", paneId: "%1", panePid: "789", processBootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processStartTicks: "123" };
+	await f.registry.setManagedWindow(id, { sessionName: "project", windowId: "@1", paneId: "%1", ownership: proof });
+	const runtime = new ArchiveRuntimeChecks({ registry: f.registry, attached: () => attached, exact: { check: async () => state, inspect: async () => replacement ? proof : undefined }, observeLegacy: async () => { observed++; return {}; } });
+	assert.equal((await runtime.inspect(source)).receipt.basis, "exact_exit"); assert.equal(observed, 0);
+	for (const value of ["match", "changed"] as const) { state = value; await assert.rejects(runtime.inspect(source, true), /conflicting or unverified/); }
+	state = "gone"; replacement = true; await assert.rejects(runtime.inspect(source), /conflicting or unverified/);
+	replacement = false; attached = true; await assert.rejects(runtime.inspect(source), /running conversation/); attached = false;
+	const hierarchy = await f.owner(runtime); const plan = await hierarchy.preview(id, (await runtime.inspect(source)).window);
+	assert.equal((await hierarchy.apply(plan))?.phase, "archived"); assert.equal(hierarchy.status(id)?.closureBasis, "exact_exit");
+});
+
+test("legacy controls never waive unfinished work or archive the protected coordinator", async t => {
+	const f = await fixture(t); const runtime = new ArchiveRuntimeChecks({ registry: f.registry, attached: () => false, exact: { check: async () => "gone", inspect: async () => undefined },
+		observeLegacy: async () => ({ conflicts: false, unreadableProcesses: [], bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }) });
+	const hierarchy = await f.owner(runtime); const controls = new ArchiveHostControls({ registry: f.registry, hierarchy, runtime });
+	const blocked = await controls.snapshot({ operation: "conversation.archive.preview", conversationIds: [deriveConversationId("host", "coordinator")], legacyClosure: true }); assert.match(blocked.blockers.join(), /protected coordinator/);
+	await f.registry.beginLaunch(f.first.conversationId);
+	const pending = await controls.snapshot({ operation: "conversation.archive.preview", conversationIds: [f.first.conversationId], legacyClosure: true });
+	assert.ok(pending.blockers.length); assert.equal(await controls.valid(pending), false); assert.equal(f.registry.archiveRecords().length, 0); assert.deepEqual(f.matrix.effects, []);
+});
+
+test("effect-free unadmitted drafts require fresh consent but can replan changed source links", async t => {
+	const f = await fixture(t); let checks = 0;
+	const runtime = new ArchiveRuntimeChecks({ registry: f.registry, attached: () => false, exact: { check: async () => "gone", inspect: async () => undefined },
+		observeLegacy: async () => { checks++; if (checks === 2) throw Error("temporary inspection failure"); return { conflicts: false, unreadableProcesses: [], bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }; } });
+	const owner = await f.owner(runtime); const before = await owner.preview(f.first.conversationId);
+	await assert.rejects(owner.apply(before, true, `operation_${"b".repeat(32)}`), /inspection unavailable/);
+	assert.equal(owner.status(f.first.conversationId)?.phase, "reserved"); assert.equal(f.registry.archiveRecords().length, 0); assert.deepEqual(f.matrix.effects, []);
+	f.matrix.children.get(f.first.checkoutSpace!)!.set(f.first.roomId, { via: ["example.com"], order: "new order" });
+	const after = await owner.preview(f.first.conversationId); assert.notDeepEqual(before, after);
+	await assert.rejects(owner.apply(before, true, `operation_${"c".repeat(32)}`), /changed/);
+	assert.equal((await owner.apply(after, true, `operation_${"d".repeat(32)}`))?.phase, "archived");
+});
+
+test("admitted legacy retries require fresh complete inspection and retain original audit evidence", async t => {
+	const f = await fixture(t); let observation = { conflicts: false, unreadableProcesses: [] as string[], bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" };
+	const runtime = new ArchiveRuntimeChecks({ registry: f.registry, attached: () => false, exact: { check: async () => "gone", inspect: async () => undefined }, observeLegacy: async () => observation });
+	let owner = await f.owner(runtime); const plan = await owner.preview(f.first.conversationId); f.matrix.autoJoin = false;
+	const original = `operation_${"a".repeat(32)}`, retry = `operation_${"b".repeat(32)}`;
+	assert.equal((await owner.apply(plan, true, original))?.phase, "archiving"); await owner.close(); owner = await f.owner(runtime);
+	const controls = new ArchiveHostControls({ registry: f.registry, hierarchy: owner, runtime }); const effects = [...f.matrix.effects];
+	for (const problem of [{ conflicts: true, unreadableProcesses: [] }, { conflicts: false, unreadableProcesses: ["123"] }]) {
+		observation = { ...observation, ...problem };
+		assert.ok((await controls.snapshot({ operation: "conversation.archive.preview", conversationIds: [f.first.conversationId], legacyClosure: true })).blockers.length);
+		await assert.rejects(owner.apply(plan, true, retry), /conflicting or incomplete/); assert.deepEqual(f.matrix.effects, effects);
+	}
+	observation = { ...observation, conflicts: false, unreadableProcesses: [] };
+	assert.ok((await controls.snapshot({ operation: "conversation.archive.preview", conversationIds: [f.first.conversationId] })).blockers.length);
+	for (const room of owner.status(f.first.conversationId)!.archiveSpaces) f.matrix.members.get(room)!.add(f.matrix.operatorUserId);
+	assert.equal((await owner.apply(plan, true, retry))?.phase, "archived");
+	const saved = JSON.parse(await readFile(join(f.directory, "archive", "archive-hierarchy.json"), "utf8"));
+	assert.equal(saved.entries[0].closure.operationId, original); assert.equal(saved.entries[0].lastInspection.operationId, retry);
+});
+
 test("uncertain local journal writes poison the owner and never roll back an accepted create", async t => {
 	const f = await fixture(t); let owner = await f.owner(); const plan = await owner.preview(f.first.conversationId); const original = AtomicJsonFile.prototype.write;
 	AtomicJsonFile.prototype.write = async function (value: unknown) {
 		await original.call(this, value);
 		if (this.path.endsWith("archive-hierarchy.json") && f.matrix.effects.some(e => e.startsWith("create:"))) throw Error("Injected post-rename");
 	};
-	try { await assert.rejects(owner.apply(plan), /Injected/); } finally { AtomicJsonFile.prototype.write = original; }
+	try { await assert.rejects(owner.apply((plan), true, `operation_${"a".repeat(32)}`), /Injected/); } finally { AtomicJsonFile.prototype.write = original; }
 	assert.throws(() => owner.status(f.first.conversationId), /unavailable/); await owner.close(); owner = await f.owner();
-	assert.equal((await owner.apply(plan))?.phase, "archived"); assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3);
+	assert.equal((await owner.apply((plan), true, `operation_${"a".repeat(32)}`))?.phase, "archived"); assert.equal(f.matrix.effects.filter(e => e.startsWith("create:")).length, 3);
 	assert.ok((await readFile(join(f.directory, "archive", "archive-hierarchy.json"), "utf8")).includes(f.first.roomId));
 });

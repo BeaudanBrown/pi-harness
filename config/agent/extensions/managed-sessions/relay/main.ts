@@ -37,6 +37,10 @@ import { retryMatrixStartup } from "./startup-retry.js";
 import { RecoveryAlerts } from "./recovery-alerts.js";
 import { RecoveryMonitor } from "./recovery-monitor.js";
 import { LiveHierarchy } from "./live-hierarchy.js";
+import { ArchiveHierarchy } from "./archive-hierarchy.js";
+import { ArchiveRuntimeChecks } from "./archive-runtime.js";
+import { ArchiveHostControls } from "./archive-host-controls.js";
+import type { SpaceCleanupAccount } from "./live-space-cleanup.js";
 import { LocalEnrollmentReconciler } from "./local-enrollment-reconciler.js";
 import { readHostPolicy } from "./host-policy.js";
 import { HostDispatcher } from "./host-dispatcher.js";
@@ -93,6 +97,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let coordinatorRouter: CoordinatorRouter | undefined;
 	let recoveryMonitor: RecoveryMonitor | undefined;
 	let hierarchy: LiveHierarchy | undefined;
+	let archives: ArchiveHierarchy | undefined;
+	let archiveControls: ArchiveHostControls | undefined;
 	let localEnrollments: LocalEnrollmentReconciler | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
 	let runtimeObserver: HostRuntimeObserver | undefined;
@@ -430,15 +436,14 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				() => registry.listManifests().find((manifest) => manifest.kind === "coordinator"),
 				(conversationId) => Boolean(registry.retirement(conversationId) || registry.archiveRecord(conversationId)));
 			await hierarchy.load();
-			const accountDevice = environment.PI_MANAGED_ACCOUNT_DEVICE_ID?.trim();
-			if (accountDevice) {
-				account = new HostAccountOwner(new HostAccountClient(resolve(stateDirectory, "account"), hostId, matrix.operatorUserId, accountDevice, matrix), registry, matrix, hierarchy);
-				await account.initialize();
-			}
+			const cleanupAccount: SpaceCleanupAccount = {
+				leaveAndForget: (target, signal) => account?.leaveAndForget(target, signal) ?? Promise.resolve(false),
+				completed: (target, signal) => account?.completed(target, signal) ?? Promise.resolve(false),
+			};
 			const projectSessionDirectory = environment.PI_MANAGED_PROJECT_SESSION_DIR?.trim() || resolve(stateDirectory, "project-sessions");
 			hostLifecycle = new HostLifecycle({
 				hostId, launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(), projectSessionDirectory: resolve(projectSessionDirectory),
-				socketPath: server.socketPath, registry, matrix, hierarchy, server, environment, spaceCleanupAccount: account,
+				socketPath: server.socketPath, registry, matrix, hierarchy, server, environment, spaceCleanupAccount: cleanupAccount,
 				coordinator: { launcher: environment.PI_MANAGED_COORDINATOR_LAUNCHER!.trim(),
 					sessionFile: coordinatorValues[1]!.trim(), workspaceDirectory: coordinatorValues[0]!.trim() },
 				projectNotice: async (sourceId, manifest, body) => eventProjector.projectNotice(manifest.conversationId, sourceId, body),
@@ -450,6 +455,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					return retirement.retire(conversationId);
 				},
 			});
+			const archiveRuntime = new ArchiveRuntimeChecks({ registry, attached: id => Boolean(server!.attachment(id)), exact: hostLifecycle.exactWindows,
+				observeLegacy: (id, window) => hostLifecycle!.observeArchiveClosure(id, window) });
+			archives = new ArchiveHierarchy({ directory: resolve(stateDirectory, "live-workspaces"), registry, matrix, hierarchy, account: cleanupAccount,
+				assertRuntimeAbsent: (source, signal, legacyClosure) => archiveRuntime.inspect(source, legacyClosure, signal) });
+			await archives.load();
+			archiveControls = new ArchiveHostControls({ registry, hierarchy: archives, runtime: archiveRuntime });
+			const accountDevice = environment.PI_MANAGED_ACCOUNT_DEVICE_ID?.trim();
+			if (accountDevice) {
+				account = new HostAccountOwner(new HostAccountClient(resolve(stateDirectory, "account"), hostId, matrix.operatorUserId, accountDevice, matrix), registry, matrix, hierarchy, archives);
+				await account.initialize();
+			}
 		}
 		if (hostLifecycle) {
 			runtimeObserver = new HostRuntimeObserver({ hostId, windows: hostLifecycle.exactWindows,
@@ -462,11 +478,11 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			cancelApprovals: (conversationId) => hostApprovals?.cancelRun(conversationId),
 			onFailure: () => process.stderr.write("pi-managed-session-relay: retirement cleanup is pending\n") });
 		if (hostPolicy) {
-			const reads = new HostReadModel({ hostId, registry, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), savedSessionImport: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
+			const reads = new HostReadModel({ hostId, registry, archives: archiveControls, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), savedSessionImport: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
 			} });
-			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server, account,
+			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server, account, archives: archiveControls,
 				activeRun: async (id) => {
 					const witness = await hostApprovals!.controls.proofs.request(id);
 					if (!witness) throw new Error("Active target run observation is unavailable");
@@ -583,6 +599,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		await runtimeObserver?.close().catch(() => undefined);
 		await retirement?.close().catch(() => undefined);
 		const enrollmentClosing = localEnrollments?.close();
+		await archives?.close().catch(() => undefined);
 		await hierarchy?.close().catch(() => undefined);
 		await enrollmentClosing;
 		await closeArtifactExporter().catch(() => undefined);
@@ -609,6 +626,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await retirement?.close().catch(() => undefined);
 			await server.close({ preserveAttachments: true }).catch(() => undefined);
 			const enrollmentClosing = localEnrollments?.close();
+			await archives?.close().catch(() => undefined);
 			await hierarchy?.close().catch(() => undefined);
 			await enrollmentClosing;
 			await relayLock?.release().catch(() => undefined);
@@ -644,6 +662,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			await runtimeObserver?.close();
 			await retirement?.close();
 			const enrollmentClosing = localEnrollments?.close();
+			await archives?.close();
 			await hierarchy?.close();
 			await enrollmentClosing;
 			await closeArtifactExporter();

@@ -37,6 +37,16 @@ test("terminal and room controls parse arguments without shell evaluation or pro
 	for (const text of ["!start do something", "!close", "!stop --force", "!host conversation open title", "!host host status --request-id forged", '!host conversation create --title "unfinished']) assert.throws(() => roomHostCommand(text, conversationId));
 });
 
+test("archive tools and operator commands share exact scope and explicit legacy opt-in", () => {
+	const action = { operation: "conversation.archive.preview", conversationIds: [conversationId], legacyClosure: true };
+	assert.deepEqual(managedHostAction(action), action);
+	assert.deepEqual(hostCommandAction(`conversation archive preview --conversation-ids ${conversationId} --legacy-closure`), action);
+	assert.deepEqual(hostCommandAction("conversation archive list --limit 5"), { operation: "conversation.archive.list", limit: 5 });
+	assert.throws(() => managedHostAction({ ...action, legacyClosure: false }));
+	assert.throws(() => managedHostAction({ ...action, operation: "conversation.archive.cleanup.preview" }));
+	assert.throws(() => managedHostAction({ ...action, conversationIds: [conversationId, conversationId] }));
+});
+
 test("Matrix never displays a partial bulk preview with an applicable token", async t => {
 	const root = await mkdtemp(join(tmpdir(), "host-preview-display-")); t.after(() => rm(root, { recursive: true, force: true }));
 	const policy = new HostPolicy(JSON.parse(await readFile("config/agent/managed-host-policy.json", "utf8")));

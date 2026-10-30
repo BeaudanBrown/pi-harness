@@ -92,6 +92,19 @@ class LegacyExitTests(unittest.TestCase):
         return legacy.observe({"conversationId": CID, "window": self.request["window"],
                                "sessionDirectory": "/private/" + CID, "manualClosure": True}, panes, self.proc)
 
+    def test_archive_without_window_only_screens_conflicts_and_never_claims_exit(self):
+        request = {"conversationId": CID, "window": None, "sessionDirectory": "/private/" + CID, "archiveClosure": True}
+        self.assertTrue(legacy.observe(request, "", self.proc)["conflicts"])
+        self.process(123, 1, 100)
+        clean = legacy.observe(request, "", self.proc)
+        self.assertEqual(clean, {"conflicts": False, "bootId": BOOT, "unreadableProcesses": []})
+        self.assertTrue(legacy.observe(request, self.pane, self.proc)["conflicts"])
+        for altered in [{**request, "archiveClosure": False}, {**request, "manualClosure": True}, {**request, "extra": True}]:
+            with self.assertRaises(ValueError):
+                legacy.observe(altered, "", self.proc)
+        with self.assertRaises(ValueError):
+            legacy.observe({"conversationId": CID, "window": None, "sessionDirectory": "/private/" + CID, "manualClosure": True}, "", self.proc)
+
     def test_manual_closure_reports_conflicts_never_exit_proof(self):
         self.assertTrue(self.manual()["conflicts"])
         self.process(123, 1, 100)

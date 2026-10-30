@@ -1429,9 +1429,18 @@ export class RelayRegistry {
 	}
 	archiveRecord(conversationId: string): ArchiveRecord | undefined { return this.archives.get(conversationId); }
 	archiveRecords(): ArchiveRecord[] { return this.archives.list(); }
-	archiveCandidate(conversationId: string): { source: ArchiveSource; blockers: string[] } {
+	/** Narrow retained identity for read-only archive retry inspection, never runtime admission. */
+	archiveClosureWindow(conversationId: string): RuntimeConversation["managedWindow"] {
+		this.assertAuthorityAvailable();
+		if (!this.archives.has(conversationId)) throw new RelayRegistryError("invalid_state", "Archive authority is unavailable");
+		const row = this.state.conversations.find(c => c.conversationId === conversationId);
+		if (!row) throw new RelayRegistryError("invalid_state", "Archive runtime identity is unavailable");
+		return structuredClone(row.managedWindow ?? null);
+	}
+	archiveCandidate(conversationId: string, closedWindow?: RuntimeConversation["managedWindow"]): { source: ArchiveSource; blockers: string[] } {
 		const manifest = this.boundConversation(conversationId); const row = this.runtimeConversation(conversationId); const blockers: string[] = [];
-		if (row.state !== "dormant" || row.attachment || this.liveConnections.has(conversationId) || row.managedWindow || row.launch?.observed === false)
+		const windowChanged = closedWindow === undefined ? Boolean(row.managedWindow) : !isDeepStrictEqual(row.managedWindow ?? null, closedWindow);
+		if (row.state !== "dormant" || row.attachment || this.liveConnections.has(conversationId) || windowChanged || row.launch?.observed === false)
 			blockers.push("Runtime closure requires exact verification before archive");
 		if (row.pendingInputs.some(input => !["completed", "cancelled"].includes(input.status))) blockers.push("Unfinished input must be resolved before archive");
 		if (row.pendingControls.length || row.publishingControlPoll || row.activeControlPoll || row.publishingCheckpointPoll || row.activeCheckpointPoll || row.closingCheckpointPolls.length)
@@ -1443,12 +1452,12 @@ export class RelayRegistry {
 	}
 	/** Archive owner only, after fresh external runtime/Matrix checks and consent.
 	 * Recheck durable blockers under registry serialization before negative authority. */
-	async admitArchive(source: ArchiveSource): Promise<ArchiveRecord> {
-		const frozen = structuredClone(source);
+	async admitArchive(source: ArchiveSource, closedWindow?: RuntimeConversation["managedWindow"]): Promise<ArchiveRecord> {
+		const frozen = structuredClone(source); const closure = structuredClone(closedWindow);
 		return this.mutate(async () => {
 			const previous = this.archives.get(frozen.conversationId);
 			if (previous) { if (!isDeepStrictEqual(previous.source, frozen)) throw new RelayRegistryError("invalid_state", "Archive admission identity changed"); return previous; }
-			const current = this.archiveCandidate(frozen.conversationId);
+			const current = this.archiveCandidate(frozen.conversationId, closure);
 			if (current.blockers.length || !isDeepStrictEqual(current.source, frozen)) throw new RelayRegistryError("invalid_state", "Archive targets or pending work changed before admission");
 			return this.archives.admit({ version: 1, hostId: this.hostId, archiveId: archiveId(this.hostId, frozen.conversationId), admittedAt: Date.now(), phase: "archiving", source: frozen });
 		});

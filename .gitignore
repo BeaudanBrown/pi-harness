@@ -8,6 +8,8 @@
 /backup/
 
 # Local developer/runtime artifacts
+__pycache__/
+*.pyc
 .direnv/
 .loom/
 .pi/

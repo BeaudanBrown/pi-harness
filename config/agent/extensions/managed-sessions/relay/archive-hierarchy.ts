@@ -9,6 +9,7 @@ import { MatrixRoomIdSchema as room } from "../../matrix-shared/room-id.js";
 import { MatrixUserIdSchema } from "../identity-contracts.js";
 import { deriveConversationId } from "../contracts.js";
 import { ManagedProvenanceSchema, parseManagedProvenance, safeManagedTitle, type ManagedProvenance } from "../managed-provenance.js";
+import { ArchiveClosureReceiptSchema, type ArchiveClosure } from "./archive-runtime.js";
 import { ArchiveSourceSchema, type ArchiveSource } from "./archive-store.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import type { RelayRegistry } from "./registry.js";
@@ -34,7 +35,7 @@ export const ArchivePlanSchema = Type.Object({ source: ArchiveSourceSchema, host
 export type ArchivePlan = Static<typeof ArchivePlanSchema>;
 const nodeSchema = Type.Object({ target: targetSchema, parentRoomId: Type.Optional(room), roomId: Type.Optional(room),
 	createAttempted: Type.Boolean(), linked: Type.Boolean() }, { additionalProperties: false });
-const entrySchema = Type.Object({ plan: ArchivePlanSchema, linked: Type.Boolean(), completed: Type.Boolean(),
+const entrySchema = Type.Object({ plan: ArchivePlanSchema, closure: Type.Optional(ArchiveClosureReceiptSchema), lastInspection: Type.Optional(ArchiveClosureReceiptSchema), linked: Type.Boolean(), completed: Type.Boolean(),
 	unlinkAttempted: Type.Array(room, { maxItems: 2, uniqueItems: true }), unlinked: Type.Array(room, { maxItems: 2, uniqueItems: true }),
 	cleanup: Type.Array(Type.Union([Type.Literal("pending"), Type.Literal("preserved"), Type.Literal("done")]), { maxItems: 2 }) }, { additionalProperties: false });
 const stateSchema = Type.Object({ version: Type.Literal(1), hostId: id, nodes: Type.Array(nodeSchema, { maxItems: 16384 }), entries: Type.Array(entrySchema, { maxItems: 4096 }) }, { additionalProperties: false });
@@ -81,6 +82,7 @@ function parse(value: unknown): State {
 	for (const entry of state.entries) {
 		if (entry.linked && entry.plan.targets.some(t => !nodes.get(t.key)?.linked)) throw Error("Archive link lacks its verified path");
 		validatePlan(entry.plan, state.hostId);
+		for (const receipt of [entry.closure, entry.lastInspection]) if (receipt?.basis === "operator_attested" && !receipt.operationId) throw Error("Legacy archive attestation lacks its consent reference");
 		if (entry.cleanup.length !== entry.plan.ancestors.length || entry.completed && (!entry.linked || entry.unlinked.length !== entry.plan.parents.length) ||
 			entry.unlinked.some(p => !entry.plan.parents.some(r => r.roomId === p)) || entry.unlinkAttempted.some(p => !entry.plan.parents.some(r => r.roomId === p)) ||
 			(entry.unlinked.length > 0 || entry.unlinkAttempted.length > 0) && !entry.linked || !entry.completed && entry.cleanup.some(c => c !== "pending")) throw Error("Invalid archive progress");
@@ -106,7 +108,7 @@ export class ArchiveHierarchy {
 	private readonly stop = new AbortController();
 	private readonly file: AtomicJsonFile<State>;
 	constructor(private readonly options: { directory: string; registry: RelayRegistry; matrix: ManagedMatrixClient; hierarchy: LiveHierarchy;
-		account?: SpaceCleanupAccount; assertRuntimeAbsent: (source: ArchiveSource, signal: AbortSignal) => Promise<void> }) {
+		account?: SpaceCleanupAccount; assertRuntimeAbsent: (source: ArchiveSource, signal: AbortSignal, legacyClosure: boolean) => Promise<ArchiveClosure> }) {
 		this.state = { version: 1, hostId: options.registry.hostId, nodes: [], entries: [] };
 		this.file = new AtomicJsonFile(join(options.directory, "archive-hierarchy.json"), parse);
 	}
@@ -127,7 +129,7 @@ export class ArchiveHierarchy {
 		if (this.state.hostId !== this.options.registry.hostId) throw Error("Archive journal belongs to another host");
 		for (const entry of this.state.entries) {
 			const record = this.options.registry.archiveRecord(entry.plan.source.conversationId);
-			if (record ? !isDeepStrictEqual(record.source, entry.plan.source) : entry.linked || entry.completed) throw Error("Archive authority and journal disagree");
+			if (record ? !entry.closure || !isDeepStrictEqual(record.source, entry.plan.source) : entry.linked || entry.completed) throw Error("Archive authority and journal disagree");
 		}
 		for (const record of this.options.registry.archiveRecords()) if (!this.entry(record.source.conversationId)) throw Error("Archive journal is missing; restore the complete backup");
 		this.loaded = true;
@@ -154,12 +156,13 @@ export class ArchiveHierarchy {
 		await this.verify(plan.host, true, signal); await this.verify(plan.conversation, false, signal);
 		if (!await this.options.matrix.memberJoined(plan.source.roomId, plan.operatorUserId, signal)) throw Error("Archive requires existing operator membership; restoration is separate");
 	}
-	/** GET-only. A saved incomplete plan is returned unchanged, never broadened. */
-	async preview(conversationId: string): Promise<ArchivePlan> {
+	/** GET-only. Admitted intents never change. Unadmitted drafts may be replanned;
+	 * replacing a draft requires fresh apply consent and cannot discard effect receipts. */
+	async preview(conversationId: string, closedWindow?: ArchiveClosure["window"]): Promise<ArchivePlan> {
 		this.assertAvailable(); const existing = this.entry(conversationId);
-		if (existing) return structuredClone(existing.plan);
+		if (existing && this.options.registry.archiveRecord(conversationId)) return structuredClone(existing.plan);
 		if (this.options.registry.archiveRecord(conversationId)) throw Error("Archive journal missing; cannot infer prior effects");
-		const candidate = this.options.registry.archiveCandidate(conversationId);
+		const candidate = this.options.registry.archiveCandidate(conversationId, closedWindow);
 		if (candidate.blockers.length) throw Error(candidate.blockers.join("; "));
 		const source = candidate.source; const signal = this.stop.signal;
 		const coordinator = this.options.registry.listManifests().find(m => m.kind === "coordinator");
@@ -180,22 +183,33 @@ export class ArchiveHierarchy {
 			targets: targets(this.state.hostId, source).map(t => structuredClone(this.state.nodes.find(n => n.target.key === t.key)?.target ?? t)) };
 		validatePlan(plan, this.state.hostId); await this.readable(plan, signal); return plan;
 	}
-	async apply(frozen: ArchivePlan): Promise<ReturnType<ArchiveHierarchy["status"]>> {
+	async apply(frozen: ArchivePlan, legacyClosure = false, operationId?: string): Promise<ReturnType<ArchiveHierarchy["status"]>> {
 		this.assertAvailable(); const plan = structuredClone(frozen); validatePlan(plan, this.state.hostId);
+		if (legacyClosure && (!operationId || !/^operation_[a-f0-9]{32}$/.test(operationId))) throw Error("Legacy archive requires an approved operation reference");
 		return this.track(this.options.hierarchy.withProjectCleanup(plan.source.projectKey, async scopeSignal => {
 			const signal = AbortSignal.any([scopeSignal, this.stop.signal]); this.assertAvailable();
 			const id = plan.source.conversationId; let entry = this.entry(id);
-			if (entry && !isDeepStrictEqual(entry.plan, plan)) throw Error("Frozen archive intent changed");
-			if (!entry) {
+			const wasAdmitted = Boolean(this.options.registry.archiveRecord(id));
+			if (entry && !isDeepStrictEqual(entry.plan, plan) && this.options.registry.archiveRecord(id)) throw Error("Frozen archive intent changed");
+			if (!entry || !isDeepStrictEqual(entry.plan, plan)) {
 				if (this.options.registry.archiveRecord(id)) throw Error("Archive journal missing; cannot reconstruct effect history");
-				if (!isDeepStrictEqual(await this.preview(id), plan)) throw Error("Archive preview changed; obtain fresh consent");
+				const closure = await this.options.assertRuntimeAbsent(plan.source, signal, legacyClosure);
+				if (!isDeepStrictEqual(await this.preview(id, closure.window), plan)) throw Error("Archive preview changed; obtain fresh consent");
 				await this.mutate(state => {
+					if (this.options.registry.archiveRecord(id)) throw Error("Archive was admitted while reserving; obtain a fresh preview");
 					for (const target of plan.targets) {
 						const prior = state.nodes.find(n => n.target.key === target.key);
 						if (prior && !isDeepStrictEqual(prior.target, target)) throw Error("Archive reservation changed");
 						if (!prior) state.nodes.push({ target, createAttempted: false, linked: false, ...(target.parentKey ? {} : { parentRoomId: plan.host.roomId }) });
 					}
-					state.entries.push({ plan, linked: false, completed: false, unlinkAttempted: [], unlinked: [], cleanup: plan.ancestors.map(() => "pending") });
+					const draft: Entry = { plan, linked: false, completed: false, unlinkAttempted: [], unlinked: [], cleanup: plan.ancestors.map(() => "pending") };
+					const index = state.entries.findIndex(e => e.plan.source.conversationId === id);
+					if (index < 0) state.entries.push(draft); else state.entries[index] = draft;
+					state.nodes = state.nodes.filter(node => {
+						if (state.entries.some(e => e.plan.targets.some(t => t.key === node.target.key))) return true;
+						if (node.createAttempted || node.roomId) throw Error("Cannot discard an uncertain archive target");
+						return false;
+					});
 				}); entry = this.entry(id)!;
 			}
 			if (!this.options.registry.archiveRecord(id)) {
@@ -204,17 +218,24 @@ export class ArchiveHierarchy {
 					await this.verify({ roomId: parent.roomId, ...(parent.provenance ? { provenance: parent.provenance } : {}) }, true, signal);
 					if (!isDeepStrictEqual(await this.options.matrix.spaceChildContent(parent.roomId, plan.source.roomId, signal), parent.content)) throw Error("Archive source link changed");
 				}
-				await this.options.assertRuntimeAbsent(plan.source, signal); signal.throwIfAborted();
-				await this.options.registry.admitArchive(plan.source);
+				const closure = await this.options.assertRuntimeAbsent(plan.source, signal, legacyClosure); signal.throwIfAborted();
+				if (closure.receipt.basis === "operator_attested" && !legacyClosure) throw Error("Legacy closure requires explicit operator attestation");
+				await this.update(id, e => { e.closure = { ...structuredClone(closure.receipt), ...(operationId ? { operationId } : {}) }; }, plan);
+				signal.throwIfAborted(); await this.options.registry.admitArchive(plan.source, closure.window);
 			}
 			if (!isDeepStrictEqual(this.options.registry.archiveRecord(id)?.source, plan.source)) throw Error("Archive authority changed");
 			await this.readable(plan, signal);
+			if (wasAdmitted) {
+				const closure = await this.options.assertRuntimeAbsent(plan.source, signal, legacyClosure);
+				if (closure.receipt.basis === "operator_attested" && !legacyClosure) throw Error("Archive retry requires fresh legacy attestation");
+				await this.update(id, e => { e.lastInspection = { ...closure.receipt, ...(operationId ? { operationId } : {}) }; }, plan);
+			}
 			// A completed archive does not depend on departed original ancestors.
 			await this.ensure(plan.targets[2]!.key, signal);
 			for (const target of plan.targets) if (!await this.options.matrix.memberJoined(this.node(target.key).roomId!, plan.operatorUserId, signal)) return this.status(id);
 			const destination = this.node(plan.targets[2]!.key).roomId!;
 			await this.link(destination, plan.source.roomId, signal);
-			await this.update(id, e => { e.linked = true; });
+			await this.update(id, e => { e.linked = true; }, plan);
 			for (const parent of plan.parents) {
 				if (this.entry(id)!.unlinked.includes(parent.roomId)) continue;
 				await this.readable(plan, signal); await this.verifyPath(plan, signal);
@@ -224,14 +245,14 @@ export class ArchiveHierarchy {
 				if (!isDeepStrictEqual(current, parent.content) && !(retry && empty(current))) throw Error("Archive source link changed before unlink");
 				if (live(current)) {
 					if (!live(await this.options.matrix.spaceChildContent(destination, plan.source.roomId, signal))) throw Error("Archive link disappeared before unlink");
-					await this.update(id, e => { if (!e.unlinkAttempted.includes(parent.roomId)) e.unlinkAttempted.push(parent.roomId); });
+					await this.update(id, e => { if (!e.unlinkAttempted.includes(parent.roomId)) e.unlinkAttempted.push(parent.roomId); }, plan);
 					if (!isDeepStrictEqual(await this.options.matrix.spaceChildContent(parent.roomId, plan.source.roomId, signal), current)) throw Error("Concurrent archive source link change");
 					await this.options.matrix.removeSpaceChild(parent.roomId, plan.source.roomId, signal);
 					if (!empty(await this.options.matrix.spaceChildContent(parent.roomId, plan.source.roomId, signal))) throw Error("Archive unlink readback changed");
 				}
-				await this.update(id, e => { e.unlinked.push(parent.roomId); });
+				await this.update(id, e => { e.unlinked.push(parent.roomId); }, plan);
 			}
-			await this.readable(plan, signal); await this.verifyPath(plan, signal); await this.update(id, e => { e.completed = true; }); return this.status(id);
+			await this.readable(plan, signal); await this.verifyPath(plan, signal); await this.update(id, e => { e.completed = true; }, plan); return this.status(id);
 		}));
 	}
 	private async verifyPath(plan: ArchivePlan, signal: AbortSignal): Promise<void> {
@@ -242,9 +263,25 @@ export class ArchiveHierarchy {
 		}
 		if (!live(await this.options.matrix.spaceChildContent(this.node(plan.targets[2]!.key).roomId!, plan.source.roomId, signal))) throw Error("Archive conversation link disappeared");
 	}
+	/** Fresh read-only cleanup evidence; unknown authority is not an empty Space. */
+	async cleanupPreview(conversationId: string): Promise<Array<{ roomId: string; state: "done" | "eligible" | "preserved" | "unverifiable" }>> {
+		this.assertAvailable(); const entry = this.entry(conversationId);
+		if (!entry?.completed || entry.plan.operatorUserId !== this.options.matrix.operatorUserId || entry.plan.botUserId !== this.options.matrix.botUserId) throw Error("Archive cleanup scope unavailable");
+		const owner = new LiveSpaceCleanup(this.options); const rows: Array<{ roomId: string; state: "done" | "eligible" | "preserved" | "unverifiable" }> = [];
+		for (const link of entry.plan.ancestors) {
+			let state: typeof rows[number]["state"];
+			try {
+				if (this.options.hierarchy.spaceRetirement(owner.identity(link)) === "done") state = "done";
+				else { await owner.verify(link, this.stop.signal); state = await owner.empty(link, this.stop.signal) ? "eligible" : "preserved"; }
+			} catch { this.stop.signal.throwIfAborted(); state = "unverifiable"; }
+			rows.push({ roomId: link.child.roomId, state });
+		}
+		return rows;
+	}
 	/** Separately retryable, exactly frozen ancestors only. Never touches conversation membership. */
 	async cleanup(conversationId: string): Promise<ReturnType<ArchiveHierarchy["status"]>> {
 		this.assertAvailable(); const entry = this.entry(conversationId); if (!entry?.completed) throw Error("Archive is not complete");
+		if (entry.plan.operatorUserId !== this.options.matrix.operatorUserId || entry.plan.botUserId !== this.options.matrix.botUserId) throw Error("Archive cleanup actors changed");
 		return this.track(this.options.hierarchy.withProjectCleanup(entry.plan.source.projectKey, async scopeSignal => {
 			const signal = AbortSignal.any([scopeSignal, this.stop.signal]); const owner = new LiveSpaceCleanup(this.options);
 			for (const [index, link] of entry.plan.ancestors.entries()) {
@@ -256,14 +293,14 @@ export class ArchiveHierarchy {
 					else if (!await owner.empty(link, signal)) status = "preserved";
 					else status = await owner.apply(link, signal) ? "done" : "pending";
 				} catch { signal.throwIfAborted(); status = "pending"; }
-				await this.update(conversationId, e => { e.cleanup[index] = status; });
+				await this.update(conversationId, e => { e.cleanup[index] = status; }, entry.plan);
 			}
 			return this.status(conversationId);
 		}));
 	}
 	status(conversationId: string) {
 		this.assertAvailable(); const entry = this.entry(conversationId); if (!entry) return undefined;
-		return { conversationId, phase: entry.completed ? "archived" as const : this.options.registry.archiveRecord(conversationId) ? "archiving" as const : "reserved" as const,
+		return { conversationId, closureBasis: entry.closure?.basis, phase: entry.completed ? "archived" as const : this.options.registry.archiveRecord(conversationId) ? "archiving" as const : "reserved" as const,
 			cleanupPending: entry.cleanup.filter(s => s === "pending").length,
 			preservedSpaces: entry.plan.parents.filter(p => !entry.plan.ancestors.some(a => a.child.roomId === p.roomId)).map(p => p.roomId)
 				.concat(entry.plan.ancestors.filter((_, i) => entry.cleanup[i] === "preserved").map(a => a.child.roomId)),
@@ -313,7 +350,13 @@ export class ArchiveHierarchy {
 		signal.throwIfAborted(); await matrix.addSpaceChild(parent, child, signal);
 		if (!live(await matrix.spaceChildContent(parent, child, signal))) throw Error("Archive link readback failed");
 	}
-	private update(id: string, change: (entry: Entry) => void): Promise<void> { return this.mutate(state => { change(state.entries.find(e => e.plan.source.conversationId === id)!); }); }
+	private update(id: string, change: (entry: Entry) => void, plan: ArchivePlan): Promise<void> {
+		return this.mutate(state => {
+			const entry = state.entries.find(e => e.plan.source.conversationId === id);
+			if (!entry || !isDeepStrictEqual(entry.plan, plan)) throw Error("Archive intent changed before recording progress");
+			change(entry);
+		});
+	}
 	private mutate(change: (state: State) => void): Promise<void> {
 		const result = this.work.then(async () => {
 			this.assertAvailable(); const next = structuredClone(this.state); change(next); parse(next);

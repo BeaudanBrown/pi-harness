@@ -68,25 +68,31 @@ def inventory(proc, conversation_id, session_file, unreadable=None, session_dire
     return rows, matches
 
 
-def observe_manual(request, panes, proc=Path("/proc")):
+def observe_manual(request, panes, proc=Path("/proc"), allow_missing_window=False):
     if set(request) != {"conversationId", "window", "sessionDirectory", "manualClosure"} or request["manualClosure"] is not True:
         raise ValueError("invalid manual observation request")
     cid, window, directory = request["conversationId"], request["window"], request["sessionDirectory"]
     if not re.fullmatch(r"conv_[a-f0-9]{32}", cid) or not isinstance(directory, str) or not directory.startswith("/") or Path(directory).name != cid:
         raise ValueError("invalid manual observation identity")
-    if set(window) != {"sessionName", "windowId", "paneId"} or not re.fullmatch(r"@[0-9]+", window["windowId"]) or not re.fullmatch(r"%[0-9]+", window["paneId"]):
+    if not (window is None and allow_missing_window) and (not isinstance(window, dict) or set(window) != {"sessionName", "windowId", "paneId"} or not re.fullmatch(r"@[0-9]+", window["windowId"]) or not re.fullmatch(r"%[0-9]+", window["paneId"])):
         raise ValueError("invalid saved window")
     lines = [line.split("|") for line in panes.splitlines() if line]
     if any(len(line) != 9 for line in lines):
         raise ValueError("ambiguous tmux inventory")
     unreadable = []
     _, writers = inventory(proc, cid, directory + "/session.jsonl", unreadable, directory)
-    conflicts = bool(writers or any(line[4] == cid or line[1] == window["windowId"] or line[2] == window["paneId"] for line in lines))
+    conflicts = bool(writers or any(line[4] == cid or window is not None and (line[1] == window["windowId"] or line[2] == window["paneId"]) for line in lines))
     return {"conflicts": conflicts, "unreadableProcesses": sorted(unreadable, key=int),
             "bootId": (proc / "sys/kernel/random/boot_id").read_text().strip()}
 
 
 def observe(request, panes, proc=Path("/proc")):
+    if "archiveClosure" in request:
+        if request["archiveClosure"] is not True or "manualClosure" in request:
+            raise ValueError("invalid archive closure inspection")
+        manual = {key: value for key, value in request.items() if key != "archiveClosure"}
+        manual["manualClosure"] = True
+        return observe_manual(manual, panes, proc, allow_missing_window=True)
     if "manualClosure" in request:
         return observe_manual(request, panes, proc)
     if set(request) not in ({"conversationId", "window", "sessionFile"}, {"conversationId", "window", "sessionFile", "evidence"}):

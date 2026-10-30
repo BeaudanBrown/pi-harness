@@ -21,7 +21,11 @@ not a live filesystem lookup, establishes historical grouping.
 Runtime closure, unfinished inputs, controls, polls, exports and projection work
 must be resolved before admission; null/missing runtime observations are not
 proof of closure. The registry enforces known durable blockers; the archive owner
-must additionally establish fresh runtime absence before requesting admission.
+must additionally establish fresh runtime closure evidence before requesting admission.
+Exact recorded process exit is used where available. The operator approved a
+separate legacy path: explicit confirmation that the old Pi was closed, combined
+with fresh complete conflict screening. This is recorded as operator attestation,
+not verified exit; known conflicts or unreadable processes cannot be waived.
 Missing operator membership is a blocker, not implicit permission to reinvite.
 Coordinator archival, filesystem deletion, implicit message cancellation,
 reactivation and membership restoration are outside this implementation.
@@ -45,6 +49,23 @@ that evidence. Matrix has no compare-and-swap: immediate pre-write checks and
 readback detect observed conflicts, but cannot eliminate an external same-key
 write between those checks.
 
+## Tooling/refactoring acceptance (#142)
+
+| Criterion | Owning change | Evidence |
+| --- | --- | --- |
+| One bounded preview implementation | `host-preview-store.ts`; existing mutation owner delegates retention/expiry/correlation | New preview-store tests and all existing operation-family tests |
+| Thin adapters, feature-owned archive orchestration | `archive-host-controls.ts`, schema-derived tool/CLI, shared approval owner | Catalog, frontend, policy and real registry/archive-owner tests |
+| Exact exit vs explicit legacy attestation | `archive-runtime.ts`, strict read-only observer; closure receipt before admission | Live/changed/replacement and incomplete-inspection regressions; Python observer tests |
+| Approval scope/expiry and no model bypass | Shared frozen preview; explicit legacy disclosure; operation-reference receipt | Approval question, expiry, changed inspection, cross-operation handle and receipt tests |
+| Archived inventory and coherent persistence | Paginated archive-only inventory; startup/shutdown/account wiring; live-workspaces relocation | Active inventory exclusion, account tests, relocation tests and package checks |
+| Navigability | `managed-host-tooling-map.md`, linked README/skill; no central lifecycle rewrite | Trace entrypoint -> policy/consent -> feature owner -> authority/tests |
+
+The refactor moves cache/bounds mechanics out of the mutation orchestrator and
+keeps archive behavior out of the central lifecycle class (apart from a narrow
+fixed-observer invocation). A new preview/apply operation reuses the same storage
+and schema-driven adapters, rather than copying another cache or argument parser.
+No registry writer split or new plugin framework is introduced.
+
 ## Crash boundaries
 
 | Boundary | Required result |
@@ -52,6 +73,8 @@ write between those checks.
 | Preview, before approval | No archive effects; frozen exact selection and metadata |
 | Fresh runtime/queue checks, before fence | Changed state blocks; no implicit discard |
 | Archive authority write uncertain | Fail closed in memory until reload; never resume ordinary dispatch |
+| Attestation receipt before admission | Store basis, checked identity digest and approved operation reference; retry still requires fresh consent/inspection, never replay the receipt as authorization |
+| Unadmitted draft becomes stale | Fresh read-only preview may replan; only newly approved apply replaces an effect-free draft; never discard a create-attempt receipt |
 | Durable fence before runtime projection write | Separate archive authority wins over runtime rollback/restored old registry |
 | Before first Matrix effect | Stable archive targets and creation attempts recorded |
 | Create/link accepted before receipt | Inspect exact alias/provenance/state; never allocate a new identity |
@@ -119,8 +142,24 @@ passed, zero failed, 48 packaged/environment skips; both recipe-selected source
 compilations passed again. Canonical Nix/package verification and complete-epic
 review/publication remain #143; recipe-selected compilation is not a Nix build.
 
-The hierarchy library and account-contract support are implemented, but real
-runtime-absence observation, host startup/account wiring, independent public
-consent, preview/apply/list/CLI tools remain #142. Nothing is deployed, and no live
-conversation was archived. Do not describe this partial change as an available
-archive workflow.
+The #142 implementation now wires runtime checks, host/account startup and
+shutdown, confirmed archive/cleanup operations and bounded archive inventory.
+`legacyClosure=true` on preview opts into a disclosed attestation, not weaker
+checks for known active or conflicting runtimes. The closure receipt records the
+approved operation ID; admitted archive intents are never replayed on startup.
+Retries of admitted archives still require fresh closure/conflict inspection and,
+for legacy targets, fresh explicit attestation. The original receipt remains audit
+history; a separate last-inspection receipt records the newly approved operation
+before further Matrix effects. The archive fence never substitutes for inspection.
+
+#142 verification: the isolated preview-only refactor compiles and passes 31 focused
+existing/new tests. The integrated change passes 700 affected tests (48 packaged or
+environment skips), 14 Python observer cases, both recipe-selected source compiles,
+and diff checks. These are not actual Nix/package builds. Paired review identified
+missing fresh inspection on already-admitted retries; this is fixed and covered by
+a restart/conflict/incomplete-inspection/audit-receipt regression. Generated Python
+bytecode was removed and ignored.
+
+Final verification/review/publication remains #143. Nothing is deployed, and
+no live conversation was archived. Do not describe the feature as rebuild-ready
+until #143 records canonical verification, cumulative review and publication.
