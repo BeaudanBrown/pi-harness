@@ -40,6 +40,23 @@ fresh ownership, emptiness and reference checks. This is not authority to discov
 new targets, remove the host Space, or reuse cached eligibility. Account identities
 and complete expected ancestor provenance are part of the frozen cleanup scope.
 
+## Readable archive target amendment (#139, implementation in progress)
+
+The approved archive target is distinct from dormant/stop and irreversible
+leave/forget retirement. It preserves the original Matrix room, history and
+operator membership under host -> Archive -> historical project -> historical
+worktree -> conversation. Historical grouping does not require a surviving
+checkout. Independent host-local archive authority fences attachment, launch,
+input and ordinary discovery; it cannot be rolled back by restoring an older
+runtime projection. Exact preview/confirmation, fresh closure checks, pending
+work blockers and conservative owned/empty/unreferenced ancestor cleanup are
+required. Reactivation and implicit membership restoration are excluded.
+
+This supersedes the baseline's "no archived state" target, not its deployed
+implementation history. The staged evidence and remaining work are tracked in
+[readable archives](../../managed-readable-archives.md); do not infer that the
+public archive workflow is available until that document records completion.
+
 ## Context
 
 The direct `remote-session` extension combines Matrix polling, Pi adaptation, and conversation state inside every attached Pi process. Managed sessions replace that arrangement with one boot-persistent, host-local relay. Before the relay and adapter can be implemented independently, they need one fail-closed language for lifecycle, IPC, identity, and persistence.

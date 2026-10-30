@@ -651,6 +651,7 @@ const projectionEntry = strictObject({
 });
 const runtimeConversation = strictObject({
 	conversationId: ConversationIdSchema,
+	archiveId: Type.Optional(stableId("archive")),
 	state: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
 	attachmentNonceHash: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	attachment: nullable(
@@ -769,6 +770,7 @@ export interface HostRuntimeState {
 	localConversations?: PendingLocalConversation[];
 	conversations: Array<{
 		conversationId: string;
+		archiveId?: string;
 		state: "starting" | "active" | "dormant";
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string; runtimeId?: string };

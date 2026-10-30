@@ -45,7 +45,7 @@ export async function prepareRelayStateDirectory(hostId: string, stateRoot: stri
 	const staging = `${state}.relocating-${randomUUID()}`;
 	await mkdir(staging, { mode: 0o700 });
 	try {
-		const names = ["registry.json", "activities.json", "media-spool", "project-sessions"];
+		const names = ["registry.json", "archives.json", "archives.json.initialized", "activities.json", "media-spool", "project-sessions"];
 		if (await exists(runtime)) {
 			await ensurePrivateDirectory(runtime);
 			const present: string[] = [];
