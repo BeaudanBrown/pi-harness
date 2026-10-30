@@ -17,6 +17,7 @@
       "@earendil-works/pi-tui": [".pi-types/node_modules/@earendil-works/pi-tui"],
       "typebox": [".pi-types/node_modules/typebox/build/index.d.mts"],
       "typebox/value": [".pi-types/node_modules/typebox/build/value/index.d.mts"],
+      "typebox/compile": [".pi-types/node_modules/typebox/build/compile/index.d.mts"],
       "markdown-it": [".pi-types/node_modules/@types/markdown-it/index.d.ts"],
       "markdown-it/*": [".pi-types/node_modules/@types/markdown-it/*"]
     }

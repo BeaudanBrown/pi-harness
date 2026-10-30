@@ -43,7 +43,7 @@ export class RecoveryMonitor {
 		return this.running;
 	}
 	private attachmentId(conversationId: string): string | undefined {
-		return this.registry.snapshot().conversations.find((item) => item.conversationId === conversationId)?.attachment?.attachmentId;
+		return this.registry.conversationSnapshot(conversationId)?.attachment?.attachmentId;
 	}
 	private async check(ticket: RecoveryTicket): Promise<void> {
 		const { conversationId, piSessionId } = ticket.target;
@@ -72,7 +72,7 @@ export class RecoveryMonitor {
 		if (checkpointId === null) return true;
 		const { conversationId, piSessionId } = ticket.target;
 		const entryId = deriveTranscriptEntryId(piSessionId, `checkpoint:${checkpointId}`);
-		const projection = this.registry.snapshot().conversations.find((item) => item.conversationId === conversationId)?.projection.find((item) => item.entryId === entryId && item.kind === "checkpoint");
+		const projection = this.registry.conversationSnapshot(conversationId)?.projection.find((item) => item.entryId === entryId && item.kind === "checkpoint");
 		if (projection?.status !== "projected" || !projection.originDeliveryId) return false;
 		const inputs = this.registry.pendingInputs(conversationId);
 		const origin = inputs.findIndex((item) => item.deliveryId === projection.originDeliveryId);

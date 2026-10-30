@@ -28,7 +28,8 @@ in pkgs.runCommand "pi-bridge-chat" { nativeBuildInputs = [ pkgs.typescript ]; }
       "baseUrl": ".", "paths": {
         "@earendil-works/pi-coding-agent": ["${sdk}/dist/index.d.ts"],
         "typebox": ["${sdk}/node_modules/typebox/build/index.d.mts"],
-        "typebox/value": ["${sdk}/node_modules/typebox/build/value/index.d.mts"]
+        "typebox/value": ["${sdk}/node_modules/typebox/build/value/index.d.mts"],
+        "typebox/compile": ["${sdk}/node_modules/typebox/build/compile/index.d.mts"]
       },
       "rootDir": "source", "outDir": "lib"
     },

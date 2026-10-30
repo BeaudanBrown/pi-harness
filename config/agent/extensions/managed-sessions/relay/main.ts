@@ -266,7 +266,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						}
 						let projectedMessage = payload.message;
 						if (payload.liveStatus) {
-							const runtime = registry.snapshot().conversations.find((item) => item.conversationId === attachment.conversationId);
+							const runtime = registry.conversationSnapshot(attachment.conversationId);
 							if (!runtime) throw new RelayRegistryError("not_found", "Managed runtime status is unavailable");
 							projectedMessage = renderManagedConversationStatus(manifest, runtime, payload.liveStatus,
 								registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, payload.controlId, undefined, presentation(manifest.conversationId));

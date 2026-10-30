@@ -51,6 +51,7 @@ stdenv.mkDerivation {
         "paths": {
           "typebox": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox"],
           "typebox/value": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/value/index.d.mts"],
+          "typebox/compile": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/compile/index.d.mts"],
           "markdown-it": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/index.d.ts"],
           "markdown-it/*": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/*"]
         },

@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import { isAbsolute } from "node:path";
 import { Type, type TSchema } from "typebox";
 import { Check, Errors } from "typebox/value";
+import { Compile } from "typebox/compile";
 import { isMatrixRoomId } from "../matrix-shared/room-id.js";
 import { HostActionSchema, HostResultSchemas, parseHostAction, parseHostResponse } from "./live-workspace-contracts.js";
 import { ExactWindowProofSchema, assertExactWindowBinding, type ExactWindowProof } from "./exact-window-contracts.js";
@@ -1078,16 +1079,25 @@ function validateLogicalConversation(manifest: RegisteredConversation): void {
 	}
 }
 
+// Compile only this repository-owned schema, once. Keep semantic checks and
+// interpreter-produced error details; never compile schemas from runtime input.
+const hostRuntimeValidator = Compile(HostRuntimeStateSchema);
+const runtimeDefaultFields = ["matrixCursor", "pendingControls", "completedControlIds", "publishingControlPoll", "activeControlPoll",
+	"publishingCheckpointPoll", "activeCheckpointPoll", "closingCheckpointPolls", "artifactExports"] as const;
+
 export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 	if (typeof value === "object" && value !== null && "schemaVersion" in value &&
 		(value as { schemaVersion?: unknown }).schemaVersion !== MANAGED_SESSION_STATE_VERSION) {
 		throw new ManagedSessionContractError("unsupported_version", "unsupported host runtime state version");
 	}
 	let candidate = value;
-	if (typeof value === "object" && value !== null && Array.isArray((value as { conversations?: unknown }).conversations)) {
+	const conversations = typeof value === "object" && value !== null ? (value as { conversations?: unknown }).conversations : undefined;
+	if (Array.isArray(conversations) && conversations.some(conversation => typeof conversation === "object" && conversation !== null &&
+		runtimeDefaultFields.some(key => !(key in conversation)))) {
 		const migrated = structuredClone(value) as { conversations: Array<Record<string, unknown>> };
 		let changed = false;
 		for (const conversation of migrated.conversations) {
+			if (typeof conversation !== "object" || conversation === null) continue; // Strict shape validation below rejects these.
 			if (!("matrixCursor" in conversation)) {
 				conversation.matrixCursor = typeof conversation.matrixSince === "string"
 					? { status: "established", since: conversation.matrixSince } : { status: "bootstrap" };
@@ -1104,7 +1114,9 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		}
 		if (changed) candidate = migrated;
 	}
-	assertSchema(HostRuntimeStateSchema, candidate, "host runtime state");
+	if (!hostRuntimeValidator.Check(candidate)) {
+		throw new ManagedSessionContractError("malformed", `host runtime state: ${schemaError(HostRuntimeStateSchema, candidate)}`);
+	}
 	const localIds = new Set<string>();
 	for (const local of (candidate as HostRuntimeState).localConversations ?? []) {
 		parsePendingLocalConversation(local);

@@ -64,8 +64,8 @@ test("monitor requires a fresh exact-attachment reply after backlog; never wakes
 	const alerts = new RecoveryAlerts(join(root, "alerts.json"), async (alert) => { sent.push(alert); }); await alerts.load();
 	const registry = {
 		listManifests: () => [target], manifestByConversationId: () => target,
-		snapshot: () => ({ conversations: [{ conversationId: target.conversationId, attachment: attached ? { attachmentId } : null,
-			projection: [{ entryId: deriveTranscriptEntryId(target.piSessionId, `checkpoint:${checkpointId}`), kind: "checkpoint", status: "projected", originDeliveryId: "origin" }] }] }),
+		conversationSnapshot: () => ({ conversationId: target.conversationId, attachment: attached ? { attachmentId } : null,
+			projection: [{ entryId: deriveTranscriptEntryId(target.piSessionId, `checkpoint:${checkpointId}`), kind: "checkpoint", status: "projected", originDeliveryId: "origin" }] }),
 		pendingInputs: () => [{ deliveryId: "origin", status: "completed" }],
 	};
 	const server = {

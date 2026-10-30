@@ -1166,39 +1166,51 @@ export class RelayRegistry {
 	}
 
 	async acknowledgeInput(conversationId: string, deliveryId: string, status: string, piEntryId?: string, completionKind?: string): Promise<void> {
-		await this.mutate(async () => {
-			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
-			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
-			if (input.recoveryKey && status !== "cancelled") throw new RelayRegistryError("invalid_state", "Managed delivery has a reserved retirement");
-			const rank: Record<string, number> = { accepted: 0, delivered: 1, persisted: 2, completed: 3, cancelled: 3 };
-			const receiptAfterSocketDelivery = status === "accepted" && input.status === "delivered";
-			if (!(status in rank) || (!receiptAfterSocketDelivery && rank[status]! < rank[input.status]!) ||
-				((input.status === "completed" || input.status === "cancelled") && input.status !== status)) {
-				throw new RelayRegistryError("invalid_state", "Managed delivery acknowledgement regressed");
-			}
-			if (status === "persisted" && !piEntryId) throw new RelayRegistryError("invalid_state", "Persisted delivery acknowledgement requires a Pi entry ID");
-			if (completionKind === "extension_command") {
-				if (status !== "completed" || piEntryId) throw new RelayRegistryError("invalid_state", "Extension-command completion is malformed");
-			} else if (status === "completed" && !piEntryId) {
-				throw new RelayRegistryError("invalid_state", "Ordinary completed delivery acknowledgement requires a Pi entry ID");
-			}
-			if (piEntryId && input.piEntryId && input.piEntryId !== piEntryId) {
-				throw new RelayRegistryError("invalid_state", "Managed delivery changed its persisted Pi entry identity");
-			}
-			if (piEntryId) input.piEntryId = piEntryId;
-			if (piEntryId) {
-				const conversation = this.runtimeConversation(conversationId);
-				const projection = conversation.projection.find((candidate) => candidate.entryId === piEntryId);
-				if (projection && (projection.kind !== "matrix_user" || projection.status !== "projected" || projection.chunks.length !== 0)) {
-					throw new RelayRegistryError("invalid_state", "Matrix-origin Pi entry conflicts with transcript projection state");
-				}
-				if (!projection) {
-					if (conversation.projection.length >= MAX_PROJECTION_ENTRIES) throw new RelayRegistryError("capacity_reached", "Transcript projection capacity was reached");
-					conversation.projection.push({ entryId: piEntryId, kind: "matrix_user", status: "projected", chunks: [] });
-				}
-			}
-			if (!receiptAfterSocketDelivery) input.status = status;
+		let apply: (() => void) | undefined;
+		await this.mutate(async () => { apply!(); }, () => {
+			// Plan inside the serialized queue, after preceding writes have settled.
+			// A speculative in-memory transition is never proof of durable receipt.
+			apply = this.inputReceiptChange(conversationId, deliveryId, status, piEntryId, completionKind);
+			return apply ? undefined : { result: undefined };
 		});
+	}
+
+	/** Pure validation/planning; the returned change runs only after rollback capture. */
+	private inputReceiptChange(conversationId: string, deliveryId: string, status: string, piEntryId?: string, completionKind?: string): (() => void) | undefined {
+		const conversation = this.runtimeConversation(conversationId);
+		const input = conversation.pendingInputs.find(candidate => candidate.deliveryId === deliveryId);
+		if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
+		if (input.recoveryKey && status !== "cancelled") throw new RelayRegistryError("invalid_state", "Managed delivery has a reserved retirement");
+		const rank: Record<string, number> = { accepted: 0, delivered: 1, persisted: 2, completed: 3, cancelled: 3 };
+		const receiptAfterSocketDelivery = status === "accepted" && input.status === "delivered";
+		if (!Object.hasOwn(rank, status) || (!receiptAfterSocketDelivery && rank[status]! < rank[input.status]!) ||
+			((input.status === "completed" || input.status === "cancelled") && input.status !== status)) {
+			throw new RelayRegistryError("invalid_state", "Managed delivery acknowledgement regressed");
+		}
+		if (status === "persisted" && !piEntryId) throw new RelayRegistryError("invalid_state", "Persisted delivery acknowledgement requires a Pi entry ID");
+		if (completionKind === "extension_command") {
+			if (status !== "completed" || piEntryId || input.piEntryId) throw new RelayRegistryError("invalid_state", "Extension-command completion is malformed");
+		} else if (status === "completed" && !piEntryId) {
+			throw new RelayRegistryError("invalid_state", "Ordinary completed delivery acknowledgement requires a Pi entry ID");
+		}
+		if (input.status === "completed" && !input.piEntryId && piEntryId) {
+			throw new RelayRegistryError("invalid_state", "Managed delivery changed its completed command identity");
+		}
+		if (piEntryId && input.piEntryId && input.piEntryId !== piEntryId) {
+			throw new RelayRegistryError("invalid_state", "Managed delivery changed its persisted Pi entry identity");
+		}
+		const projection = piEntryId ? conversation.projection.find(candidate => candidate.entryId === piEntryId) : undefined;
+		if (projection && (projection.kind !== "matrix_user" || projection.status !== "projected" || projection.chunks.length !== 0)) {
+			throw new RelayRegistryError("invalid_state", "Matrix-origin Pi entry conflicts with transcript projection state");
+		}
+		const addProjection = Boolean(piEntryId && !projection);
+		if (addProjection && conversation.projection.length >= MAX_PROJECTION_ENTRIES) throw new RelayRegistryError("capacity_reached", "Transcript projection capacity was reached");
+		if ((receiptAfterSocketDelivery || input.status === status) && (!piEntryId || input.piEntryId === piEntryId) && !addProjection) return undefined;
+		return () => {
+			if (piEntryId) input.piEntryId = piEntryId;
+			if (addProjection) conversation.projection.push({ entryId: piEntryId!, kind: "matrix_user", status: "projected", chunks: [] });
+			if (!receiptAfterSocketDelivery) input.status = status;
+		};
 	}
 
 	hasOwnedLocalSeed(conversationId: string): boolean {
@@ -1316,6 +1328,14 @@ export class RelayRegistry {
 	snapshot(): HostRuntimeState {
 		this.retirements.assertAvailable();
 		return structuredClone(this.state);
+	}
+
+	/** Same observation semantics as snapshot().conversations.find, without
+	 * cloning unrelated histories. This is a read model, not attachment authority. */
+	conversationSnapshot(conversationId: string): RuntimeConversation | undefined {
+		this.retirements.assertAvailable();
+		const row = this.state.conversations.find(candidate => candidate.conversationId === conversationId);
+		return row ? structuredClone(row) : undefined;
 	}
 
 	/** Only original frozen cleanup resources; never an ordinary conversation inventory. */
@@ -1456,11 +1476,16 @@ export class RelayRegistry {
 		return conversation;
 	}
 
-	private async mutate<T>(operation: () => Promise<T>): Promise<T> {
+	private async mutate<T>(operation: () => Promise<T>, unchanged?: () => { result: T } | undefined): Promise<T> {
 		let result!: T;
 		let failure: unknown;
+		let skipped = false;
 		const run = this.operations.then(async () => {
 			this.retirements.assertAvailable();
+			// This synchronous preflight must not mutate state. It still runs behind
+			// prior commits and validates authority before avoiding write/observer work.
+			const prior = unchanged?.();
+			if (prior) { result = prior.result; skipped = true; return; }
 			const before = structuredClone(this.state);
 			const liveBefore = new Map(this.liveConnections);
 			const manifestsBefore = new Map(this.manifests);
@@ -1480,7 +1505,7 @@ export class RelayRegistry {
 		});
 		this.operations = run.catch(() => undefined);
 		await run;
-		try { this.notifyRuntimeObservers(); } catch { /* Observers fail closed independently of committed mutations. */ }
+		if (!skipped) try { this.notifyRuntimeObservers(); } catch { /* Observers fail closed independently of committed mutations. */ }
 		if (failure) throw failure;
 		return result;
 	}

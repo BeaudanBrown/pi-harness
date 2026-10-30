@@ -80,7 +80,7 @@ export class RelayEventProjector {
 			}, intent);
 			if (projection.disposition !== "silent" && projection.chunks.some((chunk) => chunk.status === "pending")) await this.recovery?.originalAccepted(manifest.conversationId, manifest.piSessionId);
 			if (projection.chunks[0]?.transactionId !== transactionId) throw new RelayRegistryError("invalid_state", "Checkpoint poll projection has a conflicting transaction");
-			const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
+			const runtime = this.registry.conversationSnapshot(manifest.conversationId);
 			if (runtime?.publishingCheckpointPoll?.checkpointId === payload.checkpointId || runtime?.activeCheckpointPoll?.checkpointId === payload.checkpointId) {
 				await this.checkpointPollPublisher.publish(manifest.conversationId, manifest.roomId, intent);
 			} else if (projection.status !== "projected") {

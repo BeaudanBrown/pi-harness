@@ -269,7 +269,7 @@ export class CoordinatorRouter {
 		let failures = 0;
 		while (!signal.aborted) {
 			try {
-				const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === this.manifest.conversationId);
+				const runtime = this.registry.conversationSnapshot(this.manifest.conversationId);
 				if (!runtime) throw new Error("Coordinator Matrix cursor state is unavailable");
 				const cursor = runtime.matrixCursor;
 				const established = cursor.status === "established";
@@ -376,7 +376,7 @@ export class CoordinatorRouter {
 			return;
 		}
 		if (this.registry.hasGenerationTransition(manifest.conversationId) && (control.name === "status" || control.name === "help")) {
-			const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId)!;
+			const runtime = this.registry.conversationSnapshot(manifest.conversationId)!;
 			await this.projectNotice(eventId, manifest, renderManagedConversationStatus(manifest, runtime, undefined,
 				this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, undefined, undefined, this.presentation(manifest.conversationId)));
 			return;
@@ -395,7 +395,7 @@ export class CoordinatorRouter {
 			let message = control.name === "help" ? "Managed controls: !help, !status, !model [provider/model|filter], !thinking [level], !compact [focus], !new, !start, !stop, !close --confirm, !host help, !abort, !steer <text>."
 				: "Managed conversation is already dormant.";
 			if (control.name === "status") {
-				const runtime = this.registry.snapshot().conversations.find((item) => item.conversationId === manifest.conversationId);
+				const runtime = this.registry.conversationSnapshot(manifest.conversationId);
 				if (!runtime) throw new RelayRegistryError("not_found", "Managed runtime status is unavailable");
 				message = renderManagedConversationStatus(manifest, runtime, undefined,
 					this.registry.listManifests().filter((item) => item.kind === "project" && !item.projectKey).length, undefined, undefined, this.presentation(manifest.conversationId));
