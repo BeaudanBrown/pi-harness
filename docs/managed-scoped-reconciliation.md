@@ -48,6 +48,40 @@ Spaces, not by overwriting existing power state. No immutable co-creator grants.
 No builds, activation, live reconciliation or missing-workspace restoration are
 performed during source implementation.
 
+## Attached-idle preview repair (#131)
+
+The hierarchy planner can succeed while the public preview fails afterward:
+`ManagedHostMutationOwner` requested a native active-run witness for every
+selected attached conversation. `NativeHostRun.snapshot()` returns null when
+idle (also when evidence is unavailable), and the production observation callback
+rejects null. Reconciliation is a Matrix/grouping operation, not runtime-stop
+consent; it must not depend on an active model run or reinterpret null as idle.
+
+| Acceptance | Evidence |
+| --- | --- |
+| Selected attached idle/active/unobservable targets can obtain Space reconciliation previews | Mutation-owner regression at preview/freeze/revalidate/execute seams |
+| Empty activeRuns is not presented as an idle attestation | Explicit preview/consent warning |
+| Missing workspaces and changed hierarchy still block apply | Existing scope tests with attached target and unavailable run observation |
+| Destructive/runtime operations retain fresh run-proof requirements | Retirement preview regression plus existing host-run/approval suites |
+| Existing journals and live rooms remain untouched during diagnosis | Snapshot reconstruction and GET-only Matrix client; no apply |
+
+This repair changes only Space reconciliation's preview dependency. Space cleanup,
+runtime migration, retirement, recovery and account provisioning remain outside
+this repair. No new protocol or idle-witness representation is introduced.
+Preview/freeze interruption has no external effect; the existing journal,
+reservation and revalidation crash boundaries above remain unchanged on apply.
+
+Repair verification: the new tests failed before the fix at the active-run
+observation seam. After the fix, 636 managed tests passed, zero failed, with 48
+packaged/environment skips; TypeScript and LSP were clean. A reconstruction using
+copied live hierarchy/journal state, the real workspace resolver and GET-only
+Matrix access produced shopping's one-item plan with zero blockers. The owner
+failed before the fix with an unavailable run observation and returned the public
+preview afterward without requesting that observation. No live apply, room
+writes, runtime mutations or journal edits were performed. Standards and Spec
+reviews reported no findings. The deployed public preview still needs checking
+after the operator rebuild; canonical Nix/package builds were not run.
+
 ## Verification and review
 
 TypeScript compilation and 195 affected Node tests passed (seven packaged checks

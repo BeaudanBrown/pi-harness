@@ -117,7 +117,9 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			const cleanup = source.operation === "space.cleanup.preview";
 			preview.spaces = await this.options.lifecycle.spaceApprovalPreview(cleanup, source.operation === "space.reconcile.preview" ? source.conversationIds : undefined);
 			preview.blockers.push(...(preview.spaces.blockers ?? []));
-			if (!cleanup) (preview.warnings ??= []).push("Reconcile only the frozen conversations and ancestor links. Preserve rooms and history; newly created migration Spaces grant the configured operator admin power 100. Existing Space permissions are not changed.");
+			if (!cleanup) (preview.warnings ??= []).push(
+				"Reconcile only the frozen conversations and ancestor links. Preserve rooms and history; newly created migration Spaces grant the configured operator admin power 100. Existing Space permissions are not changed.",
+				"This changes Matrix organisation only; it does not stop, restart or inspect active Pi runs. An empty activeRuns list is not an idle attestation.");
 			const targets = new Map<string, PreviewResult["targets"][number]>();
 			for (const id of preview.spaces.selection ?? []) targets.set(id, { kind: "conversation", conversationId: id });
 			for (const link of preview.spaces.links) {
@@ -134,7 +136,9 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			}
 			for (const saved of preview.spaces.legacyPlacements ?? []) targets.set(saved.hostSpace, { kind: "space", roomId: saved.hostSpace });
 			preview.targets = [...targets.values()];
-			conversations = preview.targets.flatMap((target) => target.kind === "conversation" ? [target.conversationId] : []);
+			// Reconciliation does not interrupt Pi; an idle adapter has no active-run witness.
+			// Keep runtime evidence requirements for cleanup and runtime-changing operations.
+			conversations = cleanup ? preview.targets.flatMap((target) => target.kind === "conversation" ? [target.conversationId] : []) : [];
 		}
 		preview.activeRuns = await this.activeRuns(conversations);
 		if (preview.adminJson && Buffer.byteLength(JSON.stringify(preview)) > 48 * 1024) throw new HostControlError("unavailable", "Admin permission snapshots exceed approval bounds; select fewer conversations");
@@ -170,8 +174,9 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			if (!preview.spaces || !isDeepStrictEqual(preview.spaces, await this.options.lifecycle.spaceApprovalPreview(preview.source.operation === "space.cleanup.preview", preview.source.operation === "space.reconcile.preview" ? preview.source.conversationIds : undefined))) return false;
 		}
 		if (preview.removal && !isDeepStrictEqual(preview.removal.intent, await this.options.lifecycle.removalApprovalSnapshot(preview.removal.intent.removalKey))) return false;
-		// Admin state changes do not signal or interrupt attached Pi runs.
-		if (!branch && !preview.adminJson) {
+		// Admin changes and Space reconciliation do not signal or interrupt attached Pi runs.
+		// Reconciliation's frozen hierarchy/ownership snapshot was revalidated above.
+		if (!branch && !preview.adminJson && preview.source.operation !== "space.reconcile.preview") {
 			const ids = preview.removal?.activeConversations ?? preview.targets.filter((target) => target.kind === "conversation").map((target) => target.conversationId);
 			if (!isDeepStrictEqual(preview.activeRuns, await this.activeRuns(ids))) return false;
 		}

@@ -127,7 +127,9 @@ test("public Space preview freezes exact live links and cannot expand approved s
 
 test("selected Space consent preserves selection and blocks missing-workspace previews", async () => {
 	let blocked = true; let executions = 0; const selection = [conversationId];
-	const owner = new ManagedHostMutationOwner({ registry: { hostId: "host" } as RelayRegistry, server: { attachment: () => undefined }, now: () => 1000,
+	const owner = new ManagedHostMutationOwner({ registry: { hostId: "host" } as RelayRegistry,
+		server: { attachment: () => ({ conversationId, attachmentId: "attached", role: "ordinary_adapter", state: "active", generation: 1 }) },
+		activeRun: async () => { throw Error("Active target run observation is unavailable"); }, now: () => 1000,
 		retirement: {} as ConversationRetirement, lifecycle: {
 			spaceApprovalPreview: async (cleanup: boolean, ids?: string[]) => { assert.equal(cleanup, false); assert.deepEqual(ids, selection);
 				return { links: [], selection: [...selection], operatorUserId: "@operator:test", botUserId: "@bot:test", ...(blocked ? { blockers: ["Missing workspace projects/old"] } : {}) }; },
@@ -142,6 +144,29 @@ test("selected Space consent preserves selection and blocks missing-workspace pr
 	assert.match(hostApprovalQuestion(record), /admin power 100/);
 	blocked = true; assert.equal(await owner.revalidate(record), false); await assert.rejects(owner.execute(record), /Frozen targets/); assert.equal(executions, 0);
 	blocked = false; await owner.execute(record); assert.equal(executions, 1);
+});
+
+for (const runState of ["idle", "active", "unavailable"] as const) test(`Space-only reconciliation does not require ${runState} target run proof`, async () => {
+	let observations = 0; let executions = 0;
+	const owner = new ManagedHostMutationOwner({ registry: { hostId: "host" } as RelayRegistry, now: () => 1000,
+		server: { attachment: () => ({ conversationId, attachmentId: "attached", role: "ordinary_adapter", state: "active", generation: 1 }) },
+		activeRun: async () => { observations++; if (runState === "active") return { runId: "run-active" };
+			// Production rejects both a confirmed null witness (idle) and unavailable proof.
+			throw Error("Active target run observation is unavailable"); },
+		retirement: { prepare: () => ({ conversationId, targets: [] }) } as unknown as ConversationRetirement,
+		lifecycle: { spaceApprovalPreview: async () => ({ links: [], selection: [conversationId], operatorUserId: "@operator:test", botUserId: "@bot:test" }),
+			executeSpaceApproval: async () => { executions++; return { remaining: 0 }; } } as unknown as HostLifecycle });
+	const preview = await owner.preview({ operation: "space.reconcile.preview", conversationIds: [conversationId] });
+	assert.deepEqual(preview.activeRuns, []);
+	assert.ok(preview.warnings?.some(w => w.includes("not an idle attestation")));
+	const input: ModelHostRequest = { ...request(preview.previewId), action: { operation: "space.reconcile.apply", previewId: preview.previewId, confirmed: true } };
+	const record = prepareHostApproval("host", input, await owner.freeze(input), 1000);
+	assert.match(hostApprovalQuestion(record), /not an idle attestation/);
+	assert.equal(await owner.revalidate(record), true); assert.equal(executions, 0);
+	await owner.execute(record); assert.equal(executions, 1); assert.equal(observations, 0);
+	if (runState !== "active") await assert.rejects(owner.preview({ operation: "conversation.delete.preview", conversationIds: [conversationId] }), /observation is unavailable/);
+	else assert.deepEqual((await owner.preview({ operation: "conversation.delete.preview", conversationIds: [conversationId] })).activeRuns, [{ conversationId, runId: "run-active" }]);
+	assert.equal(observations, 1, "runtime-changing previews retain the native-run check");
 });
 
 test("worktree creation rechecks the frozen base inside lifecycle admission before applying anything", async (t) => {
