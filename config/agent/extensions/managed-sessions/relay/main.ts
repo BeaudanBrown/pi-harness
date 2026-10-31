@@ -8,6 +8,7 @@ import {
 	deriveConversationId,
 	hasMatrixBinding,
 	type ManagedAdapterLiveStatus,
+	deriveTranscriptEntryId,
 	type ManagedSessionEnvelope,
 } from "../contracts.js";
 import { bootstrapCoordinator, type CoordinatorIdentity } from "./coordinator-bootstrap.js";
@@ -224,7 +225,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					...(local ? { matrixBinding: hasMatrixBinding(manifest) ? "bound" : "pending" } : {}),
 				});
 			},
-			onEnvelope: async (envelope, attachment) => {
+			onEnvelope: async (envelope, attachment) => registry.withQueueEffect(attachment.conversationId, async () => {
 				if (envelope.type.startsWith("host.")) {
 					if (!hostApprovals) throw new RelayRegistryError("invalid_state", "Host approvals are unavailable");
 					return hostApprovals.handle(envelope, attachment);
@@ -323,6 +324,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				}
 				if (envelope.type === "input.acknowledge") {
 					const payload = envelope.payload as { deliveryId: string; status: string; piEntryId?: string; completionKind?: string };
+					if (registry.queueItemCancelled(attachment.conversationId, "input", payload.deliveryId)) return response(attachment.conversationId, envelope.messageId, "input.result", { deliveryId: payload.deliveryId, status: "cancelled" });
 					const input = registry.pendingInputs(attachment.conversationId).find((candidate) => candidate.deliveryId === payload.deliveryId);
 					const command = payload.completionKind === "extension_command" ? input?.body?.match(/^\/([^\s]+)/)?.[1] : undefined;
 					if (payload.completionKind === "extension_command" && !command) {
@@ -349,7 +351,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					if (envelope.payload.kind === "assistant_final" && activityProjector!.hasUnfinalized(attachment.conversationId)) throw new RelayRegistryError("invalid_state", "Final activity snapshot must be persisted before the final answer");
 					await transcriptProjector.project(envelope);
 					return response(attachment.conversationId, envelope.messageId, "transcript.acknowledge", {
-						entryId: envelope.payload.entryId, status: "projected",
+						entryId: envelope.payload.entryId, status: registry.queueItemCancelled(attachment.conversationId, "projection", String(envelope.payload.entryId)) ? "cancelled" : "projected",
 					});
 				}
 				if (envelope.type === "checkpoint.offer") {
@@ -363,9 +365,10 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					const lifecycle = parseAloopLifecycleEvent({ version: 1, ...envelope.payload });
 					const lifecycleManifest = registry.manifestByConversationId(attachment.conversationId);
 					if (!lifecycle || !lifecycleManifest || lifecycle.scopeSessionId !== lifecycleManifest.piSessionId) throw new RelayRegistryError("invalid_state", "Aloop lifecycle notice failed scope or privacy validation");
-					await eventProjector.projectNotice(attachment.conversationId, `aloop:${lifecycle.lifecycleId}`, lifecycle.body);
+					const cancelled = registry.queueItemCancelled(attachment.conversationId, "projection", deriveTranscriptEntryId(lifecycleManifest.piSessionId, `notice:aloop:${lifecycle.lifecycleId}`));
+					if (!cancelled) await eventProjector.projectNotice(attachment.conversationId, `aloop:${lifecycle.lifecycleId}`, lifecycle.body);
 					return response(attachment.conversationId, envelope.messageId, "aloop.acknowledge", {
-						lifecycleId: envelope.payload.lifecycleId, status: "projected",
+						lifecycleId: envelope.payload.lifecycleId, status: cancelled ? "cancelled" : "projected",
 					});
 				}
 				if (envelope.type === "lifecycle.request") {
@@ -423,7 +426,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					throw new RelayRegistryError("invalid_state", "Legacy deletion requires upgraded approved host controls");
 				}
 				return undefined;
-			},
+			}),
 		});
 		recoveryMonitor = new RecoveryMonitor(recoveryAlerts, registry, server,
 			(conversationId) => !coordinatorRouter || coordinatorRouter.hasRecoveryBacklog(conversationId),

@@ -26,7 +26,7 @@ export class HostReadModel {
 		const action = request.action;
 		switch (action.operation) {
 			case "host.status": return { hostId: this.options.hostId, relayState: this.options.matrixReady() ? "ready" : "disconnected",
-				capabilities: ["host-control-v1", ...(this.options.archives ? ["readable-archive-v1" as const] : []), ...(this.options.windowFirstOpen ? ["window-first-open-v1" as const] : []), ...(this.options.savedSessionOpen ? ["saved-session-open-v1" as const] : []), ...(this.options.savedSessionImport ? ["saved-session-import-v1" as const] : [])], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
+				capabilities: ["host-control-v1", "queue-cancellation-v1", ...(this.options.archives ? ["readable-archive-v1" as const] : []), ...(this.options.windowFirstOpen ? ["window-first-open-v1" as const] : []), ...(this.options.savedSessionOpen ? ["saved-session-open-v1" as const] : []), ...(this.options.savedSessionImport ? ["saved-session-import-v1" as const] : [])], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
 			case "conversation.archive.list": {
 				if (!this.options.archives) throw new HostControlError("upgrade_required", "Archive controls are unavailable");
 				return this.options.archives.list(action);

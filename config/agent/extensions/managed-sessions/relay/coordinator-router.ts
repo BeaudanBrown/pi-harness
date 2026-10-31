@@ -249,6 +249,9 @@ export class CoordinatorRouter {
 	}
 
 	async attachmentReady(conversationId = this.manifest.conversationId): Promise<void> {
+		return this.registry.withQueueEffect(conversationId, () => this.attachmentReadyOnce(conversationId));
+	}
+	private async attachmentReadyOnce(conversationId: string): Promise<void> {
 		if (this.registry.isRefreshing(conversationId)) return;
 		if (this.registry.hasGenerationBoundary(conversationId)) {
 			for (const control of this.registry.pendingControls(conversationId).filter((item) => item.name === "new" && item.argument === "--confirm")) {
@@ -366,7 +369,7 @@ export class CoordinatorRouter {
 	}
 
 	private async dispatchControl(manifest: ConversationManifest, eventId: string, senderUserId: string, control: TypedRemoteControl): Promise<void> {
-		if (this.registry.controlResultState(manifest.conversationId, deriveControlId(manifest.conversationId, eventId)) === "completed") return;
+		if (["completed", "cancelled"].includes(this.registry.controlResultState(manifest.conversationId, deriveControlId(manifest.conversationId, eventId)))) return;
 		if (control.name === "new" && manifest.kind !== "project") {
 			await this.projectNotice(eventId, manifest, "Fresh session generations are available only in project conversations; the coordinator session was not changed.");
 			return;
@@ -409,9 +412,13 @@ export class CoordinatorRouter {
 		await this.deliverRecordedControl(manifest, eventId, pending);
 	}
 
-	private async deliverRecordedControl(manifest: ConversationManifest, eventId: string,
+	private async deliverRecordedControl(...args: Parameters<CoordinatorRouter["deliverRecordedControlOnce"]>): Promise<void> {
+		return this.registry.withQueueEffect(args[0].conversationId, () => this.deliverRecordedControlOnce(...args));
+	}
+	private async deliverRecordedControlOnce(manifest: ConversationManifest, eventId: string,
 		pending: ReturnType<RelayRegistry["pendingControls"]>[number]): Promise<void> {
 		if (this.registry.isRefreshing(manifest.conversationId)) return;
+		if (this.registry.controlResultState(manifest.conversationId, pending.controlId) !== "pending") return;
 		const envelope = this.controlEnvelope(manifest.conversationId, pending);
 		if (this.server.sendToConversation(envelope)) return;
 		await this.wakeForControl(manifest);
@@ -453,7 +460,10 @@ export class CoordinatorRouter {
 
 	private readonly delivering = new Set<string>();
 	private readonly deliveryAgain = new Set<string>();
-	private async deliverRecordedInput(manifest: ConversationManifest, _input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
+	private async deliverRecordedInput(...args: Parameters<CoordinatorRouter["deliverRecordedInputOnce"]>): Promise<void> {
+		return this.registry.withQueueEffect(args[0].conversationId, () => this.deliverRecordedInputOnce(...args));
+	}
+	private async deliverRecordedInputOnce(manifest: ConversationManifest, _input: ReturnType<RelayRegistry["pendingInputs"]>[number]): Promise<void> {
 		const id = manifest.conversationId;
 		if (this.delivering.has(id)) { this.deliveryAgain.add(id); return; }
 		if (this.registry.isRefreshing(id) || this.registry.hasDeliveryBoundary(id) ||
@@ -574,6 +584,9 @@ export class CoordinatorRouter {
 	}
 
 	private async ensureWake(manifest: ConversationManifest): Promise<void> {
+		return this.registry.withQueueEffect(manifest.conversationId, () => this.ensureWakeOnce(manifest));
+	}
+	private async ensureWakeOnce(manifest: ConversationManifest): Promise<void> {
 		if (this.registry.isRefreshing(manifest.conversationId)) return;
 		// A queued confirmed reset needs an adapter to create its durable new
 		// generation. Wake for that control, but keep ordinary dispatch gated.

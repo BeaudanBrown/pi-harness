@@ -47,6 +47,7 @@ test("saved-session discovery exposes opaque active identity and advertises guar
 	const registry = { conversationMetadata: () => [{ ...base, sessionId: "saved-native-id" }], retirement: () => undefined };
 	const model = new HostReadModel({ hostId: "host", registry, matrixReady: () => false, windowFirstOpen: true, savedSessionOpen: true, savedSessionImport: true });
 	const host = await read(model, { operation: "host.status" }); assert.ok(host.ok);
+	assert.ok(host.data.capabilities.includes("queue-cancellation-v1"), "installed queue controls are advertised even while Matrix is offline");
 	assert.ok(host.data.capabilities.includes("saved-session-open-v1"));
 	assert.ok(host.data.capabilities.includes("saved-session-import-v1"));
 	const rows = await read(model, { operation: "conversation.list" }); assert.ok(rows.ok);

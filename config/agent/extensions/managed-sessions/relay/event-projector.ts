@@ -48,6 +48,10 @@ export class RelayEventProjector {
 	}
 
 	async projectCheckpoint(envelope: ManagedSessionEnvelope): Promise<void> {
+		if (!envelope.conversationId) throw new RelayRegistryError("invalid_state", "Conversation identity is required");
+		return this.registry.withQueueEffect(envelope.conversationId, () => this.projectCheckpointOnce(envelope));
+	}
+	private async projectCheckpointOnce(envelope: ManagedSessionEnvelope): Promise<void> {
 		if (envelope.type !== "checkpoint.offer" || !envelope.conversationId || envelope.role === "relay") {
 			throw new RelayRegistryError("permission_denied", "Checkpoint offer requires an attached adapter");
 		}
@@ -107,9 +111,13 @@ export class RelayEventProjector {
 		} else await this.project(conversationId, manifest.piSessionId, manifest.roomId, `notice:${sourceId}`, "notice", body, undefined, disposition);
 	}
 
-	private async project(conversationId: string, piSessionId: string, roomId: string, sourceKey: string,
+	private async project(...args: Parameters<RelayEventProjector["projectOnce"]>): Promise<void> {
+		return this.registry.withQueueEffect(args[0], () => this.projectOnce(...args));
+	}
+	private async projectOnce(conversationId: string, piSessionId: string, roomId: string, sourceKey: string,
 		kind: "checkpoint" | "notice", body: string, originDeliveryId?: string, disposition?: "silent" | "notify"): Promise<void> {
 		const entryId = deriveTranscriptEntryId(piSessionId, sourceKey);
+		if (this.registry.queueItemCancelled(conversationId, "projection", entryId)) return;
 		const existing = this.registry.projectionByEntryId(conversationId, entryId);
 		const frozenDisposition = existing ? existing.disposition : disposition;
 		const projection = await prepareTextProjection(this.registry, conversationId, {

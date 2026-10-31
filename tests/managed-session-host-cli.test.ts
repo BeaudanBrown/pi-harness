@@ -23,6 +23,7 @@ const commands = [
 	`worktree conversation fork ${workspace} ${creation} --source-conversation-id ${cid} --base-ref main --branch topic --summary context`,
 	`worktree remove preview ${workspace} --merge-target main`, `worktree remove apply ${apply}`,
 	`worktree conversation cleanup preview ${cid}`, `worktree conversation cleanup apply ${apply}`, `worktree branch delete ${apply}`, `worktree branch preview ${workspace} --branch feature/test --merge-target main`,
+	`conversation queue cancel preview ${cid}`, `conversation queue cancel apply ${apply}`,
 	"conversation archive list", `conversation archive preview --conversation-ids ${cid} --legacy-closure`, `conversation archive apply ${apply}`,
 	`conversation archive cleanup preview --conversation-ids ${cid}`, `conversation archive cleanup apply ${apply}`,
 	"conversation list", `conversation status ${cid}`, `conversation create ${workspace} ${creation}`,

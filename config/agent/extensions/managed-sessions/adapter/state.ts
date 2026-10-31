@@ -45,7 +45,7 @@ export interface ProjectionMarker {
 	kind: "local_user" | "assistant_final" | "assistant_commentary" | "branch_marker";
 	status: "offered" | "projected" | "blocked";
 	disposition?: "silent" | "notify";
-	reason?: "oversized" | "backfill_limit" | "aloop_private";
+	reason?: "oversized" | "backfill_limit" | "aloop_private" | "operator_cancelled";
 }
 
 export interface EligibleTranscriptEntry {
@@ -286,7 +286,7 @@ export function restoreProjections(entries: readonly unknown[]): Map<string, Pro
 			(value.kind !== "local_user" && value.kind !== "assistant_final" && value.kind !== "assistant_commentary" && value.kind !== "branch_marker") ||
 			!(["offered", "projected", "blocked"] as unknown[]).includes(value.status) ||
 			(value.disposition !== undefined && value.disposition !== "silent" && value.disposition !== "notify") ||
-			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit" && value.reason !== "aloop_private")) continue;
+			(value.reason !== undefined && value.reason !== "oversized" && value.reason !== "backfill_limit" && value.reason !== "aloop_private" && value.reason !== "operator_cancelled")) continue;
 		const marker = value as unknown as ProjectionMarker;
 		const previous = projections.get(marker.entryId);
 		if (previous && (previous.piEntryKey !== marker.piEntryKey || previous.kind !== marker.kind || previous.disposition !== marker.disposition ||

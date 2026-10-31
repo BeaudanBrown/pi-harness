@@ -22,7 +22,7 @@ export const HOST_INVENTORY_PAGE_SIZE = 50;
 export const HOST_INVENTORY_MAX_PAGE_SIZE = 100;
 export const LIVE_WORKSPACE_CAPABILITIES = [
 	"host-control-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
-	"commentary-v1", "notification-disposition-v1", "readable-archive-v1", "window-first-open-v1", "saved-session-open-v1", "saved-session-import-v1",
+	"commentary-v1", "notification-disposition-v1", "readable-archive-v1", "queue-cancellation-v1", "window-first-open-v1", "saved-session-open-v1", "saved-session-import-v1",
 ] as const;
 const strict = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
 const text = (maxLength: number) => Type.String({ minLength: 1, maxLength });
@@ -52,6 +52,8 @@ export const HostActionSchema = Type.Union([
 	action("worktree.conversation.cleanup.apply", preview),
 	action("worktree.branch.preview", { ...workspace, branch: gitRef, mergeTarget: gitRef }),
 	action("worktree.branch.delete", preview),
+	action("conversation.queue.cancel.preview", { conversationId: ConversationIdSchema }),
+	action("conversation.queue.cancel.apply", preview),
 	action("conversation.archive.list", page),
 	action("conversation.archive.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 16, uniqueItems: true }), legacyClosure: Type.Optional(Type.Literal(true)), acceptIncompleteInspection: Type.Optional(Type.Literal(true)) }),
 	action("conversation.archive.apply", preview),
@@ -102,6 +104,7 @@ export const HOST_ERROR_EXITS = {
 
 const readOperationNames = [
 	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status",
+	"conversation.queue.cancel.preview",
 	"conversation.archive.list", "conversation.archive.preview", "conversation.archive.cleanup.preview",
 	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "worktree.branch.preview", "conversation.delete.preview",
 	"space.reconcile.preview", "space.cleanup.preview", "conversation.recover.preview", "conversation.admin.preview",
@@ -170,6 +173,8 @@ export const HostResultSchemas = {
 		projectDisplayName: text(128), checkoutDisplayName: text(128), phase: enumeration(["archiving", "archived"]),
 		closureBasis: enumeration(["exact_exit", "operator_attested"]), cleanupPending: Type.Integer({ minimum: 0, maximum: 2 }),
 		preservedSpaces: Type.Array(room, { maxItems: 2 }), archiveSpaces: Type.Array(room, { maxItems: 3 }) })),
+	"conversation.queue.cancel.preview": previewResult,
+	"conversation.queue.cancel.apply": cleanup,
 	"conversation.archive.preview": previewResult,
 	"conversation.archive.apply": cleanup,
 	"conversation.archive.cleanup.preview": previewResult,

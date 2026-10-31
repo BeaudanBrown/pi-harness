@@ -40,6 +40,7 @@ Tests are under `tests/`; most names have the prefix `managed-session-`.
 | Permission changes | `operator-admin`, lifecycle's narrow approval methods | `operator-admin`, `migration-space-admin` |
 | Retirement | `conversation-retirement`, `retirement-store`, `retirement-cleanup`, `retirement-ancestor-owner` | `retirement-registry`, `host-mutation-owner` |
 | Live hierarchy/reconciliation | `live-hierarchy`, `project-reconciliation`, `live-space-cleanup` | `live-hierarchy`, `reconciliation` |
+| Exact queue abandonment | `queue-cancellation`, registry serialized admission, shared mutation owner; producer activity gates | `queue-cancellation`, `adapter`, `live-workspace-contracts`, `host-cli` |
 | Readable archival | `archive-host-controls`, `archive-runtime`, `archive-hierarchy`, `archive-store` | `archive-hierarchy`, `archive-registry`, `host-preview-store` |
 | Account membership/notification setup | `host-account-owner`, `host-account-client`; `config/agent/extensions/bridge-chat/account-{proof,worker,store}.ts` | `host-account-client`, `live-hierarchy`, `bridge-chat-account` |
 

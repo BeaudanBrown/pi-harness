@@ -50,7 +50,7 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 		case "self.recovery.preview": return { type: "self.result", fields: [["operation", "self.recovery.preview"]] };
 		case "self.recovery.retire": return { type: "self.result", fields: [["operation", "self.recovery.retire"], ["deliveryId", String(payload.deliveryId)]] };
 		case "self.recovery.status": return { type: "self.result", fields: [["operation", "self.recovery.status"], ["deliveryId", String(payload.deliveryId)]] };
-		case "input.acknowledge": return { type: "input.result", fields: [["deliveryId", String(payload.deliveryId)], ["status", String(payload.status)]] };
+		case "input.acknowledge": return { type: "input.result", fields: [["deliveryId", String(payload.deliveryId)]] };
 		case "activity.update": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "updated"]] };
 		case "activity.finalize": return { type: "activity.acknowledge", fields: [["activityId", String(payload.activityId)], ["revision", Number(payload.revision)], ["status", "finalized"]] };
 		case "branch.prepare": case "branch.complete": return { type: "self.result", fields: [["operation", request.type], ["operationId", String(payload.operationId)], ["status", "ok"]] };
@@ -60,14 +60,14 @@ function expectedResponse(request: ManagedSessionEnvelope): ResponseExpectation 
 		case "artifact.begin":
 		case "artifact.chunk": return { type: "artifact.acknowledge", fields: [["uploadId", String(payload.uploadId)]] };
 		case "media.reject": return { type: "media.result", fields: [["deliveryId", String(payload.deliveryId)], ["blobId", String(payload.blobId)], ["status", "rejected"]] };
-		case "transcript.offer": return { type: "transcript.acknowledge", fields: [["entryId", String(payload.entryId)], ["status", "projected"]] };
+		case "transcript.offer": return { type: "transcript.acknowledge", fields: [["entryId", String(payload.entryId)]] };
 		case "host.request": return { type: "host.result", fields: [["operation", String((payload.action as Record<string, unknown>).operation)]] };
 		case "host.run.observe":
 		case "host.run.confirm":
 		case "host.approval.answer": return { type: "host.acknowledge", fields: [] };
 		case "recovery.confirm": return { type: "recovery.acknowledge", fields: [["requestId", String(payload.requestId)]] };
 		case "checkpoint.offer": return { type: "checkpoint.acknowledge", fields: [["checkpointId", String(payload.checkpointId)], ["status", "projected"]] };
-		case "aloop.notice": return { type: "aloop.acknowledge", fields: [["lifecycleId", String(payload.lifecycleId)], ["status", "projected"]] };
+		case "aloop.notice": return { type: "aloop.acknowledge", fields: [["lifecycleId", String(payload.lifecycleId)]] };
 		case "self.status": return { type: "self.result", fields: [["operation", "self.status"], ["status", "ok"]] };
 		case "self.delete": return { type: "self.result", fields: [["operation", "self.delete"], ["status", "ok"]] };
 		case "self.promote": return { type: "self.result", fields: [["operation", "self.promote"], ["status", "ok"]] };
@@ -206,7 +206,7 @@ export class BoundAdapterClient {
 	}
 
 	async acknowledgeInput(deliveryId: string, status: "accepted" | "persisted" | "completed" | "cancelled", piEntryId?: string,
-		completionKind?: "extension_command"): Promise<void> {
+		completionKind?: "extension_command"): Promise<"accepted" | "persisted" | "completed" | "cancelled"> {
 		const result = await this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("ack"),
@@ -215,9 +215,10 @@ export class BoundAdapterClient {
 			type: "input.acknowledge",
 			payload: { deliveryId, status, ...(piEntryId ? { piEntryId } : {}), ...(completionKind ? { completionKind } : {}) },
 		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
-		if (result.type !== "input.result" || result.payload.deliveryId !== deliveryId || result.payload.status !== status) {
+		if (result.type !== "input.result" || result.payload.deliveryId !== deliveryId || (result.payload.status !== status && result.payload.status !== "cancelled")) {
 			throw new ManagedAdapterError("Relay did not confirm input acknowledgement", "invalid_response");
 		}
+		return result.payload.status as typeof status;
 	}
 
 	async updateActivity(payload: Record<string, unknown>, finalize = false): Promise<void> {
@@ -333,7 +334,7 @@ export class BoundAdapterClient {
 			messageId: messageId("transcript"), conversationId: this.options.binding.conversationId,
 			role: this.options.role, type: "transcript.offer", payload: entry,
 		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
-		if (result.type !== "transcript.acknowledge" || result.payload.entryId !== entry.entryId || result.payload.status !== "projected") {
+		if (result.type !== "transcript.acknowledge" || result.payload.entryId !== entry.entryId || !["projected", "cancelled"].includes(String(result.payload.status))) {
 			throw new ManagedAdapterError("Relay did not confirm transcript projection", "invalid_response");
 		}
 		return result;
@@ -351,16 +352,17 @@ export class BoundAdapterClient {
 		return result;
 	}
 
-	async offerAloopNotice(payload: { scopeSessionId: string; lifecycleId: string; kind: string; epic: number; issue?: number; body: string; timestamp: string }): Promise<void> {
-		if (this.options.role !== "ordinary_adapter") return;
+	async offerAloopNotice(payload: { scopeSessionId: string; lifecycleId: string; kind: string; epic: number; issue?: number; body: string; timestamp: string }): Promise<ManagedSessionEnvelope> {
+		if (this.options.role !== "ordinary_adapter") throw new ManagedAdapterError("Aloop notices require an ordinary adapter", "permission_denied");
 		const result = await this.request({
 			protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION,
 			messageId: messageId("aloop"), conversationId: this.options.binding.conversationId,
 			role: "ordinary_adapter", type: "aloop.notice", payload,
 		}, RELAY_SIDE_EFFECT_TIMEOUT_MS);
-		if (result.type !== "aloop.acknowledge" || result.payload.lifecycleId !== payload.lifecycleId || result.payload.status !== "projected") {
+		if (result.type !== "aloop.acknowledge" || result.payload.lifecycleId !== payload.lifecycleId || !["projected", "cancelled"].includes(String(result.payload.status))) {
 			throw new ManagedAdapterError("Relay did not confirm aloop lifecycle projection", "invalid_response");
 		}
+		return result;
 	}
 
 	async treeChange(operationId: string, phase: "prepare" | "complete", cancelled = false): Promise<void> {

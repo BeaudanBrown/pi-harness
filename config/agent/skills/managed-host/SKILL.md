@@ -25,6 +25,15 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
   changed observations need fresh preview and consent. Recovery records operator
   attestation, not verified exit. It never stops or launches Pi. For a retired target,
   it only resolves the stop obligation; account cleanup remains independent.
+- `conversation.queue.cancel.preview` takes one exact `conversationId`. Inspect every
+  frozen item ID/state and the uncertainty warning before separately approved
+  `conversation.queue.cancel.apply`. This abandons future dispatch/retries only;
+  prior execution/delivery may already have occurred. Preserve history and never
+  call abandoned work successfully completed. At most 32 items; attached/in-flight
+  work, transitions, checkpoints, polls and pending artifacts block. No implicit
+  stop, launch, retirement or membership restoration. Changed scope needs a fresh
+  preview and consent. An uncertain write requires owner reload and inspection,
+  not a blind retry. Cancellation itself does not establish process exit.
 - `conversation.admin.preview` takes exact `conversationIds` and optional
   `includeSpaces=true`. Its separately approved apply grants only the configured
   operator room admin power, not arbitrary users. Inspect all frozen targets and

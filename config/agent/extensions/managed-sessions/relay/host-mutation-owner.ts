@@ -12,10 +12,11 @@ import type { ConversationRetirement, RetirementPlan } from "./conversation-reti
 import type { HostAccountOwner, MembershipRestore } from "./host-account-owner.js";
 import { HostControlError } from "./host-control-error.js";
 import { HostPreviewStore, staleHostPreview, freezeJsonChunks } from "./host-preview-store.js";
+import { QUEUE_CANCELLATION_WARNING, type QueueCancellationSnapshot } from "./queue-cancellation.js";
 import type { ArchiveHostControls, ArchiveControlSnapshot } from "./archive-host-controls.js";
 
 const detached = (value: unknown): FrozenJson => JSON.parse(JSON.stringify(value)) as FrozenJson;
-type PreviewAction = Extract<HostReadAction, { operation: "conversation.archive.preview" | "conversation.archive.cleanup.preview" | "conversation.admin.preview" | "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
+type PreviewAction = Extract<HostReadAction, { operation: "conversation.queue.cancel.preview" | "conversation.archive.preview" | "conversation.archive.cleanup.preview" | "conversation.admin.preview" | "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
 type PreviewResult = HostResult<"conversation.delete.preview">;
 type Removal = Awaited<ReturnType<HostLifecycle["removalApprovalPreview"]>>;
 interface Preview {
@@ -27,6 +28,7 @@ interface Preview {
 	/** JSON chunks preserve arbitrary Matrix user/event keys without widening approval's private-key grammar. */
 	adminJson?: string[];
 	archiveJson?: string[];
+	queueCancellation?: QueueCancellationSnapshot;
 	warnings?: string[];
 }
 function adminSnapshot(preview: Preview): Awaited<ReturnType<HostLifecycle["adminApprovalPreview"]>> | undefined {
@@ -75,6 +77,13 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (source.operation === "worktree.conversation.cleanup.preview" && source.conversationId === coordinatorId) {
 			conversations = [coordinatorId]; preview.targets = [{ kind: "conversation", conversationId: coordinatorId }];
 			preview.blockers.push("The protected coordinator cannot be retired or included in destructive cleanup");
+		} else if (source.operation === "conversation.queue.cancel.preview") {
+			const snapshot = preview.queueCancellation = this.options.registry.queueCancellationSnapshot(source.conversationId);
+			preview.targets = [{ kind: "conversation", conversationId: source.conversationId }];
+			preview.blockers = snapshot.blockers;
+			preview.warnings = [QUEUE_CANCELLATION_WARNING, `Frozen source SHA256: ${snapshot.sourceDigest}. ${snapshot.items.length} selected items.`];
+			for (let i = 0; i < Math.min(snapshot.items.length, 32); i += 4)
+				preview.warnings.push(snapshot.items.slice(i, i + 4).map(item => `${item.kind} ${item.id} (${item.priorState})`).join("; "));
 		} else if (source.operation === "conversation.archive.preview" || source.operation === "conversation.archive.cleanup.preview") {
 			if (!this.options.archives) throw new HostControlError("upgrade_required", "Archive controls are unavailable");
 			const snapshot = await this.options.archives.snapshot(source);
@@ -161,6 +170,8 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (preview.source.operation === "conversation.archive.preview" || preview.source.operation === "conversation.archive.cleanup.preview") {
 			if (!preview.archiveJson || !this.options.archives || !await this.options.archives.valid(JSON.parse(preview.archiveJson.join("")) as ArchiveControlSnapshot)) return false;
 		}
+		if (preview.source.operation === "conversation.queue.cancel.preview" && (!preview.queueCancellation ||
+			!isDeepStrictEqual(preview.queueCancellation, this.options.registry.queueCancellationSnapshot(preview.source.conversationId)))) return false;
 		if (preview.source.operation === "conversation.admin.preview") {
 			const admins = adminSnapshot(preview);
 			if (!admins || !isDeepStrictEqual(admins, await this.options.lifecycle.adminApprovalPreview(admins.selection))) return false;
@@ -174,7 +185,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (preview.removal && !isDeepStrictEqual(preview.removal.intent, await this.options.lifecycle.removalApprovalSnapshot(preview.removal.intent.removalKey))) return false;
 		// Admin changes and Space reconciliation do not signal or interrupt attached Pi runs.
 		// Reconciliation's frozen hierarchy/ownership snapshot was revalidated above.
-		if (!branch && !preview.adminJson && !preview.archiveJson && preview.source.operation !== "space.reconcile.preview") {
+		if (!branch && !preview.adminJson && !preview.archiveJson && !preview.queueCancellation && preview.source.operation !== "space.reconcile.preview") {
 			const ids = preview.removal?.activeConversations ?? preview.targets.filter((target) => target.kind === "conversation").map((target) => target.conversationId);
 			if (!isDeepStrictEqual(preview.activeRuns, await this.activeRuns(ids))) return false;
 		}
@@ -233,7 +244,10 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			const preview = frozen.preconditions.preview as unknown as Preview;
 			if (!await this.validPreview(preview, action.operation === "worktree.branch.delete")) throw stale();
 			let pending = false;
-			if (action.operation === "conversation.archive.apply" || action.operation === "conversation.archive.cleanup.apply") {
+			if (action.operation === "conversation.queue.cancel.apply") {
+				if (!preview.queueCancellation) throw stale();
+				await this.options.registry.cancelQueuedWork(preview.queueCancellation, operationId);
+			} else if (action.operation === "conversation.archive.apply" || action.operation === "conversation.archive.cleanup.apply") {
 				if (!preview.archiveJson || !this.options.archives) throw stale();
 				pending = await this.options.archives.apply(JSON.parse(preview.archiveJson.join("")) as ArchiveControlSnapshot, operationId);
 			} else if (action.operation === "conversation.admin.apply") {

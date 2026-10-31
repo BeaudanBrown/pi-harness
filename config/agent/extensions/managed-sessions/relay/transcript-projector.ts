@@ -20,6 +20,10 @@ export class TranscriptProjector {
 	constructor(private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient) {}
 
 	async project(envelope: ManagedSessionEnvelope): Promise<void> {
+		if (!envelope.conversationId) throw new RelayRegistryError("invalid_state", "Conversation identity is required");
+		return this.registry.withQueueEffect(envelope.conversationId, () => this.projectOnce(envelope));
+	}
+	private async projectOnce(envelope: ManagedSessionEnvelope): Promise<void> {
 		if (envelope.type !== "transcript.offer" || !envelope.conversationId || envelope.role === "relay") {
 			throw new RelayRegistryError("permission_denied", "Transcript offer requires an attached adapter");
 		}
@@ -29,6 +33,7 @@ export class TranscriptProjector {
 			payload.entryId !== deriveTranscriptEntryId(payload.piSessionId, payload.piEntryKey)) {
 			throw new RelayRegistryError("permission_denied", "Transcript entry does not belong to the bound Pi session");
 		}
+		if (this.registry.queueItemCancelled(manifest.conversationId, "projection", payload.entryId)) return;
 		if (payload.kind !== "assistant_final" && payload.disposition === "notify") throw new RelayRegistryError("invalid_state", "Only final transcript text may request attention");
 		const projection = await prepareTextProjection(this.registry, manifest.conversationId, {
 			entryId: payload.entryId, kind: payload.kind,

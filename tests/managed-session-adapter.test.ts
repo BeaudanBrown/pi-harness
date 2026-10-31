@@ -411,6 +411,8 @@ class FakeRelay {
 	projectActivity?: (envelope: ManagedSessionEnvelope) => Promise<"updated" | "finalized">;
 	beforeActivityAck?: (socket: Socket, envelope: ManagedSessionEnvelope) => Promise<void>;
 	checkpointError?: { code: string; message: string };
+	projectionStatus: "projected" | "cancelled" = "projected";
+	abandonedDeliveries = new Set<string>();
 	enableCommentary = false;
 	enableDisposition = false;
 	enableRecovery = false;
@@ -521,6 +523,9 @@ class FakeRelay {
 				: { version: "1.0.0", requestId: envelope.payload.requestId, ok: false, error: { code: "denied", message: "Operator denied this exact call", retryable: false } };
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "host.result", payload: { operation, response } }));
 		} else if (envelope.type === "input.acknowledge") {
+			if (this.abandonedDeliveries.has(String(envelope.payload.deliveryId))) {
+				socket.write(encodeNdjsonEnvelope({ ...base, type: "input.result", payload: { deliveryId: envelope.payload.deliveryId, status: "cancelled" } })); return;
+			}
 			if (this.dropCancelledReplyOnce && envelope.payload.status === "cancelled") {
 				this.dropCancelledReplyOnce = false; socket.destroy(); return;
 			}
@@ -571,10 +576,10 @@ class FakeRelay {
 			if (this.checkpointError) socket.write(encodeNdjsonEnvelope({ ...base, type: "error", payload: { ...this.checkpointError, retryable: false } }));
 			else socket.write(encodeNdjsonEnvelope({ ...base, type: "checkpoint.acknowledge", payload: { checkpointId: envelope.payload.checkpointId, status: "projected" } }));
 		} else if (envelope.type === "aloop.notice") {
-			socket.write(encodeNdjsonEnvelope({ ...base, type: "aloop.acknowledge", payload: { lifecycleId: envelope.payload.lifecycleId, status: "projected" } }));
+			socket.write(encodeNdjsonEnvelope({ ...base, type: "aloop.acknowledge", payload: { lifecycleId: envelope.payload.lifecycleId, status: this.projectionStatus } }));
 		} else if (envelope.type === "transcript.offer") {
 			setTimeout(() => {
-				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: "projected" } }));
+				if (!socket.destroyed) socket.write(encodeNdjsonEnvelope({ ...base, type: "transcript.acknowledge", payload: { entryId: envelope.payload.entryId, status: this.projectionStatus } }));
 			}, this.transcriptDelayMs);
 		} else if (envelope.type === "self.promote") {
 			socket.write(encodeNdjsonEnvelope({ ...base, type: "self.result", payload: { operation: "self.promote", status: "ok" } }));
@@ -834,6 +839,20 @@ test("transcript projection tolerates relay Matrix work beyond the short IPC req
 		kind: "assistant_final", body: "A final response delayed by bounded Matrix retry work." });
 	assert.equal(result.type, "transcript.acknowledge");
 	assert.equal(client.connected, true);
+});
+
+test("cancelled transcript and lifecycle receipts are terminal without claiming projection success", async t => {
+	const relay = await FakeRelay.start(); relay.projectionStatus = "cancelled"; t.after(() => relay.close());
+	const client = new BoundAdapterClient({ socketPath: relay.socketPath, role: "ordinary_adapter", attachmentNonce: nonce, binding, onEnvelope: () => undefined });
+	t.after(() => client.close()); await client.connect();
+	const entryId = deriveTranscriptEntryId(sessionId, "cancelled-final");
+	const receipt = await client.offerTranscript({ entryId, piSessionId: sessionId, piEntryKey: "cancelled-final", kind: "assistant_final", body: "Preserved locally" });
+	assert.equal(receipt.payload.status, "cancelled");
+	const marker = { version: "1.0.0", entryId, piEntryKey: "cancelled-final", kind: "assistant_final", status: "blocked", reason: "operator_cancelled" };
+	const restored = restoreProjections([custom("abandoned", PROJECTION_ENTRY_TYPE, marker)]);
+	assert.equal(restored.get(entryId)?.status, "blocked");
+	const lifecycle = await client.offerAloopNotice({ scopeSessionId: sessionId, lifecycleId: `aloop_${"c".repeat(32)}`, kind: "cancelled", epic: 145, body: "Cancelled", timestamp: new Date().toISOString() });
+	assert.equal(lifecycle.payload.status, "cancelled"); assert.equal(client.connected, true);
 });
 
 test("a valid response arriving just after an IPC timeout does not disconnect the adapter", async (t) => {
@@ -1910,6 +1929,15 @@ test("managed adapter steers busy Matrix prompts and replay while preserving idl
 	await recoveryHandlers.get("session_start")!({ reason: "resume" }, recoveryCtx);
 	assert.equal(resumeTriggers, 1, "a stop received alongside the receipt wins before recovery continuation");
 	assert.equal(restoreDeliveries(recoveryBranch).get(recoveryId)?.status, "cancelled");
+	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
+	const abandonedId = deriveDeliveryId(conversationId, "$explicitly-abandoned");
+	recoveryBranch.push(custom("abandoned-persisted", DELIVERY_ENTRY_TYPE, { version: MANAGED_SESSION_STATE_VERSION,
+		deliveryId: abandonedId, matrixEventId: "$explicitly-abandoned", kind: "prompt", status: "persisted",
+		expandedText: "Preserved historical input", piEntryId: deriveTranscriptEntryId(sessionId, "abandoned-user") }));
+	relay.abandonedDeliveries.add(abandonedId);
+	await recoveryHandlers.get("session_start")!({ reason: "resume" }, recoveryCtx);
+	assert.equal(resumeTriggers, 1, "explicit abandonment never triggers recovery work");
+	assert.equal(restoreDeliveries(recoveryBranch).get(abandonedId)?.status, "cancelled", "local receipt is cancelled, never completed");
 	await recoveryHandlers.get("session_shutdown")!({ reason: "quit" }, recoveryCtx);
 });
 

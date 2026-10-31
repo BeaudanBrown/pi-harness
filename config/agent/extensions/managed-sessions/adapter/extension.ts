@@ -663,7 +663,12 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			const ctx = currentContext;
 			const currentBinding = binding;
 			if (!target) return;
-			void target.acknowledgeInput(marker.deliveryId, marker.status, marker.piEntryId, marker.completionKind).catch((error) => {
+			void target.acknowledgeInput(marker.deliveryId, marker.status, marker.piEntryId, marker.completionKind).then(status => {
+				if (status !== "cancelled" || !ctx || currentContext !== ctx || binding !== currentBinding || client !== target) return;
+				const current = deliveries.get(marker.deliveryId);
+				if (current && current.status !== "completed" && current.status !== "cancelled") recordDelivery(ctx, { ...current, status: "cancelled" });
+				activeDeliveries.delete(marker.deliveryId); persistedRecoveryPending.delete(marker.deliveryId); expandedRecoveryPending.delete(marker.deliveryId);
+			}).catch((error) => {
 				if (error instanceof ManagedAdapterError && error.code === "capacity_reached" && marker.piEntryId && ctx && currentBinding &&
 					currentContext === ctx && binding === currentBinding &&
 					!hasProjectionCapacityDiagnostic(ctx.sessionManager.getBranch(), currentBinding, marker.piEntryId)) {
@@ -690,8 +695,8 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 			for (const event of aloopLifecycleEvents.values()) {
 				if (projectedAloopLifecycle.has(event.lifecycleId) || !aloopLifecycleIsDurable(ctx, event)) continue;
 				if (!projectionClient.connected || client !== projectionClient) return;
-				await projectionClient.offerAloopNotice({ scopeSessionId: event.scopeSessionId, lifecycleId: event.lifecycleId, kind: event.kind, epic: event.epic, ...(event.issue === undefined ? {} : { issue: event.issue }), body: event.body, timestamp: event.timestamp });
-				appendMarker(pi, ctx, ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE, { version: 1, lifecycleId: event.lifecycleId, status: "projected" });
+				const receipt = await projectionClient.offerAloopNotice({ scopeSessionId: event.scopeSessionId, lifecycleId: event.lifecycleId, kind: event.kind, epic: event.epic, ...(event.issue === undefined ? {} : { issue: event.issue }), body: event.body, timestamp: event.timestamp });
+				appendMarker(pi, ctx, ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE, { version: 1, lifecycleId: event.lifecycleId, status: receipt.payload.status });
 				projectedAloopLifecycle.add(event.lifecycleId);
 			}
 			const latest = [...aloopLifecycleEvents.values()].at(-1);
@@ -764,9 +769,13 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					recordProjectionMarker(ctx, marker);
 				}
 				try {
-					await projectionClient.offerTranscript({ entryId: entry.entryId, piEntryKey: entry.piEntryKey,
+					const receipt = await projectionClient.offerTranscript({ entryId: entry.entryId, piEntryKey: entry.piEntryKey,
 						kind: entry.kind, body: entry.body, piSessionId: projectionBinding.sessionId,
 						...(marker.disposition === undefined ? {} : { disposition: marker.disposition }) });
+					if (receipt.payload.status === "cancelled") {
+						recordProjectionMarker(ctx, { ...marker, status: "blocked", reason: "operator_cancelled" });
+						continue;
+					}
 				} catch (error) {
 					if (error instanceof ManagedAdapterError && error.code === "capacity_reached") {
 						const blocked: ProjectionMarker = { ...marker, status: "blocked", reason: "backfill_limit" };
@@ -1266,8 +1275,17 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					if (current.status !== "projected") continue;
 					const origin = deliveries.get(current.originDeliveryId);
 					if (origin?.status === "persisted" && origin.piEntryId) {
-						const completed = { ...origin, status: "completed" as const };
-						recordDelivery(ctx, completed); activeDeliveries.delete(origin.deliveryId); acknowledge(completed);
+						// A projected boundary is historical evidence, not permission to
+						// overwrite a later operator abandonment with local success.
+						try {
+							const receipt = await next.acknowledgeInput(origin.deliveryId, "completed", origin.piEntryId);
+							if (stopped || client !== next || bindingEpoch !== epoch) return;
+							recordDelivery(ctx, { ...origin, status: receipt === "cancelled" ? "cancelled" : "completed" });
+							activeDeliveries.delete(origin.deliveryId);
+						} catch (error) {
+							if (!(error instanceof ManagedAdapterError) || error.code !== "invalid_state") throw error;
+							notify(ctx, "Checkpoint recovery held: relay receipt is terminal or inconsistent.", "warning");
+						}
 					}
 				}
 				if (expandedRecoveryPending.size) {
@@ -1279,7 +1297,15 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 					if (!marker?.piEntryId) continue;
 					// Relay cancellation/completion wins over stale local history. Await
 					// authoritative acceptance before triggering any recovery model turn.
-					try { await next.acknowledgeInput(deliveryId, "persisted", marker.piEntryId); }
+					try {
+						const receipt = await next.acknowledgeInput(deliveryId, "persisted", marker.piEntryId);
+						if (receipt === "cancelled") {
+							if (stopped || client !== next || bindingEpoch !== epoch) return;
+							recordDelivery(ctx, { ...marker, status: "cancelled" });
+							activeDeliveries.delete(deliveryId);
+							continue;
+						}
+					}
 					catch (error) {
 						if (!(error instanceof ManagedAdapterError) || error.code !== "invalid_state") throw error;
 						notify(ctx, "Managed recovery held: relay receipt is terminal or inconsistent; no task was resumed.", "warning");
@@ -1434,7 +1460,7 @@ export function createManagedSessionAdapterExtension(role: AdapterRole, environm
 				}
 				if (entry.customType === ALOOP_LIFECYCLE_PROJECTION_ENTRY_TYPE) {
 					const value = entry.data as Record<string, unknown>;
-					if (value?.version !== 1 || typeof value.lifecycleId !== "string" || !/^aloop_[a-f0-9]{32}$/.test(value.lifecycleId) || value.status !== "projected" || Object.keys(value).some((key) => !["version", "lifecycleId", "status"].includes(key))) throw new ManagedAdapterError("Malformed durable aloop lifecycle projection state");
+					if (value?.version !== 1 || typeof value.lifecycleId !== "string" || !/^aloop_[a-f0-9]{32}$/.test(value.lifecycleId) || !["projected", "cancelled"].includes(String(value.status)) || Object.keys(value).some((key) => !["version", "lifecycleId", "status"].includes(key))) throw new ManagedAdapterError("Malformed durable aloop lifecycle projection state");
 					projectedAloopLifecycle.add(value.lifecycleId);
 				}
 			}

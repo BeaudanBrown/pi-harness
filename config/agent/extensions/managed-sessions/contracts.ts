@@ -366,7 +366,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 	}),
 	relayEnvelope("transcript.acknowledge", {
 		entryId: TranscriptEntryIdSchema,
-		status: Type.Union([Type.Literal("accepted"), Type.Literal("projected")]),
+		status: Type.Union([Type.Literal("accepted"), Type.Literal("projected"), Type.Literal("cancelled")]),
 	}),
 	relayEnvelope("checkpoint.acknowledge", {
 		checkpointId: identifier,
@@ -378,7 +378,7 @@ export const ManagedSessionEnvelopeSchema = Type.Union([
 		status: Type.Union([Type.Literal("updated"), Type.Literal("finalized")]),
 	}),
 	relayEnvelope("aloop.acknowledge", {
-		lifecycleId: stableId("aloop"), status: Type.Literal("projected"),
+		lifecycleId: stableId("aloop"), status: Type.Union([Type.Literal("projected"), Type.Literal("cancelled")]),
 	}),
 	relayEnvelopeWithPayload("self.result", Type.Union([
 		strictObject({ operation: Type.Literal("self.bind"), status: Type.Literal("ok"), boundConversationId: ConversationIdSchema, matrixBinding: Type.Optional(matrixBindingState) }),
@@ -637,7 +637,7 @@ const projectionEntry = strictObject({
 		Type.Literal("checkpoint"),
 		Type.Literal("notice"),
 	]),
-	status: Type.Union([Type.Literal("offered"), Type.Literal("projecting"), Type.Literal("projected")]),
+	status: Type.Union([Type.Literal("offered"), Type.Literal("projecting"), Type.Literal("projected"), Type.Literal("cancelled")]),
 	contentHash: Type.Optional(Type.String({ pattern: "^[a-f0-9]{64}$" })),
 	originDeliveryId: Type.Optional(DeliveryIdSchema),
 	renderingVersion: Type.Optional(Type.Literal(2)),
@@ -649,7 +649,19 @@ const projectionEntry = strictObject({
 		formattedBody: Type.Optional(boundedString(8_000)),
 	}), { maxItems: 64 }),
 });
+const queueCancellationReceipt = strictObject({
+	operationId: stableId("operation"), at: timestamp, sourceDigest: Type.String({ pattern: "^[a-f0-9]{64}$" }),
+	semantics: Type.Literal("abandon_future_attempts_prior_effects_uncertain"),
+	items: Type.Array(strictObject({ kind: Type.Union([Type.Literal("input"), Type.Literal("control"), Type.Literal("projection")]),
+		id: identifier, priorState: boundedString(32), digest: Type.String({ pattern: "^[a-f0-9]{64}$" }) }), { minItems: 1, maxItems: 128 }),
+});
+export interface QueueCancellationReceipt {
+	operationId: string; at: string; sourceDigest: string; semantics: "abandon_future_attempts_prior_effects_uncertain";
+	items: Array<{ kind: "input" | "control" | "projection"; id: string; priorState: string; digest: string }>;
+}
 const runtimeConversation = strictObject({
+	queueCancellations: Type.Optional(Type.Array(queueCancellationReceipt, { maxItems: 32 })),
+	abandonedControls: Type.Optional(Type.Array(pendingControl, { maxItems: 1024 })),
 	conversationId: ConversationIdSchema,
 	archiveId: Type.Optional(stableId("archive")),
 	state: Type.Union([Type.Literal("starting"), Type.Literal("active"), Type.Literal("dormant")]),
@@ -771,6 +783,8 @@ export interface HostRuntimeState {
 	conversations: Array<{
 		conversationId: string;
 		archiveId?: string;
+		queueCancellations?: QueueCancellationReceipt[];
+		abandonedControls?: HostRuntimeState["conversations"][number]["pendingControls"];
 		state: "starting" | "active" | "dormant";
 		attachmentNonceHash?: string;
 		attachment: null | { attachmentId: string; sessionId: string; connectedAt: string; runtimeId?: string };
@@ -1265,11 +1279,32 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 				throw new ManagedSessionContractError("invalid_state", `invalid generation transition in ${conversation.conversationId}`);
 			}
 		}
+		const abandoned = new Set<string>();
+		const cancellationOperations = new Set<string>();
+		for (const receipt of conversation.queueCancellations ?? []) {
+			if (cancellationOperations.has(receipt.operationId)) throw new ManagedSessionContractError("conflict", "Duplicate queue abandonment operation");
+			cancellationOperations.add(receipt.operationId);
+			for (const item of receipt.items) {
+				const prefix = { input: "delivery", control: "control", projection: "entry" }[item.kind];
+				const key = `${item.kind}:${item.id}`;
+				if (!new RegExp(`^${prefix}_[a-f0-9]{32}$`).test(item.id) || abandoned.has(key)) throw new ManagedSessionContractError("conflict", "Invalid or duplicate queue abandonment identity");
+				abandoned.add(key);
+				const current = item.kind === "input" ? conversation.pendingInputs.find(i => i.deliveryId === item.id) : item.kind === "projection" ? conversation.projection.find(i => i.entryId === item.id) : undefined;
+				if (current && current.status !== "cancelled" || item.kind === "control" && (conversation.pendingControls.some(i => i.controlId === item.id) || conversation.completedControlIds.includes(item.id)))
+					throw new ManagedSessionContractError("invalid_state", "Abandoned item cannot be pending or successfully completed");
+			}
+		}
+		const abandonedControls = new Set<string>();
+		for (const control of conversation.abandonedControls ?? []) {
+			if (!abandoned.has(`control:${control.controlId}`) || abandonedControls.has(control.controlId)) throw new ManagedSessionContractError("invalid_state", "Abandoned control lost its unique audit receipt");
+			abandonedControls.add(control.controlId);
+		}
 		const entries = new Set<string>();
 		const checkpointOrigins = new Set<string>();
 		const chunks = new Set<string>();
 		const transactions = new Set<string>();
 		for (const projection of conversation.projection) {
+			if (projection.status === "cancelled" && !abandoned.has(`projection:${projection.entryId}`)) throw new ManagedSessionContractError("invalid_state", "Abandoned projection lost its audit receipt");
 			if (entries.has(projection.entryId)) {
 				throw new ManagedSessionContractError("conflict", `duplicate projection entry ${projection.entryId}`);
 			}
@@ -1283,8 +1318,8 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 			}
 			if (projection.renderingVersion !== undefined &&
 				(projection.kind === "matrix_user" || !projection.contentHash || projection.chunks.length === 0 ||
-					(projection.status !== "projecting" && projection.status !== "projected") ||
-					(projection.status === "projected") !== projection.chunks.every((chunk) => chunk.status === "sent"))) {
+					!["projecting", "projected", "cancelled"].includes(projection.status) ||
+					(projection.status !== "cancelled" && (projection.status === "projected") !== projection.chunks.every((chunk) => chunk.status === "sent")))) {
 				throw new ManagedSessionContractError("invalid_state", "Invalid versioned text projection");
 			}
 			for (const chunk of projection.chunks) {

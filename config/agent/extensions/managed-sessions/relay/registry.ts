@@ -32,6 +32,9 @@ import { redactManagedValue } from "./redaction.js";
 import { RetirementStore, retirementId, retirementEffectId, type RetirementRecord, type RetirementTarget } from "./retirement-store.js";
 import { ArchiveStore, archiveId, type ArchiveRecord, type ArchiveSource } from "./archive-store.js";
 
+import { QueueActivityGate, queueCancellationSnapshot, abandonQueue, wasQueueCancelled, type QueueCancellationSnapshot } from "./queue-cancellation.js";
+import { staleHostPreview } from "./host-preview-store.js";
+
 type RuntimeConversation = HostRuntimeState["conversations"][number];
 type AdapterRole = "ordinary_adapter" | "coordinator_adapter";
 
@@ -87,6 +90,36 @@ export class RelayRegistry {
 	private readonly liveConnections = new Map<string, string>();
 	private operations: Promise<void> = Promise.resolve();
 	private restartReconciling = false;
+	private readonly queueActivity = new QueueActivityGate();
+	private queueCommitPending = false;
+	private queueWriteUncertain = false;
+
+	withQueueEffect<T>(conversationId: string, work: () => Promise<T>): Promise<T> {
+		this.assertAuthorityAvailable();
+		return this.queueActivity.effect(conversationId, work);
+	}
+	queueCancellationSnapshot(conversationId: string): QueueCancellationSnapshot {
+		this.assertAuthorityAvailable();
+		const manifest = this.manifests.get(conversationId);
+		if (!manifest) throw new RelayRegistryError("not_found", "Conversation is unavailable");
+		return queueCancellationSnapshot(manifest, this.runtimeConversation(conversationId),
+			this.queueActivity.busy(conversationId) || this.liveConnections.has(conversationId) || this.isRefreshing(conversationId));
+	}
+	queueItemCancelled(conversationId: string, kind: "input" | "control" | "projection", id: string): boolean {
+		return wasQueueCancelled(this.runtimeConversation(conversationId), kind, id);
+	}
+	async cancelQueuedWork(snapshot: QueueCancellationSnapshot, operationId: string): Promise<void> {
+		const frozen = structuredClone(snapshot);
+		await this.queueActivity.exclusive(frozen.conversationId, async () => {
+			await this.mutate(async () => {
+				const current = this.queueCancellationSnapshot(frozen.conversationId);
+				if (current.blockers.length || !isDeepStrictEqual(current, frozen)) throw staleHostPreview();
+				abandonQueue(this.runtimeConversation(frozen.conversationId), frozen, operationId, new Date().toISOString());
+				parseHostRuntimeState(this.state);
+				this.queueCommitPending = true;
+			});
+		});
+	}
 	private readonly runtimeObservers = new Set<() => void>();
 	private runtimeObservationKey?: string;
 
@@ -388,8 +421,9 @@ export class RelayRegistry {
 		return structuredClone(this.runtimeConversation(conversationId).pendingControls);
 	}
 
-	controlResultState(conversationId: string, controlId: string): "pending" | "completed" | "unknown" {
+	controlResultState(conversationId: string, controlId: string): "pending" | "completed" | "cancelled" | "unknown" {
 		const conversation = this.runtimeConversation(conversationId);
+		if (wasQueueCancelled(conversation, "control", controlId)) return "cancelled";
 		if (conversation.pendingControls.some((control) => control.controlId === controlId)) return "pending";
 		return conversation.completedControlIds.includes(controlId) ? "completed" : "unknown";
 	}
@@ -397,6 +431,7 @@ export class RelayRegistry {
 	async acknowledgeControlResult(conversationId: string, controlId: string): Promise<void> {
 		await this.mutate(async () => {
 			const conversation = this.runtimeConversation(conversationId);
+			if (wasQueueCancelled(conversation, "control", controlId)) return;
 			if (conversation.completedControlIds.includes(controlId)) return;
 			const index = conversation.pendingControls.findIndex((control) => control.controlId === controlId);
 			if (index === -1) throw new RelayRegistryError("not_found", "Pending managed control was not found");
@@ -483,8 +518,8 @@ export class RelayRegistry {
 			if (!projection || !chunk) throw new RelayRegistryError("not_found", "Transcript projection chunk was not found");
 			chunk.status = "sent";
 			// Only pending transactions need frozen payloads. Keep identities/hashes after delivery.
-			delete chunk.body; delete chunk.formattedBody;
-			projection.status = projection.chunks.every((candidate) => candidate.status === "sent") ? "projected" : "projecting";
+			if (projection.status !== "cancelled") { delete chunk.body; delete chunk.formattedBody; }
+			if (projection.status !== "cancelled") projection.status = projection.chunks.every((candidate) => candidate.status === "sent") ? "projected" : "projecting";
 		});
 	}
 
@@ -626,7 +661,7 @@ export class RelayRegistry {
 				return;
 			}
 			if (row.completedTreeOperation === operationId || this.isRefreshing(conversationId) || this.hasGenerationBoundary(conversationId) || row.pendingControls.length || row.activeCheckpointPoll || row.publishingCheckpointPoll || row.activeControlPoll || row.publishingControlPoll ||
-				row.closingCheckpointPolls.length || row.projection.some(projection => projection.status !== "projected") ||
+				row.closingCheckpointPolls.length || row.projection.some(projection => !["projected", "cancelled"].includes(projection.status)) ||
 				row.pendingInputs.some(input => input.status !== "completed" && input.status !== "cancelled")) throw new RelayRegistryError("invalid_state", "Wait for pending managed input, controls, projection and poll closure before changing branches");
 			row.treeTransition = { operationId, sessionId: manifest.piSessionId };
 		});
@@ -1377,6 +1412,7 @@ export class RelayRegistry {
 	}
 
 	private addPendingInput(conversation: RuntimeConversation, input: RuntimeConversation["pendingInputs"][number]): boolean {
+		if (wasQueueCancelled(conversation, "input", input.deliveryId)) return false;
 		const existing = conversation.pendingInputs.find((candidate) => candidate.deliveryId === input.deliveryId || candidate.matrixEventId === input.matrixEventId);
 		if (existing) {
 			if (existing.deliveryId !== input.deliveryId || existing.matrixEventId !== input.matrixEventId || existing.senderUserId !== input.senderUserId || existing.kind !== input.kind ||
@@ -1391,6 +1427,7 @@ export class RelayRegistry {
 	}
 
 	private addPendingControl(conversation: RuntimeConversation, control: RuntimeConversation["pendingControls"][number]): boolean {
+		if (wasQueueCancelled(conversation, "control", control.controlId)) return false;
 		if (conversation.completedControlIds.includes(control.controlId)) return false;
 		const existing = conversation.pendingControls.find((candidate) =>
 			candidate.controlId === control.controlId || candidate.matrixEventId === control.matrixEventId);
@@ -1445,7 +1482,7 @@ export class RelayRegistry {
 		if (row.pendingInputs.some(input => !["completed", "cancelled"].includes(input.status))) blockers.push("Unfinished input must be resolved before archive");
 		if (row.pendingControls.length || row.publishingControlPoll || row.activeControlPoll || row.publishingCheckpointPoll || row.activeCheckpointPoll || row.closingCheckpointPolls.length)
 			blockers.push("Pending controls or polls must be resolved before archive");
-		if (row.projection.some(entry => entry.status !== "projected") || row.artifactExports.some(entry => entry.state !== "sent" && !entry.failure))
+		if (row.projection.some(entry => !["projected", "cancelled"].includes(entry.status)) || row.artifactExports.some(entry => entry.state !== "sent" && !entry.failure))
 			blockers.push("Pending publication must be resolved before archive");
 		if (row.treeTransition || row.generationTransition || row.promotion && row.promotion.phase !== "adopted") blockers.push("Pending lifecycle transition must be resolved before archive");
 		return { source: this.archiveSource(manifest), blockers };
@@ -1517,8 +1554,12 @@ export class RelayRegistry {
 			this.pruneRetired(); return record;
 		});
 	}
-	private assertAuthorityAvailable(): void { this.retirements.assertAvailable(); this.archives.assertAvailable(); }
+	private assertAuthorityAvailable(): void {
+		if (this.queueWriteUncertain) throw new RelayRegistryError("invalid_state", "Queue abandonment write is uncertain; reload the owner before further activity");
+		this.retirements.assertAvailable(); this.archives.assertAvailable();
+	}
 	private assertNotRetired(conversationId: string): void {
+		this.assertAuthorityAvailable();
 		if (this.archives.has(conversationId)) throw new RelayRegistryError("invalid_state", "Managed conversation is archived; runtime access is disabled");
 		if (this.retirements.has(conversationId)) throw new RelayRegistryError("invalid_state", "Managed conversation is permanently retired");
 	}
@@ -1571,8 +1612,9 @@ export class RelayRegistry {
 				// Runtime rollback can never roll back separately committed negative authority.
 				this.pruneRetired();
 				this.projectArchives();
+				if (this.queueCommitPending) this.queueWriteUncertain = true;
 				failure = error;
-			}
+			} finally { this.queueCommitPending = false; }
 		});
 		this.operations = run.catch(() => undefined);
 		await run;
