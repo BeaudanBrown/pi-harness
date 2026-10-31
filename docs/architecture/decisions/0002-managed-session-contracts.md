@@ -51,9 +51,13 @@ input and ordinary discovery; it cannot be rolled back by restoring an older
 runtime projection. Exact preview/confirmation, fresh closure checks, pending
 work blockers and conservative owned/empty/unreferenced ancestor cleanup are
 required. For legacy conversations without recorded process-birth identity, the
-operator-approved alternative is explicit closure attestation plus fresh complete
-conflict screening. This must be disclosed and durably recorded with its consent
-reference; it is not verified exit, and cannot waive conflicts or unfinished work.
+operator-approved alternative is explicit closure attestation plus fresh conflict
+screening. By default unreadable environments block; #144 permits an additional
+explicit archive-only acceptance of disclosed incomplete visibility. Count and an
+opaque observed-set digest bind this uncertainty to fresh consent and durable initial/
+retry receipts. Failed/malformed inspection, known conflicts and unfinished work
+cannot be waived; changed gaps require fresh consent. This is not verified exit and
+changes neither exact-exit checks nor stopping/deletion/ancestor-cleanup authority.
 Reactivation and implicit membership restoration are excluded.
 
 This supersedes the baseline's "no archived state" target, not its deployed

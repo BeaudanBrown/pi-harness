@@ -40,6 +40,12 @@ test("terminal and room controls parse arguments without shell evaluation or pro
 test("archive tools and operator commands share exact scope and explicit legacy opt-in", () => {
 	const action = { operation: "conversation.archive.preview", conversationIds: [conversationId], legacyClosure: true };
 	assert.deepEqual(managedHostAction(action), action);
+	const incomplete = { ...action, acceptIncompleteInspection: true };
+	assert.deepEqual(managedHostAction(incomplete), incomplete);
+	assert.deepEqual(hostCommandAction(`conversation archive preview --conversation-ids ${conversationId} --legacy-closure --accept-incomplete-inspection`), incomplete);
+	assert.throws(() => managedHostAction({ ...incomplete, legacyClosure: undefined }));
+	assert.throws(() => managedHostAction({ ...incomplete, acceptIncompleteInspection: false }));
+	assert.throws(() => managedHostAction({ ...incomplete, operation: "conversation.archive.cleanup.preview" }));
 	assert.deepEqual(hostCommandAction(`conversation archive preview --conversation-ids ${conversationId} --legacy-closure`), action);
 	assert.deepEqual(hostCommandAction("conversation archive list --limit 5"), { operation: "conversation.archive.list", limit: 5 });
 	assert.throws(() => managedHostAction({ ...action, legacyClosure: false }));

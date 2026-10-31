@@ -38,8 +38,15 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
   without deleting/restoring checkouts. No reactivation is supported. Known active
   runtimes, unfinished inputs, controls and publications block; never cancel them
   implicitly. If exact exit evidence is unavailable, `legacyClosure=true` requests
-  **operator attestation that the old Pi was closed**, with fresh complete conflict
-  screening. This is not verified exit; never assert closure on the operator's behalf.
+  **operator attestation that the old Pi was closed**, with fresh conflict
+  screening. By default unreadable process environments block. Only when the operator
+  explicitly accepts that uncertainty, add `acceptIncompleteInspection=true` alongside
+  `legacyClosure=true` to the archive preview. The warning discloses unreadable counts;
+  frozen opaque set evidence and the approved operation reference are audited. Changed
+  gaps require fresh preview/consent, including retries. Known conflicts, failed or
+  malformed inspection and pending work still block. This never weakens exact-exit,
+  stopping/deletion or cleanup checks. This is not verified exit; never assert closure
+  or uncertainty acceptance on the operator's behalf.
   Inspect `conversation.archive.list` for archived/archiving status before an explicit
   retry with fresh preview and consent. New Space joins may remain pending while
   original links are preserved. Ancestor cleanup has its own

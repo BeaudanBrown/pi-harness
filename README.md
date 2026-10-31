@@ -329,8 +329,10 @@ Readable archival uses `conversation.archive.preview/apply` and a separate
 `conversation.archive.list`; ancestor cleanup has its own preview/apply. It preserves
 original rooms/history/membership under Archive and disables managed execution,
 without restoring deleted checkouts. Exact exit evidence is preferred; an explicitly
-approved `legacyClosure` attestation requires complete conflict screening and is not
-verified exit. See [archive safety and release status](docs/managed-readable-archives.md)
+approved `legacyClosure` attestation requires fresh conflict screening and is not
+verified exit. Unreadable environments block unless the operator additionally accepts
+the disclosed uncertainty via `acceptIncompleteInspection=true`; known conflicts
+still block and changed visibility gaps require fresh consent. See [archive safety and release status](docs/managed-readable-archives.md)
 before deployment; these controls require updated host/agent code and archive account
 support for automatic NAS joins. Project creation
 accepts only a configured root, safe absent immediate-child name, and creation

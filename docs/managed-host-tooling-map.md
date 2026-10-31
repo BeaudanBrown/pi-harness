@@ -65,8 +65,11 @@ reconciliation; it never grants permission to retire the conversation room.
 `legacyClosure=true` requests an explicit, disclosed operator closure attestation.
 The complete conflict screen is **not** a proof of historical process exit. Exact
 process checks are used where recorded birth identity exists; known conflicts
-cannot fall back to attestation. Unknown/incomplete inspection and pending work
-block both modes. Archiving the agent's own active conversation is blocked too.
+cannot fall back to attestation. Failed/malformed inspection and pending work
+block both modes. Unreadable environments block by default; explicit legacy-only
+`acceptIncompleteInspection=true` accepts disclosed uncertainty, binding its count
+and opaque observed-set digest into fresh consent and initial/retry audit receipts.
+Changed gaps invalidate consent. This does not weaken exact-exit or cleanup checks. Archiving the agent's own active conversation is blocked too.
 
 `conversation.archive.list` is a separate bounded inventory. Active inventories
 exclude admitted archives. `readable-archive-v1` in host capabilities advertises

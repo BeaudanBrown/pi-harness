@@ -74,7 +74,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, sibling = fa
 	const owners: ArchiveHierarchy[] = [];
 	const owner = async (runtime?: ArchiveRuntimeChecks) => {
 		const value = new ArchiveHierarchy({ directory: join(directory, "archive"), registry, hierarchy, matrix: matrix as unknown as ManagedMatrixClient,
-			assertRuntimeAbsent: async (source, signal, legacy) => { closureChecks++; if (closureError) throw Error("No fresh process-absence proof"); if (runtime) return runtime.inspect(source, legacy, signal); return { window: null, receipt: { basis: "operator_attested", windowDigest: "0".repeat(64), checkedAt: new Date().toISOString() } }; },
+			assertRuntimeAbsent: async (source, signal, legacy, incomplete) => { closureChecks++; if (closureError) throw Error("No fresh process-absence proof"); if (runtime) return runtime.inspect(source, legacy, signal, incomplete); return { window: null, receipt: { basis: "operator_attested", windowDigest: "0".repeat(64), checkedAt: new Date().toISOString() } }; },
 			account: { leaveAndForget: async target => { if (!accountReady) return false; matrix.members.get(target.roomId)!.delete(matrix.operatorUserId); return true; }, completed: async () => accountReady } });
 		await value.load(); owners.push(value); return value;
 	};
@@ -250,7 +250,7 @@ test("archive runtime distinguishes exact exit from live, changed, replacement o
 	await f.registry.setManagedWindow(id, { sessionName: "project", windowId: "@1", paneId: "%1", ownership: proof });
 	const runtime = new ArchiveRuntimeChecks({ registry: f.registry, attached: () => attached, exact: { check: async () => state, inspect: async () => replacement ? proof : undefined }, observeLegacy: async () => { observed++; return {}; } });
 	assert.equal((await runtime.inspect(source)).receipt.basis, "exact_exit"); assert.equal(observed, 0);
-	for (const value of ["match", "changed"] as const) { state = value; await assert.rejects(runtime.inspect(source, true), /conflicting or unverified/); }
+	for (const value of ["match", "changed"] as const) { state = value; await assert.rejects(runtime.inspect(source, true), /conflicting or unverified/); await assert.rejects(runtime.inspect(source, true, undefined, true), /conflicting or unverified/); }
 	state = "gone"; replacement = true; await assert.rejects(runtime.inspect(source), /conflicting or unverified/);
 	replacement = false; attached = true; await assert.rejects(runtime.inspect(source), /running conversation/); attached = false;
 	const hierarchy = await f.owner(runtime); const plan = await hierarchy.preview(id, (await runtime.inspect(source)).window);
@@ -298,6 +298,44 @@ test("admitted legacy retries require fresh complete inspection and retain origi
 	assert.equal((await owner.apply(plan, true, retry))?.phase, "archived");
 	const saved = JSON.parse(await readFile(join(f.directory, "archive", "archive-hierarchy.json"), "utf8"));
 	assert.equal(saved.entries[0].closure.operationId, original); assert.equal(saved.entries[0].lastInspection.operationId, retry);
+});
+
+test("incomplete legacy inspection requires frozen explicit acceptance and audited fresh consent", async t => {
+	const f = await fixture(t); let value: unknown = { conflicts: false, unreadableProcesses: ["123"], bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" };
+	const runtime = new ArchiveRuntimeChecks({ registry: f.registry, attached: () => false, exact: { check: async () => "gone", inspect: async () => undefined }, observeLegacy: async () => value });
+	const owner = await f.owner(runtime); const controls = new ArchiveHostControls({ registry: f.registry, hierarchy: owner, runtime });
+	const source = f.registry.archiveCandidate(f.first.conversationId).source;
+	await assert.rejects(runtime.inspect(source, true), /explicit incomplete-inspection acceptance/);
+	await assert.rejects(runtime.inspect(source, false, undefined, true), /requires legacyClosure/);
+	const action = { operation: "conversation.archive.preview" as const, conversationIds: [f.first.conversationId], legacyClosure: true as const, acceptIncompleteInspection: true as const };
+	const snapshot = await controls.snapshot(action); assert.deepEqual(snapshot.blockers, []);
+	const mutations = new ManagedHostMutationOwner({ registry: f.registry, lifecycle: {} as HostLifecycle, retirement: {} as ConversationRetirement, server: { attachment: () => undefined }, archives: controls });
+	const preview = await mutations.preview(action);
+	const input: ModelHostRequest = { version: "1.0.0", actor: { kind: "model", conversationId: f.second.conversationId, generationId: `generation_${"a".repeat(32)}`, requestId: "incomplete-archive", runId: "run", toolCallId: "tool", presentation: "local_dialog" }, action: { operation: "conversation.archive.apply", previewId: preview.previewId, confirmed: true } };
+	const approval = prepareHostApproval("host", input, await mutations.freeze(input), Date.now());
+	assert.match(hostApprovalQuestion(approval), /INCOMPLETE INSPECTION/);
+	await assert.rejects(mutations.executeHuman(input), /independent consent/);
+	assert.match(controls.warnings(snapshot).join("\n"), /INCOMPLETE INSPECTION.*NOT verified exit/);
+	assert.equal(snapshot.witnesses[0].incompleteInspection?.unreadableCount, 1);
+	value = { conflicts: false, unreadableProcesses: ["456"], bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" };
+	assert.equal(await controls.valid(snapshot), false); assert.equal(await mutations.revalidate(approval), false);
+	await assert.rejects(owner.apply(snapshot.plans[0], true, `operation_${"a".repeat(32)}`, true, { incompleteInspection: snapshot.witnesses[0].incompleteInspection }), /evidence changed/);
+	assert.equal(f.registry.archiveRecords().length, 0); assert.deepEqual(f.matrix.effects, []);
+	for (const invalid of [{ conflicts: true, unreadableProcesses: ["123"], bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }, { conflicts: false }]) {
+		value = invalid; assert.ok((await controls.snapshot(action)).blockers.length);
+	}
+	value = { conflicts: false, unreadableProcesses: ["123"], bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" };
+	await controls.apply(snapshot, `operation_${"b".repeat(32)}`);
+	const saved = JSON.parse(await readFile(join(f.directory, "archive", "archive-hierarchy.json"), "utf8"));
+	assert.equal(saved.entries[0].closure.operationId, `operation_${"b".repeat(32)}`);
+	assert.deepEqual(saved.entries[0].closure.incompleteInspection, snapshot.witnesses[0].incompleteInspection);
+	await owner.close(); const restarted = await f.owner(runtime);
+	const retry = new ArchiveHostControls({ registry: f.registry, hierarchy: restarted, runtime });
+	assert.ok((await retry.snapshot({ operation: action.operation, conversationIds: action.conversationIds, legacyClosure: true })).blockers.length);
+	await retry.apply(await retry.snapshot(action), `operation_${"c".repeat(32)}`);
+	const retried = JSON.parse(await readFile(join(f.directory, "archive", "archive-hierarchy.json"), "utf8"));
+	assert.equal(retried.entries[0].lastInspection.operationId, `operation_${"c".repeat(32)}`);
+	assert.equal(retried.entries[0].lastInspection.incompleteInspection.accepted, true);
 });
 
 test("uncertain local journal writes poison the owner and never roll back an accepted create", async t => {

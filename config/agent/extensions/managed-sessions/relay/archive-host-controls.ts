@@ -2,14 +2,14 @@ import { isDeepStrictEqual } from "node:util";
 import { deriveConversationId } from "../contracts.js";
 import type { HostAction, HostResult } from "../live-workspace-contracts.js";
 import type { ArchiveHierarchy, ArchivePlan } from "./archive-hierarchy.js";
-import type { ArchiveRuntimeChecks } from "./archive-runtime.js";
+import type { ArchiveClosure, ArchiveRuntimeChecks } from "./archive-runtime.js";
 import type { RelayRegistry } from "./registry.js";
 import { HostInventoryPages } from "./host-inventory-pages.js";
 import { HostControlError } from "./host-control-error.js";
 export type ArchivePreviewAction = Extract<HostAction, { operation: "conversation.archive.preview" | "conversation.archive.cleanup.preview" }>;
 export interface ArchiveControlSnapshot {
 	source: ArchivePreviewAction; plans: ArchivePlan[]; blockers: string[];
-	witnesses: Array<{ conversationId: string; basis: string; windowDigest?: string; bootId?: string; progress?: unknown }>;
+	witnesses: Array<{ conversationId: string; basis: string; windowDigest?: string; bootId?: string; incompleteInspection?: ArchiveClosure["receipt"]["incompleteInspection"]; progress?: unknown }>;
 }
 /** Feature-owned orchestration. Consent/expiry remain in the shared host owner, not here. */
 export class ArchiveHostControls {
@@ -21,6 +21,7 @@ export class ArchiveHostControls {
 		const source = structuredClone(input); source.conversationIds.sort();
 		const result: ArchiveControlSnapshot = { source, plans: [], witnesses: [], blockers: [] };
 		const cleanup = source.operation === "conversation.archive.cleanup.preview";
+		const acceptIncomplete = source.operation === "conversation.archive.preview" && source.acceptIncompleteInspection === true;
 		for (const id of source.conversationIds) try {
 			if (id === deriveConversationId(this.options.registry.hostId, "coordinator")) throw new HostControlError("forbidden", "The protected coordinator cannot be archived");
 			const record = this.options.registry.archiveRecord(id);
@@ -29,13 +30,13 @@ export class ArchiveHostControls {
 				if (!progress || cleanup && progress.phase !== "archived") throw new HostControlError("conflict", "Complete the archive move before ancestor cleanup");
 				const cleanupEvidence = cleanup ? await this.options.hierarchy.cleanupPreview(id) : undefined;
 				if (cleanupEvidence?.some(row => row.state === "unverifiable")) throw new HostControlError("conflict", "Ancestor cleanup ownership or emptiness is unverifiable; repair separately without implicit rejoin");
-				const closure = !cleanup ? await this.options.runtime.inspect(record.source, source.operation === "conversation.archive.preview" && source.legacyClosure === true) : undefined;
-				const evidence = closure ? { basis: closure.receipt.basis, windowDigest: closure.receipt.windowDigest, bootId: closure.receipt.bootId } : { basis: "cleanup_only" };
+				const closure = !cleanup ? await this.options.runtime.inspect(record.source, source.operation === "conversation.archive.preview" && source.legacyClosure === true, undefined, acceptIncomplete) : undefined;
+				const evidence = closure ? { basis: closure.receipt.basis, windowDigest: closure.receipt.windowDigest, bootId: closure.receipt.bootId, ...(closure.receipt.incompleteInspection ? { incompleteInspection: closure.receipt.incompleteInspection } : {}) } : { basis: "cleanup_only" };
 				result.plans.push(await this.options.hierarchy.preview(id)); result.witnesses.push({ conversationId: id, ...evidence, progress: { ...progress, ...(cleanupEvidence ? { cleanupEvidence } : {}) } });
 			} else {
 				if (cleanup) throw new HostControlError("conflict", "Conversation has not been archived");
 				const candidate = this.options.registry.archiveCandidate(id);
-				const closure = await this.options.runtime.inspect(candidate.source, source.operation === "conversation.archive.preview" && source.legacyClosure === true);
+				const closure = await this.options.runtime.inspect(candidate.source, source.operation === "conversation.archive.preview" && source.legacyClosure === true, undefined, acceptIncomplete);
 				result.plans.push(await this.options.hierarchy.preview(id, closure.window));
 				const { checkedAt: _, ...evidence } = closure.receipt; result.witnesses.push({ conversationId: id, ...evidence });
 			}
@@ -53,7 +54,8 @@ export class ArchiveHostControls {
 		return [
 			"Archive these exact conversations under host -> Archive -> historical project -> worktree. Preserve the original Matrix rooms, history and operator membership; disable managed input/attachment/launch. No reactivation or checkout restoration.",
 			"Ancestor cleanup is separate. Pending archive-Space joins keep original links. Matrix has no conditional state writes: avoid concurrent hierarchy edits; observed conflicts block rather than overwrite.",
-			...(legacy ? [`LEGACY ATTESTATION for ${legacy} selected conversations: approving asserts that their old Pi processes were closed. Fresh complete conflict inspection must pass. This is operator attestation, NOT verified process exit. Never confirm on the operator's behalf.`] : ["Runtime closure is inspected afresh, including retries; an existing archive fence does not replace closure inspection."]),
+			...(snapshot.witnesses.some(w => w.incompleteInspection) ? [`INCOMPLETE INSPECTION: ${snapshot.witnesses.filter(w => w.incompleteInspection).length} conversations have unreadable process environments (per-conversation counts: ${snapshot.witnesses.filter(w => w.incompleteInspection).map(w => w.incompleteInspection!.unreadableCount).join(", ")}). Approval explicitly accepts that matching writers cannot be ruled out in these processes. This is NOT verified exit. Known conflicts still block; no permission to stop processes or weaken cleanup.`] : []),
+			...(legacy ? [`LEGACY ATTESTATION for ${legacy} selected conversations: approving asserts that their old Pi processes were closed. Fresh conflict inspection must pass; any explicitly accepted visibility gaps are disclosed separately. This is operator attestation, NOT verified process exit. Never confirm on the operator's behalf.`] : ["Runtime closure is inspected afresh, including retries; an existing archive fence does not replace closure inspection."]),
 		];
 	}
 	async valid(snapshot: ArchiveControlSnapshot): Promise<boolean> {
@@ -65,7 +67,8 @@ export class ArchiveHostControls {
 		for (const plan of snapshot.plans) {
 			const status = snapshot.source.operation === "conversation.archive.cleanup.preview"
 				? await this.options.hierarchy.cleanup(plan.source.conversationId)
-				: await this.options.hierarchy.apply(plan, snapshot.source.legacyClosure === true, operationId);
+				: await this.options.hierarchy.apply(plan, snapshot.source.legacyClosure === true, operationId, snapshot.source.acceptIncompleteInspection === true,
+					{ incompleteInspection: snapshot.witnesses.find(w => w.conversationId === plan.source.conversationId)?.incompleteInspection });
 			pending ||= !status || status.phase !== "archived" || status.cleanupPending > 0;
 		}
 		return pending;

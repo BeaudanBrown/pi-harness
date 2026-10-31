@@ -53,7 +53,7 @@ export const HostActionSchema = Type.Union([
 	action("worktree.branch.preview", { ...workspace, branch: gitRef, mergeTarget: gitRef }),
 	action("worktree.branch.delete", preview),
 	action("conversation.archive.list", page),
-	action("conversation.archive.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 16, uniqueItems: true }), legacyClosure: Type.Optional(Type.Literal(true)) }),
+	action("conversation.archive.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 16, uniqueItems: true }), legacyClosure: Type.Optional(Type.Literal(true)), acceptIncompleteInspection: Type.Optional(Type.Literal(true)) }),
 	action("conversation.archive.apply", preview),
 	action("conversation.archive.cleanup.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 16, uniqueItems: true }) }),
 	action("conversation.archive.cleanup.apply", preview),
@@ -228,6 +228,7 @@ function validatePlacement(placement: { rootKey: string; workspace: string; rela
 }
 export function parseHostAction(value: unknown): HostAction {
 	const result = validate<HostAction>(HostActionSchema, value);
+	if (result.operation === "conversation.archive.preview" && result.acceptIncompleteInspection && !result.legacyClosure) throw new Error("Incomplete archive inspection requires explicit legacyClosure");
 	const placement = "placement" in result ? result.placement : "workspace" in result ? result : undefined;
 	if (placement) validatePlacement(placement);
 	if (result.operation === "worktree.conversation.fork") parseForkSummary(result.summary);

@@ -458,7 +458,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			const archiveRuntime = new ArchiveRuntimeChecks({ registry, attached: id => Boolean(server!.attachment(id)), exact: hostLifecycle.exactWindows,
 				observeLegacy: (id, window) => hostLifecycle!.observeArchiveClosure(id, window) });
 			archives = new ArchiveHierarchy({ directory: resolve(stateDirectory, "live-workspaces"), registry, matrix, hierarchy, account: cleanupAccount,
-				assertRuntimeAbsent: (source, signal, legacyClosure) => archiveRuntime.inspect(source, legacyClosure, signal) });
+				assertRuntimeAbsent: (source, signal, legacyClosure, acceptIncompleteInspection) => archiveRuntime.inspect(source, legacyClosure, signal, acceptIncompleteInspection) });
 			await archives.load();
 			archiveControls = new ArchiveHostControls({ registry, hierarchy: archives, runtime: archiveRuntime });
 			const accountDevice = environment.PI_MANAGED_ACCOUNT_DEVICE_ID?.trim();

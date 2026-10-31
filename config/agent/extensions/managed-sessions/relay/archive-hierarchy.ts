@@ -82,7 +82,10 @@ function parse(value: unknown): State {
 	for (const entry of state.entries) {
 		if (entry.linked && entry.plan.targets.some(t => !nodes.get(t.key)?.linked)) throw Error("Archive link lacks its verified path");
 		validatePlan(entry.plan, state.hostId);
-		for (const receipt of [entry.closure, entry.lastInspection]) if (receipt?.basis === "operator_attested" && !receipt.operationId) throw Error("Legacy archive attestation lacks its consent reference");
+		for (const receipt of [entry.closure, entry.lastInspection]) {
+			if (receipt?.basis === "operator_attested" && !receipt.operationId) throw Error("Legacy archive attestation lacks its consent reference");
+			if (receipt?.incompleteInspection && receipt.basis !== "operator_attested") throw Error("Incomplete inspection cannot claim exact exit");
+		}
 		if (entry.cleanup.length !== entry.plan.ancestors.length || entry.completed && (!entry.linked || entry.unlinked.length !== entry.plan.parents.length) ||
 			entry.unlinked.some(p => !entry.plan.parents.some(r => r.roomId === p)) || entry.unlinkAttempted.some(p => !entry.plan.parents.some(r => r.roomId === p)) ||
 			(entry.unlinked.length > 0 || entry.unlinkAttempted.length > 0) && !entry.linked || !entry.completed && entry.cleanup.some(c => c !== "pending")) throw Error("Invalid archive progress");
@@ -108,7 +111,7 @@ export class ArchiveHierarchy {
 	private readonly stop = new AbortController();
 	private readonly file: AtomicJsonFile<State>;
 	constructor(private readonly options: { directory: string; registry: RelayRegistry; matrix: ManagedMatrixClient; hierarchy: LiveHierarchy;
-		account?: SpaceCleanupAccount; assertRuntimeAbsent: (source: ArchiveSource, signal: AbortSignal, legacyClosure: boolean) => Promise<ArchiveClosure> }) {
+		account?: SpaceCleanupAccount; assertRuntimeAbsent: (source: ArchiveSource, signal: AbortSignal, legacyClosure: boolean, acceptIncompleteInspection: boolean) => Promise<ArchiveClosure> }) {
 		this.state = { version: 1, hostId: options.registry.hostId, nodes: [], entries: [] };
 		this.file = new AtomicJsonFile(join(options.directory, "archive-hierarchy.json"), parse);
 	}
@@ -183,8 +186,16 @@ export class ArchiveHierarchy {
 			targets: targets(this.state.hostId, source).map(t => structuredClone(this.state.nodes.find(n => n.target.key === t.key)?.target ?? t)) };
 		validatePlan(plan, this.state.hostId); await this.readable(plan, signal); return plan;
 	}
-	async apply(frozen: ArchivePlan, legacyClosure = false, operationId?: string): Promise<ReturnType<ArchiveHierarchy["status"]>> {
+	async apply(frozen: ArchivePlan, legacyClosure = false, operationId?: string, acceptIncompleteInspection = false,
+		expectedInspection?: Pick<ArchiveClosure["receipt"], "incompleteInspection">): Promise<ReturnType<ArchiveHierarchy["status"]>> {
 		this.assertAvailable(); const plan = structuredClone(frozen); validatePlan(plan, this.state.hostId);
+		if (acceptIncompleteInspection && (!legacyClosure || !expectedInspection)) throw Error("Incomplete inspection requires frozen evidence and explicit legacy consent");
+		const inspectClosure = async (source: ArchiveSource, signal: AbortSignal) => {
+			const closure = await this.options.assertRuntimeAbsent(source, signal, legacyClosure, acceptIncompleteInspection);
+			if (closure.receipt.incompleteInspection && (!acceptIncompleteInspection || closure.receipt.basis !== "operator_attested")) throw Error("Incomplete inspection is not authorized");
+			if (acceptIncompleteInspection && !isDeepStrictEqual(closure.receipt.incompleteInspection, expectedInspection?.incompleteInspection)) throw Error("Incomplete inspection evidence changed; obtain fresh preview and consent");
+			return closure;
+		};
 		if (legacyClosure && (!operationId || !/^operation_[a-f0-9]{32}$/.test(operationId))) throw Error("Legacy archive requires an approved operation reference");
 		return this.track(this.options.hierarchy.withProjectCleanup(plan.source.projectKey, async scopeSignal => {
 			const signal = AbortSignal.any([scopeSignal, this.stop.signal]); this.assertAvailable();
@@ -193,7 +204,7 @@ export class ArchiveHierarchy {
 			if (entry && !isDeepStrictEqual(entry.plan, plan) && this.options.registry.archiveRecord(id)) throw Error("Frozen archive intent changed");
 			if (!entry || !isDeepStrictEqual(entry.plan, plan)) {
 				if (this.options.registry.archiveRecord(id)) throw Error("Archive journal missing; cannot reconstruct effect history");
-				const closure = await this.options.assertRuntimeAbsent(plan.source, signal, legacyClosure);
+				const closure = await inspectClosure(plan.source, signal);
 				if (!isDeepStrictEqual(await this.preview(id, closure.window), plan)) throw Error("Archive preview changed; obtain fresh consent");
 				await this.mutate(state => {
 					if (this.options.registry.archiveRecord(id)) throw Error("Archive was admitted while reserving; obtain a fresh preview");
@@ -218,7 +229,7 @@ export class ArchiveHierarchy {
 					await this.verify({ roomId: parent.roomId, ...(parent.provenance ? { provenance: parent.provenance } : {}) }, true, signal);
 					if (!isDeepStrictEqual(await this.options.matrix.spaceChildContent(parent.roomId, plan.source.roomId, signal), parent.content)) throw Error("Archive source link changed");
 				}
-				const closure = await this.options.assertRuntimeAbsent(plan.source, signal, legacyClosure); signal.throwIfAborted();
+				const closure = await inspectClosure(plan.source, signal); signal.throwIfAborted();
 				if (closure.receipt.basis === "operator_attested" && !legacyClosure) throw Error("Legacy closure requires explicit operator attestation");
 				await this.update(id, e => { e.closure = { ...structuredClone(closure.receipt), ...(operationId ? { operationId } : {}) }; }, plan);
 				signal.throwIfAborted(); await this.options.registry.admitArchive(plan.source, closure.window);
@@ -226,7 +237,7 @@ export class ArchiveHierarchy {
 			if (!isDeepStrictEqual(this.options.registry.archiveRecord(id)?.source, plan.source)) throw Error("Archive authority changed");
 			await this.readable(plan, signal);
 			if (wasAdmitted) {
-				const closure = await this.options.assertRuntimeAbsent(plan.source, signal, legacyClosure);
+				const closure = await inspectClosure(plan.source, signal);
 				if (closure.receipt.basis === "operator_attested" && !legacyClosure) throw Error("Archive retry requires fresh legacy attestation");
 				await this.update(id, e => { e.lastInspection = { ...closure.receipt, ...(operationId ? { operationId } : {}) }; }, plan);
 			}

@@ -24,8 +24,16 @@ proof of closure. The registry enforces known durable blockers; the archive owne
 must additionally establish fresh runtime closure evidence before requesting admission.
 Exact recorded process exit is used where available. The operator approved a
 separate legacy path: explicit confirmation that the old Pi was closed, combined
-with fresh complete conflict screening. This is recorded as operator attestation,
-not verified exit; known conflicts or unreadable processes cannot be waived.
+with fresh conflict screening. This is recorded as operator attestation,
+not verified exit. Known conflicts cannot be waived. #144 adds an operator-approved
+archive-only exception for unreadable process environments: the preview must explicitly
+set both `legacyClosure=true` and `acceptIncompleteInspection=true`. It discloses
+counts and freezes an opaque digest of the observed unreadable PID set and boot ID;
+no raw process identities are exposed. Changed visibility gaps invalidate consent,
+including between validation and admission. Failed/malformed inspection still blocks.
+Initial and retry receipts record accepted uncertainty and their approved operation
+reference. Exact-exit, pending-work, stopping/deletion and ancestor-cleanup checks
+are unchanged; process names never grant an exemption.
 Missing operator membership is a blocker, not implicit permission to reinvite.
 Coordinator archival, filesystem deletion, implicit message cancellation,
 reactivation and membership restoration are outside this implementation.
