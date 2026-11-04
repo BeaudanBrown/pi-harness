@@ -1,3 +1,4 @@
+import { ConversationRepairReceiptSchema, RepairQueueHoldSchema, QueueResumptionReceiptSchema, type QueueResumptionReceipt, type ConversationRepairReceipt, type RepairQueueHold } from "./conversation-repair-contracts.js";
 import { RuntimeRepairReceiptSchema, type RuntimeRepairReceipt } from "./runtime-repair-contracts.js";
 import { ConversationTitleSchema, TitleRevisionSchema, parseConversationTitle } from "./title-contracts.js";
 import { createHash } from "node:crypto";
@@ -661,6 +662,9 @@ export interface QueueCancellationReceipt {
 	items: Array<{ kind: "input" | "control" | "projection"; id: string; priorState: string; digest: string }>;
 }
 const runtimeConversation = strictObject({
+	queueResumptions: Type.Optional(Type.Array(QueueResumptionReceiptSchema, { maxItems: 32 })),
+	conversationRepairs: Type.Optional(Type.Array(ConversationRepairReceiptSchema, { maxItems: 32 })),
+	repairQueueHolds: Type.Optional(Type.Array(RepairQueueHoldSchema, { maxItems: MAX_PENDING_INPUTS + MAX_PENDING_CONTROLS + MAX_PROJECTION_ENTRIES })),
 	runtimeRepairs: Type.Optional(Type.Array(RuntimeRepairReceiptSchema, { maxItems: 32 })),
 	launchHighWater: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
 	queueCancellations: Type.Optional(Type.Array(queueCancellationReceipt, { maxItems: 32 })),
@@ -786,6 +790,9 @@ export interface HostRuntimeState {
 	conversations: Array<{
 		conversationId: string;
 		archiveId?: string;
+		queueResumptions?: QueueResumptionReceipt[];
+		conversationRepairs?: ConversationRepairReceipt[];
+		repairQueueHolds?: RepairQueueHold[];
 		runtimeRepairs?: RuntimeRepairReceipt[];
 		launchHighWater?: number;
 		queueCancellations?: QueueCancellationReceipt[];
@@ -1286,6 +1293,26 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		}
 		const abandoned = new Set<string>();
 		const cancellationOperations = new Set<string>();
+		const resumptions = conversation.queueResumptions ?? [];
+		if (new Set(resumptions.map(r => r.operationId)).size !== resumptions.length || resumptions.some(r => new Set(r.items.map(i => `${i.kind}:${i.id}`)).size !== r.items.length))
+			throw new ManagedSessionContractError("invalid_state", "Invalid queue resumption audit");
+		for (const r of resumptions) assertTimestamp(r.at, "queue resumption");
+		const executions = conversation.conversationRepairs ?? [];
+		for (const r of executions) {
+			assertTimestamp(r.admittedAt, "repair admission"); assertTimestamp(r.updatedAt, "repair update");
+			try {
+				const plan = JSON.parse(r.planJson.join(""));
+				if (!plan || typeof plan !== "object" || Array.isArray(plan) || plan.source?.conversationId !== conversation.conversationId ||
+					plan.source?.generationId !== r.generationId || plan.source?.runtimeRepair !== r.runtimeRepair || plan.expiresAt !== r.expiresAt || r.expiresAt <= Date.parse(r.admittedAt)) throw Error();
+			}
+			catch { throw new ManagedSessionContractError("invalid_state", "Invalid frozen repair plan"); }
+		}
+		if (new Set(executions.map(r => r.operationId)).size !== executions.length || executions.some((r, index) =>
+			createHash("sha256").update(r.planJson.join("")).digest("hex") !== r.planDigest || index === executions.length - 1 && r.phase === "superseded" || index < executions.length - 1 && !["complete", "superseded"].includes(r.phase)))
+			throw new ManagedSessionContractError("invalid_state", "Invalid conversation repair receipt");
+		const holds = conversation.repairQueueHolds ?? [];
+		if (new Set(holds.map(h => `${h.kind}:${h.id}`)).size !== holds.length || holds.some(h => !executions.some(r => r.operationId === h.operationId)))
+			throw new ManagedSessionContractError("invalid_state", "Invalid repair queue hold");
 		const repairs = conversation.runtimeRepairs ?? [];
 		if (new Set(repairs.map(r => r.operationId)).size !== repairs.length || repairs.some((r, i) =>
 			(i < repairs.length - 1 && !["released", "superseded"].includes(r.phase)) ||

@@ -133,6 +133,14 @@ test("read model, tool and command use the same inspect contract; capability nee
 	assert.deepEqual(await model.read(request), await f.inspect());
 	const status = await model.read({ ...request, action: { operation: "host.status" } }) as { capabilities: string[] };
 	assert.ok(status.capabilities.includes("repair-inspection-v1"));
+	assert.ok(!status.capabilities.includes("conversation-repair-v1"));
+	assert.ok(!status.capabilities.includes("queue-resumption-v1"));
+	let queueReady = false;
+	const wired = new HostReadModel({ hostId: "host", registry: f.registry, repairInspection, repairExecution: true, queueResumption: () => queueReady, matrixReady: () => true });
+	const capabilities = async () => (await wired.read({ ...request, action: { operation: "host.status" } }) as { capabilities: string[] }).capabilities;
+	assert.ok((await capabilities()).includes("conversation-repair-v1"));
+	assert.ok(!(await capabilities()).includes("queue-resumption-v1"));
+	queueReady = true; assert.ok((await capabilities()).includes("queue-resumption-v1"));
 	const unavailable = new HostReadModel({ hostId: "host", registry: f.registry, matrixReady: () => true });
 	await assert.rejects(unavailable.read(request), { code: "upgrade_required" });
 	const result = await unavailable.read({ ...request, action: { operation: "host.status" } }) as { capabilities: string[] };

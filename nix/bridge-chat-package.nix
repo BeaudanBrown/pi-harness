@@ -9,6 +9,7 @@ in pkgs.runCommand "pi-bridge-chat" { nativeBuildInputs = [ pkgs.typescript ]; }
   mkdir -p source/managed-sessions/adapter
   cp ${../config/agent/extensions/managed-sessions/adapter/artifact-export.ts} source/managed-sessions/adapter/artifact-export.ts
   cp ${../config/agent/extensions/managed-sessions/contracts.ts} source/managed-sessions/contracts.ts
+  cp ${../config/agent/extensions/managed-sessions/conversation-repair-contracts.ts} source/managed-sessions/conversation-repair-contracts.ts
   cp ${../config/agent/extensions/managed-sessions/runtime-repair-contracts.ts} source/managed-sessions/runtime-repair-contracts.ts
   cp ${../config/agent/extensions/managed-sessions/title-contracts.ts} source/managed-sessions/title-contracts.ts
   cp ${../config/agent/extensions/managed-sessions/live-workspace-contracts.ts} source/managed-sessions/live-workspace-contracts.ts

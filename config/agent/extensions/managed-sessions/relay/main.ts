@@ -51,6 +51,8 @@ import { ManagedHostMutationOwner, isManagedHostPreview } from "./host-mutation-
 import { ConversationTitles } from "./conversation-titles.js";
 import { HostRuntimeObserver } from "./runtime-observer.js";
 import { HostReadModel } from "./host-read-model.js";
+import { ProjectionResumptionOwner } from "./projection-resumption.js";
+import { ConversationRepairOwner } from "./conversation-repair.js";
 import { ConversationRepairInspection } from "./conversation-repair-inspection.js";
 import { HostMatrixCommands } from "./host-matrix-commands.js";
 import { HostAccountClient } from "./host-account-client.js";
@@ -103,6 +105,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 	let archiveControls: ArchiveHostControls | undefined;
 	let localEnrollments: LocalEnrollmentReconciler | undefined;
 	let hostLifecycle: HostLifecycle | undefined;
+	let conversationRepairs: ConversationRepairOwner | undefined;
+	let projectionResumptions: ProjectionResumptionOwner | undefined;
 	let runtimeObserver: HostRuntimeObserver | undefined;
 	let titles: ConversationTitles | undefined;
 	let retirement: ConversationRetirement | undefined;
@@ -164,6 +168,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 		const recoveryAlerts: RecoveryAlerts = new RecoveryAlerts(resolve(stateDirectory, "recovery-alerts.json"), (alert) => eventProjector.projectRecoveryAlert(alert));
 		await recoveryAlerts.load();
 		const eventProjector = new RelayEventProjector(registry, matrix, recoveryAlerts, () => matrixHealthy ? "notify" : "silent");
+		projectionResumptions = new ProjectionResumptionOwner(registry, matrix);
 		await eventProjector.startNoticeOutbox(resolve(stateDirectory, "notice-outbox.json"),
 			(message) => process.stderr.write(`pi-managed-session-relay: ${redactManagedValue(message, environment)}\n`));
 		closeNotices = () => eventProjector.close();
@@ -193,7 +198,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 						conversationId: attachment.conversationId, role: "relay", type: "promotion.shutdown", payload: {} });
 				}
 				if (coordinatorRouter) await coordinatorRouter.attachmentReady(attachment.conversationId);
-				else for (const control of registry.pendingControls(attachment.conversationId).filter((item) =>
+				else for (const control of registry.dispatchableControls(attachment.conversationId).filter((item) =>
 					!registry.hasGenerationBoundary(attachment.conversationId) || item.name === "new" && item.argument === "--confirm")) {
 					await activityProjector?.beginOperationFeedback(attachment.conversationId, control.controlId);
 					server!.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, messageId: `relay-control-${randomUUID()}`,
@@ -487,13 +492,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				return matrixHealthy && age >= 0 && age < 120_000;
 			};
 			const accountSetup = (id: string) => account?.client.setupState(id) ?? "pending";
-			const repairInspection = new ConversationRepairInspection({ registry, matrixReady, accountSetup, membership: async roomId => {
+			const repairInspection = new ConversationRepairInspection({ registry, matrixReady, accountSetup, repairProgress: id => {
+				const receipt = registry.conversationRepairReceipt(id); return receipt ? { operationId: receipt.operationId, phase: receipt.phase, live: conversationRepairs?.isRunning(receipt.operationId) ?? false } : undefined;
+			}, membership: async roomId => {
 				const event = await matrix.operatorMembershipEvent(roomId, AbortSignal.timeout(10_000));
 				return ["join", "leave", "invite", "ban", "knock"].includes(event.membership)
 					? event.membership as "join" | "leave" | "invite" | "ban" | "knock" : "unknown";
 			} });
-			const reads = new HostReadModel({ hostId, registry, repairInspection, archives: archiveControls, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), savedSessionImport: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup, matrixReady });
-			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server, account, archives: archiveControls,
+			if (hostLifecycle && account) conversationRepairs = new ConversationRepairOwner({ registry, runtime: hostLifecycle.runtimeRepair, account });
+			const reads = new HostReadModel({ hostId, registry, repairExecution: Boolean(conversationRepairs), queueResumption: () => Boolean(hostLifecycle && coordinatorRouter && projectionResumptions), repairInspection, archives: archiveControls, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), savedSessionImport: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup, matrixReady });
+			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server, account, archives: archiveControls, repairs: conversationRepairs,
+				queueReady: () => Boolean(coordinatorRouter), resumeQueues: async id => { if (!coordinatorRouter) throw Error("Queue dispatcher unavailable"); await Promise.all([coordinatorRouter.resumeQueued(id), projectionResumptions!.kick()]); },
 				activeRun: async (id) => {
 					const witness = await hostApprovals!.controls.proofs.request(id);
 					if (!witness) throw new Error("Active target run observation is unavailable");
@@ -541,7 +550,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			process.stderr.write("pi-managed-session-relay: waiting for Matrix startup connectivity; local IPC remains available\n");
 		}, signal);
 		if (authenticatedUserId !== matrix.botUserId) throw new Error("Matrix whoami did not match PI_MATRIX_BOT_USER_ID");
-		matrixAuthenticated = true; retirement.kick();
+		matrixAuthenticated = true; retirement.kick(); projectionResumptions.start();
 		// Pending publications are reconciled in independent room workers, never on the boot/intake path.
 		if (coordinatorValues.every((value) => value?.trim())) {
 			coordinator = await retryMatrixStartup(() => bootstrapCoordinator(hostId, {
@@ -602,6 +611,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			localEnrollments.start();
 		}
 	} catch (error) {
+		await projectionResumptions?.close().catch(() => undefined);
+		await conversationRepairs?.close().catch(() => undefined);
 		await matrixHostCommands?.close().catch(() => undefined);
 		await account?.close().catch(() => undefined);
 		await controlServer?.close().catch(() => undefined);
@@ -628,6 +639,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			.then(() => hostLifecycle?.recoverTerminalPromotions())
 			.then(() => coordinatorRouter?.reconcileWake()).catch(async () => {
 			process.stderr.write("pi-managed-session-relay: restart reconciliation failed\n");
+			await projectionResumptions?.close().catch(() => undefined);
+			await conversationRepairs?.close().catch(() => undefined);
 			await matrixHostCommands?.close().catch(() => undefined);
 			await account?.close().catch(() => undefined);
 			await controlServer?.close().catch(() => undefined);
@@ -666,6 +679,8 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			hostLifecycle?.stopRuntimeUpdates();
 			await runtimeUpdate;
 			clearTimeout(reconciliationTimer);
+			await projectionResumptions?.close();
+			await conversationRepairs?.close();
 			await matrixHostCommands?.close();
 			await account?.close();
 			await hostApprovals?.close();

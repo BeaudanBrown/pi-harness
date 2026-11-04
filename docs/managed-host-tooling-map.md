@@ -37,12 +37,13 @@ Tests are under `tests/`; most names have the prefix `managed-session-`.
 | List/status/workspaces | `host-read-model`, `host-inventory-pages`, `runtime-observer` | `host-read-model`, `runtime-observer`, `host-cli` |
 | Create/open/resume/stop/fork/worktree | `host-lifecycle`, `exact-window-client`; fixed launcher operations | `exact-lifecycle`, `host-mutation-owner`, `live-hierarchy` |
 | Advisory repair inspection | `conversation-repair-inspection`, `host-read-model`; read-only membership adapter in `main` | `repair-inspection`, `host-read-model`, `live-workspace-contracts`, `host-cli` |
-| Internal original-room membership repair (#149; frontend pending #150) | `membership-repair`, `host-account-owner`, `host-account-client`, bridge `account-worker`/`account-store` | `membership-repair`, `host-account-client`, `bridge-chat-account` |
-| Internal runtime repair owner (#148; public orchestration pending #150) | `runtime-repair`, `runtime-repair-evidence`, registry hold/receipt writer; trusted adapters in `host-lifecycle` | `runtime-repair`, `exact-lifecycle`, `test_managed_legacy_observe.py` |
+| Original-room membership repair (#149), composed by #150 | `membership-repair`, `host-account-owner`, `host-account-client`, bridge `account-worker`/`account-store` | `membership-repair`, `host-account-client`, `bridge-chat-account` |
+| Runtime repair owner (#148), composed by #150 | `runtime-repair`, `runtime-repair-evidence`, registry hold/receipt writer; trusted adapters in `host-lifecycle` | `runtime-repair`, `exact-lifecycle`, `test_managed_legacy_observe.py` |
 | Legacy migration/recovery | `legacy-window-migration`, `manual-legacy-recovery`; fixed `scripts/managed-legacy-observe.py` | `exact-lifecycle`, `legacy-observe`, `test_managed_legacy_observe.py` |
 | Permission changes | `operator-admin`, lifecycle's narrow approval methods | `operator-admin`, `migration-space-admin` |
 | Retirement | `conversation-retirement`, `retirement-store`, `retirement-cleanup`, `retirement-ancestor-owner` | `retirement-registry`, `host-mutation-owner` |
 | Live hierarchy/reconciliation | `live-hierarchy`, `project-reconciliation`, `live-space-cleanup` | `live-hierarchy`, `reconciliation` |
+| Approved unified repair and separate queue resumption (#150) | `conversation-repair`, shared preview/approval/mutation owners, registry preservation/cutover and audit | `conversation-repair`, `host-cli`, `live-workspace-contracts`, affected routing/projector suites |
 | Exact queue abandonment | `queue-cancellation`, registry serialized admission, shared mutation owner; producer activity gates | `queue-cancellation`, `adapter`, `live-workspace-contracts`, `host-cli` |
 | Readable archival | `archive-host-controls`, `archive-runtime`, `archive-hierarchy`, `archive-store` | `archive-hierarchy`, `archive-registry`, `host-preview-store` |
 | Account membership/notification setup | `host-account-owner`, `host-account-client`; `config/agent/extensions/bridge-chat/account-{proof,worker,store}.ts` | `host-account-client`, `live-hierarchy`, `bridge-chat-account` |
@@ -87,8 +88,11 @@ repair intents or change existing lifecycle behavior. Its read-only module owns
 classification and actionable findings for both projects and coordinator;
 `main` supplies a bounded membership GET. An unavailable/failed membership read
 remains unknown. See [repair scope, acceptance and crash matrices](managed-conversation-repair.md)
-for later runtime, account and orchestration ownership. Do not advertise a repair
-apply capability or use this advisory result as approval/process evidence.
+for runtime, account and orchestration ownership. #150 wires `conversation-repair-v1`
+only with the execution owners present; its preview/apply preserves queued work
+without queue-management choices. Optional exact resumption has its own approval.
+See [orchestration](managed-repair-orchestration.md). Never use advisory inspection
+as approval/process evidence, and never advertise execution from inspection alone.
 
 ## Authority and persistence
 

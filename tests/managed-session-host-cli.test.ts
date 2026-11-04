@@ -24,6 +24,8 @@ const commands = [
 	`worktree remove preview ${workspace} --merge-target main`, `worktree remove apply ${apply}`,
 	`worktree conversation cleanup preview ${cid}`, `worktree conversation cleanup apply ${apply}`, `worktree branch delete ${apply}`, `worktree branch preview ${workspace} --branch feature/test --merge-target main`,
 	`conversation queue cancel preview ${cid}`, `conversation queue cancel apply ${apply}`,
+	`conversation queue resume preview ${cid}`, `conversation queue resume apply ${apply}`,
+	`conversation repair preview ${cid}`, `conversation repair apply ${apply} --operator-closed --accept-incomplete-inspection`,
 	"conversation archive list", `conversation archive preview --conversation-ids ${cid} --legacy-closure`, `conversation archive apply ${apply}`,
 	`conversation archive cleanup preview --conversation-ids ${cid}`, `conversation archive cleanup apply ${apply}`,
 	"conversation list", `conversation status ${cid}`, `conversation repair inspect ${cid}`, `conversation create ${workspace} ${creation}`,

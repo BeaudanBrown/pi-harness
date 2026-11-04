@@ -40,6 +40,7 @@ export class TranscriptProjector {
 			...(payload.disposition === undefined ? {} : { disposition: payload.disposition }),
 			contentHash: transcriptContentHash(payload.kind, payload.body),
 		}, payload.body, payload.kind);
+		if (this.registry.queueItemHeld(manifest.conversationId, "projection", payload.entryId)) throw new RelayRegistryError("invalid_state", "Repair preserved this output; a separate queue decision is required");
 		for (let index = 0; index < projection.chunks.length; index += 1) {
 			const chunkState = projection.chunks[index]!;
 			if (chunkState.status === "sent") continue;

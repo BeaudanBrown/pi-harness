@@ -13,10 +13,11 @@ import type { HostAccountOwner, MembershipRestore } from "./host-account-owner.j
 import { HostControlError } from "./host-control-error.js";
 import { HostPreviewStore, staleHostPreview, freezeJsonChunks } from "./host-preview-store.js";
 import { QUEUE_CANCELLATION_WARNING, type QueueCancellationSnapshot } from "./queue-cancellation.js";
+import type { ConversationRepairOwner, ConversationRepairPlan } from "./conversation-repair.js";
 import type { ArchiveHostControls, ArchiveControlSnapshot } from "./archive-host-controls.js";
 
 const detached = (value: unknown): FrozenJson => JSON.parse(JSON.stringify(value)) as FrozenJson;
-type PreviewAction = Extract<HostReadAction, { operation: "conversation.queue.cancel.preview" | "conversation.archive.preview" | "conversation.archive.cleanup.preview" | "conversation.admin.preview" | "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
+type PreviewAction = Extract<HostReadAction, { operation: "conversation.repair.preview" | "conversation.queue.resume.preview" | "conversation.queue.cancel.preview" | "conversation.archive.preview" | "conversation.archive.cleanup.preview" | "conversation.admin.preview" | "conversation.recover.preview" | "conversation.delete.preview" | "worktree.branch.preview" | "worktree.remove.preview" | "worktree.conversation.cleanup.preview" | "space.reconcile.preview" | "space.cleanup.preview" }>;
 type PreviewResult = HostResult<"conversation.delete.preview">;
 type Removal = Awaited<ReturnType<HostLifecycle["removalApprovalPreview"]>>;
 interface Preview {
@@ -29,6 +30,8 @@ interface Preview {
 	adminJson?: string[];
 	archiveJson?: string[];
 	queueCancellation?: QueueCancellationSnapshot;
+	queueResumption?: QueueCancellationSnapshot;
+	repairJson?: string[];
 	warnings?: string[];
 }
 function adminSnapshot(preview: Preview): Awaited<ReturnType<HostLifecycle["adminApprovalPreview"]>> | undefined {
@@ -45,6 +48,9 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		registry: RelayRegistry; lifecycle: HostLifecycle; retirement: ConversationRetirement; server: Pick<ManagedSessionIpcServer, "attachment">;
 		account?: Pick<HostAccountOwner, "freezeMembership" | "restoreMembership">;
 		archives?: ArchiveHostControls;
+		repairs?: ConversationRepairOwner;
+		resumeQueues?: (conversationId: string) => Promise<void>;
+		queueReady?: () => boolean;
 		activeRun?: (conversationId: string) => Promise<{ runId: string } | undefined>; now?: () => number;
 	}) { this.now = options.now ?? Date.now; this.previews = new HostPreviewStore(options.registry.hostId, this.now); }
 
@@ -77,6 +83,20 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (source.operation === "worktree.conversation.cleanup.preview" && source.conversationId === coordinatorId) {
 			conversations = [coordinatorId]; preview.targets = [{ kind: "conversation", conversationId: coordinatorId }];
 			preview.blockers.push("The protected coordinator cannot be retired or included in destructive cleanup");
+		} else if (source.operation === "conversation.repair.preview") {
+			if (!this.options.repairs) throw new HostControlError("upgrade_required", "Unified repair is not wired on this host");
+			const plan = await this.options.repairs.preview(source.conversationId); preview.expiresAt = Math.min(preview.expiresAt, plan.expiresAt);
+			preview.repairJson = freezeJsonChunks(plan); preview.blockers = plan.blockers; preview.warnings = plan.warnings;
+			preview.targets = [{ kind: "conversation", conversationId: source.conversationId }]; conversations = [];
+		} else if (source.operation === "conversation.queue.resume.preview") {
+			const snapshot = preview.queueResumption = this.options.registry.queueResumptionSnapshot(source.conversationId);
+			preview.targets = [{ kind: "conversation", conversationId: source.conversationId }]; preview.blockers = snapshot.blockers;
+			if (!this.options.resumeQueues || this.options.queueReady?.() === false) preview.blockers.push("Queue dispatcher is not ready; wait for managed routing before resumption.");
+			preview.warnings = ["Separately approve resumption of only the frozen preserved items, including ordinary wake if needed. Prior effects may already have occurred. This grants future attempts, not proof of execution/delivery. Other preserved work remains held.", `Frozen source SHA256: ${snapshot.sourceDigest}. ${snapshot.items.length} selected items.`];
+			if (snapshot.items.some(i => i.kind === "projection" && this.options.registry.projectionByEntryId(source.conversationId, i.id)?.chunks.some(c => c.status !== "sent" && (c.body === undefined || c.formattedBody === undefined))))
+				preview.warnings.push("Some legacy output lacks durable payload bytes: resumption permits the original adapter/producer to reoffer it, but the outbox cannot reconstruct it. Delivery remains pending until that producer is available.");
+			for (let i = 0; i < snapshot.items.length; i += 4) preview.warnings.push(snapshot.items.slice(i, i + 4).map(item => `${item.kind} ${item.id} (${item.priorState})`).join("; "));
+			conversations = [];
 		} else if (source.operation === "conversation.queue.cancel.preview") {
 			const snapshot = preview.queueCancellation = this.options.registry.queueCancellationSnapshot(source.conversationId);
 			preview.targets = [{ kind: "conversation", conversationId: source.conversationId }];
@@ -102,6 +122,10 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 				"Preserve other members, permissions and history. This does not remove anyone or grant guests admin access.",
 				"Matrix has no conditional power-state writes. Avoid concurrent permission edits: a change between inspection and write could be overwritten. Uncertain writes are never automatically retried.",
 			];
+		} else if (source.operation === "conversation.recover.preview" && this.options.repairs && !this.options.registry.retirement(source.conversationId)) {
+			const plan = await this.options.repairs.preview(source.conversationId); preview.expiresAt = Math.min(preview.expiresAt, plan.expiresAt);
+			preview.repairJson = freezeJsonChunks(plan); preview.blockers = plan.blockers; preview.warnings = plan.warnings;
+			preview.targets = [{ kind: "conversation", conversationId: source.conversationId }]; conversations = [];
 		} else if (source.operation === "conversation.recover.preview") {
 			preview.recovery = await this.options.lifecycle.manualRecoveryPreview(source.conversationId);
 			conversations = [source.conversationId];
@@ -170,13 +194,15 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (preview.source.operation === "conversation.archive.preview" || preview.source.operation === "conversation.archive.cleanup.preview") {
 			if (!preview.archiveJson || !this.options.archives || !await this.options.archives.valid(JSON.parse(preview.archiveJson.join("")) as ArchiveControlSnapshot)) return false;
 		}
+		if (preview.repairJson && (!this.options.repairs || !await this.options.repairs.valid(JSON.parse(preview.repairJson.join("")) as ConversationRepairPlan))) return false;
+		if (preview.queueResumption && (!this.options.resumeQueues || this.options.queueReady?.() === false || !isDeepStrictEqual(preview.queueResumption, this.options.registry.queueResumptionSnapshot(preview.queueResumption.conversationId)))) return false;
 		if (preview.source.operation === "conversation.queue.cancel.preview" && (!preview.queueCancellation ||
 			!isDeepStrictEqual(preview.queueCancellation, this.options.registry.queueCancellationSnapshot(preview.source.conversationId)))) return false;
 		if (preview.source.operation === "conversation.admin.preview") {
 			const admins = adminSnapshot(preview);
 			if (!admins || !isDeepStrictEqual(admins, await this.options.lifecycle.adminApprovalPreview(admins.selection))) return false;
 		}
-		if (preview.source.operation === "conversation.recover.preview" && (!preview.recovery || !isDeepStrictEqual(preview.recovery, await this.options.lifecycle.manualRecoveryPreview(preview.source.conversationId)))) return false;
+		if (preview.source.operation === "conversation.recover.preview" && !preview.repairJson && (!preview.recovery || !isDeepStrictEqual(preview.recovery, await this.options.lifecycle.manualRecoveryPreview(preview.source.conversationId)))) return false;
 		if (preview.branch && (preview.source.operation !== "worktree.branch.preview" || !isDeepStrictEqual(preview.branch, await this.options.lifecycle.branchApprovalPreview(preview.source)))) return false;
 		if (preview.retirements && !isDeepStrictEqual(preview.retirements, preview.retirements.map((plan) => this.options.retirement.prepare(plan.conversationId)))) return false;
 		if (preview.source.operation === "space.reconcile.preview" || preview.source.operation === "space.cleanup.preview") {
@@ -185,7 +211,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		if (preview.removal && !isDeepStrictEqual(preview.removal.intent, await this.options.lifecycle.removalApprovalSnapshot(preview.removal.intent.removalKey))) return false;
 		// Admin changes and Space reconciliation do not signal or interrupt attached Pi runs.
 		// Reconciliation's frozen hierarchy/ownership snapshot was revalidated above.
-		if (!branch && !preview.adminJson && !preview.archiveJson && !preview.queueCancellation && preview.source.operation !== "space.reconcile.preview") {
+		if (!branch && !preview.adminJson && !preview.archiveJson && !preview.queueCancellation && !preview.queueResumption && !preview.repairJson && preview.source.operation !== "space.reconcile.preview") {
 			const ids = preview.removal?.activeConversations ?? preview.targets.filter((target) => target.kind === "conversation").map((target) => target.conversationId);
 			if (!isDeepStrictEqual(preview.activeRuns, await this.activeRuns(ids))) return false;
 		}
@@ -204,11 +230,13 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 		}
 		switch (action.operation) {
 			case "coordinator.membership.restore": {
+				if (this.options.repairs) throw new HostControlError("upgrade_required", "Use conversation.repair.preview/apply for the protected coordinator; closure consent may also be required");
 				if (!this.options.account) throw new HostControlError("upgrade_required", "Account membership owner is unavailable");
 				const restore = await this.options.account.freezeMembership();
 				return { effects: [action], targets: [{ kind: "conversation", conversationId: restore.conversationId }], preconditions: { restore: detached(restore) } };
 			}
 			case "conversation.migrate": {
+				if (this.options.repairs) throw new HostControlError("upgrade_required", "Use conversation.repair.preview/apply; standalone migration is superseded on this host");
 				if (this.options.registry.registeredConversation(action.conversationId)?.kind !== "project") throw new HostControlError("forbidden", "Only project conversations support legacy migration");
 				if ((await this.activeRuns([action.conversationId])).length) throw new HostControlError("busy", "Finish the active run before preparing legacy migration");
 				return { effects: [action], preconditions: { target: this.target(action.conversationId) } };
@@ -244,7 +272,15 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			const preview = frozen.preconditions.preview as unknown as Preview;
 			if (!await this.validPreview(preview, action.operation === "worktree.branch.delete")) throw stale();
 			let pending = false;
-			if (action.operation === "conversation.queue.cancel.apply") {
+			if (action.operation === "conversation.repair.apply" || action.operation === "conversation.recover.apply" && preview.repairJson) {
+				if (!preview.repairJson || !this.options.repairs) throw stale();
+				await this.options.repairs.apply(JSON.parse(preview.repairJson.join("")) as ConversationRepairPlan, operationId, action);
+				pending = true;
+			} else if (action.operation === "conversation.queue.resume.apply") {
+				if (!preview.queueResumption || !this.options.resumeQueues || this.options.queueReady?.() === false) throw stale();
+				await this.options.registry.resumeQueuedWork(preview.queueResumption, operationId);
+				void this.options.resumeQueues(preview.queueResumption.conversationId).catch(() => {});
+			} else if (action.operation === "conversation.queue.cancel.apply") {
 				if (!preview.queueCancellation) throw stale();
 				await this.options.registry.cancelQueuedWork(preview.queueCancellation, operationId);
 			} else if (action.operation === "conversation.archive.apply" || action.operation === "conversation.archive.cleanup.apply") {

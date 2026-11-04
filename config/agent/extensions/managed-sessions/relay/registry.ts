@@ -96,7 +96,7 @@ export class RelayRegistry {
 
 	withQueueEffect<T>(conversationId: string, work: () => Promise<T>): Promise<T> {
 		this.assertAuthorityAvailable();
-		this.assertRuntimeNotHeld(conversationId);
+		if (this.runtimeRepairHeld(conversationId)) throw new RelayRegistryError("invalid_state", "Runtime repair holds execution");
 		return this.queueActivity.effect(conversationId, work);
 	}
 	queueCancellationSnapshot(conversationId: string): QueueCancellationSnapshot {
@@ -105,6 +105,60 @@ export class RelayRegistry {
 		if (!manifest) throw new RelayRegistryError("not_found", "Conversation is unavailable");
 		return queueCancellationSnapshot(manifest, this.runtimeConversation(conversationId),
 			this.queueActivity.busy(conversationId) || this.liveConnections.has(conversationId) || this.isRefreshing(conversationId));
+	}
+	/** Only separately resumed, still-pending durable output. Repair alone never authorizes this outbox. */
+	resumedProjectionTargets(): Array<{ conversationId: string; entryId: string }> {
+		this.assertAuthorityAvailable();
+		const result: Array<{ conversationId: string; entryId: string }> = [];
+		for (const row of this.state.conversations) {
+			if (this.retirements.has(row.conversationId) || this.archives.has(row.conversationId) || this.conversationRepairHeld(row.conversationId) || this.runtimeRepairHeld(row.conversationId)) continue;
+			const roomId = this.manifestByConversationId(row.conversationId)?.roomId;
+			const selected = new Set(row.queueResumptions?.filter(r => r.roomId === roomId).flatMap(r => r.items.filter(i => i.kind === "projection").map(i => i.id)));
+			for (const p of row.projection) if (selected.has(p.entryId) && p.kind !== "checkpoint" && !["projected", "cancelled"].includes(p.status) &&
+				!this.queueItemHeld(row.conversationId, "projection", p.entryId) && p.chunks.every(c => c.status === "sent" || c.body !== undefined && c.formattedBody !== undefined)) {
+				result.push({ conversationId: row.conversationId, entryId: p.entryId }); if (result.length === 32) return result;
+			}
+		}
+		return result;
+	}
+	queueResumptionSnapshot(conversationId: string): QueueCancellationSnapshot {
+		const row = this.runtimeConversation(conversationId); const manifest = this.registeredConversation(conversationId)!;
+		const all = queueCancellationSnapshot(manifest, row, false);
+		const selected = new Set(row.repairQueueHolds?.map(h => `${h.kind}:${h.id}`));
+		const items = all.items.filter(i => selected.has(`${i.kind}:${i.id}`)).slice(0, 32);
+		const blockers = this.conversationRepairObligations(conversationId, false);
+		if (this.conversationRepairHeld(conversationId) || this.runtimeRepairHeld(conversationId)) blockers.push("Finish or replan the admitted repair before resuming preserved work.");
+		if (row.state === "starting") blockers.push("Wait for the in-flight launch to settle before queue resumption.");
+		if (!items.length) blockers.push("No preserved pending items to resume.");
+		if ((row.queueResumptions?.length ?? 0) >= 32) blockers.push("Queue resumption audit capacity is exhausted; no implicit pruning.");
+		return { conversationId, sourceDigest: all.sourceDigest, items, blockers };
+	}
+	async resumeQueuedWork(snapshot: QueueCancellationSnapshot, operationId: string): Promise<void> {
+		const frozen = structuredClone(snapshot);
+		await this.queueActivity.exclusive(frozen.conversationId, () => this.mutate(async () => {
+			const current = this.queueResumptionSnapshot(frozen.conversationId);
+			if (current.blockers.length || !isDeepStrictEqual(current, frozen)) throw staleHostPreview();
+			const selected = new Set(frozen.items.map(i => `${i.kind}:${i.id}`));
+			const row = this.runtimeConversation(frozen.conversationId);
+			row.repairQueueHolds = row.repairQueueHolds?.filter(h => !selected.has(`${h.kind}:${h.id}`));
+			(row.queueResumptions ??= []).push({ operationId, roomId: this.boundConversation(frozen.conversationId).roomId, at: new Date().toISOString(), sourceDigest: frozen.sourceDigest, items: structuredClone(frozen.items) });
+			parseHostRuntimeState(this.state); this.queueCommitPending = true;
+		}));
+	}
+	queueItemHeld(conversationId: string, kind: "input" | "control" | "projection", id: string): boolean {
+		return (kind !== "projection" && this.conversationRepairHeld(conversationId)) || (this.runtimeConversation(conversationId).repairQueueHolds?.some(h => h.kind === kind && h.id === id) ?? false);
+	}
+	dispatchableInputs(conversationId: string): RuntimeConversation["pendingInputs"] {
+		if (this.conversationRepairHeld(conversationId)) return [];
+		const row = this.runtimeConversation(conversationId);
+		const held = new Set(row.repairQueueHolds?.filter(h => h.kind === "input").map(h => h.id));
+		return structuredClone(row.pendingInputs.filter(input => !held.has(input.deliveryId)));
+	}
+	dispatchableControls(conversationId: string): RuntimeConversation["pendingControls"] {
+		if (this.conversationRepairHeld(conversationId)) return [];
+		const row = this.runtimeConversation(conversationId);
+		const held = new Set(row.repairQueueHolds?.filter(h => h.kind === "control").map(h => h.id));
+		return structuredClone(row.pendingControls.filter(control => !held.has(control.controlId)));
 	}
 	queueItemCancelled(conversationId: string, kind: "input" | "control" | "projection", id: string): boolean {
 		return wasQueueCancelled(this.runtimeConversation(conversationId), kind, id);
@@ -125,8 +179,75 @@ export class RelayRegistry {
 		const receipt = this.runtimeConversation(conversationId).runtimeRepairs?.at(-1);
 		return Boolean(receipt && receipt.phase !== "released");
 	}
+	conversationRepairObligations(conversationId: string, admission = true): string[] {
+		const row = this.runtimeConversation(conversationId); const result: string[] = [];
+		if (this.queueActivity.busy(conversationId)) result.push("A producer or launcher is in flight. Wait for it to settle, then request a fresh repair preview.");
+		if (this.isRefreshing(conversationId)) result.push("Finish the pending adapter refresh before repair.");
+		if (row.generationTransition || row.treeTransition || row.promotion) result.push("Resolve the pending generation, tree or promotion transition using its existing recovery path; repair will not discard it.");
+		if (row.publishingControlPoll || row.activeControlPoll || row.publishingCheckpointPoll || row.activeCheckpointPoll || row.closingCheckpointPolls.length) result.push("Resolve or close the existing control/checkpoint polls before repair.");
+		if (row.artifactExports.some(a => a.state !== "sent" && !a.failure)) result.push("Resolve the pending artifact delivery before repair; delivery is not assumed successful or abandoned.");
+		if (row.projection.some(p => p.kind === "checkpoint" && !["projected", "cancelled"].includes(p.status))) result.push("Resolve the pending checkpoint publication before repair.");
+		if (admission && (row.conversationRepairs?.length ?? 0) >= 32) result.push("Repair audit capacity is exhausted; explicit operator maintenance is required. No authority is implicitly pruned.");
+		return result;
+	}
+	conversationRepairSource(conversationId: string) {
+		this.assertNotRetired(conversationId);
+		const manifest = this.registeredConversation(conversationId);
+		if (!manifest) throw new RelayRegistryError("not_found", "Conversation is unavailable");
+		const row = this.runtimeConversation(conversationId); const facts = this.repairRuntimeFacts(conversationId)!;
+		const attached = Boolean(row.attachment || this.liveConnections.has(conversationId));
+		return { conversationId, generationId: this.activeGeneration(manifest).generationId,
+			sourceDigest: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
+			runtimeRepair: !attached && Boolean(facts.legacyWindow || facts.unobservedLaunch || row.state === "starting" || row.runtimeRepairs?.at(-1)?.phase === "held") };
+	}
+	conversationRepairReceipt(conversationId: string) {
+		return structuredClone(this.runtimeConversation(conversationId).conversationRepairs?.at(-1));
+	}
+	private preserveRepairQueues(row: RuntimeConversation, operationId: string): void {
+		row.repairQueueHolds = [
+			...row.pendingInputs.filter(i => !["completed", "cancelled"].includes(i.status)).map(i => ({ kind: "input" as const, id: i.deliveryId, operationId })),
+			...row.pendingControls.map(i => ({ kind: "control" as const, id: i.controlId, operationId })),
+			...row.projection.filter(i => !["projected", "cancelled"].includes(i.status)).map(i => ({ kind: "projection" as const, id: i.entryId, operationId })),
+		];
+	}
+	async admitConversationRepair(source: ReturnType<RelayRegistry["conversationRepairSource"]>, receipt: import("../conversation-repair-contracts.js").ConversationRepairReceipt): Promise<void> {
+		await this.queueActivity.exclusive(source.conversationId, () => this.mutate(async () => {
+			const row = this.runtimeConversation(source.conversationId);
+			if (receipt.expiresAt <= Date.now() || !isDeepStrictEqual(source, this.conversationRepairSource(source.conversationId)) || this.repairRuntimeFacts(source.conversationId)!.lifecycleObligations ||
+				(row.conversationRepairs?.length ?? 0) >= 32 || receipt.phase !== "held" || receipt.generationId !== source.generationId || receipt.runtimeRepair !== source.runtimeRepair) throw staleHostPreview();
+			const prior = row.conversationRepairs?.at(-1);
+			if (prior && prior.phase !== "complete") { prior.phase = "superseded"; prior.updatedAt = receipt.admittedAt; }
+			(row.conversationRepairs ??= []).push(structuredClone(receipt));
+			this.preserveRepairQueues(row, receipt.operationId);
+			parseHostRuntimeState(this.state); this.queueCommitPending = true;
+		}));
+	}
+	async advanceConversationRepair(conversationId: string, operationId: string, phase: "account_pending" | "runtime_pending" | "complete"): Promise<void> {
+		await this.queueActivity.exclusive(conversationId, () => this.mutate(async () => {
+			const row = this.runtimeConversation(conversationId); const receipt = row.conversationRepairs?.at(-1);
+			if (!receipt || receipt.operationId !== operationId || receipt.generationId !== this.conversationRepairSource(conversationId).generationId || (receipt.phase === "complete" || receipt.phase === "superseded")) throw staleHostPreview();
+			const rank = { held: 0, account_pending: 1, runtime_pending: 2, complete: 3 };
+			if (rank[phase] !== rank[receipt.phase] && rank[phase] !== rank[receipt.phase] + 1) throw staleHostPreview();
+			if (phase === "complete") {
+				if (this.repairRuntimeFacts(conversationId)!.lifecycleObligations) throw new RelayRegistryError("invalid_state", "Resolve pending polls, artifacts and lifecycle transitions before completing repair");
+				const runtime = row.runtimeRepairs?.at(-1);
+				if (receipt.runtimeRepair && (!runtime || runtime.operationId !== operationId || runtime.phase !== "reconciled")) throw staleHostPreview();
+				if (runtime && runtime.phase !== "released") {
+					if (runtime.phase !== "reconciled") throw staleHostPreview();
+					runtime.phase = "released"; runtime.releasedAt = new Date().toISOString();
+				}
+				this.preserveRepairQueues(row, operationId);
+			}
+			receipt.phase = phase; receipt.updatedAt = new Date().toISOString();
+			parseHostRuntimeState(this.state); this.queueCommitPending = true;
+		}));
+	}
+	conversationRepairHeld(conversationId: string): boolean {
+		const phase = this.runtimeConversation(conversationId).conversationRepairs?.at(-1)?.phase;
+		return phase !== undefined && phase !== "complete" && phase !== "superseded";
+	}
 	assertRuntimeNotHeld(conversationId: string): void {
-		if (this.runtimeRepairHeld(conversationId)) throw new RelayRegistryError("invalid_state", "Runtime repair holds this conversation; inspect and resolve its approved plan before further activity");
+		if (this.conversationRepairHeld(conversationId) || this.runtimeRepairHeld(conversationId)) throw new RelayRegistryError("invalid_state", "Runtime repair holds this conversation; inspect and resolve its approved plan before further activity");
 	}
 	heldRuntimeRepairOperation(conversationId: string): string | undefined {
 		const last = this.runtimeConversation(conversationId).runtimeRepairs?.at(-1);
@@ -149,6 +270,7 @@ export class RelayRegistry {
 	async admitRuntimeRepair(target: ReturnType<RelayRegistry["runtimeRepairTarget"]>, receipt: import("../runtime-repair-contracts.js").RuntimeRepairReceipt, supersedesOperationId?: string): Promise<void> {
 		await this.queueActivity.exclusive(target.conversationId, () => this.mutate(async () => {
 			const row = this.runtimeConversation(target.conversationId);
+			if (this.conversationRepairHeld(target.conversationId) && row.conversationRepairs?.at(-1)?.operationId !== receipt.operationId) throw staleHostPreview();
 			const prior = row.runtimeRepairs?.find(r => r.operationId === receipt.operationId);
 			if (prior) {
 				if (!isDeepStrictEqual(prior, receipt)) throw staleHostPreview();
@@ -165,6 +287,7 @@ export class RelayRegistry {
 		await this.queueActivity.exclusive(target.conversationId, () => this.mutate(async () => {
 			const row = this.runtimeConversation(target.conversationId);
 			const receipt = row.runtimeRepairs?.at(-1);
+			if (this.conversationRepairHeld(target.conversationId) && row.conversationRepairs?.at(-1)?.operationId !== operationId) throw staleHostPreview();
 			if (!receipt || receipt.operationId !== operationId || receipt.sourceDigest !== target.sourceDigest || receipt.evidenceDigest !== evidenceDigest || receipt.phase !== "held" ||
 				!isDeepStrictEqual(target, this.runtimeRepairTarget(target.conversationId))) throw staleHostPreview();
 			this.clearRuntimeObservation(row);
@@ -288,10 +411,10 @@ export class RelayRegistry {
 			const inserted = this.addPendingControl(conversation, control);
 			if (inserted && control.name === "new" && control.argument === "--confirm") {
 				conversation.pendingControls.find((item) => item.controlId === control.controlId)!.cancelDeliveryIds =
-					conversation.pendingInputs.filter((item) => item.status !== "completed" && item.status !== "cancelled").map((item) => item.deliveryId);
+					conversation.pendingInputs.filter((item) => item.status !== "completed" && item.status !== "cancelled" && !this.queueItemHeld(conversationId, "input", item.deliveryId)).map((item) => item.deliveryId);
 			}
 			if (inserted && control.name === "stop") {
-				for (const input of conversation.pendingInputs) if (input.status !== "completed") input.status = "cancelled";
+				for (const input of conversation.pendingInputs) if (input.status !== "completed" && !this.queueItemHeld(conversationId, "input", input.deliveryId)) input.status = "cancelled";
 			}
 			if (inserted && conversation.publishingControlPoll?.scope === control.name) {
 				const supersededId = conversation.publishingControlPoll.sourceControl.controlId;
@@ -309,6 +432,7 @@ export class RelayRegistry {
 
 	async beginControlPollPublication(conversationId: string, intent: NonNullable<RuntimeConversation["publishingControlPoll"]>): Promise<"publishing" | "active"> {
 		return this.mutate(async () => {
+			if (this.queueItemHeld(conversationId, "control", intent.sourceControl.controlId)) throw new RelayRegistryError("invalid_state", "Repair preserved this control");
 			const conversation = this.runtimeConversation(conversationId);
 			const source = conversation.pendingControls.find((control) => control.controlId === intent.sourceControl.controlId);
 			if (!source || JSON.stringify(source) !== JSON.stringify(intent.sourceControl) || source.name !== intent.scope) {
@@ -394,6 +518,7 @@ export class RelayRegistry {
 
 	async beginCheckpointPollPublication(conversationId: string, intent: NonNullable<RuntimeConversation["publishingCheckpointPoll"]>): Promise<"publishing" | "active"> {
 		return this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			const active = conversation.activeCheckpointPoll;
 			if (active?.checkpointId === intent.checkpointId) {
@@ -709,7 +834,7 @@ export class RelayRegistry {
 
 	hasGenerationBoundary(conversationId: string): boolean {
 		const conversation = this.runtimeConversation(conversationId);
-		return conversation.generationTransition != null || conversation.pendingControls.some((control) => control.name === "new" && control.argument === "--confirm");
+		return conversation.generationTransition != null || this.dispatchableControls(conversationId).some((control) => control.name === "new" && control.argument === "--confirm");
 	}
 
 	pendingTreeOperation(conversationId: string): string | undefined { return this.runtimeConversation(conversationId).treeTransition?.operationId; }
@@ -723,6 +848,7 @@ export class RelayRegistry {
 	/** In-place branch navigation fences delivery, not process/generation ownership. */
 	async prepareTreeChange(conversationId: string, operationId: string): Promise<void> {
 		await this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const row = this.runtimeConversation(conversationId); const manifest = this.manifests.get(conversationId);
 			if (!manifest || !this.isActiveGenerationAttached(conversationId)) throw new RelayRegistryError("invalid_state", "Tree source is not attached");
 			if (row.treeTransition) {
@@ -765,6 +891,7 @@ export class RelayRegistry {
 
 	async beginGenerationTransition(conversationId: string, sourceControlId: string, metadata: { model?: string; thinking?: string }): Promise<NonNullable<RuntimeConversation["generationTransition"]>> {
 		return this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			const manifest = this.manifests.get(conversationId);
 			if (manifest && !hasMatrixBinding(manifest)) throw new RelayRegistryError("matrix_unavailable", "Matrix binding is pending");
@@ -779,7 +906,7 @@ export class RelayRegistry {
 				fromGenerationId: active.generationId, toGenerationId: deriveGenerationId(conversationId, ordinal), ordinal, requestedAt: new Date().toISOString(), ...metadata };
 			const cutoff = conversation.pendingControls.find((control) => control.controlId === sourceControlId)?.cancelDeliveryIds;
 			for (const input of conversation.pendingInputs) {
-				if ((cutoff === undefined || cutoff.includes(input.deliveryId)) && input.status !== "completed") input.status = "cancelled";
+				if ((cutoff === undefined || cutoff.includes(input.deliveryId)) && input.status !== "completed" && !this.queueItemHeld(conversationId, "input", input.deliveryId)) input.status = "cancelled";
 			}
 			conversation.generationTransition = transition;
 			return structuredClone(transition);
@@ -857,7 +984,7 @@ export class RelayRegistry {
 	async cancelPendingInputsExcept(conversationId: string, preservedDeliveryId: string): Promise<void> {
 		await this.mutate(async () => {
 			for (const input of this.runtimeConversation(conversationId).pendingInputs) {
-				if (input.deliveryId !== preservedDeliveryId && input.status !== "completed" && input.status !== "cancelled") input.status = "cancelled";
+				if (input.deliveryId !== preservedDeliveryId && input.status !== "completed" && input.status !== "cancelled" && !this.queueItemHeld(conversationId, "input", input.deliveryId)) input.status = "cancelled";
 			}
 		});
 	}
@@ -865,7 +992,7 @@ export class RelayRegistry {
 	async cancelPendingInputs(conversationId: string): Promise<void> {
 		await this.mutate(async () => {
 			for (const input of this.runtimeConversation(conversationId).pendingInputs) {
-				if (input.status !== "completed" && input.status !== "cancelled") input.status = "cancelled";
+				if (input.status !== "completed" && input.status !== "cancelled" && !this.queueItemHeld(conversationId, "input", input.deliveryId)) input.status = "cancelled";
 			}
 		});
 	}
@@ -1264,6 +1391,7 @@ export class RelayRegistry {
 
 	async recordArtifactExport(conversationId: string, artifact: RuntimeConversation["artifactExports"][number]): Promise<void> {
 		await this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			const existing = conversation.artifactExports.find((candidate) => candidate.uploadId === artifact.uploadId);
 			if (existing) {
@@ -1280,6 +1408,7 @@ export class RelayRegistry {
 
 	async markInputDelivered(conversationId: string, deliveryId: string): Promise<void> {
 		await this.mutate(async () => {
+			if (this.queueItemHeld(conversationId, "input", deliveryId)) throw new RelayRegistryError("invalid_state", "Repair preserved this input; explicit queue consent is required");
 			const input = this.runtimeConversation(conversationId).pendingInputs.find((candidate) => candidate.deliveryId === deliveryId);
 			if (!input) throw new RelayRegistryError("not_found", "Managed delivery was not found");
 			if (input.status === "accepted") input.status = "delivered";
@@ -1351,6 +1480,7 @@ export class RelayRegistry {
 
 	async requestPromotion(conversationId: string): Promise<void> {
 		await this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			if (!conversation.promotion) throw new RelayRegistryError("invalid_state", "This conversation was not prepared for terminal-session promotion");
 			if (conversation.managedWindow) throw new RelayRegistryError("invalid_state", "A managed conversation cannot be promoted again");
@@ -1400,7 +1530,8 @@ export class RelayRegistry {
 			if (payload.sessionId !== manifest.piSessionId || payload.bindingBoundaryEntryId !== manifest.bindingBoundaryEntryId) {
 				throw new RelayRegistryError("permission_denied", "Adapter session binding does not match the conversation manifest");
 			}
-			this.assertRuntimeNotHeld(manifest.conversationId);
+			if (this.runtimeRepairHeld(manifest.conversationId) || this.conversationRepairHeld(manifest.conversationId) && this.runtimeConversation(manifest.conversationId).conversationRepairs?.at(-1)?.runtimeRepair)
+				throw new RelayRegistryError("invalid_state", "Runtime repair holds attachment");
 			const conversation = this.runtimeConversation(manifest.conversationId);
 			if (!conversation.attachmentNonceHash || !equalHash(conversation.attachmentNonceHash, nonceHash(payload.attachmentNonce))) {
 				throw new RelayRegistryError("invalid_nonce", "Attachment nonce was rejected");
@@ -1456,7 +1587,7 @@ export class RelayRegistry {
 		const manifest = this.manifests.get(conversationId);
 		if (!row || !manifest) return undefined;
 		return {
-			state: row.state, repairHeld: this.runtimeRepairHeld(conversationId),
+			state: row.state, repairHeld: this.runtimeRepairHeld(conversationId) || this.conversationRepairHeld(conversationId),
 			attached: Boolean(this.liveConnections.has(conversationId) && row.state === "active" && row.attachment?.sessionId === manifest.piSessionId),
 			legacyWindow: Boolean(row.managedWindow && !row.managedWindow.ownership), unobservedLaunch: row.launch?.observed === false,
 			queues: { inputs: row.pendingInputs.filter(i => !["completed", "cancelled"].includes(i.status)).length,

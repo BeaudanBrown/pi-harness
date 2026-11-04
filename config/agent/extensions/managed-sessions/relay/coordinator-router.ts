@@ -244,6 +244,12 @@ export class CoordinatorRouter {
 		await this.inbox?.close();
 	}
 
+	async resumeQueued(conversationId: string): Promise<void> {
+		const manifest = this.registry.manifestByConversationId(conversationId);
+		if (!manifest || this.registry.retirement(conversationId)) return;
+		await this.ensureWake(manifest);
+		if (this.server.attachment(conversationId)) await this.attachmentReady(conversationId);
+	}
 	async reconcileWake(): Promise<void> {
 		for (const manifest of this.registry.listManifests()) await this.ensureWake(manifest);
 	}
@@ -254,17 +260,17 @@ export class CoordinatorRouter {
 	private async attachmentReadyOnce(conversationId: string): Promise<void> {
 		if (this.registry.isRefreshing(conversationId)) return;
 		if (this.registry.hasGenerationBoundary(conversationId)) {
-			for (const control of this.registry.pendingControls(conversationId).filter((item) => item.name === "new" && item.argument === "--confirm")) {
+			for (const control of this.registry.dispatchableControls(conversationId).filter((item) => item.name === "new" && item.argument === "--confirm")) {
 				await this.beginOperationFeedback(conversationId, control.controlId);
 				this.server.sendToConversation(this.controlEnvelope(conversationId, control));
 			}
 			return;
 		}
-		for (const control of this.registry.pendingControls(conversationId)) {
+		for (const control of this.registry.dispatchableControls(conversationId)) {
 			await this.beginOperationFeedback(conversationId, control.controlId); this.server.sendToConversation(this.controlEnvelope(conversationId, control));
 		}
 		const manifest = this.registry.manifestByConversationId(conversationId);
-		const input = this.registry.pendingInputs(conversationId).find((item) => item.status === "accepted" || item.status === "delivered");
+		const input = this.registry.dispatchableInputs(conversationId).find((item) => item.status === "accepted" || item.status === "delivered");
 		if (manifest && input) await this.deliverRecordedInput(manifest, input);
 	}
 
@@ -370,6 +376,11 @@ export class CoordinatorRouter {
 
 	private async dispatchControl(manifest: ConversationManifest, eventId: string, senderUserId: string, control: TypedRemoteControl): Promise<void> {
 		if (["completed", "cancelled"].includes(this.registry.controlResultState(manifest.conversationId, deriveControlId(manifest.conversationId, eventId)))) return;
+		if (this.registry.queueItemHeld(manifest.conversationId, "control", deriveControlId(manifest.conversationId, eventId))) {
+			await this.registry.recordPendingControl(manifest.conversationId, { controlId: deriveControlId(manifest.conversationId, eventId), matrixEventId: eventId,
+				senderUserId, name: control.name, ...(control.argument ? { argument: control.argument } : {}) });
+			return;
+		}
 		if (control.name === "new" && manifest.kind !== "project") {
 			await this.projectNotice(eventId, manifest, "Fresh session generations are available only in project conversations; the coordinator session was not changed.");
 			return;
@@ -418,7 +429,7 @@ export class CoordinatorRouter {
 	private async deliverRecordedControlOnce(manifest: ConversationManifest, eventId: string,
 		pending: ReturnType<RelayRegistry["pendingControls"]>[number]): Promise<void> {
 		if (this.registry.isRefreshing(manifest.conversationId)) return;
-		if (this.registry.controlResultState(manifest.conversationId, pending.controlId) !== "pending") return;
+		if (this.registry.queueItemHeld(manifest.conversationId, "control", pending.controlId) || this.registry.controlResultState(manifest.conversationId, pending.controlId) !== "pending") return;
 		const envelope = this.controlEnvelope(manifest.conversationId, pending);
 		if (this.server.sendToConversation(envelope)) return;
 		await this.wakeForControl(manifest);
@@ -467,12 +478,12 @@ export class CoordinatorRouter {
 		const id = manifest.conversationId;
 		if (this.delivering.has(id)) { this.deliveryAgain.add(id); return; }
 		if (this.registry.isRefreshing(id) || this.registry.hasDeliveryBoundary(id) ||
-			this.registry.pendingControls(id).some((control) => control.name === "stop")) return;
+			this.registry.dispatchableControls(id).some((control) => control.name === "stop")) return;
 		this.delivering.add(id);
 		try {
 			// The registry, not a stale caller snapshot, decides eligibility. At most
 			// one input crosses expansion/persistence at a time; model runs may continue.
-			const input = this.registry.pendingInputs(id).find((item) => item.status === "accepted" || item.status === "delivered");
+			const input = this.registry.dispatchableInputs(id).find((item) => item.status === "accepted" || item.status === "delivered");
 			if (!input || input.deliveryId !== _input.deliveryId) return;
 			const state = this.registry.conversationState(id);
 			if (state !== "active") {
@@ -480,14 +491,14 @@ export class CoordinatorRouter {
 				return;
 			}
 			await this.registry.markInputDelivered(id, input.deliveryId);
-			const current = this.registry.pendingInputs(id).find((item) => item.deliveryId === input.deliveryId);
+			const current = this.registry.dispatchableInputs(id).find((item) => item.deliveryId === input.deliveryId);
 			if (!current || current.status !== "delivered" || this.registry.hasDeliveryBoundary(id) || this.registry.isRefreshing(id)) return;
 			if (input.kind === "prompt" && input.body?.startsWith("/")) await this.beginOperationFeedback(id, input.deliveryId);
 			// Feedback can await disk/Matrix work. Cancellation or a reset accepted
 			// during it must win before any native slash-command dispatch.
-			if (this.registry.pendingInputs(id).find((item) => item.deliveryId === input.deliveryId)?.status !== "delivered" ||
+			if (this.registry.dispatchableInputs(id).find((item) => item.deliveryId === input.deliveryId)?.status !== "delivered" ||
 				this.registry.hasDeliveryBoundary(id) || this.registry.isRefreshing(id) ||
-				this.registry.pendingControls(id).some((control) => control.name === "stop")) return;
+				this.registry.dispatchableControls(id).some((control) => control.name === "stop")) return;
 			if (input.media) await this.media?.deliver(this.server, id, input);
 			else this.server.sendToConversation(this.deliveryEnvelope(id, input));
 		} finally {
@@ -561,6 +572,7 @@ export class CoordinatorRouter {
 		await this.registry.recordAcceptedInput(manifest.conversationId, {
 			deliveryId, matrixEventId: event.eventId, senderUserId: event.senderUserId, kind: input.kind, ...(input.body ? { body: input.body } : {}), status: "accepted",
 		});
+		if (this.registry.queueItemHeld(manifest.conversationId, "input", deliveryId)) return;
 		const recordedState = this.registry.conversationState(manifest.conversationId);
 		if (recordedState === "starting" && input.kind === "abort") {
 			if (this.launching.has(manifest.conversationId)) {
@@ -590,12 +602,12 @@ export class CoordinatorRouter {
 		if (this.registry.isRefreshing(manifest.conversationId)) return;
 		// A queued confirmed reset needs an adapter to create its durable new
 		// generation. Wake for that control, but keep ordinary dispatch gated.
-		const reset = this.registry.pendingControls(manifest.conversationId)
+		const reset = this.registry.dispatchableControls(manifest.conversationId)
 			.find((control) => control.name === "new" && control.argument === "--confirm");
 		if (this.registry.hasTreeBoundary(manifest.conversationId) || this.registry.hasGenerationTransition(manifest.conversationId) ||
 			(this.registry.hasGenerationBoundary(manifest.conversationId) && !reset)) return;
 		if (this.registry.conversationState(manifest.conversationId) === "active") return;
-		const pending = this.registry.pendingInputs(manifest.conversationId)
+		const pending = this.registry.dispatchableInputs(manifest.conversationId)
 			.find((input) => input.status === "accepted" || input.status === "delivered" || input.status === "persisted");
 		if (!pending && !reset) return;
 		const wakeSourceId = reset?.controlId ?? pending!.deliveryId;
@@ -613,7 +625,7 @@ export class CoordinatorRouter {
 					this.diagnostic(message);
 					await this.registry.recordLaunchError(manifest.conversationId, "launch_failed", message);
 					await this.registry.failLaunch(manifest.conversationId);
-					const queuedAbort = this.registry.pendingInputs(manifest.conversationId)
+					const queuedAbort = this.registry.dispatchableInputs(manifest.conversationId)
 						.find((input) => input.kind === "abort" && (input.status === "accepted" || input.status === "delivered"));
 					if (queuedAbort) {
 						await this.registry.cancelPendingInputs(manifest.conversationId);

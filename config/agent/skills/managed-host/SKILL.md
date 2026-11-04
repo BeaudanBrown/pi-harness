@@ -22,7 +22,24 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
 - `conversation.open` is window-first; `conversation.resume` waits for readiness.
   Neither includes a prompt. Reuse the saved conversation rather than creating a
   replacement after a timeout. Inspect uncertain outcomes before any explicit retry.
-- For legacy windows still present, `conversation.migrate` captures exit evidence
+- With `conversation-repair-v1`, use `conversation.repair.preview/apply` for the
+  exact project or protected coordinator. **No queue-management choice is required.**
+  Repair preserves pending work without replay/abandonment and never launches or
+  stops Pi. Original-room access may be restored only with proven authority;
+  every existing NAS retired flag is terminal. Required closure/uncertainty
+  assertions must come from the operator, never be invented. Inspect the latest
+  receipt phase after a pending result. Restart or stale evidence needs fresh
+  preview and consent; a complete receipt is not current runtime readiness.
+  Ordinary later messages are separate fresh intent. Preserved backlog stays held.
+  Live legacy recovery delegates to repair when wired; standalone migration and
+  legacy coordinator restoration are superseded. Retired cleanup remains separate.
+- Only if preserved work should run again, separately approve
+  `conversation.queue.resume.preview/apply`. It selects up to 32 exact items and
+  may invoke ordinary wake. Prior effects may already have occurred; resumption
+  is future-attempt permission, not proof of execution/delivery. It is optional,
+  never a prerequisite for repair. Project queue cancellation is another separate
+  authority, not part of repair.
+- On older hosts without unified repair, for legacy windows still present, `conversation.migrate` captures exit evidence
   before manual closure and verifies it on a separately confirmed repeat.
   For already-closed legacy windows, use `conversation.recover.preview`, inspect
   its mode and uncertainty warnings, then `conversation.recover.apply` with the
@@ -96,7 +113,7 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
   Consent displays the summary and frozen base/source generation; oversized
   approval details fail rather than being truncated. Inspect partial results
   before explicitly retrying the same creation identity with fresh consent.
-- Coordinator membership recovery requires its own explicit confirmed action;
+- Coordinator access recovery uses independently approved unified repair;
   leaving the coordinator never retires it or authorizes automatic reinvitation.
 
 Direct operator surfaces are `/host`, `!host` and `pi-managed-session` with noun /

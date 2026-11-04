@@ -21,7 +21,7 @@ export const APPROVAL_LIFETIME_MS = 15 * 60_000;
 export const HOST_INVENTORY_PAGE_SIZE = 50;
 export const HOST_INVENTORY_MAX_PAGE_SIZE = 100;
 export const LIVE_WORKSPACE_CAPABILITIES = [
-	"host-control-v1", "repair-inspection-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
+	"host-control-v1", "repair-inspection-v1", "conversation-repair-v1", "queue-resumption-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
 	"commentary-v1", "notification-disposition-v1", "readable-archive-v1", "queue-cancellation-v1", "window-first-open-v1", "saved-session-open-v1", "saved-session-import-v1",
 ] as const;
 const strict = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
@@ -54,6 +54,8 @@ export const HostActionSchema = Type.Union([
 	action("worktree.branch.delete", preview),
 	action("conversation.queue.cancel.preview", { conversationId: ConversationIdSchema }),
 	action("conversation.queue.cancel.apply", preview),
+	action("conversation.queue.resume.preview", target),
+	action("conversation.queue.resume.apply", preview),
 	action("conversation.archive.list", page),
 	action("conversation.archive.preview", { conversationIds: Type.Array(ConversationIdSchema, { minItems: 1, maxItems: 16, uniqueItems: true }), legacyClosure: Type.Optional(Type.Literal(true)), acceptIncompleteInspection: Type.Optional(Type.Literal(true)) }),
 	action("conversation.archive.apply", preview),
@@ -62,6 +64,8 @@ export const HostActionSchema = Type.Union([
 	action("conversation.list", page),
 	action("conversation.status", target),
 	action("conversation.repair.inspect", target),
+	action("conversation.repair.preview", target),
+	action("conversation.repair.apply", { ...preview, operatorClosed: Type.Optional(Type.Literal(true)), acceptIncompleteInspection: Type.Optional(Type.Literal(true)) }),
 	action("conversation.create", { ...creation, placement: WorkspaceIdentitySchema, expectedSessionKey: Type.Optional(stable("session")) }),
 	action("conversation.open", { ...target, expectedGenerationId: Type.Optional(stable("generation")) }),
 	action("conversation.resume", target),
@@ -105,7 +109,7 @@ export const HOST_ERROR_EXITS = {
 
 const readOperationNames = [
 	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status", "conversation.repair.inspect",
-	"conversation.queue.cancel.preview",
+	"conversation.queue.cancel.preview", "conversation.queue.resume.preview", "conversation.repair.preview",
 	"conversation.archive.list", "conversation.archive.preview", "conversation.archive.cleanup.preview",
 	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "worktree.branch.preview", "conversation.delete.preview",
 	"space.reconcile.preview", "space.cleanup.preview", "conversation.recover.preview", "conversation.admin.preview",
@@ -118,7 +122,7 @@ export function requiresModelApproval(action: HostAction): boolean { return isHo
 
 // protectedConversationId is resolved by the host, never supplied by the model.
 export function hostActionPolicy(action: HostAction, actor: HostActor, protectedConversationId: string): "forbidden" | "approval" | "direct" {
-	const destructive = ["conversation.stop", "conversation.delete", "conversation.migrate", "conversation.recover.preview"];
+	const destructive = ["conversation.stop", "conversation.delete", "conversation.migrate"];
 	if (destructive.includes(action.operation) && "conversationId" in action && action.conversationId === protectedConversationId) return "forbidden";
 	// Preview-based apply also revalidates all resolved targets before execution.
 	return actor.kind === "model" && isHostMutation(action) ? "approval" : "direct";
@@ -148,6 +152,7 @@ const repairInspection = Type.Union([
 	strict({ ...repairBase, authority: Type.Literal("live"), kind: enumeration(["project", "coordinator"]), activeGenerationId: stable("generation"),
 		runtime: enumeration(["repair_held", "attached", "legacy_ownership", "unobserved_launch", "starting", "dormant", "unknown"]),
 		membership: enumeration(["join", "leave", "invite", "ban", "knock", "unknown"]), setupState,
+		repair: Type.Optional(strict({ operationId: stable("operation"), phase: enumeration(["held", "account_pending", "runtime_pending", "complete", "superseded"]), continuation: enumeration(["live", "none"]) })),
 		queues: Type.Union([strict({ inputs: Type.Integer({ minimum: 0, maximum: 1000000 }), controls: Type.Integer({ minimum: 0, maximum: 1000000 }), outputs: Type.Integer({ minimum: 0, maximum: 1000000 }) }), Type.Null()]),
 	}),
 ]);
@@ -187,6 +192,10 @@ export const HostResultSchemas = {
 		preservedSpaces: Type.Array(room, { maxItems: 2 }), archiveSpaces: Type.Array(room, { maxItems: 3 }) })),
 	"conversation.queue.cancel.preview": previewResult,
 	"conversation.queue.cancel.apply": cleanup,
+	"conversation.queue.resume.preview": previewResult,
+	"conversation.queue.resume.apply": cleanup,
+	"conversation.repair.preview": previewResult,
+	"conversation.repair.apply": cleanup,
 	"conversation.archive.preview": previewResult,
 	"conversation.archive.apply": cleanup,
 	"conversation.archive.cleanup.preview": previewResult,

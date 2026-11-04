@@ -125,6 +125,7 @@ export class RelayEventProjector {
 			entryId, kind, contentHash: createHash("sha256").update(`managed-${kind}\0`).update(body).digest("hex"),
 			...(originDeliveryId ? { originDeliveryId } : {}),
 		}, body, "assistant_final", kind === "checkpoint");
+		if (this.registry.queueItemHeld(conversationId, "projection", entryId)) throw new RelayRegistryError("invalid_state", "Repair preserved this output; a separate queue decision is required");
 		if (kind === "checkpoint" && projection.disposition === "notify" && projection.chunks.some((chunk) => chunk.status === "pending")) {
 			await this.recovery?.originalAccepted(conversationId, piSessionId);
 		}

@@ -29,7 +29,7 @@ and invalidate the old attachment nonce. Preserve a monotonic launch high-water
 mark even when the obsolete launch reservation is cleared. A cleared nonce is
 only an attachment fence, never proof the old writer stopped.
 
-Keep the hold until the later orchestration owner has resolved queue and account
+Keep the hold until the later orchestration owner has preserved queues and resolved account
 choices. This slice must not implicitly open the conversation, invite anyone,
 finish queued work or resume accepted prompts. Legacy compatibility paths may
 share the same verified metadata-reconciliation primitive while retaining their
@@ -119,7 +119,7 @@ Initial focused: `.pi/tmp/workers/2026-11-04T01-39-01-505Z-runtime-repair-focuse
 | Admission | freshly approved frozen scope | atomic hold and receipt | hold survives restart; no wake/attach/producer side effects |
 | Evidence recheck | held original scope | read exact process and saved-session identity | changed observation requires fresh approval; hold remains |
 | Reconciliation | held and revalidated | atomic stale-observation reset, nonce fence, launch high-water and receipt | reload to observe uncertain commit; never replay based on an exception |
-| Release/open | reconciled but held | owned by #150 with explicit queue/account/open choices | no automatic release or launch in this slice |
+| Release/open | reconciled but held | owned by #150: preserve queues without choices, reconcile account access, no automatic open | no automatic release or launch in this slice |
 
 ## Audit notes
 

@@ -19,6 +19,7 @@ export class ConversationRepairInspection {
 		matrixReady: () => boolean;
 		accountSetup: (id: string) => Setup;
 		membership: (roomId: string) => Promise<Membership>;
+		repairProgress?: (id: string) => { operationId: string; phase: "held" | "account_pending" | "runtime_pending" | "complete" | "superseded"; live: boolean } | undefined;
 	}) {}
 
 	private terminal(conversationId: string): HostRepairInspection | undefined {
@@ -49,9 +50,12 @@ export class ConversationRepairInspection {
 		const queues = facts?.queues ?? null;
 		const matrixReady = this.options.matrixReady();
 		const setupState = !matrixReady ? "disconnected" : !hasMatrixBinding(manifest) ? "pending" : this.options.accountSetup(conversationId);
+		const progress = this.options.repairProgress?.(conversationId);
 		const findings: HostRepairInspection["findings"] = [];
 		const add = (code: HostRepairInspection["findings"][number]["code"], nextStep: string) => findings.push({ code, nextStep });
-		if (runtime === "repair_held") add("repair_held", "An admitted repair holds execution. Inspect its durable receipt and obtain fresh approval to continue or supersede the plan; do not bypass it with open or legacy recovery.");
+		if (runtime === "repair_held") {
+			add("repair_held", progress ? `Repair phase: ${progress.phase}. ${progress.live ? "The approved bounded invocation is progressing; inspect again." : "No live continuation exists; obtain a fresh conversation.repair.preview and independent approval."} Future queued delivery remains held, not abandoned. Do not bypass with open or legacy recovery.` : "An admitted repair holds future queued delivery. Obtain a fresh conversation.repair.preview and independent approval; do not bypass it with open or legacy recovery.");
+		}
 		if (runtime === "unknown") add("runtime_unknown", "Obtain fresh process and attachment observations before any runtime repair; missing metadata is not exit proof.");
 		if (runtime === "legacy_ownership") add("legacy_ownership", "Inspect the old writer and saved session. Runtime repair requires verified exit or explicit closure attestation with fresh conflict screening.");
 		if (runtime === "unobserved_launch") add("unobserved_launch", "Inspect the reserved launch outcome before retrying. Do not clear its reservation or assume an absent attachment means process exit.");
@@ -59,7 +63,7 @@ export class ConversationRepairInspection {
 		if (runtime === "dormant") add("dormant", "No adapter is attached. Obtain fresh process evidence and an approved open/repair plan if you want this conversation running.");
 		if (facts?.lifecycleObligations)
 			add("lifecycle_obligations", "Inspect pending transitions, polls, checkpoints, exports or refresh before runtime repair; queue abandonment alone cannot resolve them.");
-		if (queues && Object.values(queues).some(n => n > 0)) add("queued_work", "For repair, explicitly choose hold, resume or exact-scope abandonment. These counts may include current work; inspection neither cancels nor replays it.");
+		if (queues && Object.values(queues).some(n => n > 0)) add("queued_work", "Repair preserves queued work without a queue-management choice. Separate conversation.queue.resume.preview/apply or queue.cancel.preview/apply consent is needed only if you want preserved work resumed or abandoned. Counts may include current work; prior effects remain uncertain.");
 		if (!matrixReady) add("matrix_disconnected", "Restore Matrix connectivity, then inspect original-room membership again.");
 		if (membership === "unknown") add("membership_unknown", "Read the original room's operator membership and bot authority; a saved binding or cached setup result is not access proof.");
 		if (membership === "leave") add("membership_restore_required", "Obtain explicit consent to restore access to the original room after verifying ownership and current departure. Do not create a replacement room.");
@@ -67,6 +71,7 @@ export class ConversationRepairInspection {
 		if (membership === "ban") add("membership_banned", "An authorized room administrator must resolve the ban; repair must not bypass it or replace the room.");
 		if (setupState === "pending" || setupState === "notification_setup_uncertain") add("account_setup_pending", "Inspect account setup and acknowledgements separately from membership. Preserve manual notification preferences; do not blindly retry uncertain settings writes.");
 		return { conversationId, authority: "live", readiness: "not_verified", kind: manifest.kind,
-			activeGenerationId: registry.activeGeneration(manifest).generationId, runtime, membership, setupState, queues, findings };
+			activeGenerationId: registry.activeGeneration(manifest).generationId, runtime, membership, setupState, queues, findings,
+			...(progress ? { repair: { operationId: progress.operationId, phase: progress.phase, continuation: progress.live ? "live" as const : "none" as const } } : {}) };
 	}
 }

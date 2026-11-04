@@ -42,13 +42,13 @@ Inspection performs no filesystem, launcher, session or Matrix writes. Terminal
 archive/retirement authority is returned without reading historical payloads or
 contacting Matrix. It does not make an archived/retired identity resumable.
 
-The later `conversation.repair.preview` selects explicit choices for the exact
-conversation: runtime repair/open, queue hold/resume/abandon and membership
-preserve/restore. Omitted choices must not enable effects. The frozen plan
-contains effect targets, source/session identity, precise queue scope, process
-observations and membership/departure evidence. The separately approved apply
-executes through one shared repair owner, not recursive calls to public tools.
-Unrelated conversations and new inputs cannot be included by an old approval.
+`conversation.repair.preview` freezes repair of one exact original conversation:
+runtime reconciliation when needed, plus original-room access verification or
+restoration. **Repair requires no queue-management choices.** Pending work is
+preserved without replay or abandonment, and repair never launches Pi. The plan
+binds identity, process observations and membership/departure evidence. Separately
+approved apply uses one shared owner, not recursive public-tool calls. See
+[orchestration](managed-repair-orchestration.md) for the precise preservation boundary.
 
 Queue hold is a durable dispatch hold, not successful completion. Input arriving
 while a repair is admitted stays held for a new explicit decision; approval to
@@ -79,7 +79,7 @@ is restored. A repair hold must never resurrect an already-retired identity.
 | --- | --- | --- |
 | Sandbox/epic unobserved launches | assessment fixtures distinguish reservations from dormant/attached | #148 exact process reconciliation and durable launch receipts |
 | Coordinator legacy runtime | same assessment for both kinds, no destructive-policy relaxation | #148 protected same-session repair |
-| Pi-harness output backlog | counts and explicit queue choice; no cancellation on inspect | #150 audited queue effects |
+| Pi-harness output backlog | counts without mandatory queue choices; no cancellation on inspect | #150 preservation and separately approved queue controls |
 | Timeline/ihp-update inaccessible originals | membership leave/invite/ban/unknown distinguished from setup cache | #149 original-room consent and account protocol |
 | No fabricated readiness | missing runtime/account observations reported, readiness always not verified | #151 live post-apply acceptance |
 | No history/payload disclosure or side effects | narrow read adapters, metadata-only exact result schema; read-model integration tests | #148–150 durable owner/reload tests |
@@ -95,7 +95,7 @@ is restored. A repair hold must never resurrect an already-retired identity.
 | Repair admission | exact plan/identity and dispatch hold in durable serialized owner | restart keeps hold; reject competing attach/wake/retirement races conservatively | #148/#150 |
 | Closure evidence | birth-aware observation or audited attestation | reobserve after awaits; known conflicts not waivable | #148 |
 | Runtime metadata commit | audit and monotonic attachment/launch fencing | uncertain write poisons owner until reload; no blind retry | #148 |
-| Queue step | atomic cancellations/hold and exact receipts | retain payloads/prior effects; no fabricated success; scope changes replan | #150 |
+| Preservation cutover | atomic release of repair admission with per-item holds retained | retain payloads/prior effects; no implicit execution or fabricated success | #150 |
 | Invite/join | exact provenance/departure intent and stable account request | observe membership/ack before retry; later departure invalidates consent | #149 |
 | Launcher call | durable launch reservation before external invocation | reconcile same attempt; never simply clear and repeat after timeout | #148 |
 | Verification | attachment, runtime, account observations with distinct status | incomplete readiness stays awaiting observation/external action | #150/#151 |

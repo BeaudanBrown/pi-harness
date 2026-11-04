@@ -21,10 +21,12 @@ export class HostAccountOwner {
 	private membershipWork<T>(fn: () => Promise<T>): Promise<T> {
 		const work = this.membershipLane.then(fn); this.membershipLane = work.catch(() => {}); return work;
 	}
-	private repairOwner(): MembershipRepairOwner {
+	private repairOwner(operationId?: string): MembershipRepairOwner {
 		return new MembershipRepairOwner({ client: this.client, identity: async id => {
 			const check = () => {
 				if (this.registry.retirement(id) || this.registry.archiveRecord(id)) throw Error("Conversation is terminal and not restorable");
+				const repair = this.registry.conversationRepairReceipt?.(id);
+				if (operationId && repair && repair.operationId !== operationId) throw Error("Membership repair was superseded; obtain fresh consent");
 				const manifest = this.registry.manifestByConversationId(id); const action = this.client.ensureIdentity(id);
 				this.client.assertOwner(this.matrix.operatorUserId);
 				if (!manifest || !action || action.roomId !== manifest.roomId || action.creationKey !== manifest.creationKey || action.hostSpaceId !== this.coordinator()?.hostSpace ||
@@ -43,7 +45,7 @@ export class HostAccountOwner {
 	}
 	freezeRoomMembership(id: string): Promise<MembershipRepairPlan> { return this.repairOwner().snapshot(id); }
 	restoreRoomMembership(plan: MembershipRepairPlan, operationId: string, expiresAt: number) {
-		return this.membershipWork(() => this.repairOwner().reconcile(plan, operationId, expiresAt));
+		return this.membershipWork(() => this.repairOwner(operationId).reconcile(plan, operationId, expiresAt));
 	}
 	start(retire: (id: string) => Promise<unknown>): void {
 		if (this.work) return;
