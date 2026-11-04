@@ -1373,6 +1373,25 @@ export class RelayRegistry {
 		});
 	}
 
+	/** Sanitized read seam: no queue payloads, process identifiers or history clones. */
+	repairRuntimeFacts(conversationId: string): import("./conversation-repair-inspection.js").RepairRuntimeFacts | undefined {
+		this.assertAuthorityAvailable();
+		if (this.archives.has(conversationId) || this.retirements.has(conversationId)) return undefined;
+		const row = this.state.conversations.find(item => item.conversationId === conversationId);
+		const manifest = this.manifests.get(conversationId);
+		if (!row || !manifest) return undefined;
+		return {
+			state: row.state,
+			attached: Boolean(this.liveConnections.has(conversationId) && row.state === "active" && row.attachment?.sessionId === manifest.piSessionId),
+			legacyWindow: Boolean(row.managedWindow && !row.managedWindow.ownership), unobservedLaunch: row.launch?.observed === false,
+			queues: { inputs: row.pendingInputs.filter(i => !["completed", "cancelled"].includes(i.status)).length,
+				controls: row.pendingControls.length, outputs: row.projection.filter(i => !["projected", "cancelled"].includes(i.status)).length },
+			lifecycleObligations: Boolean(this.isRefreshing(conversationId) || row.generationTransition || row.treeTransition || row.promotion ||
+				row.publishingControlPoll || row.activeControlPoll || row.publishingCheckpointPoll || row.activeCheckpointPoll || row.closingCheckpointPolls.length ||
+				row.artifactExports.some(i => i.state !== "sent" && !i.failure) || row.projection.some(i => i.kind === "checkpoint" && !["projected", "cancelled"].includes(i.status))),
+		};
+	}
+
 	snapshot(): HostRuntimeState {
 		this.assertAuthorityAvailable();
 		return structuredClone(this.state);

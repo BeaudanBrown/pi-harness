@@ -51,6 +51,7 @@ import { ManagedHostMutationOwner, isManagedHostPreview } from "./host-mutation-
 import { ConversationTitles } from "./conversation-titles.js";
 import { HostRuntimeObserver } from "./runtime-observer.js";
 import { HostReadModel } from "./host-read-model.js";
+import { ConversationRepairInspection } from "./conversation-repair-inspection.js";
 import { HostMatrixCommands } from "./host-matrix-commands.js";
 import { HostAccountClient } from "./host-account-client.js";
 import { HostAccountOwner } from "./host-account-owner.js";
@@ -481,10 +482,17 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 			cancelApprovals: (conversationId) => hostApprovals?.cancelRun(conversationId),
 			onFailure: () => process.stderr.write("pi-managed-session-relay: retirement cleanup is pending\n") });
 		if (hostPolicy) {
-			const reads = new HostReadModel({ hostId, registry, archives: archiveControls, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), savedSessionImport: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup: id => account?.client.setupState(id) ?? "pending", matrixReady: () => {
+			const matrixReady = () => {
 				const age = lastSuccessfulSyncAt ? Date.now() - Date.parse(lastSuccessfulSyncAt) : Infinity;
 				return matrixHealthy && age >= 0 && age < 120_000;
+			};
+			const accountSetup = (id: string) => account?.client.setupState(id) ?? "pending";
+			const repairInspection = new ConversationRepairInspection({ registry, matrixReady, accountSetup, membership: async roomId => {
+				const event = await matrix.operatorMembershipEvent(roomId, AbortSignal.timeout(10_000));
+				return ["join", "leave", "invite", "ban", "knock"].includes(event.membership)
+					? event.membership as "join" | "leave" | "invite" | "ban" | "knock" : "unknown";
 			} });
+			const reads = new HostReadModel({ hostId, registry, repairInspection, archives: archiveControls, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), savedSessionImport: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", accountSetup, matrixReady });
 			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server, account, archives: archiveControls,
 				activeRun: async (id) => {
 					const witness = await hostApprovals!.controls.proofs.request(id);

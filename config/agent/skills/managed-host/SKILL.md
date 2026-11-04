@@ -12,6 +12,13 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
 - Reads and previews are free. Every model mutation requires separate live-tool
   approval, even when `confirmed: true`. Never substitute a shell/CLI invocation
   to avoid the approval gate. Model parameters cannot choose actor or origin.
+- `conversation.repair.inspect` is read-only advisory inspection for projects and
+  the coordinator: runtime classification, unfinished-work counts and current
+  operator membership when readable. It grants no consent and never verifies
+  readiness, process exit or idle state. Missing queue metadata is `null`, not an
+  empty queue. It returns actionable findings without launching, joining, clearing
+  reservations or changing history. Archive/retirement remain terminal. The
+  `repair-inspection-v1` capability does not imply repair execution is available.
 - `conversation.open` is window-first; `conversation.resume` waits for readiness.
   Neither includes a prompt. Reuse the saved conversation rather than creating a
   replacement after a timeout. Inspect uncertain outcomes before any explicit retry.

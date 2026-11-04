@@ -6,6 +6,7 @@ import type { HostReadRequest } from "./host-dispatcher.js";
 import type { RegistryConversationMetadata, RelayRegistry } from "./registry.js";
 import type { ArchiveHostControls } from "./archive-host-controls.js";
 import type { HostLifecycle } from "./host-lifecycle.js";
+import type { ConversationRepairInspection } from "./conversation-repair-inspection.js";
 
 const compare = (a: string, b: string) => a < b ? -1 : a > b ? 1 : 0;
 const placementKey = (row: { rootKey: string; workspace: string }) => JSON.stringify([row.rootKey, row.workspace]);
@@ -19,6 +20,7 @@ export class HostReadModel {
 	constructor(private readonly options: {
 		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean; accountState?: () => "ready" | "pending" | "unavailable"; accountSetup?: (id: string) => "ready" | "pending" | "notification_setup_uncertain";
 		archives?: Pick<ArchiveHostControls, "list">;
+		repairInspection?: Pick<ConversationRepairInspection, "inspect">;
 		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; savedSessionOpen?: boolean; savedSessionImport?: boolean; now?: () => number; runtimeObservations?: () => ReadonlyMap<string, RuntimeObservation>;
 	}) { this.options = { ...options }; this.now = options.now ?? (() => performance.now()); this.pages = new HostInventoryPages(options.hostId, this.now); }
 
@@ -26,7 +28,11 @@ export class HostReadModel {
 		const action = request.action;
 		switch (action.operation) {
 			case "host.status": return { hostId: this.options.hostId, relayState: this.options.matrixReady() ? "ready" : "disconnected",
-				capabilities: ["host-control-v1", "queue-cancellation-v1", ...(this.options.archives ? ["readable-archive-v1" as const] : []), ...(this.options.windowFirstOpen ? ["window-first-open-v1" as const] : []), ...(this.options.savedSessionOpen ? ["saved-session-open-v1" as const] : []), ...(this.options.savedSessionImport ? ["saved-session-import-v1" as const] : [])], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
+				capabilities: ["host-control-v1", "queue-cancellation-v1", ...(this.options.repairInspection ? ["repair-inspection-v1" as const] : []), ...(this.options.archives ? ["readable-archive-v1" as const] : []), ...(this.options.windowFirstOpen ? ["window-first-open-v1" as const] : []), ...(this.options.savedSessionOpen ? ["saved-session-open-v1" as const] : []), ...(this.options.savedSessionImport ? ["saved-session-import-v1" as const] : [])], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
+			case "conversation.repair.inspect": {
+				if (!this.options.repairInspection) throw new HostControlError("upgrade_required", "Repair inspection is unavailable");
+				return this.options.repairInspection.inspect(action.conversationId);
+			}
 			case "conversation.archive.list": {
 				if (!this.options.archives) throw new HostControlError("upgrade_required", "Archive controls are unavailable");
 				return this.options.archives.list(action);

@@ -26,7 +26,7 @@ const commands = [
 	`conversation queue cancel preview ${cid}`, `conversation queue cancel apply ${apply}`,
 	"conversation archive list", `conversation archive preview --conversation-ids ${cid} --legacy-closure`, `conversation archive apply ${apply}`,
 	`conversation archive cleanup preview --conversation-ids ${cid}`, `conversation archive cleanup apply ${apply}`,
-	"conversation list", `conversation status ${cid}`, `conversation create ${workspace} ${creation}`,
+	"conversation list", `conversation status ${cid}`, `conversation repair inspect ${cid}`, `conversation create ${workspace} ${creation}`,
 	...["open", "resume", "stop"].map((word) => `conversation ${word} ${cid}`),
 	`conversation admin preview --conversation-ids ${cid} --include-spaces`,
 	`conversation admin apply --preview-id preview_${"1".repeat(32)} --confirmed`,

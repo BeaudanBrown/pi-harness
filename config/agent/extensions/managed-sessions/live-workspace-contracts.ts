@@ -21,7 +21,7 @@ export const APPROVAL_LIFETIME_MS = 15 * 60_000;
 export const HOST_INVENTORY_PAGE_SIZE = 50;
 export const HOST_INVENTORY_MAX_PAGE_SIZE = 100;
 export const LIVE_WORKSPACE_CAPABILITIES = [
-	"host-control-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
+	"host-control-v1", "repair-inspection-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
 	"commentary-v1", "notification-disposition-v1", "readable-archive-v1", "queue-cancellation-v1", "window-first-open-v1", "saved-session-open-v1", "saved-session-import-v1",
 ] as const;
 const strict = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
@@ -61,6 +61,7 @@ export const HostActionSchema = Type.Union([
 	action("conversation.archive.cleanup.apply", preview),
 	action("conversation.list", page),
 	action("conversation.status", target),
+	action("conversation.repair.inspect", target),
 	action("conversation.create", { ...creation, placement: WorkspaceIdentitySchema, expectedSessionKey: Type.Optional(stable("session")) }),
 	action("conversation.open", { ...target, expectedGenerationId: Type.Optional(stable("generation")) }),
 	action("conversation.resume", target),
@@ -103,7 +104,7 @@ export const HOST_ERROR_EXITS = {
 } as const;
 
 const readOperationNames = [
-	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status",
+	"host.status", "workspace.list", "worktree.list", "conversation.list", "conversation.status", "conversation.repair.inspect",
 	"conversation.queue.cancel.preview",
 	"conversation.archive.list", "conversation.archive.preview", "conversation.archive.cleanup.preview",
 	"worktree.remove.preview", "worktree.conversation.cleanup.preview", "worktree.branch.preview", "conversation.delete.preview",
@@ -140,6 +141,17 @@ const summary = Type.Union([
 	strict({ ...summaryFields, kind: Type.Literal("project"), reconciliationRequired: Type.Literal(true), projectKey: Type.Optional(stable("project")), ...projectSummaryFields }),
 ]);
 export type HostConversationSummary = Static<typeof summary>;
+const repairFinding = strict({ code: enumeration(["terminal_identity", "runtime_unknown", "legacy_ownership", "unobserved_launch", "launch_in_progress", "dormant", "lifecycle_obligations", "queued_work", "matrix_disconnected", "membership_unknown", "membership_restore_required", "membership_invitation_pending", "membership_banned", "account_setup_pending"]), nextStep: text(512) });
+const repairBase = { conversationId: ConversationIdSchema, readiness: Type.Literal("not_verified"), findings: Type.Array(repairFinding, { maxItems: 16 }) };
+const repairInspection = Type.Union([
+	strict({ ...repairBase, authority: enumeration(["retired", "archived"]) }),
+	strict({ ...repairBase, authority: Type.Literal("live"), kind: enumeration(["project", "coordinator"]), activeGenerationId: stable("generation"),
+		runtime: enumeration(["attached", "legacy_ownership", "unobserved_launch", "starting", "dormant", "unknown"]),
+		membership: enumeration(["join", "leave", "invite", "ban", "knock", "unknown"]), setupState,
+		queues: Type.Union([strict({ inputs: Type.Integer({ minimum: 0, maximum: 1000000 }), controls: Type.Integer({ minimum: 0, maximum: 1000000 }), outputs: Type.Integer({ minimum: 0, maximum: 1000000 }) }), Type.Null()]),
+	}),
+]);
+export type HostRepairInspection = Static<typeof repairInspection>;
 const availability = enumeration(["available", "unavailable"]);
 const listResult = <T extends TSchema>(item: T) => strict({ items: Type.Array(item, { maxItems: HOST_INVENTORY_MAX_PAGE_SIZE }), nextCursor: Type.Union([text(256), Type.Null()]) });
 const created = strict({ conversationId: ConversationIdSchema, launchId: stable("launch"), setupState });
@@ -181,6 +193,7 @@ export const HostResultSchemas = {
 	"conversation.archive.cleanup.apply": cleanup,
 	"conversation.list": listResult(summary),
 	"conversation.status": summary,
+	"conversation.repair.inspect": repairInspection,
 	"conversation.create": created,
 	"conversation.open": strict({ conversationId: ConversationIdSchema, launchId: stable("launch"), launchState, window: windowSchema }),
 	"conversation.resume": launched,

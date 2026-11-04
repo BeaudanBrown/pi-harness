@@ -325,6 +325,11 @@ retain confirmation. Matrix `/host` is routed as Matrix authority, never execute
 as a local slash command. The coordinator stays protected from stop/delete and
 has no engineering tools. See [frontend evidence and migration](docs/managed-host-frontends-evidence.md)
 and the [tooling module map and adding-operation checklist](docs/managed-host-tooling-map.md).
+Read-only `conversation.repair.inspect` reports advisory runtime/queue state,
+original-room operator membership and actionable findings for both projects and
+the coordinator. It performs no repair and never asserts process exit or overall
+readiness. See the [unified repair implementation plan](docs/managed-conversation-repair.md)
+for scope and remaining execution work.
 Stale queues can be explicitly abandoned through
 `conversation.queue.cancel.preview/apply`: one dormant project conversation,
 exact frozen IDs, and independent approval. This prevents future dispatch/retries,
