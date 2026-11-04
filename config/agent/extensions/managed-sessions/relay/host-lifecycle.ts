@@ -4,6 +4,8 @@ import { parseExactWindowProof, assertExactWindowBinding, type ExactWindowProof 
 import { ExactWindowClient } from "./exact-window-client.js";
 import { legacyOwnershipError, migrateLegacyWindow } from "./legacy-window-migration.js";
 import { OperatorAdminMigration, type AdminSelection, type AdminMigrationSnapshot } from "./operator-admin.js";
+import { RuntimeRepairOwner } from "./runtime-repair.js";
+import { observeRuntimeRepair } from "./runtime-repair-evidence.js";
 import { manualRecoverySnapshot, applyManualRecovery, type ManualRecoverySnapshot } from "./manual-legacy-recovery.js";
 import { HostControlError } from "./host-control-error.js";
 import { launchCoordinator as ensureCoordinatorWindow } from "./coordinator-launcher.js";
@@ -393,6 +395,8 @@ export class HostLifecycle {
 	private readonly reconciler: ProjectReconciler;
 	private readonly projectSpaces: ProjectSpaces;
 	readonly exactWindows: Pick<ExactWindowClient, "inspect" | "check" | "terminate" | "observe">;
+	/** Internal owner for #150 approval orchestration; no public mutation route yet. */
+	readonly runtimeRepair: RuntimeRepairOwner;
 
 	constructor(private readonly options: {
 		hostId: string;
@@ -420,6 +424,18 @@ export class HostLifecycle {
 		}
 		this.operatorAdmins = new OperatorAdminMigration({ registry: options.registry, matrix: options.matrix, directory: join(options.projectSessionDirectory, "operator-admin") });
 		this.exactWindows = new ExactWindowClient((operation, request) => this.invoke(operation, request));
+		this.runtimeRepair = new RuntimeRepairOwner({ registry: options.registry, observe: async target => {
+			const manifest = this.liveManifest(target.conversationId); const generation = options.registry.activeGeneration(manifest);
+			let file: string; let cwd: string;
+			if (manifest.kind === "coordinator") {
+				if (!options.coordinator) throw new HostControlError("unavailable", "Coordinator saved-session configuration is unavailable");
+				file = resolve(options.coordinator.sessionFile); cwd = resolve(options.coordinator.workspaceDirectory);
+			} else {
+				cwd = (await this.resolveWorkspaceIdentity(manifest.placement!)).cwd;
+				file = join(resolve(options.projectSessionDirectory), target.conversationId, generation.ordinal === 1 ? "session.jsonl" : `generation-${generation.ordinal}.jsonl`);
+			}
+			return observeRuntimeRepair({ manifest, target, file, cwd, windows: this.exactWindows, observe: request => this.invoke("window-legacy-observe", request) });
+		} });
 		this.projectSpaces = new ProjectSpaces(options.registry, options.matrix);
 		this.reconciler = new ProjectReconciler({ registry: options.registry, matrix: options.matrix, intentDirectory: options.projectSessionDirectory,
 			resolveWorkspace: (placement) => this.resolveWorkspaceIdentity(placement), hierarchy: options.hierarchy, account: options.spaceCleanupAccount });
@@ -1621,7 +1637,7 @@ export class HostLifecycle {
 		const window = new Promise<void>((resolve, reject) => { windowCreated = resolve; windowFailed = reject; });
 		// Resume-only callers need not observe the earlier window promise.
 		void window.catch(() => undefined);
-		const ready = run(windowCreated)
+		const ready = this.options.registry.withQueueEffect(conversationId, () => run(windowCreated))
 			.catch((error) => { windowFailed(error); throw error; })
 			.finally(() => { if (this.launches.get(conversationId)?.ready === ready) this.launches.delete(conversationId); });
 		this.launches.set(conversationId, { window, ready });

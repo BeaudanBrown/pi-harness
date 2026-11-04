@@ -141,12 +141,12 @@ const summary = Type.Union([
 	strict({ ...summaryFields, kind: Type.Literal("project"), reconciliationRequired: Type.Literal(true), projectKey: Type.Optional(stable("project")), ...projectSummaryFields }),
 ]);
 export type HostConversationSummary = Static<typeof summary>;
-const repairFinding = strict({ code: enumeration(["terminal_identity", "runtime_unknown", "legacy_ownership", "unobserved_launch", "launch_in_progress", "dormant", "lifecycle_obligations", "queued_work", "matrix_disconnected", "membership_unknown", "membership_restore_required", "membership_invitation_pending", "membership_banned", "account_setup_pending"]), nextStep: text(512) });
+const repairFinding = strict({ code: enumeration(["terminal_identity", "repair_held", "runtime_unknown", "legacy_ownership", "unobserved_launch", "launch_in_progress", "dormant", "lifecycle_obligations", "queued_work", "matrix_disconnected", "membership_unknown", "membership_restore_required", "membership_invitation_pending", "membership_banned", "account_setup_pending"]), nextStep: text(512) });
 const repairBase = { conversationId: ConversationIdSchema, readiness: Type.Literal("not_verified"), findings: Type.Array(repairFinding, { maxItems: 16 }) };
 const repairInspection = Type.Union([
 	strict({ ...repairBase, authority: enumeration(["retired", "archived"]) }),
 	strict({ ...repairBase, authority: Type.Literal("live"), kind: enumeration(["project", "coordinator"]), activeGenerationId: stable("generation"),
-		runtime: enumeration(["attached", "legacy_ownership", "unobserved_launch", "starting", "dormant", "unknown"]),
+		runtime: enumeration(["repair_held", "attached", "legacy_ownership", "unobserved_launch", "starting", "dormant", "unknown"]),
 		membership: enumeration(["join", "leave", "invite", "ban", "knock", "unknown"]), setupState,
 		queues: Type.Union([strict({ inputs: Type.Integer({ minimum: 0, maximum: 1000000 }), controls: Type.Integer({ minimum: 0, maximum: 1000000 }), outputs: Type.Integer({ minimum: 0, maximum: 1000000 }) }), Type.Null()]),
 	}),

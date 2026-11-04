@@ -167,6 +167,19 @@ class LegacyExitTests(unittest.TestCase):
             self.assertFalse(self.manual()["conflicts"])
             self.assertEqual(self.observe("", {"bootId": BOOT, "processes": [birth[0]]}), {"state": "running"})
 
+    def test_repair_scans_trusted_coordinator_file_without_a_legacy_window(self):
+        request = {"conversationId": CID, "window": None, "sessionFile": "/private/coordinator/session.jsonl",
+                   "sessionDirectory": "/private/coordinator", "repairClosure": True}
+        self.process(123, 1, 100, env=b"PI_MANAGED_COORDINATOR_SESSION_FILE=/private/coordinator/session.jsonl\0")
+        self.assertTrue(legacy.observe(request, "", self.proc)["conflicts"])
+        self.process(123, 1, 100)
+        self.assertEqual(legacy.observe(request, "", self.proc), {"conflicts": False, "bootId": BOOT, "unreadableProcesses": []})
+        for altered in [{**request, "sessionDirectory": "/other"}, {**request, "extra": True},
+                        {**request, "repairClosure": False}, {**request, "manualClosure": True}]:
+            with self.assertRaises(ValueError):
+                legacy.observe(altered, "", self.proc)
+        self.assertTrue(legacy.observe({**request, "window": self.request["window"]}, self.pane.replace(CID, ""), self.proc)["conflicts"])
+
     def test_helper_is_read_only(self):
         before = {str(p): p.read_bytes() for p in self.proc.rglob("*") if p.is_file()}
         evidence = self.observe()

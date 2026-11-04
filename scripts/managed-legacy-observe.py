@@ -53,6 +53,7 @@ def inventory(proc, conversation_id, session_file, unreadable=None, session_dire
             rows[path.name] = (before[0], before[1])
             if (f"PI_MANAGED_SESSION_CONVERSATION_ID={conversation_id}".encode() in env
                     or f"PI_MANAGED_PROJECT_SESSION_FILE={session_file}".encode() in env
+                    or f"PI_MANAGED_COORDINATOR_SESSION_FILE={session_file}".encode() in env
                     or any(arg == os.fsencode(session_file) and i > 0 and argv[i - 1] == b"--session" for i, arg in enumerate(argv))
                     or session_directory and (any(entry.startswith(b"PI_MANAGED_PROJECT_SESSION_FILE=" + os.fsencode(session_directory) + b"/") for entry in env)
                         or any(arg.startswith(os.fsencode(session_directory) + b"/") and i > 0 and argv[i - 1] == b"--session" for i, arg in enumerate(argv)))):
@@ -86,7 +87,32 @@ def observe_manual(request, panes, proc=Path("/proc"), allow_missing_window=Fals
             "bootId": (proc / "sys/kernel/random/boot_id").read_text().strip()}
 
 
+def observe_repair(request, panes, proc=Path("/proc")):
+    # Paths are resolved by the trusted host owner, never model parameters.
+    if set(request) != {"conversationId", "window", "sessionFile", "sessionDirectory", "repairClosure"} or request["repairClosure"] is not True:
+        raise ValueError("invalid repair closure inspection")
+    cid, window, session, directory = (request[k] for k in ("conversationId", "window", "sessionFile", "sessionDirectory"))
+    if (not isinstance(cid, str) or not re.fullmatch(r"conv_[a-f0-9]{32}", cid)
+            or not isinstance(session, str) or not session.startswith("/") or not isinstance(directory, str)
+            or not directory.startswith("/") or Path(session).parent != Path(directory)):
+        raise ValueError("invalid repair session identity")
+    if window is not None and (not isinstance(window, dict) or set(window) != {"sessionName", "windowId", "paneId"}
+            or not re.fullmatch(r"@[0-9]+", window["windowId"]) or not re.fullmatch(r"%[0-9]+", window["paneId"])):
+        raise ValueError("invalid repair window")
+    lines = [line.split("|") for line in panes.splitlines() if line]
+    if any(len(line) != 9 for line in lines):
+        raise ValueError("ambiguous tmux inventory")
+    unreadable = []
+    _, writers = inventory(proc, cid, session, unreadable, directory)
+    return {"conflicts": bool(writers or any(line[4] == cid or window is not None and
+            (line[1] == window["windowId"] or line[2] == window["paneId"]) for line in lines)),
+            "unreadableProcesses": sorted(unreadable, key=int),
+            "bootId": (proc / "sys/kernel/random/boot_id").read_text().strip()}
+
+
 def observe(request, panes, proc=Path("/proc")):
+    if "repairClosure" in request:
+        return observe_repair(request, panes, proc)
     if "archiveClosure" in request:
         if request["archiveClosure"] is not True or "manualClosure" in request:
             raise ValueError("invalid archive closure inspection")

@@ -38,7 +38,7 @@ test("unobserved project launches retain their reservations, session and input; 
 	await f.registry.recordAcceptedInput(f.id, { deliveryId: deriveDeliveryId(f.id, "$input"), matrixEventId: "$input", kind: "prompt", body: "PRIVATE PROMPT", status: "accepted" });
 	await f.registry.prepareProjectLaunch(f.id, "n".repeat(64)); await f.registry.failLaunch(f.id);
 	const facts = f.registry.repairRuntimeFacts(f.id)!;
-	assert.deepEqual(Object.keys(facts).sort(), ["attached", "legacyWindow", "lifecycleObligations", "queues", "state", "unobservedLaunch"]);
+	assert.deepEqual(Object.keys(facts).sort(), ["attached", "legacyWindow", "lifecycleObligations", "queues", "repairHeld", "state", "unobservedLaunch"]);
 	assert.deepEqual(facts.queues, { inputs: 1, controls: 0, outputs: 0 });
 	assert.ok(!JSON.stringify(facts).includes("PRIVATE"));
 	facts.queues.inputs = 999;

@@ -96,6 +96,7 @@ export class RelayRegistry {
 
 	withQueueEffect<T>(conversationId: string, work: () => Promise<T>): Promise<T> {
 		this.assertAuthorityAvailable();
+		this.assertRuntimeNotHeld(conversationId);
 		return this.queueActivity.effect(conversationId, work);
 	}
 	queueCancellationSnapshot(conversationId: string): QueueCancellationSnapshot {
@@ -119,6 +120,74 @@ export class RelayRegistry {
 				this.queueCommitPending = true;
 			});
 		});
+	}
+	runtimeRepairHeld(conversationId: string): boolean {
+		const receipt = this.runtimeConversation(conversationId).runtimeRepairs?.at(-1);
+		return Boolean(receipt && receipt.phase !== "released");
+	}
+	assertRuntimeNotHeld(conversationId: string): void {
+		if (this.runtimeRepairHeld(conversationId)) throw new RelayRegistryError("invalid_state", "Runtime repair holds this conversation; inspect and resolve its approved plan before further activity");
+	}
+	heldRuntimeRepairOperation(conversationId: string): string | undefined {
+		const last = this.runtimeConversation(conversationId).runtimeRepairs?.at(-1);
+		return last && last.phase !== "released" ? last.operationId : undefined;
+	}
+	runtimeRepairReceipt(conversationId: string, operationId: string): import("../runtime-repair-contracts.js").RuntimeRepairReceipt | undefined {
+		return structuredClone(this.runtimeConversation(conversationId).runtimeRepairs?.find(r => r.operationId === operationId));
+	}
+	/** Frozen runtime identity only. Queues remain independently held and scoped. */
+	runtimeRepairTarget(conversationId: string) {
+		const row = this.runtimeConversation(conversationId); const manifest = this.registeredConversation(conversationId)!;
+		const facts = this.repairRuntimeFacts(conversationId)!;
+		if (this.queueActivity.busy(conversationId) || this.liveConnections.has(conversationId) || row.attachment || row.state === "active" || facts.lifecycleObligations)
+			throw new RelayRegistryError("invalid_state", "Runtime repair requires detached, quiescent runtime and no lifecycle obligations");
+		return { conversationId, generationId: this.activeGeneration(manifest).generationId,
+			sourceDigest: createHash("sha256").update(JSON.stringify({ manifest, state: row.state, window: row.managedWindow,
+				launch: row.launch, nonceHash: row.attachmentNonceHash, launchHighWater: row.launchHighWater })).digest("hex"),
+			window: structuredClone(row.managedWindow), ...(row.launch ? { launch: structuredClone(row.launch) } : {}) };
+	}
+	async admitRuntimeRepair(target: ReturnType<RelayRegistry["runtimeRepairTarget"]>, receipt: import("../runtime-repair-contracts.js").RuntimeRepairReceipt, supersedesOperationId?: string): Promise<void> {
+		await this.queueActivity.exclusive(target.conversationId, () => this.mutate(async () => {
+			const row = this.runtimeConversation(target.conversationId);
+			const prior = row.runtimeRepairs?.find(r => r.operationId === receipt.operationId);
+			if (prior) {
+				if (!isDeepStrictEqual(prior, receipt)) throw staleHostPreview();
+				return;
+			}
+			if (this.heldRuntimeRepairOperation(target.conversationId) !== supersedesOperationId || (row.runtimeRepairs?.length ?? 0) >= 32 || receipt.phase !== "held" ||
+				receipt.sourceDigest !== target.sourceDigest || receipt.generationId !== target.generationId || !isDeepStrictEqual(target, this.runtimeRepairTarget(target.conversationId))) throw staleHostPreview();
+			if (supersedesOperationId) { const old = row.runtimeRepairs!.at(-1)!; old.phase = "superseded"; old.supersededAt = receipt.admittedAt; }
+			(row.runtimeRepairs ??= []).push(structuredClone(receipt));
+			parseHostRuntimeState(this.state); this.queueCommitPending = true;
+		}));
+	}
+	async reconcileRuntimeRepair(target: ReturnType<RelayRegistry["runtimeRepairTarget"]>, operationId: string, evidenceDigest: string): Promise<void> {
+		await this.queueActivity.exclusive(target.conversationId, () => this.mutate(async () => {
+			const row = this.runtimeConversation(target.conversationId);
+			const receipt = row.runtimeRepairs?.at(-1);
+			if (!receipt || receipt.operationId !== operationId || receipt.sourceDigest !== target.sourceDigest || receipt.evidenceDigest !== evidenceDigest || receipt.phase !== "held" ||
+				!isDeepStrictEqual(target, this.runtimeRepairTarget(target.conversationId))) throw staleHostPreview();
+			this.clearRuntimeObservation(row);
+			receipt.phase = "reconciled"; receipt.reconciledAt = new Date().toISOString();
+			parseHostRuntimeState(this.state); this.queueCommitPending = true;
+		}));
+	}
+	/** Internal owner seam, not a public approval bypass. Non-empty queues require #150's explicit choices. */
+	async releaseEmptyRuntimeRepair(conversationId: string, operationId: string): Promise<void> {
+		await this.queueActivity.exclusive(conversationId, () => this.mutate(async () => {
+			const row = this.runtimeConversation(conversationId); const receipt = row.runtimeRepairs?.at(-1);
+			const facts = this.repairRuntimeFacts(conversationId)!;
+			if (!receipt || receipt.operationId !== operationId || receipt.phase !== "reconciled" || receipt.generationId !== this.activeGeneration(this.registeredConversation(conversationId)!).generationId || Object.values(facts.queues).some(n => n > 0) || facts.lifecycleObligations || row.attachment || row.launch || row.managedWindow)
+				throw new RelayRegistryError("invalid_state", "Runtime repair is not reconciled or still holds work; an explicit repair plan is required");
+			receipt.phase = "released"; receipt.releasedAt = new Date().toISOString();
+			parseHostRuntimeState(this.state); this.queueCommitPending = true;
+		}));
+	}
+	private clearRuntimeObservation(row: RuntimeConversation): void {
+		const high = Math.max(row.launchHighWater ?? 0, row.launch?.ordinal ?? 0);
+		if (high) row.launchHighWater = high;
+		row.launch = undefined; row.managedWindow = null; row.attachmentNonceHash = undefined;
+		row.lastLaunchError = undefined; row.state = "dormant"; row.attachment = null;
 	}
 	private readonly runtimeObservers = new Set<() => void>();
 	private runtimeObservationKey?: string;
@@ -1030,6 +1099,7 @@ export class RelayRegistry {
 	async prepareProjectLaunch(conversationId: string, nonce: string): Promise<NonNullable<RuntimeConversation["launch"]>> {
 		if (!/^[A-Za-z0-9_-]{32,128}$/.test(nonce)) throw new RelayRegistryError("invalid_nonce", "Attachment nonce is invalid");
 		return this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			if (conversation.state === "active" || conversation.managedWindow || conversation.launch?.observed === false)
 				throw new RelayRegistryError("invalid_state", "Previous launch requires ownership-safe inspection before retry");
@@ -1042,11 +1112,12 @@ export class RelayRegistry {
 				throw new RelayRegistryError("invalid_state", "Terminal promotion must complete source adoption before an owned launch");
 			}
 			const generationId = this.activeGeneration(manifest).generationId;
-			const ordinal = (conversation.launch?.ordinal ?? 0) + 1;
+			const ordinal = Math.max(conversation.launchHighWater ?? 0, conversation.launch?.ordinal ?? 0) + 1;
 			if (!Number.isSafeInteger(ordinal)) throw new RelayRegistryError("capacity_reached", "Launch ordinal limit reached");
 			const hash = createHash("sha256").update("pi-managed-sessions:launch:live-v1\0");
 			for (const part of [conversationId, generationId, String(ordinal)]) hash.update(`${Buffer.byteLength(part)}:${part}`);
 			conversation.launch = { launchId: `launch_${hash.digest("hex").slice(0, 32)}`, generationId, ordinal, observed: false };
+			conversation.launchHighWater = ordinal;
 			conversation.attachmentNonceHash = nonceHash(nonce); conversation.state = "starting";
 			return structuredClone(conversation.launch);
 		});
@@ -1054,6 +1125,7 @@ export class RelayRegistry {
 
 	async beginLaunch(conversationId: string): Promise<void> {
 		await this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			if (conversation.state === "active") return;
 			conversation.state = "starting";
@@ -1072,6 +1144,7 @@ export class RelayRegistry {
 
 	async setManagedWindow(conversationId: string, window: RuntimeConversation["managedWindow"]): Promise<void> {
 		await this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			if (window && conversation.launch) {
 				if (window.ownership?.launchId !== conversation.launch.launchId) throw new RelayRegistryError("invalid_state", "Observed window changed its reserved launch");
@@ -1097,9 +1170,8 @@ export class RelayRegistry {
 				conversation.pendingControls.length || conversation.promotion) {
 				throw new RelayRegistryError("invalid_state", "Legacy migration target changed or remains active; no metadata was cleared");
 			}
-			conversation.managedWindow = null;
-			conversation.attachmentNonceHash = undefined;
-			conversation.lastLaunchError = undefined;
+			this.assertRuntimeNotHeld(conversationId);
+			this.clearRuntimeObservation(conversation);
 		});
 	}
 
@@ -1173,6 +1245,7 @@ export class RelayRegistry {
 	isRefreshing(conversationId: string): boolean { return this.refreshing.has(conversationId); }
 
 	beginRefresh(conversationId: string): void {
+		this.assertRuntimeNotHeld(conversationId);
 		const conversation = this.runtimeConversation(conversationId);
 		if (this.refreshing.has(conversationId) || conversation.state === "starting" || this.hasGenerationBoundary(conversationId) ||
 			conversation.pendingControls.length || conversation.pendingInputs.some((input) => input.status === "persisted" || input.status === "delivered")) {
@@ -1308,6 +1381,7 @@ export class RelayRegistry {
 	async setAttachmentNonce(conversationId: string, nonce: string): Promise<void> {
 		if (!/^[A-Za-z0-9_-]{32,128}$/.test(nonce)) throw new RelayRegistryError("invalid_nonce", "Attachment nonce is invalid");
 		await this.mutate(async () => {
+			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			conversation.attachmentNonceHash = nonceHash(nonce);
 		});
@@ -1326,6 +1400,7 @@ export class RelayRegistry {
 			if (payload.sessionId !== manifest.piSessionId || payload.bindingBoundaryEntryId !== manifest.bindingBoundaryEntryId) {
 				throw new RelayRegistryError("permission_denied", "Adapter session binding does not match the conversation manifest");
 			}
+			this.assertRuntimeNotHeld(manifest.conversationId);
 			const conversation = this.runtimeConversation(manifest.conversationId);
 			if (!conversation.attachmentNonceHash || !equalHash(conversation.attachmentNonceHash, nonceHash(payload.attachmentNonce))) {
 				throw new RelayRegistryError("invalid_nonce", "Attachment nonce was rejected");
@@ -1381,7 +1456,7 @@ export class RelayRegistry {
 		const manifest = this.manifests.get(conversationId);
 		if (!row || !manifest) return undefined;
 		return {
-			state: row.state,
+			state: row.state, repairHeld: this.runtimeRepairHeld(conversationId),
 			attached: Boolean(this.liveConnections.has(conversationId) && row.state === "active" && row.attachment?.sessionId === manifest.piSessionId),
 			legacyWindow: Boolean(row.managedWindow && !row.managedWindow.ownership), unobservedLaunch: row.launch?.observed === false,
 			queues: { inputs: row.pendingInputs.filter(i => !["completed", "cancelled"].includes(i.status)).length,
@@ -1574,7 +1649,7 @@ export class RelayRegistry {
 		});
 	}
 	private assertAuthorityAvailable(): void {
-		if (this.queueWriteUncertain) throw new RelayRegistryError("invalid_state", "Queue abandonment write is uncertain; reload the owner before further activity");
+		if (this.queueWriteUncertain) throw new RelayRegistryError("invalid_state", "Runtime safety write is uncertain; reload the owner before further activity");
 		this.retirements.assertAvailable(); this.archives.assertAvailable();
 	}
 	private assertNotRetired(conversationId: string): void {

@@ -37,6 +37,7 @@ Tests are under `tests/`; most names have the prefix `managed-session-`.
 | List/status/workspaces | `host-read-model`, `host-inventory-pages`, `runtime-observer` | `host-read-model`, `runtime-observer`, `host-cli` |
 | Create/open/resume/stop/fork/worktree | `host-lifecycle`, `exact-window-client`; fixed launcher operations | `exact-lifecycle`, `host-mutation-owner`, `live-hierarchy` |
 | Advisory repair inspection | `conversation-repair-inspection`, `host-read-model`; read-only membership adapter in `main` | `repair-inspection`, `host-read-model`, `live-workspace-contracts`, `host-cli` |
+| Internal runtime repair owner (#148; public orchestration pending #150) | `runtime-repair`, `runtime-repair-evidence`, registry hold/receipt writer; trusted adapters in `host-lifecycle` | `runtime-repair`, `exact-lifecycle`, `test_managed_legacy_observe.py` |
 | Legacy migration/recovery | `legacy-window-migration`, `manual-legacy-recovery`; fixed `scripts/managed-legacy-observe.py` | `exact-lifecycle`, `legacy-observe`, `test_managed_legacy_observe.py` |
 | Permission changes | `operator-admin`, lifecycle's narrow approval methods | `operator-admin`, `migration-space-admin` |
 | Retirement | `conversation-retirement`, `retirement-store`, `retirement-cleanup`, `retirement-ancestor-owner` | `retirement-registry`, `host-mutation-owner` |

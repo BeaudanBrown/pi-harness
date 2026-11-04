@@ -1,3 +1,4 @@
+import { RuntimeRepairReceiptSchema, type RuntimeRepairReceipt } from "./runtime-repair-contracts.js";
 import { ConversationTitleSchema, TitleRevisionSchema, parseConversationTitle } from "./title-contracts.js";
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
@@ -660,6 +661,8 @@ export interface QueueCancellationReceipt {
 	items: Array<{ kind: "input" | "control" | "projection"; id: string; priorState: string; digest: string }>;
 }
 const runtimeConversation = strictObject({
+	runtimeRepairs: Type.Optional(Type.Array(RuntimeRepairReceiptSchema, { maxItems: 32 })),
+	launchHighWater: Type.Optional(Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER })),
 	queueCancellations: Type.Optional(Type.Array(queueCancellationReceipt, { maxItems: 32 })),
 	abandonedControls: Type.Optional(Type.Array(pendingControl, { maxItems: 1024 })),
 	conversationId: ConversationIdSchema,
@@ -783,6 +786,8 @@ export interface HostRuntimeState {
 	conversations: Array<{
 		conversationId: string;
 		archiveId?: string;
+		runtimeRepairs?: RuntimeRepairReceipt[];
+		launchHighWater?: number;
 		queueCancellations?: QueueCancellationReceipt[];
 		abandonedControls?: HostRuntimeState["conversations"][number]["pendingControls"];
 		state: "starting" | "active" | "dormant";
@@ -1281,6 +1286,18 @@ export function parseHostRuntimeState(value: unknown): HostRuntimeState {
 		}
 		const abandoned = new Set<string>();
 		const cancellationOperations = new Set<string>();
+		const repairs = conversation.runtimeRepairs ?? [];
+		if (new Set(repairs.map(r => r.operationId)).size !== repairs.length || repairs.some((r, i) =>
+			(i < repairs.length - 1 && !["released", "superseded"].includes(r.phase)) ||
+			(i === repairs.length - 1 && r.phase === "superseded") ||
+			(r.phase !== "superseded" && (r.phase === "held") !== (r.reconciledAt === undefined)) ||
+			(r.phase === "superseded") !== (r.supersededAt !== undefined) ||
+			(r.phase === "released") !== (r.releasedAt !== undefined) ||
+			(r.closureBasis === "verified_exit" && r.unreadableCount !== 0)) ||
+			(conversation.launchHighWater !== undefined && conversation.launch && conversation.launchHighWater < conversation.launch.ordinal))
+			throw new ManagedSessionContractError("malformed", "Invalid runtime repair receipt or launch high-water");
+		if (repairs.at(-1)?.phase !== undefined && repairs.at(-1)!.phase !== "released" && conversation.attachment)
+			throw new ManagedSessionContractError("malformed", "A held runtime repair cannot have an attachment");
 		for (const receipt of conversation.queueCancellations ?? []) {
 			if (cancellationOperations.has(receipt.operationId)) throw new ManagedSessionContractError("conflict", "Duplicate queue abandonment operation");
 			cancellationOperations.add(receipt.operationId);

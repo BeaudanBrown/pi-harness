@@ -7,7 +7,7 @@ type Membership = "join" | "leave" | "invite" | "ban" | "knock" | "unknown";
 type Setup = "pending" | "ready" | "notification_setup_uncertain";
 export interface RepairRuntimeFacts {
 	state: "starting" | "active" | "dormant";
-	attached: boolean; legacyWindow: boolean; unobservedLaunch: boolean;
+	attached: boolean; legacyWindow: boolean; unobservedLaunch: boolean; repairHeld: boolean;
 	queues: { inputs: number; controls: number; outputs: number };
 	lifecycleObligations: boolean;
 }
@@ -43,7 +43,7 @@ export class ConversationRepairInspection {
 		if (!manifest) throw new HostControlError("not_found", "Conversation was not found");
 		if (!hasMatrixBinding(manifest) || !hasMatrixBinding(before) || manifest.roomId !== before.roomId) membership = "unknown";
 		const facts = registry.repairRuntimeFacts(conversationId);
-		const runtime = !facts ? "unknown" : facts.attached ? "attached" : facts.unobservedLaunch ? "unobserved_launch"
+		const runtime = !facts ? "unknown" : facts.repairHeld ? "repair_held" : facts.attached ? "attached" : facts.unobservedLaunch ? "unobserved_launch"
 			: facts.legacyWindow ? "legacy_ownership" : facts.state === "starting" ? "starting"
 			: facts.state === "dormant" ? "dormant" : "unknown";
 		const queues = facts?.queues ?? null;
@@ -51,6 +51,7 @@ export class ConversationRepairInspection {
 		const setupState = !matrixReady ? "disconnected" : !hasMatrixBinding(manifest) ? "pending" : this.options.accountSetup(conversationId);
 		const findings: HostRepairInspection["findings"] = [];
 		const add = (code: HostRepairInspection["findings"][number]["code"], nextStep: string) => findings.push({ code, nextStep });
+		if (runtime === "repair_held") add("repair_held", "An admitted repair holds execution. Inspect its durable receipt and obtain fresh approval to continue or supersede the plan; do not bypass it with open or legacy recovery.");
 		if (runtime === "unknown") add("runtime_unknown", "Obtain fresh process and attachment observations before any runtime repair; missing metadata is not exit proof.");
 		if (runtime === "legacy_ownership") add("legacy_ownership", "Inspect the old writer and saved session. Runtime repair requires verified exit or explicit closure attestation with fresh conflict screening.");
 		if (runtime === "unobserved_launch") add("unobserved_launch", "Inspect the reserved launch outcome before retrying. Do not clear its reservation or assume an absent attachment means process exit.");
