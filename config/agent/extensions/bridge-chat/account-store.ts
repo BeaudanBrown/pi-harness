@@ -28,7 +28,7 @@ export type RuleProgress = { roomId: string; ruleId: string; payload: unknown; s
 export class AccountStore {
 	private readonly db: DatabaseSync;
 	private transactionDepth = 0;
-	constructor(filename: string, ownerUserId: string) {
+	constructor(filename: string, ownerUserId: string, private readonly now = Date.now) {
 		this.db = new DatabaseSync(filename, { timeout: 100 });
 		try {
 			this.db.exec(`PRAGMA synchronous=FULL; PRAGMA secure_delete=ON; PRAGMA max_page_count=32768;
@@ -50,6 +50,8 @@ export class AccountStore {
 					this.db.exec("ALTER TABLE account_requests ADD COLUMN revision INTEGER NOT NULL DEFAULT 0");
 				}
 				if (!columns.includes("attempt")) this.db.exec("ALTER TABLE account_requests ADD COLUMN attempt INTEGER NOT NULL DEFAULT 0");
+				if (!columns.includes("membership_admitted")) this.db.exec("ALTER TABLE account_requests ADD COLUMN membership_admitted INTEGER NOT NULL DEFAULT 0");
+				if (!columns.includes("membership_attempt")) this.db.exec("ALTER TABLE account_requests ADD COLUMN membership_attempt INTEGER NOT NULL DEFAULT 0");
 				const saved = this.db.prepare("SELECT owner FROM identity").get();
 				if (saved && saved.owner !== ownerUserId) throw Error("Managed account owner changed; explicit recovery required");
 				if (!saved) this.db.prepare("INSERT INTO identity VALUES (?)").run(ownerUserId);
@@ -86,7 +88,10 @@ export class AccountStore {
 				const old = this.get(action.requestId);
 				if (old) {
 					if (old.sender !== sender || old.action.payloadDigest !== action.payloadDigest) throw Error("Conflicting managed account identity");
-					if (old.ack) this.queueAck(old.ack, configured.find(h => h.hostId === action.hostId)!);
+					if (action.operation === "room.membership.inspect") {
+						this.db.prepare("UPDATE account_requests SET ack=NULL WHERE id=?").run(action.requestId);
+						this.db.prepare("DELETE FROM account_outbox WHERE id=?").run(action.requestId);
+					} else if (old.ack) this.queueAck(old.ack, configured.find(h => h.hostId === action.hostId)!);
 					continue;
 				}
 				if (Number(this.db.prepare("SELECT count(*) AS n FROM account_requests").get()!.n) >= 16384) throw Error("Managed account intake capacity exhausted");
@@ -147,7 +152,10 @@ export class AccountStore {
 			const departureEventId = code === "departed" ? this.room(request.action.roomId)?.departure : undefined;
 			const previous = Number(this.db.prepare("SELECT revision FROM account_requests WHERE id=?").get(requestId)!.revision);
 			if (!Number.isSafeInteger(previous) || previous < 0) throw Error("Invalid account progress revision");
-			const next = { version, requestId, payloadDigest, hostId, status, ...(code ? { code } : {}), ...(departureEventId ? { departureEventId } : {}) };
+			const inspected = request.action.operation === "room.membership.inspect" ? this.room(request.action.roomId) : undefined;
+			const membershipRepair = inspected && inspected.sender === request.sender && inspected.action.conversationId === (request.action as Extract<AccountAction, { operation: "room.membership.inspect" }>).conversationId
+				? { capability: "original-room-repair-v1", retired: inspected.retired, ...(inspected.departure ? { departureEventId: inspected.departure } : {}) } : undefined;
+			const next = { version, requestId, payloadDigest, hostId, status, ...(code ? { code } : {}), ...(departureEventId ? { departureEventId } : {}), ...(membershipRepair ? { membershipRepair } : {}) };
 			const unchanged = request.ack && isDeepStrictEqual(request.ack, { ...next, revision: previous });
 			const ack = parseAccountAck({ ...next, revision: unchanged ? previous : previous + 1 });
 			this.db.prepare("UPDATE account_requests SET ack=?,revision=? WHERE id=?").run(JSON.stringify(ack), ack.revision, requestId); this.queueAck(ack, host);
@@ -202,9 +210,87 @@ export class AccountStore {
 			const room = this.room(roomId); if (!this.tracksMembership(roomId) || this.db.prepare("SELECT 1 FROM account_departures WHERE event=?").get(eventId)) return;
 			if (Number(this.db.prepare("SELECT count(*) AS n FROM account_departures").get()!.n) >= 16384) throw Error("Account departure capacity exhausted");
 			this.db.prepare("INSERT INTO account_departures VALUES (?,?)").run(eventId, roomId);
-			if (room) this.db.prepare("UPDATE account_rooms SET departure=?, retired=? WHERE room=?").run(eventId, room.action.kind === "conversation" || room.retired ? 1 : 0, roomId);
+			if (room) this.db.prepare("UPDATE account_rooms SET departure=?, retired=? WHERE room=?").run(eventId, room.retired || room.action.kind === "conversation" && !this.protectsDeparture(room, eventId) ? 1 : 0, roomId);
 			this.db.prepare("DELETE FROM account_invites WHERE room=?").run(roomId);
 			this.invalidateEnsures(roomId);
+		});
+	}
+	/** Only an authenticated, unexpired exact request may protect a not-yet-retired room. */
+	private protectsDeparture(room: AccountRoom, eventId: string): boolean {
+		if (room.retired || !room.verified) return false;
+		return this.db.prepare("SELECT id FROM account_requests WHERE json_extract(payload,'$.roomId')=? AND json_extract(payload,'$.operation')='room.membership.restore'").all(room.action.roomId).some(row => {
+			const r = this.get(String(row.id))!; const a = r.action;
+			return a.operation === "room.membership.restore" && this.db.prepare("SELECT membership_admitted FROM account_requests WHERE id=?").get(a.requestId)?.membership_admitted === 1 && !this.membershipCancelled(r) && r.sender === room.sender && a.hostId === room.action.hostId && a.conversationId === room.action.conversationId && a.hostSpaceId === room.action.hostSpaceId &&
+				(a.membership === "leave" ? a.membershipEventId : a.departureEventId) === eventId && a.expiresAt > this.now() && a.expiresAt <= this.now() + 600_000 && (!r.ack || r.ack.status === "pending") &&
+				(room.departure === undefined || room.departure === a.departureEventId || room.departure === eventId);
+		});
+	}
+	private membershipCancelled(request: AccountRequest): boolean {
+		const action = request.action; if (action.operation !== "room.membership.restore") return true;
+		return this.db.prepare("SELECT id FROM account_requests WHERE json_extract(payload,'$.roomId')=? AND json_extract(payload,'$.operation')='room.membership.cancel'").all(action.roomId).some(row => {
+			const cancel = this.get(String(row.id))!; const a = cancel.action;
+			return a.operation === "room.membership.cancel" && cancel.sender === request.sender && a.hostId === action.hostId && a.conversationId === action.conversationId && a.operationId === action.operationId;
+		});
+	}
+	assertMembershipRepair(requestId: string): AccountRoom {
+		const r = this.get(requestId); const a = r?.action;
+		if (!r || a?.operation !== "room.membership.restore") throw Error("Membership repair request is unavailable");
+		const room = this.room(a.roomId);
+		if (!room?.verified || room.retired || this.membershipCancelled(r) || !["conversation", "coordinator"].includes(room.action.kind) || r.sender !== room.sender || a.hostId !== room.action.hostId ||
+			a.conversationId !== room.action.conversationId || a.hostSpaceId !== room.action.hostSpaceId || a.expiresAt <= this.now() || a.expiresAt > this.now() + 600_000 ||
+			(room.departure !== a.departureEventId && !(a.membership === "leave" && room.departure === a.membershipEventId))) throw Error("Membership repair expired, terminal or changed");
+		return room;
+	}
+	recheckDepartures(): void {
+		this.atomic(() => {
+			for (const row of this.db.prepare("SELECT room FROM account_rooms WHERE retired=0 AND departure IS NOT NULL AND json_extract(payload,'$.kind')='conversation'").all()) {
+				const room = this.room(String(row.room))!;
+				if (!this.protectsDeparture(room, room.departure!)) {
+					this.db.prepare("UPDATE account_rooms SET retired=1 WHERE room=?").run(room.action.roomId); this.invalidateEnsures(room.action.roomId);
+				}
+			}
+		});
+	}
+	membershipAuthorization(requestId: string): Extract<AccountAction, { operation: "room.membership.authorize" }> | undefined {
+		const request = this.get(requestId); if (request?.action.operation !== "room.membership.restore") return;
+		let found: Extract<AccountAction, { operation: "room.membership.authorize" }> | undefined;
+		for (const row of this.db.prepare("SELECT id FROM account_requests WHERE json_extract(payload,'$.roomId')=? AND json_extract(payload,'$.operation')='room.membership.authorize'").all(request.action.roomId)) {
+			const r = this.get(String(row.id))!; const a = r.action;
+			if (a.operation === "room.membership.authorize" && r.sender === request.sender && a.hostId === request.action.hostId && a.conversationId === request.action.conversationId && a.restoreRequestId === requestId) {
+				if (found) throw Error("Membership authorization scope changed"); found = a;
+			}
+		}
+		return found;
+	}
+	membershipJoinAttempted(requestId: string): boolean {
+		return this.db.prepare("SELECT membership_attempt FROM account_requests WHERE id=?").get(requestId)?.membership_attempt === 1;
+	}
+	membershipConfirmation(requestId: string): string | undefined {
+		const request = this.get(requestId); if (request?.action.operation !== "room.membership.restore") return;
+		let found: string | undefined;
+		for (const row of this.db.prepare("SELECT id FROM account_requests WHERE json_extract(payload,'$.roomId')=? AND json_extract(payload,'$.operation')='room.membership.confirm'").all(request.action.roomId)) {
+			const r = this.get(String(row.id))!; const a = r.action;
+			if (a.operation === "room.membership.confirm" && r.sender === request.sender && a.hostId === request.action.hostId && a.conversationId === request.action.conversationId && a.restoreRequestId === requestId) {
+				if (found) throw Error("Membership confirmation scope changed"); found = a.membershipEventId;
+			}
+		}
+		return found;
+	}
+	beginMembershipJoin(requestId: string): boolean {
+		return this.atomic(() => {
+			this.assertMembershipRepair(requestId);
+			if (this.db.prepare("SELECT membership_attempt FROM account_requests WHERE id=?").get(requestId)?.membership_attempt !== 0) return false;
+			this.db.prepare("UPDATE account_requests SET membership_attempt=1 WHERE id=?").run(requestId); return true;
+		});
+	}
+	admitMembershipRepair(requestId: string): void {
+		this.atomic(() => {
+			this.assertMembershipRepair(requestId);
+			this.db.prepare("UPDATE account_requests SET membership_admitted=1 WHERE id=?").run(requestId);
+			const action = this.get(requestId)!.action as Extract<AccountAction, { operation: "room.membership.restore" }>;
+			// Remember the exact observed departure so a delayed sync cannot undo restoration.
+			if (action.membership === "leave") this.departed(action.roomId, action.membershipEventId);
+			this.assertMembershipRepair(requestId);
 		});
 	}
 	saveInvite(roomId: string, events: unknown): void {
@@ -221,10 +307,12 @@ export class AccountStore {
 			this.db.prepare("UPDATE account_rooms SET retired=1 WHERE room=?").run(roomId);
 		});
 	}
-	restored(roomId: string, departure: string, requestId: string, host: AccountHost): void {
+	restored(roomId: string, departure: string | undefined, requestId: string, host: AccountHost): void {
 		this.atomic(() => {
 			const room = this.room(roomId);
-			if (!room?.verified || room.action.kind !== "coordinator" || room.retired || room.departure !== departure) throw Error("Coordinator departure changed");
+			const request = this.get(requestId);
+			if (request?.action.operation === "room.membership.restore") this.assertMembershipRepair(requestId);
+			if (!room?.verified || room.retired || room.departure !== departure || (request?.action.operation !== "room.membership.restore" && room.action.kind !== "coordinator")) throw Error("Membership departure changed");
 			this.db.prepare("UPDATE account_rooms SET departure=NULL WHERE room=?").run(roomId);
 			this.invalidateEnsures(roomId);
 			this.writeAck(requestId, host, "complete");

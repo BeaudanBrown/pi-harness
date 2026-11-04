@@ -1,3 +1,4 @@
+import { MembershipRepairOwner, type MembershipRepairPlan } from "./membership-repair.js";
 import { matrixDelay } from "../../matrix-shared/http.js";
 import { isDeepStrictEqual } from "node:util";
 import { createHash } from "node:crypto";
@@ -16,6 +17,34 @@ type CleanupTarget = Parameters<RetirementAccountPort["leaveAndForget"]>[0] | Hi
 export class HostAccountOwner {
 	private readonly stop = new AbortController();
 	private work?: Promise<void>;
+	private membershipLane: Promise<unknown> = Promise.resolve();
+	private membershipWork<T>(fn: () => Promise<T>): Promise<T> {
+		const work = this.membershipLane.then(fn); this.membershipLane = work.catch(() => {}); return work;
+	}
+	private repairOwner(): MembershipRepairOwner {
+		return new MembershipRepairOwner({ client: this.client, identity: async id => {
+			const check = () => {
+				if (this.registry.retirement(id) || this.registry.archiveRecord(id)) throw Error("Conversation is terminal and not restorable");
+				const manifest = this.registry.manifestByConversationId(id); const action = this.client.ensureIdentity(id);
+				this.client.assertOwner(this.matrix.operatorUserId);
+				if (!manifest || !action || action.roomId !== manifest.roomId || action.creationKey !== manifest.creationKey || action.hostSpaceId !== this.coordinator()?.hostSpace ||
+					action.kind !== (manifest.kind === "coordinator" ? "coordinator" : "conversation") || manifest.kind === "project" && action.project?.projectKey !== manifest.projectKey) throw Error("Managed original-room identity is unavailable");
+				return { manifest, action };
+			};
+			const source = check(); const a = source.action;
+			await this.matrix.assertManagedProvenance(a.roomId, a.kind === "coordinator"
+				? { version: 1, hostId: this.registry.hostId, kind: "coordinator", conversationId: id, creationKey: a.creationKey, parentRoomId: a.hostSpaceId }
+				: { version: 1, hostId: this.registry.hostId, kind: "conversation", conversationId: id, creationKey: a.creationKey, projectKey: a.project!.projectKey, checkoutId: a.checkout!.checkoutId, parentRoomId: a.checkout!.spaceId }, AbortSignal.any([this.stop.signal, AbortSignal.timeout(10000)]));
+			if (!isDeepStrictEqual(source, check())) throw Error("Managed membership identity changed");
+			return { conversationId: id, roomId: a.roomId, hostSpaceId: a.hostSpaceId, operatorUserId: this.matrix.operatorUserId, botUserId: this.matrix.botUserId,
+				sourceDigest: createHash("sha256").update(JSON.stringify(source)).digest("hex") };
+		}, member: room => this.matrix.operatorMembershipEvent(room, AbortSignal.any([this.stop.signal, AbortSignal.timeout(10000)])),
+		invite: room => this.matrix.inviteOperator(room, AbortSignal.any([this.stop.signal, AbortSignal.timeout(10000)])) });
+	}
+	freezeRoomMembership(id: string): Promise<MembershipRepairPlan> { return this.repairOwner().snapshot(id); }
+	restoreRoomMembership(plan: MembershipRepairPlan, operationId: string, expiresAt: number) {
+		return this.membershipWork(() => this.repairOwner().reconcile(plan, operationId, expiresAt));
+	}
 	start(retire: (id: string) => Promise<unknown>): void {
 		if (this.work) return;
 		this.work = (async () => {
@@ -25,7 +54,13 @@ export class HostAccountOwner {
 					for (const action of this.client.departed()) {
 						if (action.operation !== "room.ensure" || action.kind !== "conversation" || !action.conversationId) continue;
 						const manifest = this.registry.manifestByConversationId(action.conversationId);
-						if (manifest?.kind === "project" && manifest.roomId === action.roomId) { await retire(action.conversationId); break; }
+						if (manifest?.kind === "project" && manifest.roomId === action.roomId) {
+							const retired = await this.membershipWork(async () => {
+								const current = this.registry.manifestByConversationId(action.conversationId!);
+								if (!this.client.departed().some(a => a.requestId === action.requestId) || current?.roomId !== action.roomId || this.client.protectsDeparture(action.conversationId!, this.client.ack(action.requestId)?.departureEventId)) return false;
+								await retire(action.conversationId!); return true;
+							}); if (retired) break;
+						}
 					}
 					await this.client.flush(this.stop.signal);
 				} catch { /* Exact pending intents survive; account outages do not stop local Pi. */ }
@@ -34,7 +69,9 @@ export class HostAccountOwner {
 		})();
 	}
 	async close(): Promise<void> { this.stop.abort(); await this.client.close(); await this.work; }
-	constructor(readonly client: HostAccountClient, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly hierarchy?: LiveHierarchy, private readonly archives?: Pick<ArchiveHierarchy, "accountBaseline" | "accountInventory">) {}
+	constructor(readonly client: HostAccountClient, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly hierarchy?: LiveHierarchy, private readonly archives?: Pick<ArchiveHierarchy, "accountBaseline" | "accountInventory">) {
+		client.bindMembershipAuthority(id => !registry.retirement(id) && !registry.archiveRecord(id) && Boolean(registry.manifestByConversationId(id)));
+	}
 	async initialize(): Promise<void> {
 		await this.client.load();
 		await this.client.initializeBaseline([...(this.hierarchy?.accountBaseline() ?? []), ...(this.archives?.accountBaseline() ?? []), ...this.registry.listManifests().map(m => `${m.kind === "coordinator" ? "coordinator" : "conversation"}:${m.creationKey}`)]);
@@ -59,21 +96,11 @@ export class HostAccountOwner {
 		await this.client.requestMany(actions);
 	}
 	async freezeMembership(): Promise<MembershipRestore> {
-		const coordinator = this.coordinator(); if (!coordinator?.hostSpace) throw Error("Protected coordinator is unavailable");
-		const signal = AbortSignal.any([this.stop.signal, AbortSignal.timeout(10000)]);
-		await this.matrix.assertManagedProvenance(coordinator.roomId, { version: 1, hostId: this.registry.hostId, kind: "coordinator", creationKey: coordinator.creationKey, conversationId: coordinator.conversationId, parentRoomId: coordinator.hostSpace }, signal);
-		const member = await this.matrix.operatorMembershipEvent(coordinator.roomId, signal);
-		if (member.membership !== "leave" || member.sender !== this.matrix.operatorUserId) throw Error("Coordinator has no current deliberate operator departure");
-		return { conversationId: coordinator.conversationId, roomId: coordinator.roomId, hostSpaceId: coordinator.hostSpace, departureEventId: member.eventId, operatorUserId: this.matrix.operatorUserId, botUserId: this.matrix.botUserId };
+		throw Error("Legacy coordinator membership restoration is disabled; unified approved orchestration is required");
 	}
 	async restoreMembership(plan: MembershipRestore): Promise<{ conversationId: string; setupState: "pending" | "ready" }> {
-		if (!isDeepStrictEqual(plan, await this.freezeMembership())) throw Error("Coordinator membership scope changed; obtain fresh consent");
-		const action = await this.client.request({ operation: "coordinator.membership.restore", roomId: plan.roomId, conversationId: plan.conversationId, hostSpaceId: plan.hostSpaceId, departureEventId: plan.departureEventId });
-		// This is the admitted caller attempt, not background model mutation replay.
-		// A lost invitation reply is uncertain; NAS can still observe an accepted invite.
-		if (!isDeepStrictEqual(plan, await this.freezeMembership())) throw Error("Coordinator departure changed before invitation");
-		await this.matrix.inviteOperator(plan.roomId, AbortSignal.any([this.stop.signal, AbortSignal.timeout(10000)]));
-		return { conversationId: plan.conversationId, setupState: this.client.ack(action.requestId)?.status === "complete" ? "ready" : "pending" };
+		void plan;
+		throw Error("Legacy coordinator membership restoration is disabled; unified approved orchestration is required");
 	}
 	private cleanup(target: CleanupTarget): AccountActionBody {
 		if ("provenance" in target) {

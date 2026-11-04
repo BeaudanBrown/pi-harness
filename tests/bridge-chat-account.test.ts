@@ -172,12 +172,12 @@ const signed = (body: Record<string, unknown>): AccountAction => parseAccountAct
 const machineEvent = (action: AccountAction) => ({ type: ACCOUNT_REQUEST_EVENT, sender: bot, content: action });
 const inviteState = () => [{ type: "m.room.member", state_key: owner, sender: bot, content: { membership: "invite" } }];
 const leaveBatch = (room: string, event: string) => ({ rooms: { leave: { [room]: { timeline: { events: [{ type: "m.room.member", state_key: owner, sender: owner, event_id: event, content: { membership: "leave" } }] } } } } });
-async function workerFixture(t: { after: (fn: () => Promise<void>) => void }, action = ensure()) {
-	const file = await filename(t); let store = new AccountStore(file, owner); t.after(async () => store.close());
+async function workerFixture(t: { after: (fn: () => Promise<void>) => void }, action = ensure(), now = Date.now) {
+	const file = await filename(t); let store = new AccountStore(file, owner, now); t.after(async () => store.close());
 	const matrixRules = rules(), snapshots = hierarchy(action), joined = new Set<string>();
 	const effects: string[] = []; const sent: Array<{ txn: string; content: unknown }> = []; let loseAck = false; let loseLeave = false;
 	const port: AccountMatrixPort = {
-		joined: async id => joined.has(id), state: async id => { if (!snapshots.has(id)) throw Error("Unavailable"); return snapshots.get(id); },
+		joined: async id => joined.has(id), state: async id => { if (!snapshots.has(id)) throw Error("Unavailable"); return [...snapshots.get(id)!, { type: "m.room.member", state_key: owner, event_id: joined.has(id) ? "$joined" : "$invite", sender: joined.has(id) ? owner : bot, content: { membership: joined.has(id) ? "join" : "invite" } }]; },
 		join: async id => { effects.push(`join:${id}`); joined.add(id); },
 		leave: async id => { effects.push(`leave:${id}`); joined.delete(id); if (loseLeave) throw Error("Reply lost"); },
 		forget: async id => { effects.push(`forget:${id}`); }, cleanupEligible: async () => true,
@@ -189,7 +189,7 @@ async function workerFixture(t: { after: (fn: () => Promise<void>) => void }, ac
 	let worker = new AccountWorker(store, hosts, owner, port, matrixRules.port);
 	const ingest = (a: AccountAction, invite = true) => worker.ingest({ to_device: { events: [machineEvent(a)] }, ...(invite ? { rooms: { invite: { [a.roomId]: { invite_state: { events: inviteState() } } } } } : {}) });
 	const step = () => worker.step(new AbortController().signal), flush = () => worker.flush(new AbortController().signal);
-	const restart = () => { store.close(); store = new AccountStore(file, owner); worker = new AccountWorker(store, hosts, owner, port, matrixRules.port); worker.ingest({}); };
+	const restart = () => { store.close(); store = new AccountStore(file, owner, now); worker = new AccountWorker(store, hosts, owner, port, matrixRules.port); worker.ingest({}); };
 	return { get store() { return store; }, get worker() { return worker; }, restart, port, matrixRules, effects, sent, joined, ingest, step, flush, setLoseAck: (v: boolean) => { loseAck = v; }, setLoseLeave: (v: boolean) => { loseLeave = v; } };
 }
 
@@ -289,4 +289,118 @@ test("coordinator restoration is bound to one departure; replay cannot clear a l
 	assert.equal(f.store.get(second.requestId)?.ack?.status, "complete");
 	f.ingest(action); await f.step(); assert.ok(f.store.get(action.requestId)!.ack!.revision > firstRevision, "ack invalidation and restart retain a monotonic high-water mark"); assert.equal(f.store.room(action.roomId)?.retired, false);
 	assert.throws(() => signed({ ...second, departureEventId: undefined }));
+});
+
+function repair(action: EnsureRoom, extra: Record<string, unknown> = {}): AccountAction {
+ return signed({ version: "1.0.0", hostId: "host", operation: "room.membership.restore", roomId: action.roomId, conversationId: action.conversationId,
+  hostSpaceId: action.hostSpaceId, operationId: `operation_${"a".repeat(32)}`, sourceDigest: "a".repeat(64), expiresAt: Date.now() + 300_000,
+  membership: "leave", membershipEventId: "$repair-left", ...extra });
+}
+function confirmRepair(request: AccountAction, event = "$joined"): AccountAction {
+ if (request.operation !== "room.membership.restore") throw Error("fixture");
+ return signed({ version: "1.0.0", hostId: "host", operation: "room.membership.confirm", roomId: request.roomId, conversationId: request.conversationId,
+  restoreRequestId: request.requestId, membershipEventId: event });
+}
+function authorizeRepair(request: AccountAction): AccountAction {
+ if (request.operation !== "room.membership.restore") throw Error("fixture");
+ return signed({ version: "1.0.0", hostId: "host", operation: "room.membership.authorize", roomId: request.roomId, conversationId: request.conversationId,
+  restoreRequestId: request.requestId, membership: "invite", membershipEventId: "$invite" });
+}
+for (const kind of ["conversation", "coordinator"] as const) test(`shared repair for ${kind} admits before invite, survives restart and preserves notification policy`, async t => {
+ const { project, checkout, ...base } = ensure(); const action = signed({ ...base, kind, ...(kind === "conversation" ? { project, checkout } : {}) }) as EnsureRoom;
+ const f = await workerFixture(t, action); f.ingest(action); await f.step(); const writes = f.matrixRules.writes();
+ f.joined.delete(action.roomId); const request = repair(action);
+ // A queued intent is insufficient: durable NAS admission must precede departure protection.
+ f.ingest(request, false); await f.step(); f.worker.ingest(leaveBatch(action.roomId, "$repair-left"));
+ for (let i = 0; i < 3; i++) await f.step();
+ assert.equal(f.store.room(action.roomId)?.retired, false); assert.equal(f.store.get(request.requestId)?.ack?.code, "admitted");
+ assert.equal(f.effects.length, 1); f.restart(); f.ingest(request); f.ingest(authorizeRepair(request), false);
+ for (let i = 0; i < 3; i++) await f.step();
+ assert.equal(f.store.get(request.requestId)?.ack?.code, "join_observed"); f.ingest(confirmRepair(request), false);
+ for (let i = 0; i < 3; i++) await f.step();
+ assert.equal(f.store.get(request.requestId)?.ack?.status, "complete"); assert.equal(f.store.room(action.roomId)?.departure, undefined);
+ assert.equal(f.effects.length, 2); assert.equal(f.matrixRules.writes(), writes);
+ f.worker.ingest(leaveBatch(action.roomId, "$repair-left")); assert.equal(f.store.room(action.roomId)?.departure, undefined);
+});
+
+for (const terminal of ["departure", "explicit"] as const) test(`existing NAS ${terminal} retirement is non-restorable and inspectable`, async t => {
+ const action = ensure(); const f = await workerFixture(t); f.ingest(action); await f.step(); f.joined.delete(action.roomId);
+ if (terminal === "departure") f.worker.ingest(leaveBatch(action.roomId, "$repair-left"));
+ else f.ingest(signed({ version: "1.0.0", hostId: "host", operation: "room.retire", roomId: action.roomId, conversationId: action.conversationId, retirementId: `retirement_${"b".repeat(32)}` }), false);
+ f.restart(); const inspect = signed({ version: "1.0.0", hostId: "host", operation: "room.membership.inspect", roomId: action.roomId, conversationId: action.conversationId, membershipEventId: "$repair-left" });
+ f.ingest(inspect, false); const request = repair(action); f.ingest(request);
+ for (let i = 0; i < 8; i++) await f.step();
+ assert.equal(f.store.get(inspect.requestId)?.ack?.membershipRepair?.retired, true);
+ assert.equal(f.store.get(request.requestId)?.ack?.status, "rejected"); assert.equal(f.store.room(action.roomId)?.retired, true);
+ assert.equal(f.effects.filter(e => e.startsWith("join:")).length, 1);
+});
+
+test("new departure during joined-state I/O defeats admitted repair", async t => {
+ const action = ensure(); const f = await workerFixture(t); f.ingest(action); await f.step(); f.joined.delete(action.roomId);
+ const request = repair(action); f.ingest(request, false); await f.step();
+ f.ingest(request); f.ingest(authorizeRepair(request), false); const joined = f.port.joined; f.port.joined = async (id, signal) => { f.worker.ingest(leaveBatch(id, "$later")); return joined(id, signal); };
+ for (let i = 0; i < 3; i++) await f.step();
+ assert.equal(f.store.room(action.roomId)?.retired, true); assert.equal(f.effects.length, 1);
+});
+
+test("uncertain join is not repeated after reload; observed acceptance can finish the same receipt", async t => {
+ const action = ensure(); const f = await workerFixture(t); f.ingest(action); await f.step(); f.joined.delete(action.roomId);
+ const request = repair(action); f.ingest(request, false); await f.step(); f.ingest(request); f.ingest(authorizeRepair(request), false);
+ let attempts = 0; f.port.join = async () => { attempts++; throw Error("lost"); };
+ for (let i = 0; i < 3; i++) await f.step(); f.restart(); for (let i = 0; i < 3; i++) await f.step();
+ assert.equal(attempts, 1); assert.notEqual(f.store.get(request.requestId)?.ack?.status, "complete");
+ f.joined.add(action.roomId); for (let i = 0; i < 3; i++) await f.step();
+ assert.equal(f.store.get(request.requestId)?.ack?.code, "join_observed"); f.ingest(confirmRepair(request), false);
+ for (let i = 0; i < 3; i++) await f.step(); assert.equal(f.store.get(request.requestId)?.ack?.status, "complete");
+});
+
+test("cancellation received before repair survives restart and prevents admission", async t => {
+ const action = ensure(); const f = await workerFixture(t); f.ingest(action); await f.step();
+ const request = repair(action); const cancel = signed({ version: "1.0.0", hostId: "host", operation: "room.membership.cancel", roomId: action.roomId, conversationId: action.conversationId, operationId: `operation_${"a".repeat(32)}` });
+ f.ingest(cancel, false); f.restart(); f.ingest(request, false); f.worker.ingest(leaveBatch(action.roomId, "$repair-left"));
+ for (let i = 0; i < 5; i++) await f.step();
+ assert.equal(f.store.room(action.roomId)?.retired, true); assert.equal(f.store.get(request.requestId)?.ack?.status, "rejected"); assert.equal(f.effects.length, 1);
+});
+
+test("NAS rejects a changed actual invite or confirmation event despite matching authorization fields", async t => {
+ for (const phase of ["invite", "confirmation"] as const) {
+  const action = ensure(); const f = await workerFixture(t); f.ingest(action); await f.step(); f.joined.delete(action.roomId);
+  const request = repair(action); f.ingest(request, false); await f.step(); f.ingest(request); f.ingest(authorizeRepair(request), false);
+  if (phase === "confirmation") {
+   for (let i = 0; i < 3; i++) await f.step(); assert.equal(f.store.get(request.requestId)?.ack?.code, "join_observed"); f.ingest(confirmRepair(request), false);
+  }
+  const state = f.port.state; f.port.state = async (id, signal) => (await state(id, signal) as Array<Record<string, unknown>>).map(e => e.type === "m.room.member" && e.state_key === owner ? { ...e, event_id: "$replacement" } : e);
+  for (let i = 0; i < 3; i++) await f.step();
+  assert.notEqual(f.store.get(request.requestId)?.ack?.status, "complete"); assert.equal(f.effects.length, phase === "invite" ? 1 : 2);
+ }
+});
+
+test("NAS requires a matching host authorization for frozen invite/join evidence", async t => {
+ for (const membership of ["invite", "join"] as const) {
+  const action = ensure(); const f = await workerFixture(t); f.ingest(action); await f.step();
+  if (membership === "invite") f.joined.delete(action.roomId);
+  const request = repair(action, { membership, membershipEventId: "$frozen" }); f.ingest(request); await f.step();
+  assert.equal(f.store.get(request.requestId)?.ack?.code, "admitted"); assert.equal(f.effects.length, 1);
+  f.ingest(signed({ version: "1.0.0", hostId: "host", operation: "room.membership.authorize", roomId: action.roomId, conversationId: action.conversationId,
+   restoreRequestId: request.requestId, membership, membershipEventId: "$changed" }), false);
+  for (let i = 0; i < 3; i++) await f.step();
+  assert.equal(f.store.get(request.requestId)?.ack?.status, "rejected"); assert.equal(f.effects.length, 1);
+ }
+});
+
+test("unsent or merely queued repairs do not suppress departure and expired admissions become terminal", async t => {
+ const action = ensure(); let now = 100_000; const f = await workerFixture(t, action, () => now); f.ingest(action); await f.step();
+ const request = repair(action, { expiresAt: now + 1000 }); f.ingest(request, false); await f.step();
+ assert.equal(f.store.room(action.roomId)?.retired, false); now += 2000; await f.step(); assert.equal(f.store.room(action.roomId)?.retired, true);
+ const g = await workerFixture(t); g.ingest(action); await g.step();
+ g.worker.ingest({ ...leaveBatch(action.roomId, "$repair-left"), to_device: { events: [machineEvent(repair(action))] } });
+ assert.equal(g.store.room(action.roomId)?.retired, true);
+});
+
+test("expired and foreign membership admissions cannot protect a departure", async t => {
+ for (const extra of [{ expiresAt: Date.now() - 1 }, { conversationId: `conv_${"b".repeat(32)}` }]) {
+  const action = ensure(); const f = await workerFixture(t); f.ingest(action); await f.step();
+  const request = repair(action, extra); f.worker.ingest({ ...leaveBatch(action.roomId, "$repair-left"), to_device: { events: [machineEvent(request)] } });
+  assert.equal(f.store.room(action.roomId)?.retired, true);
+ }
 });

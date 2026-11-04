@@ -339,7 +339,7 @@ test("legacy migration preserves old attachments, pending input and history acro
 			}
 			assert.equal(hierarchy.accountInventory().find(node => node.roomId === current.roomId)?.preserveNotificationPolicy, true);
 			const actions: Array<Record<string, unknown>> = [];
-			const client = { notificationSetup: () => "initial", cancelRetired: async () => {}, requestMany: async (values: Array<Record<string, unknown>>) => { actions.push(...values); } } as unknown as HostAccountClient;
+			const client = { bindMembershipAuthority: () => {}, notificationSetup: () => "initial", cancelRetired: async () => {}, requestMany: async (values: Array<Record<string, unknown>>) => { actions.push(...values); } } as unknown as HostAccountClient;
 			await new HostAccountOwner(client, registry, matrix as unknown as ManagedMatrixClient, hierarchy).provision();
 			assert.equal(actions.find(action => action.roomId === current.roomId)?.notificationSetup, "preserve", "migration never initializes policies on an existing room, even without an account baseline");
 		} finally { await hierarchy.close(); await rm(root, { recursive: true, force: true }); }

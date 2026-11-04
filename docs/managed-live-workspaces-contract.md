@@ -434,6 +434,28 @@ so a delayed notice for the restored departure can be ignored. Restoration also
 invalidates the NAS's old ensure acknowledgement before publishing completion.
 Coordinator membership notices alone are not retirement authority.
 
+Issue #149 adds internal original-room repair for non-retired project and
+coordinator identities through a shared account execution path. Every existing
+NAS `retired` flag remains terminal, including departure-only flags; it is never
+cleared or reinterpreted. `room.membership.inspect` advertises exact-room
+`original-room-repair-v1` support and terminal state before effects. An approved
+`room.membership.restore` freezes membership/departure, source digest, operation
+and expiry; a durable NAS admission (not a queued intent) precedes invitation.
+A subsequent `room.membership.authorize` binds the fresh exact membership event
+before account join; NAS must compare the actual full membership event, not only
+stripped invite state. An own join attempt requires a fresh
+`room.membership.confirm` binding the joined event before completion. Unavailable
+current event evidence remains an external permission/inspection obligation.
+The old host coordinator restore entry point fails closed
+until #150 connects its frontend to this admission-gated orchestration.
+Only a live matching admission may
+protect an already verified non-retired project from that exact departure. New
+departures and independent retirement win. `room.membership.cancel` revokes the
+exact operation without changing existing room membership or notification rules.
+Unknown or old NAS support is an upgrade/connectivity obligation, not permission
+to invite. See `managed-membership-repair.md` for uncertainty and crash boundaries.
+Public unified orchestration remains #150.
+
 ### Notification initialization and the operator's uncertainty decision
 
 For a new verified conversation, initialize its rules once, preferably before

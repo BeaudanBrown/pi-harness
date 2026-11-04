@@ -64,6 +64,13 @@ export class AccountWorker {
 		for (const room of accountRoomProofs(action)) snapshots.set(room.roomId, await this.matrix.state(room.roomId, signal));
 		verifyManagedHierarchy(action, bot, snapshots);
 	}
+	private async currentMember(roomId: string, signal: AbortSignal): Promise<{ eventId: string; membership: string; sender: string }> {
+		const snapshot = await this.matrix.state(roomId, signal).catch(() => { throw new AccountProofError("unverified"); });
+		const members = events(snapshot).map(object).filter(e => e.type === "m.room.member" && e.state_key === this.owner);
+		const e = members[0];
+		if (members.length !== 1 || typeof e.event_id !== "string" || !/^\$[^\s]{1,254}$/.test(e.event_id) || typeof e.sender !== "string" || typeof object(e.content).membership !== "string") throw new AccountProofError("unverified");
+		return { eventId: e.event_id, membership: object(e.content).membership as string, sender: e.sender };
+	}
 	private async ensure(request: AccountRequest, signal: AbortSignal): Promise<"complete" | "notification_setup_uncertain"> {
 		const action = request.action; if (action.operation !== "room.ensure") throw Error("Invalid ensure dispatch");
 		const saved = this.store.pinRoom(action, request.sender);
@@ -89,6 +96,7 @@ export class AccountWorker {
 	}
 	async step(signal: AbortSignal): Promise<void> {
 		if (!this.intakeReady) return;
+		this.store.recheckDepartures();
 		const request = this.store.nextRequest(this.hosts); if (!request) return;
 		const host = this.host(request); if (!host) return;
 		const action = request.action;
@@ -99,22 +107,69 @@ export class AccountWorker {
 				this.store.acknowledge(action.requestId, host, await this.ensure(request, signal)); return;
 			}
 			if (!room || room.sender !== request.sender || room.action.hostId !== action.hostId) throw new AccountProofError("unverified");
+			if (action.operation === "room.membership.cancel" || action.operation === "room.membership.authorize" || action.operation === "room.membership.confirm") {
+				if (room.action.conversationId !== action.conversationId) throw new AccountProofError("unverified");
+				this.store.acknowledge(action.requestId, host, "complete"); return;
+			}
+			if (action.operation === "room.membership.inspect") {
+				if (room.action.conversationId !== action.conversationId || !["conversation", "coordinator"].includes(room.action.kind)) throw new AccountProofError("unverified");
+				this.store.acknowledge(action.requestId, host, room.verified || room.retired ? "complete" : "pending", room.verified || room.retired ? undefined : "unverified"); return;
+			}
 			if (!room.verified) {
 				// Read-only verification can recover an already joined target; never
 				// join a retired identity merely to acquire cleanup authority.
 				await this.verify(room.action, request.sender, signal); this.store.verified(action.roomId);
 			}
-			if (action.operation === "coordinator.membership.restore") {
-				if (room.action.kind !== "coordinator" || room.retired || room.action.conversationId !== action.conversationId || room.action.hostSpaceId !== action.hostSpaceId || room.departure !== action.departureEventId) {
+			if (action.operation === "coordinator.membership.restore" || action.operation === "room.membership.restore") {
+				const modern = action.operation === "room.membership.restore";
+				if (modern) {
+					try { this.store.admitMembershipRepair(action.requestId); }
+					catch { this.store.acknowledge(action.requestId, host, "rejected", "conflict"); return; }
+				} else if (room.action.kind !== "coordinator" || room.retired || room.action.conversationId !== action.conversationId || room.action.hostSpaceId !== action.hostSpaceId || room.departure !== action.departureEventId) {
 					this.store.acknowledge(action.requestId, host, "rejected", "conflict"); return;
 				}
-				if (!await this.matrix.joined(action.roomId, signal)) {
-					verifyManagedInvite(room.action, request.sender, this.owner, this.store.invite(action.roomId));
-					if (this.store.room(action.roomId)?.departure !== action.departureEventId) throw Error("Coordinator departure changed");
-					this.requireIntake(); await this.matrix.join(action.roomId, signal);
+				const authorization = modern ? this.store.membershipAuthorization(action.requestId) : undefined;
+				if (modern && !authorization) { this.store.acknowledge(action.requestId, host, "pending", "admitted"); return; }
+				if (action.operation === "room.membership.restore" && authorization && (action.membership === "leave" ? authorization.membership !== "invite" :
+					authorization.membership !== action.membership || authorization.membershipEventId !== action.membershipEventId)) {
+					this.store.acknowledge(action.requestId, host, "rejected", "conflict"); return;
 				}
-				await this.verify(room.action, request.sender, signal);
-				this.requireIntake(); this.store.restored(action.roomId, action.departureEventId, action.requestId, host); return;
+				const departure = this.store.room(action.roomId)?.departure;
+				const check = () => {
+					this.requireIntake();
+					if (modern) this.store.assertMembershipRepair(action.requestId);
+					const current = this.store.room(action.roomId);
+					if (!current || current.retired || current.departure !== departure) throw Error("Membership departure changed");
+				};
+				if (!await this.matrix.joined(action.roomId, signal)) {
+					check();
+					if (modern && !this.store.invite(action.roomId)) { this.store.acknowledge(action.requestId, host, "pending", "admitted"); return; }
+					verifyManagedInvite(room.action, request.sender, this.owner, this.store.invite(action.roomId));
+					if (modern) {
+						const member = await this.currentMember(action.roomId, signal); check();
+						if (member.membership !== "invite" || member.sender !== request.sender || member.eventId !== authorization!.membershipEventId) throw new AccountProofError("unverified");
+					}
+					check();
+					if (action.operation === "room.membership.restore" && (authorization?.membership === "join" || !this.store.beginMembershipJoin(action.requestId))) {
+						this.store.acknowledge(action.requestId, host, "pending", "conflict"); return;
+					}
+					await this.matrix.join(action.roomId, signal);
+				}
+				check(); await this.verify(room.action, request.sender, signal);
+				check(); if (!await this.matrix.joined(action.roomId, signal)) throw Error("Membership join is unconfirmed");
+				if (modern) {
+					const member = await this.currentMember(action.roomId, signal); check();
+					if (member.membership !== "join" || member.sender !== this.owner) throw new AccountProofError("unverified");
+					if (authorization!.membership === "join") {
+						if (member.eventId !== authorization!.membershipEventId) throw new AccountProofError("unverified");
+					} else {
+						if (!this.store.membershipJoinAttempted(action.requestId)) throw new AccountProofError("unverified");
+						const confirmed = this.store.membershipConfirmation(action.requestId);
+						if (!confirmed) { this.store.acknowledge(action.requestId, host, "pending", "join_observed"); return; }
+						if (member.eventId !== confirmed) throw new AccountProofError("unverified");
+					}
+				}
+				check(); this.store.restored(action.roomId, departure, action.requestId, host); return;
 			} else {
 				if (action.operation === "room.retire" ? room.action.kind !== "conversation" || room.action.conversationId !== action.conversationId : !["project_space", "worktree_space"].includes(room.action.kind) || room.action.hostSpaceId !== action.hostSpaceId) throw new AccountProofError("unverified");
 				// Save negative authority before any account effect, independently of bot cleanup.

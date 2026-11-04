@@ -40,7 +40,7 @@ test("split fork consent binds source origin, exact summary, generation and comm
 	await assert.rejects(owner.executeHuman(input), /independent consent/);
 });
 
-test("coordinator recovery freezes the exact fresh self-departure behind independent consent", async t => {
+test("legacy coordinator restoration fails closed pending unified admission-gated orchestration", async t => {
 	const root = await mkdtemp(join(tmpdir(), "account-membership-")); let departure = "$first"; let invitations = 0;
 	const coordinatorId = deriveConversationId("host", "coordinator");
 	const manifest = { kind: "coordinator", conversationId: coordinatorId, creationKey: "coordinator", roomId: "!coordinator:test", hostSpace: "!host:test" };
@@ -50,12 +50,9 @@ test("coordinator recovery freezes the exact fresh self-departure behind indepen
 	t.after(async () => { await account.close(); await rm(root, { recursive: true, force: true }); });
 	const owner = new ManagedHostMutationOwner({ registry, lifecycle: {} as HostLifecycle, retirement: {} as ConversationRetirement, server: { attachment: () => undefined }, account });
 	const input: ModelHostRequest = { ...request("unused"), action: { operation: "coordinator.membership.restore", confirmed: true } };
-	const record = prepareHostApproval("host", input, await owner.freeze(input), 1000); assert.equal(invitations, 0);
-	assert.equal(await owner.revalidate(record), true); departure = "$second";
-	assert.equal(await owner.revalidate(record), false); await assert.rejects(owner.execute(record), /scope changed/); assert.equal(invitations, 0);
-	const fresh = prepareHostApproval("host", input, await owner.freeze(input), 1001);
-	assert.deepEqual(await owner.execute(fresh), { conversationId: coordinatorId, setupState: "pending" }); assert.equal(invitations, 1);
-	const saved = JSON.parse(await readFile(join(root, "account.json"), "utf8")); assert.equal(saved.records[0].action.departureEventId, "$second");
+	await assert.rejects(owner.freeze(input), /unified approved orchestration/);
+	await assert.rejects(account.restoreMembership({ conversationId: coordinatorId, roomId: manifest.roomId, hostSpaceId: manifest.hostSpace, departureEventId: departure, operatorUserId: matrix.operatorUserId, botUserId: matrix.botUserId }), /unified approved orchestration/);
+	assert.equal(invitations, 0);
 });
 
 test("coordinator destructive previews are readable blocked scopes, never executable subsets", async () => {

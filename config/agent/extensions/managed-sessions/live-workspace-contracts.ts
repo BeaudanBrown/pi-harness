@@ -274,14 +274,27 @@ export const AccountActionSchema = Type.Union([
 		notificationSetup: Type.Union([Type.Literal("new_room"), Type.Literal("preserve")]) }),
 	strict({ ...accountBase, operation: Type.Literal("room.retire"), roomId: room, conversationId: ConversationIdSchema, retirementId: stable("retirement") }),
 	strict({ ...accountBase, operation: Type.Literal("space.retire"), roomId: room, cleanupId: stable("cleanup"), hostSpaceId: room }),
+	strict({ ...accountBase, operation: Type.Literal("room.membership.confirm"), roomId: room, conversationId: ConversationIdSchema, restoreRequestId: stable("account"),
+		membershipEventId: Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 }) }),
+	strict({ ...accountBase, operation: Type.Literal("room.membership.authorize"), roomId: room, conversationId: ConversationIdSchema, restoreRequestId: stable("account"),
+		membership: enumeration(["invite", "join"]), membershipEventId: Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 }) }),
+	strict({ ...accountBase, operation: Type.Literal("room.membership.cancel"), roomId: room, conversationId: ConversationIdSchema, operationId: stable("operation") }),
+	strict({ ...accountBase, operation: Type.Literal("room.membership.inspect"), roomId: room, conversationId: ConversationIdSchema,
+		membershipEventId: Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 }) }),
+	strict({ ...accountBase, operation: Type.Literal("room.membership.restore"), roomId: room, conversationId: ConversationIdSchema, hostSpaceId: room,
+		operationId: stable("operation"), sourceDigest: digest, expiresAt: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }),
+		membership: enumeration(["leave", "invite", "join"]), membershipEventId: Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 }),
+		departureEventId: Type.Optional(Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 })) }),
 	strict({ ...accountBase, operation: Type.Literal("coordinator.membership.restore"), roomId: room, conversationId: ConversationIdSchema, hostSpaceId: room,
 		departureEventId: Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 }) }),
 ]);
 export type AccountAction = Static<typeof AccountActionSchema>;
 export const AccountAckSchema = strict({ ...accountBase, revision: Type.Integer({ minimum: 1, maximum: Number.MAX_SAFE_INTEGER }), status: Type.Union([
 	Type.Literal("pending"), Type.Literal("complete"), Type.Literal("notification_setup_uncertain"), Type.Literal("rejected"),
-]), code: Type.Optional(Type.Union([Type.Literal("departed"), Type.Literal("unsupported_encryption"), Type.Literal("unverified"), Type.Literal("conflict")])),
-	departureEventId: Type.Optional(Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 })) });
+]), code: Type.Optional(Type.Union([Type.Literal("departed"), Type.Literal("admitted"), Type.Literal("join_observed"), Type.Literal("unsupported_encryption"), Type.Literal("unverified"), Type.Literal("conflict")])),
+	departureEventId: Type.Optional(Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 })),
+	membershipRepair: Type.Optional(strict({ capability: Type.Literal("original-room-repair-v1"), retired: Type.Boolean(),
+		departureEventId: Type.Optional(Type.String({ pattern: "^\\$[^\\s]+$", maxLength: 255 })) })) });
 export type AccountAck = Static<typeof AccountAckSchema>;
 function canonical(value: unknown): string {
 	if (Array.isArray(value)) return `[${value.map(canonical).join(",")}]`;
