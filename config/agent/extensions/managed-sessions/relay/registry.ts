@@ -198,7 +198,7 @@ export class RelayRegistry {
 		const attached = Boolean(row.attachment || this.liveConnections.has(conversationId));
 		return { conversationId, generationId: this.activeGeneration(manifest).generationId,
 			sourceDigest: createHash("sha256").update(JSON.stringify(manifest)).digest("hex"),
-			runtimeRepair: !attached && Boolean(facts.legacyWindow || facts.unobservedLaunch || row.state === "starting" || row.runtimeRepairs?.at(-1)?.phase === "held") };
+			runtimeRepair: !attached && Boolean(row.managedWindow || facts.unobservedLaunch || row.state === "starting" || row.runtimeRepairs?.at(-1)?.phase === "held") };
 	}
 	conversationRepairReceipt(conversationId: string) {
 		return structuredClone(this.runtimeConversation(conversationId).conversationRepairs?.at(-1));
@@ -310,7 +310,8 @@ export class RelayRegistry {
 		const high = Math.max(row.launchHighWater ?? 0, row.launch?.ordinal ?? 0);
 		if (high) row.launchHighWater = high;
 		row.launch = undefined; row.managedWindow = null; row.attachmentNonceHash = undefined;
-		row.lastLaunchError = undefined; row.state = "dormant"; row.attachment = null;
+		// Recovery clears execution authority, not the original failure evidence.
+		row.state = "dormant"; row.attachment = null;
 	}
 	private readonly runtimeObservers = new Set<() => void>();
 	private runtimeObservationKey?: string;
@@ -1229,7 +1230,7 @@ export class RelayRegistry {
 			this.assertRuntimeNotHeld(conversationId);
 			const conversation = this.runtimeConversation(conversationId);
 			if (conversation.state === "active" || conversation.managedWindow || conversation.launch?.observed === false)
-				throw new RelayRegistryError("invalid_state", "Previous launch requires ownership-safe inspection before retry");
+				throw new RelayRegistryError("invalid_state", "Previous launch requires ownership-safe inspection before retry; use conversation repair preview --runtime-only and confirmed repair apply after closing the old Pi process. Do not create a replacement conversation.");
 			const manifest = this.registeredConversation(conversationId);
 			if (!manifest) throw new RelayRegistryError("not_found", "Managed conversation was not found");
 			if (!hasMatrixBinding(manifest) && !conversation.ownedLocalLaunch) {
@@ -1278,7 +1279,7 @@ export class RelayRegistry {
 				conversation.launch.observed = true;
 			}
 			conversation.managedWindow = window ? structuredClone(window) : null;
-			conversation.lastLaunchError = undefined;
+			if (window) conversation.lastLaunchError = undefined;
 		});
 	}
 
@@ -1304,7 +1305,11 @@ export class RelayRegistry {
 
 	async recordLaunchError(conversationId: string, code: string, message: string): Promise<void> {
 		await this.mutate(async () => {
-			this.runtimeConversation(conversationId).lastLaunchError = {
+			const conversation = this.runtimeConversation(conversationId);
+			// Retries must not replace the original failed-launch cause with the
+			// generic reservation guard. Only confirmed window establishment clears it.
+			if (conversation.launch?.observed === false && conversation.lastLaunchError) return;
+			conversation.lastLaunchError = {
 				code: code.replace(/[^A-Za-z0-9._:-]/g, "_").slice(0, 128) || "launch_failed",
 				message: redactManagedValue(message),
 				at: new Date().toISOString(),

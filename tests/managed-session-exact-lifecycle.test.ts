@@ -17,7 +17,8 @@ import { deriveConversationId, deriveGenerationId, deriveTranscriptEntryId, type
 import type { ExactWindowProof } from "../config/agent/extensions/managed-sessions/exact-window-contracts.js";
 import { ConversationRetirement } from "../config/agent/extensions/managed-sessions/relay/conversation-retirement.js";
 import { LiveHierarchy } from "../config/agent/extensions/managed-sessions/relay/live-hierarchy.js";
-import { HostLifecycle, durableProjectSession } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
+import { ConversationRepairOwner } from "../config/agent/extensions/managed-sessions/relay/conversation-repair.js";
+import { HostLifecycle, durableProjectSession, launcherFailureCategory } from "../config/agent/extensions/managed-sessions/relay/host-lifecycle.js";
 import { ConversationManifestStore } from "../config/agent/extensions/managed-sessions/relay/manifest-store.js";
 import { RelayRegistry } from "../config/agent/extensions/managed-sessions/relay/registry.js";
 import type { ManagedSessionIpcServer } from "../config/agent/extensions/managed-sessions/relay/ipc-server.js";
@@ -74,7 +75,7 @@ async function fixture(t: TestContext, roomless: boolean | "fresh" = false, crea
 				case "root-resolve": return { sessionName: "project" };
 				case "window-legacy-observe":
 					if (legacyState === "error") throw Error("private launcher stderr");
-					if (request.manualClosure) { await beforeLegacyCheck?.(); return { conflicts: legacyState !== "gone", bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", unreadableProcesses }; }
+					if (request.manualClosure || request.repairClosure) { await beforeLegacyCheck?.(); return { conflicts: legacyState !== "gone", bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", unreadableProcesses }; }
 					if (request.evidence) { await beforeLegacyCheck?.(); return { state: legacyState }; }
 					return { bootId: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa", processes: [{ pid: "789", startTicks: "123" }] };
 				case "window-inspect-exact":
@@ -127,6 +128,38 @@ function request(conversationId: string, operation: "conversation.stop" | "conve
 }
 
 const legacyWindow = { sessionName: "project", windowId: "@3", paneId: "%3" };
+
+test("failed relaunch recovers same conversation offline without replaying work or losing original failure", async t => {
+	const f = await fixture(t); const id = f.manifest.conversationId;
+	await f.owner().openConversation(id);
+	await f.registry.markDormant(id); f.state = "gone"; f.unknownCreate = true;
+	await assert.rejects(f.owner().openConversation(id), /lost create response/);
+	f.unknownCreate = false;
+	await assert.rejects(f.owner().openConversation(id), /Previous launch/);
+	assert.match(f.registry.conversationSnapshot(id)!.lastLaunchError!.message, /lost create response/);
+	await f.reload(); f.legacyState = "gone";
+	const lifecycle = f.owner();
+	const repairs = new ConversationRepairOwner({ registry: f.registry, runtime: lifecycle.runtimeRepair });
+	t.after(() => repairs.close());
+	const plan = await repairs.preview(id, true);
+	assert.deepEqual(plan.blockers, []);
+	await repairs.apply(plan, `operation_${"a".repeat(32)}`, { operatorClosed: true });
+	await repairs.drain();
+	assert.equal(f.registry.conversationRepairReceipt(id)?.phase, "complete");
+	assert.match(f.registry.conversationSnapshot(id)!.lastLaunchError!.message, /lost create response/);
+	const resumed = await lifecycle.openConversation(id);
+	assert.equal(resumed.conversationId, id);
+	assert.equal(f.registry.launchIdentity(id)?.ordinal, 3);
+	assert.equal(f.registry.conversationState(id), "active");
+	assert.equal(f.registry.conversationSnapshot(id)!.lastLaunchError, undefined);
+});
+
+test("launcher diagnostic categories never expose raw stderr", () => {
+	assert.equal(launcherFailureCategory("error connecting to /private/socket: secret-token"), "tmux server unavailable");
+	assert.equal(launcherFailureCategory("server exited unexpectedly"), "tmux server exited unexpectedly");
+	assert.equal(launcherFailureCategory("Permission denied: /private/history"), "permission denied");
+	assert.equal(launcherFailureCategory("secret model prompt"), "unclassified launcher failure");
+});
 
 test("manual recovery preserves history and queues, fences nonce, and requires fresh consent after restart", async t => {
 	const f = await fixture(t); const id = f.manifest.conversationId; f.legacyState = "gone"; f.unreadableProcesses = ["123"];

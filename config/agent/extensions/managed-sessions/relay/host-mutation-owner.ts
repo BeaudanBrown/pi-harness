@@ -85,7 +85,7 @@ export class ManagedHostMutationOwner implements HostMutationOwner {
 			preview.blockers.push("The protected coordinator cannot be retired or included in destructive cleanup");
 		} else if (source.operation === "conversation.repair.preview") {
 			if (!this.options.repairs) throw new HostControlError("upgrade_required", "Unified repair is not wired on this host");
-			const plan = await this.options.repairs.preview(source.conversationId); preview.expiresAt = Math.min(preview.expiresAt, plan.expiresAt);
+			const plan = await this.options.repairs.preview(source.conversationId, source.runtimeOnly); preview.expiresAt = Math.min(preview.expiresAt, plan.expiresAt);
 			preview.repairJson = freezeJsonChunks(plan); preview.blockers = plan.blockers; preview.warnings = plan.warnings;
 			preview.targets = [{ kind: "conversation", conversationId: source.conversationId }]; conversations = [];
 		} else if (source.operation === "conversation.queue.resume.preview") {

@@ -10,6 +10,8 @@ import { HostControlError } from "./host-control-error.js";
 export interface ConversationRepairPlan {
  source: ReturnType<RelayRegistry["conversationRepairSource"]>;
  expiresAt: number;
+ /** Explicit local-only scope: no account observation, claims or membership effects. */
+ runtimeOnly?: true;
  runtime?: RuntimeRepairSnapshot;
  account?: MembershipRepairPlan;
  blockers: string[];
@@ -20,12 +22,12 @@ export interface ConversationRepairPlan {
 export class ConversationRepairOwner {
  private readonly running = new Map<string, Promise<void>>();
  private readonly stop = new AbortController();
- constructor(private readonly options: { registry: RelayRegistry; runtime: RuntimeRepairOwner; account: Pick<HostAccountOwner, "freezeRoomMembership" | "restoreRoomMembership">; now?: () => number }) {}
+ constructor(private readonly options: { registry: RelayRegistry; runtime: RuntimeRepairOwner; account?: Pick<HostAccountOwner, "freezeRoomMembership" | "restoreRoomMembership">; now?: () => number }) {}
  private now(): number { return (this.options.now ?? Date.now)(); }
- async preview(conversationId: string): Promise<ConversationRepairPlan> {
+ async preview(conversationId: string, runtimeOnly = false): Promise<ConversationRepairPlan> {
   const { registry } = this.options;
   const source = registry.conversationRepairSource(conversationId);
-  const plan: ConversationRepairPlan = { source, expiresAt: this.now() + 300_000, blockers: [], warnings: [
+  const plan: ConversationRepairPlan = { source, expiresAt: this.now() + 300_000, ...(runtimeOnly ? { runtimeOnly: true as const } : {}), blockers: [], warnings: [
    "Repair preserves pending work and arrivals during repair. It does not replay, abandon or successfully complete that work. Queue decisions remain separate.",
    "No Pi process will be launched or stopped. An existing running session is preserved; repaired dormant sessions remain dormant.",
   ] };
@@ -37,7 +39,9 @@ export class ConversationRepairOwner {
     if (plan.runtime.evidence.unreadableCount) plan.warnings.push(`${plan.runtime.evidence.unreadableCount} processes were unreadable; applying requires explicit acceptance of that inspection uncertainty.`);
    } catch { plan.blockers.push("Runtime closure evidence is unavailable or conflicting. Inspect the original process and saved session; do not clear launch reservations manually."); }
   }
-  try {
+  if (runtimeOnly) plan.warnings.push("Runtime-only recovery: Matrix/NAS access is neither checked nor repaired. Original room membership and account retirement are unchanged; completion means local runtime reconciliation only.");
+  else try {
+   if (!this.options.account) throw new Error("Account transport unavailable");
    plan.account = await this.options.account.freezeRoomMembership(conversationId);
    if (plan.account.member.membership !== "join" || plan.account.departureEventId) plan.warnings.push(`Reconcile operator access to the original room ${plan.account.identity.roomId}, including invitation/join if needed. No replacement room, unban or notification-policy change is permitted.`);
   }
@@ -58,7 +62,8 @@ export class ConversationRepairOwner {
   try {
    if (!isDeepStrictEqual(plan.source, this.options.registry.conversationRepairSource(plan.source.conversationId)) || this.options.registry.conversationRepairObligations(plan.source.conversationId).length) return false;
    if (plan.runtime && !isDeepStrictEqual(plan.runtime, await this.options.runtime.snapshot(plan.source.conversationId))) return false;
-   return Boolean(plan.account && isDeepStrictEqual(plan.account, await this.options.account.freezeRoomMembership(plan.source.conversationId)));
+   if (plan.runtimeOnly) return plan.account === undefined;
+   return Boolean(plan.account && this.options.account && isDeepStrictEqual(plan.account, await this.options.account.freezeRoomMembership(plan.source.conversationId)));
   } catch { return false; }
  }
  async apply(plan: ConversationRepairPlan, operationId: string, consent: { operatorClosed?: true; acceptIncompleteInspection?: true }): Promise<void> {
@@ -85,6 +90,7 @@ export class ConversationRepairOwner {
   this.current(plan, operationId);
   await this.options.registry.advanceConversationRepair(id, operationId, "account_pending");
   if (plan.account) {
+   if (plan.runtimeOnly || !this.options.account) throw staleHostPreview();
    let ready = false;
    // Account transport is queued independently. Keep this live invocation
    // within its original frozen deadline, not an unrelated thirty-poll budget.
@@ -102,8 +108,11 @@ export class ConversationRepairOwner {
   await this.options.registry.advanceConversationRepair(id, operationId, "runtime_pending");
   if (plan.runtime) await this.options.runtime.reconcile(plan.runtime, operationId, consent);
   this.current(plan, operationId);
-  const access = await this.options.account.freezeRoomMembership(id);
-  if (!plan.account || !isDeepStrictEqual(access.identity, plan.account.identity) || access.member.membership !== "join" || access.departureEventId) throw staleHostPreview();
+  if (!plan.runtimeOnly) {
+   if (!plan.account || !this.options.account) throw staleHostPreview();
+   const access = await this.options.account.freezeRoomMembership(id);
+   if (!isDeepStrictEqual(access.identity, plan.account.identity) || access.member.membership !== "join" || access.departureEventId) throw staleHostPreview();
+  }
   this.current(plan, operationId);
   await this.options.registry.advanceConversationRepair(id, operationId, "complete");
  }

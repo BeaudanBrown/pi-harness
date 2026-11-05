@@ -30,7 +30,7 @@ export function legacyOwnershipError(): HostControlError { return new LegacyOwne
 export function wakeFailureNotice(error: unknown): string {
 	return error instanceof LegacyOwnershipError
 		? `Queued input is preserved, but launch is blocked. ${error.message}`
-		: "Managed conversation wake failed; queued input remains available for retry. Use !status to inspect its state before retrying.";
+		: "Managed conversation wake failed; queued input is preserved. Use !status, then conversation repair preview --runtime-only for local recovery (also available through pi-managed-session without Matrix). Repair requires separate confirmation and any disclosed closure consent; do not create a replacement conversation or replay uncertain work.";
 }
 
 /** Called only under the lifecycle workspace lock and explicit per-call consent.

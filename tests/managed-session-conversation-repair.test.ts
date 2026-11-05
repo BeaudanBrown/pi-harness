@@ -55,6 +55,33 @@ async function finish(f: Awaited<ReturnType<typeof fixture>>, operationId = op()
  assert.equal(f.registry.conversationRepairReceipt(f.id)?.phase, "complete");
 }
 
+test("runtime-only repair survives account outage, fences old launch and preserves work after reload", async t => {
+ for (const kind of ["project", "coordinator"] as const) {
+  const f = await fixture(t, kind, false);
+  await f.registry.prepareProjectLaunch(f.id, "n".repeat(64));
+  await f.registry.markDormant(f.id);
+  await f.registry.recordAcceptedInput(f.id, f.input());
+  f.setInspectError("account network unavailable");
+  assert.ok((await f.owner.preview(f.id)).blockers.length);
+  const plan = await f.owner.preview(f.id, true);
+  assert.equal(plan.runtimeOnly, true); assert.equal(plan.account, undefined);
+  assert.deepEqual(plan.blockers, []);
+  await assert.rejects(f.owner.apply(plan, op(), {}), /Explicit process/);
+  await f.owner.apply(plan, op(), { operatorClosed: true }); await f.owner.drain();
+  assert.equal(f.calls(), 0);
+  assert.equal(f.registry.conversationRepairReceipt(f.id)?.phase, "complete");
+  assert.equal(f.registry.launchIdentity(f.id), undefined);
+  assert.deepEqual(f.registry.dispatchableInputs(f.id), []);
+  const reload = new RelayRegistry("host", f.runtimeFile, f.manifests); await reload.load();
+  assert.equal(reload.launchIdentity(f.id), undefined);
+  assert.deepEqual(reload.dispatchableInputs(f.id), []);
+  const next = await reload.prepareProjectLaunch(f.id, "z".repeat(64));
+  assert.equal(next.ordinal, 2);
+  assert.deepEqual(parseHostAction({ operation: "conversation.repair.preview", conversationId: f.id, runtimeOnly: true }),
+   { operation: "conversation.repair.preview", conversationId: f.id, runtimeOnly: true });
+ }
+});
+
 test("delayed account acknowledgement after thirty polls completes within original approval expiry", async t => {
  const f = await fixture(t, "project", false);
  await f.registry.recordAcceptedInput(f.id, f.input());

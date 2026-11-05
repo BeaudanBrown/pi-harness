@@ -3,8 +3,11 @@
 Only the relay calls this fixed launcher operation. Evidence authorizes clearing
 stale metadata after manual closure, never termination of the observed processes.
 """
+import errno
 import json
 import os
+import socket
+import stat
 from pathlib import Path
 import re
 import subprocess
@@ -179,6 +182,37 @@ def observe(request, panes, proc=Path("/proc")):
     return {"bootId": boot, "processes": [rows[pid][0] for pid in sorted(captured, key=int)]}
 
 
+def read_panes(tmux, runtime):
+    """An absent default server is not absent processes. Inventory still runs.
+
+    Do not interpret tmux's stderr (or permission/protocol errors) as absence.
+    Probe only the same explicit Unix socket used by the inventory command.
+    """
+    path = Path(runtime) / ("tmux-" + str(os.getuid())) / "default"
+    try:
+        parent = path.parent.lstat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid():
+            raise ValueError("untrusted tmux socket directory")
+        entry = path.lstat()
+        if not stat.S_ISSOCK(entry.st_mode) or entry.st_uid != os.getuid():
+            raise ValueError("untrusted tmux socket")
+    except FileNotFoundError:
+        return ""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as probe:
+        probe.settimeout(1)
+        try:
+            probe.connect(str(path))
+        except OSError as error:
+            if error.errno in (errno.ENOENT, errno.ECONNREFUSED):
+                return ""
+            raise
+    result = subprocess.run([tmux, "-S", str(path), "list-panes", "-a", "-F", FORMAT],
+                            check=True, capture_output=True, timeout=5)
+    if len(result.stdout) > 65536:
+        raise ValueError("tmux inventory exceeds bounds")
+    return result.stdout.decode()
+
+
 def main():
     if os.environ.get("TMUX") or os.environ.get("TMUX_PANE"):
         raise ValueError("attached tmux targets are forbidden")
@@ -190,10 +224,7 @@ def main():
         raise ValueError("request exceeds bounds")
     request = json.loads(raw)
     def panes():
-        result = subprocess.run([sys.argv[1], "list-panes", "-a", "-F", FORMAT], check=True, capture_output=True, timeout=5)
-        if len(result.stdout) > 65536:
-            raise ValueError("tmux inventory exceeds bounds")
-        return result.stdout.decode()
+        return read_panes(sys.argv[1], runtime)
     first = panes()
     result = observe(request, first)
     if panes() != first:

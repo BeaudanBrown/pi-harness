@@ -499,7 +499,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 				return ["join", "leave", "invite", "ban", "knock"].includes(event.membership)
 					? event.membership as "join" | "leave" | "invite" | "ban" | "knock" : "unknown";
 			} });
-			if (hostLifecycle && account) conversationRepairs = new ConversationRepairOwner({ registry, runtime: hostLifecycle.runtimeRepair, account });
+			if (hostLifecycle) conversationRepairs = new ConversationRepairOwner({ registry, runtime: hostLifecycle.runtimeRepair, account });
 			const reads = new HostReadModel({ hostId, registry, repairExecution: Boolean(conversationRepairs), queueResumption: () => Boolean(hostLifecycle && coordinatorRouter && projectionResumptions), repairInspection, archives: archiveControls, runtimeObservations: () => runtimeObserver?.snapshot() ?? new Map(), lifecycle: hostLifecycle, windowFirstOpen: Boolean(hostLifecycle), savedSessionOpen: Boolean(hostLifecycle), savedSessionImport: Boolean(hostLifecycle), accountState: () => account?.client.status() ?? "unavailable", ...(account ? { accountScheduling: () => account!.client.diagnostics() } : {}), accountSetup, matrixReady });
 			const owner = hostLifecycle ? new ManagedHostMutationOwner({ registry, lifecycle: hostLifecycle, retirement, server, account, archives: archiveControls, repairs: conversationRepairs,
 				queueReady: () => Boolean(coordinatorRouter), resumeQueues: async id => { if (!coordinatorRouter) throw Error("Queue dispatcher unavailable"); await Promise.all([coordinatorRouter.resumeQueued(id), projectionResumptions!.kick()]); },

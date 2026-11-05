@@ -33,6 +33,15 @@ Use list/status to discover exact IDs. Titles are display metadata, not identity
   Ordinary later messages are separate fresh intent. Preserved backlog stays held.
   Live legacy recovery delegates to repair when wired; standalone migration and
   legacy coordinator restoration are superseded. Retired cleanup remains separate.
+- With `runtime-only-repair-v1`, `conversation.repair.preview` accepts
+  `runtimeOnly=true` for local runtime recovery without Matrix/NAS. It retains
+  the same independent apply consent, process-closure assertions and preserved
+  work holds. Completion proves neither room access nor current Pi readiness.
+  Direct operators can use `pi-managed-session conversation repair preview ID
+  --runtime-only` when Matrix is unavailable. A missing tmux server does not
+  bypass process inspection. Close a conflicting old process explicitly; if its
+  identity cannot be safely resolved, an operator-controlled host reboot is the
+  last-resort closure boundary, followed by a fresh preview and consent.
 - Only if preserved work should run again, separately approve
   `conversation.queue.resume.preview/apply`. It selects up to 32 exact items and
   may invoke ordinary wake. Prior effects may already have occurred; resumption

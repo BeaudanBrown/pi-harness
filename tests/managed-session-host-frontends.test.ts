@@ -37,6 +37,14 @@ test("terminal and room controls parse arguments without shell evaluation or pro
 	for (const text of ["!start do something", "!close", "!stop --force", "!host conversation open title", "!host host status --request-id forged", '!host conversation create --title "unfinished']) assert.throws(() => roomHostCommand(text, conversationId));
 });
 
+test("runtime-only repair is explicit on all frontends and frozen by preview rather than apply", () => {
+	const action = { operation: "conversation.repair.preview", conversationId, runtimeOnly: true };
+	assert.deepEqual(managedHostAction(action), action);
+	assert.deepEqual(hostCommandAction(`conversation repair preview ${conversationId} --runtime-only`), action);
+	assert.deepEqual(roomHostCommand(`!host conversation repair preview ${conversationId} --runtime-only`, conversationId), action);
+	assert.throws(() => managedHostAction({ operation: "conversation.repair.apply", previewId: `preview_${"1".repeat(32)}`, confirmed: true, runtimeOnly: true }));
+});
+
 test("archive tools and operator commands share exact scope and explicit legacy opt-in", () => {
 	const action = { operation: "conversation.archive.preview", conversationIds: [conversationId], legacyClosure: true };
 	assert.deepEqual(managedHostAction(action), action);

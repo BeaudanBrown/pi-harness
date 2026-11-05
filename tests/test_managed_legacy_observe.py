@@ -1,4 +1,7 @@
 import importlib.util
+import os
+import socket
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -179,6 +182,42 @@ class LegacyExitTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 legacy.observe(altered, "", self.proc)
         self.assertTrue(legacy.observe({**request, "window": self.request["window"]}, self.pane.replace(CID, ""), self.proc)["conflicts"])
+
+    def test_absent_server_does_not_hide_detached_writer(self):
+        self.assertEqual(legacy.read_panes("/must-not-run", self.temp.name), "")
+        request = {"conversationId": CID, "window": None, "sessionFile": "/private/session.jsonl",
+                   "sessionDirectory": "/private", "repairClosure": True}
+        self.assertTrue(legacy.observe(request, "", self.proc)["conflicts"])
+
+    def test_stale_socket_is_absent_but_malformed_socket_is_not(self):
+        path = self.proc / ("tmux-" + str(os.getuid())) / "default"
+        path.parent.mkdir()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(path))
+        self.assertEqual(legacy.read_panes("/must-not-run", self.temp.name), "")
+        path.unlink()
+        path.write_text("not a socket")
+        with self.assertRaises(ValueError):
+            legacy.read_panes("/must-not-run", self.temp.name)
+        path.unlink()
+        path.symlink_to("missing")
+        with self.assertRaises(ValueError):
+            legacy.read_panes("/must-not-run", self.temp.name)
+
+    def test_permission_denied_is_not_server_absence(self):
+        with patch.object(legacy.Path, "lstat", side_effect=PermissionError("denied")):
+            with self.assertRaises(PermissionError):
+                legacy.read_panes("/must-not-run", self.temp.name)
+
+    def test_live_socket_command_failure_is_not_absence(self):
+        path = self.proc / ("tmux-" + str(os.getuid())) / "default"
+        path.parent.mkdir()
+        with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as server:
+            server.bind(str(path))
+            server.listen()
+            with patch.object(legacy.subprocess, "run", side_effect=subprocess.CalledProcessError(1, "tmux")):
+                with self.assertRaises(subprocess.CalledProcessError):
+                    legacy.read_panes("tmux", self.temp.name)
 
     def test_helper_is_read_only(self):
         before = {str(p): p.read_bytes() for p in self.proc.rglob("*") if p.is_file()}

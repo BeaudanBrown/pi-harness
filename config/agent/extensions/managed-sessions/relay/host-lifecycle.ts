@@ -360,6 +360,17 @@ export async function durableProjectSession(path: string, cwd: string, conversat
 	return { sessionId, boundaryEntryId: deriveTranscriptEntryId(sessionId, boundaryKey) };
 }
 
+/** Fixed diagnostic vocabulary only. Raw stderr is never an operator-facing value. */
+export function launcherFailureCategory(stderr: string): string {
+	const prefix = stderr.slice(0, 8192).toLowerCase();
+	if (/server exited unexpectedly|segmentation fault/.test(prefix)) return "tmux server exited unexpectedly";
+	if (/no server running|failed to connect|error connecting/.test(prefix)) return "tmux server unavailable";
+	if (/permission denied|operation not permitted/.test(prefix)) return "permission denied";
+	if (/ownership|ambiguous|already exists/.test(prefix)) return "ownership conflict";
+	if (/no such file|not found/.test(prefix)) return "required resource unavailable";
+	return "unclassified launcher failure";
+}
+
 export class HostLifecycle {
 	private readonly operatorAdmins: OperatorAdminMigration;
 	private readonly launches = new Map<string, { window: Promise<void>; ready: Promise<void> }>();
@@ -1762,15 +1773,18 @@ export class HostLifecycle {
 		for (const key of Object.keys(environment)) if (key.startsWith("PI_MATRIX_")) delete environment[key];
 		const child = spawn(this.options.launcher, ["managed", operation], { stdio: ["pipe", "pipe", "pipe"], env: environment });
 		child.stdin.end(`${JSON.stringify(request)}\n`);
-		let stdout = ""; let bytes = 0;
-		child.stdout.setEncoding("utf8"); child.stderr.resume();
+		let stdout = ""; let bytes = 0; let stderr = "";
+		child.stdout.setEncoding("utf8"); child.stderr.setEncoding("utf8");
+		// Read a bounded diagnostic prefix, but never persist raw launcher output:
+		// it can contain paths, arguments, session content or credentials.
+		child.stderr.on("data", (chunk: string) => { stderr = (stderr + chunk).slice(0, 8192); });
 		child.stdout.on("data", (chunk: string) => { bytes += Buffer.byteLength(chunk); if (bytes > 64 * 1024) child.kill("SIGKILL"); else stdout += chunk; });
 		const code = await new Promise<number | null>((resolveCode, reject) => {
 			const timer = setTimeout(() => { child.kill("SIGKILL"); reject(new RelayRegistryError("launch_failed", `Managed ${operation} timed out`)); }, 15_000);
 			child.once("error", () => { clearTimeout(timer); reject(new RelayRegistryError("launch_failed", `Managed ${operation} could not start`)); });
 			child.once("close", (status) => { clearTimeout(timer); resolveCode(status); });
 		});
-		if (code !== 0) throw new RelayRegistryError("launch_failed", `Managed ${operation} failed`);
+		if (code !== 0) throw new RelayRegistryError("launch_failed", `Managed ${operation} failed (${launcherFailureCategory(stderr)}; ${code === null ? "terminated by signal" : `exit ${code}`})`);
 		return safeJsonObject(stdout, `Managed ${operation} returned invalid JSON`);
 	}
 }

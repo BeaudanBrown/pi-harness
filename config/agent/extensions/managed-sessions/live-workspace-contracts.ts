@@ -22,7 +22,7 @@ export const APPROVAL_LIFETIME_MS = 15 * 60_000;
 export const HOST_INVENTORY_PAGE_SIZE = 50;
 export const HOST_INVENTORY_MAX_PAGE_SIZE = 100;
 export const LIVE_WORKSPACE_CAPABILITIES = [
-	"host-control-v1", "account-scheduling-diagnostics-v1", "repair-inspection-v1", "conversation-repair-v1", "queue-resumption-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
+	"host-control-v1", "account-scheduling-diagnostics-v1", "repair-inspection-v1", "conversation-repair-v1", "runtime-only-repair-v1", "queue-resumption-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
 	"commentary-v1", "notification-disposition-v1", "readable-archive-v1", "queue-cancellation-v1", "window-first-open-v1", "saved-session-open-v1", "saved-session-import-v1",
 ] as const;
 const strict = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
@@ -65,7 +65,7 @@ export const HostActionSchema = Type.Union([
 	action("conversation.list", page),
 	action("conversation.status", target),
 	action("conversation.repair.inspect", target),
-	action("conversation.repair.preview", target),
+	action("conversation.repair.preview", { ...target, runtimeOnly: Type.Optional(Type.Literal(true)) }),
 	action("conversation.repair.apply", { ...preview, operatorClosed: Type.Optional(Type.Literal(true)), acceptIncompleteInspection: Type.Optional(Type.Literal(true)) }),
 	action("conversation.create", { ...creation, placement: WorkspaceIdentitySchema, expectedSessionKey: Type.Optional(stable("session")) }),
 	action("conversation.open", { ...target, expectedGenerationId: Type.Optional(stable("generation")) }),
