@@ -123,7 +123,7 @@ export class HostAccountClient {
 				if ((action.operation === "room.membership.authorize" || action.operation === "room.membership.confirm") && state.records.some(r => r.action.operation === action.operation && r.action.restoreRequestId === action.restoreRequestId && r.action.requestId !== action.requestId)) throw Error("Membership authorization scope changed");
 				const old = known.get(action.requestId);
 				if (old && !isDeepStrictEqual(old.action, action)) throw Error("Conflicting host account request");
-				if (!old) { const record = { action }; state.records.push(record); known.set(action.requestId, record); }
+				if (!old) { const record = { action, delivery: { attempts: 0, nextAt: this.now() } }; state.records.push(record); known.set(action.requestId, record); }
 				else if (action.operation === "room.membership.inspect" && old.ack?.status === "complete" && old.ackAt !== undefined && this.now() - old.ackAt >= 90_000 &&
 					(old.sentAt === undefined || old.sentAt <= old.ackAt) && !old.delivery?.demand) {
 					old.delivery = { attempts: old.delivery?.attempts ?? 0, nextAt: this.now(), demand: true };
@@ -139,7 +139,7 @@ export class HostAccountClient {
 				if (r.action.operation === "room.membership.restore") {
 					const body = { version: "1.0.0", hostId: this.state.hostId, operation: "room.membership.cancel", roomId: r.action.roomId, conversationId: r.action.conversationId, operationId: r.action.operationId };
 					const action = parseAccountAction({ ...body, ...accountActionIdentity(body) });
-					if (!state.records.some(record => record.action.requestId === action.requestId)) state.records.push({ action });
+					if (!state.records.some(record => record.action.requestId === action.requestId)) state.records.push({ action, delivery: { attempts: 0, nextAt: this.now() } });
 				}
 			}
 		});
@@ -312,7 +312,7 @@ export class HostAccountClient {
 			// terminal authority before selection, not on the next inventory tick.
 			if (this.terminalAuthority) await this.cancelRetired(id => this.terminalAuthority!(id));
 			const candidate = await this.change(state => {
-				const record = this.schedule.select(this.eligible(state), this.now()); if (!record) return;
+				const record = this.schedule.select(this.eligible(state), this.now(), state.records); if (!record) return;
 				record.delivery = attemptedTiming(record, this.now()); record.transactionId ??= `pi-account-${randomUUID()}`; record.sentAt = this.now();
 				return structuredClone(record);
 			});

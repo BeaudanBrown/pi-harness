@@ -36,6 +36,19 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   restart: () => { store.close(); store = new AccountStore(file, owner, () => now); worker = new AccountWorker(store, hosts, owner, port, rules, () => now); worker.ingest({}); } };
 }
 
+test("NAS unverified negative retries retain control service without bypassing backoff", async t => {
+ const f = await fixture(t);
+ const actions = [
+  signed({ version: "1.0.0", hostId: "host", operation: "room.retire", roomId: "!retired:test", conversationId: `conv_${"a".repeat(32)}`, retirementId: `retirement_${"a".repeat(32)}` }),
+  signed({ version: "1.0.0", hostId: "host", operation: "space.retire", roomId: "!space:test", hostSpaceId: "!host:test", cleanupId: `cleanup_${"a".repeat(32)}` }),
+  signed({ version: "1.0.0", hostId: "host", operation: "room.membership.cancel", roomId: "!room:test", conversationId: `conv_${"a".repeat(32)}`, operationId: `operation_${"a".repeat(32)}` }),
+ ];
+ f.ingest(...actions); for (let i = 0; i < 3; i++) await f.worker.step(signal());
+ const control = f.worker.diagnostics().classes.find(r => r.kind === "control")!;
+ assert.equal(control.parked, 3); assert.equal(control.progress.unverified, 3); assert.equal(control.nextRetryInMs, 30_000);
+ assert.equal(await f.worker.step(signal()), false);
+});
+
 test("NAS diagnostics expose only bounded metadata and never select or expedite work", async t => {
  const f = await fixture(t), a = ensure(1); f.ingest(a);
  const before = f.store.get(a.requestId); const initial = f.worker.diagnostics();

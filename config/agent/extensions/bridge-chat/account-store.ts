@@ -31,8 +31,8 @@ export class AccountStore {
 	private transactionDepth = 0;
 	private turn = 0;
 	private readonly lanes = ["control", "interactive", "interactive", "ordinary", "maintenance"];
-	private readonly laneSql = `CASE WHEN json_extract(ack,'$.code')='unverified' THEN 'maintenance'
-		WHEN json_extract(payload,'$.operation') IN ('room.retire','space.retire','room.membership.cancel') THEN 'control'
+	private readonly laneSql = `CASE WHEN json_extract(payload,'$.operation') IN ('room.retire','space.retire','room.membership.cancel') THEN 'control'
+		WHEN json_extract(ack,'$.code')='unverified' THEN 'maintenance'
 		WHEN json_extract(payload,'$.operation') LIKE '%membership.%' THEN 'interactive' ELSE 'ordinary' END`;
 	constructor(filename: string, ownerUserId: string, private readonly now = Date.now) {
 		this.db = new DatabaseSync(filename, { timeout: 100 });
@@ -102,7 +102,9 @@ export class AccountStore {
 				const old = this.get(action.requestId);
 				if (old) {
 					if (old.sender !== sender || old.action.payloadDigest !== action.payloadDigest) throw Error("Conflicting managed account identity");
-					if (action.operation === "room.membership.inspect" && old.ack?.status === "complete") {
+					// A duplicate can be host redelivery after an uncertain ack send.
+					// Drain those frozen bytes/transaction before treating it as fresh demand.
+					if (action.operation === "room.membership.inspect" && old.ack?.status === "complete" && !this.db.prepare("SELECT 1 FROM account_outbox WHERE id=?").get(action.requestId)) {
 						this.db.prepare("UPDATE account_requests SET ack=NULL,next_at=?,retries=0 WHERE id=?").run(this.now(), action.requestId);
 						this.db.prepare("DELETE FROM account_outbox WHERE id=?").run(action.requestId);
 					} else if (old.ack) this.queueAck(old.ack, configured.find(h => h.hostId === action.hostId)!);

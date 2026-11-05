@@ -6,8 +6,8 @@ import { tmpdir } from "node:os";
 import { HostAccountClient, type AccountActionBody } from "../config/agent/extensions/managed-sessions/relay/host-account-client.js";
 import { MatrixError } from "../config/agent/extensions/matrix-shared/http.js";
 import { AtomicJsonFile } from "../config/agent/extensions/managed-sessions/relay/atomic-json.js";
-import { DeliveryWake } from "../config/agent/extensions/managed-sessions/relay/account-delivery-schedule.js";
-import type { AccountAction, AccountAck } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
+import { AccountDeliverySchedule, accountDeliveryClass, type SchedulableAccountRecord, DeliveryWake } from "../config/agent/extensions/managed-sessions/relay/account-delivery-schedule.js";
+import { accountActionIdentity, parseAccountAction, type AccountAction, type AccountAck } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
 const owner = "@owner:test", signal = () => new AbortController().signal;
 function ensure(n: number): AccountActionBody { return { operation: "room.ensure", kind: "coordinator", roomId: `!room${n}:test`, hostSpaceId: "!host:test", creationKey: `room${n}`, conversationId: `conv_${n.toString(16).padStart(32, "0")}`, notificationSetup: "preserve" }; }
 function inspect(n: number): AccountActionBody { return { operation: "room.membership.inspect", roomId: `!room${n}:test`, conversationId: `conv_${n.toString(16).padStart(32, "0")}`, membershipEventId: `$member${n}` }; }
@@ -25,6 +25,43 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   restart: async () => { await client.close(); client = new HostAccountClient(directory, "host", owner, "NAS", port, () => now); await client.load(); client.bindMembershipAuthority(() => live); },
   saved: async () => JSON.parse(await readFile(join(directory, "account.json"), "utf8")) };
 }
+test("negative retries retain the control lane even with unverified progress", async t => {
+ const f = await fixture(t);
+ const bodies: AccountActionBody[] = [
+  { operation: "room.retire", roomId: "!retired:test", conversationId: `conv_${"a".repeat(32)}`, retirementId: `retirement_${"a".repeat(32)}` },
+  { operation: "space.retire", roomId: "!space:test", hostSpaceId: "!host:test", cleanupId: `cleanup_${"a".repeat(32)}` },
+  { operation: "room.membership.cancel", roomId: "!room:test", conversationId: `conv_${"a".repeat(32)}`, operationId: `operation_${"a".repeat(32)}` },
+ ];
+ for (const body of bodies) { const action = await f.client.request(body); await f.ack(action, "pending", "unverified");
+  assert.equal(accountDeliveryClass({ action, ack: f.client.ack(action.requestId) }), "control"); }
+ assert.equal(f.client.diagnostics().classes.find(r => r.kind === "control")!.parked, 3);
+ assert.equal(await f.client.flush(signal()), false, "priority does not bypass retry timing");
+});
+test("host same-lane service follows oldest due rather than oldest last-send", async t => {
+ const f = await fixture(t), a = await f.client.request(ensure(1)), b = await f.client.request(ensure(2));
+ await f.ack(a, "pending"); await f.ack(b, "pending");
+ const late = { action: a, ack: f.client.ack(a.requestId), sentAt: 100, delivery: { attempts: 2, nextAt: 2000 } };
+ const early = { action: b, ack: f.client.ack(b.requestId), sentAt: 200, delivery: { attempts: 1, nextAt: 1000 } };
+ assert.equal(new AccountDeliverySchedule().select([late, early], 3000), early);
+});
+test("host children inherit earliest original expiry for equal-due selection", () => {
+ const action = (body: AccountActionBody) => { const full = { ...body, version: "1.0.0", hostId: "host" }; return parseAccountAction({ ...full, ...accountActionIdentity(full) }); };
+ const parent = (expiry: number, digit: string) => action({ operation: "room.membership.restore", roomId: "!room:test", conversationId: `conv_${"a".repeat(32)}`, hostSpaceId: "!host:test", operationId: `operation_${digit.repeat(32)}`, sourceDigest: "a".repeat(64), expiresAt: expiry, membership: "join", membershipEventId: "$joined" });
+ const soon = parent(5000, "a"), later = parent(9000, "b");
+ const child = (p: AccountAction, suffix: number) => action({ operation: "room.membership.authorize", roomId: p.roomId, conversationId: `conv_${"a".repeat(32)}`, restoreRequestId: p.requestId, membership: "join", membershipEventId: `$joined${suffix}` });
+ const urgent = child(soon, 0); let delayed = child(later, 0);
+ for (let i = 1; delayed.requestId > urgent.requestId && i < 100; i++) delayed = child(later, i);
+ assert.ok(delayed.requestId < urgent.requestId, "fixture distinguishes expiry from request-ID ordering");
+ const records: SchedulableAccountRecord[] = [delayed, urgent].map(a => ({ action: a, delivery: { attempts: 0, nextAt: 1000 } }));
+ assert.equal(new AccountDeliverySchedule().select(records, 1000, [{ action: soon }, { action: later }])?.action.requestId, urgent.requestId);
+});
+test("new arrivals persist enqueue due time and cannot perpetually jump overdue same-lane work", async t => {
+ const f = await fixture(t), old = await f.client.request(inspect(1)); await f.ack(old, "pending"); f.advance(35_000);
+ const fresh = await f.client.request(inspect(2));
+ assert.equal((await f.saved()).records.find((r: { action: AccountAction }) => r.action.requestId === fresh.requestId).delivery.nextAt, 36_000);
+ await f.client.flush(signal()); assert.equal(f.sent[0].action.requestId, old.requestId);
+});
+
 test("host diagnostics are read-only aggregates with accurate retry age and in-flight state", async t => {
  const f = await fixture(t), a = await f.client.request(inspect(1));
  const before = await readFile(join(f.directory, "account.json"), "utf8");
