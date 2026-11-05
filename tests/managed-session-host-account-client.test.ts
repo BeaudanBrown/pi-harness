@@ -21,10 +21,10 @@ async function fixture(t: { after: (fn: () => Promise<void>) => void }) {
 		assert.equal(saved.records.find((r: { action: AccountAction }) => r.action.requestId === action.requestId).transactionId, txn, "attempt persisted before HTTP");
 		sent.push({ txn, action }); if (fail) throw Error("Reply lost");
 	} };
-	let client = new HostAccountClient(directory, "host", owner, "NAS", port, () => now); await client.load();
+	let client = new HostAccountClient(directory, "host", owner, "NAS", port, () => now); await client.load(); client.bindMembershipAuthority(() => true);
 	t.after(() => client.close());
 	return { get client() { return client; }, sent, directory, port, advance: () => { now += 30001; }, fail: (v: boolean) => { fail = v; },
-		restart: async () => { await client.close(); client = new HostAccountClient(directory, "host", owner, "NAS", port, () => now); await client.load(); } };
+		restart: async () => { await client.close(); client = new HostAccountClient(directory, "host", owner, "NAS", port, () => now); await client.load(); client.bindMembershipAuthority(() => true); } };
 }
 
 test("host persists immutable scope before HTTP, retries uncertain sends exactly, and uses fresh accepted-send redelivery", async t => {
@@ -32,7 +32,7 @@ test("host persists immutable scope before HTTP, retries uncertain sends exactly
 	assert.deepEqual(await f.client.request(body), action); assert.equal(f.sent.length, 0);
 	f.fail(true); await assert.rejects(f.client.flush(new AbortController().signal)); const txn = f.sent[0].txn;
 	await f.restart(); f.advance(); f.fail(false); await f.client.flush(new AbortController().signal);
-	assert.equal(f.sent[1].txn, txn); f.advance(); await f.client.flush(new AbortController().signal);
+	assert.equal(f.sent[1].txn, txn); f.advance(); f.advance(); await f.client.flush(new AbortController().signal);
 	assert.notEqual(f.sent[2].txn, txn); assert.deepEqual(f.sent[2].action, action);
 	const wrong = new HostAccountClient(f.directory, "host", owner, "OTHER", f.port); await assert.rejects(wrong.load(), /recipient changed/);
 	await assert.rejects(f.client.request({ ...body, endpoint: "/arbitrary" } as unknown as AccountActionBody));

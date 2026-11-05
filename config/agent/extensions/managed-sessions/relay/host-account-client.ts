@@ -4,9 +4,11 @@ import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { accountActionIdentity, parseAccountAction, parseAccountAck, type AccountAction, type AccountAck } from "../live-workspace-contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
+import { MatrixError } from "../../matrix-shared/http.js";
+import { AccountDeliverySchedule, DeliveryWake, attemptedTiming, deliveryDue, maintenanceDelay, type DeliveryTiming } from "./account-delivery-schedule.js";
 
-type Record = { action: AccountAction; transactionId?: string; sentAt?: number; ack?: AccountAck; ackAt?: number; superseded?: true; cancelled?: true; invitationAttempted?: true };
-type State = { version: 1; hostId: string; ownerUserId: string; ownerDeviceId: string; records: Record[] };
+type Record = { action: AccountAction; transactionId?: string; sentAt?: number; ack?: AccountAck; ackAt?: number; superseded?: true; cancelled?: true; invitationAttempted?: true; delivery?: DeliveryTiming };
+type State = { version: 1; hostId: string; ownerUserId: string; ownerDeviceId: string; records: Record[]; retryAt?: number };
 export type AccountActionBody = AccountAction extends infer A ? A extends AccountAction ? Omit<A, "version" | "hostId" | "requestId" | "payloadDigest"> : never : never;
 export interface HostAccountTransport {
 	sendAccountRequest(ownerUserId: string, ownerDeviceId: string, transactionId: string, action: AccountAction, signal: AbortSignal): Promise<void>;
@@ -15,14 +17,20 @@ const MAX_BYTES = 8 * 1024 * 1024;
 function parse(value: unknown): State {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid host account journal");
 	const state = value as State;
-	if (Object.keys(state).sort().join(",") !== "hostId,ownerDeviceId,ownerUserId,records,version" || state.version !== 1 ||
+	if (Object.keys(state).filter(k => k !== "retryAt").sort().join(",") !== "hostId,ownerDeviceId,ownerUserId,records,version" || state.version !== 1 ||
 		typeof state.hostId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(state.hostId) ||
 		typeof state.ownerUserId !== "string" || state.ownerUserId.length > 255 || !/^@[^\s:]+:[^\s]+$/.test(state.ownerUserId) ||
 		typeof state.ownerDeviceId !== "string" || !/^[A-Za-z0-9._:-]{1,128}$/.test(state.ownerDeviceId) ||
 		!Array.isArray(state.records) || state.records.length > 4096 || Buffer.byteLength(JSON.stringify(value)) > MAX_BYTES) throw Error("Invalid host account journal");
+	if (state.retryAt !== undefined && (!Number.isSafeInteger(state.retryAt) || state.retryAt < 0)) throw Error("Invalid account transport cooldown");
 	const ids = new Set<string>();
 	for (const record of state.records) {
-		if (!record || Object.keys(record).some(k => !["action", "transactionId", "sentAt", "ack", "ackAt", "superseded", "cancelled", "invitationAttempted"].includes(k))) throw Error("Invalid host account record");
+		if (!record || Object.keys(record).some(k => !["action", "transactionId", "sentAt", "ack", "ackAt", "superseded", "cancelled", "invitationAttempted", "delivery"].includes(k))) throw Error("Invalid host account record");
+		if (record.delivery !== undefined) {
+			const d = record.delivery;
+			if (!d || Object.keys(d).some(k => !["nextAt", "attempts", "demand"].includes(k)) || !Number.isSafeInteger(d.nextAt) || d.nextAt < 0 ||
+				!Number.isInteger(d.attempts) || d.attempts < 0 || d.attempts > 8 || (d.demand !== undefined && d.demand !== true)) throw Error("Invalid account delivery timing");
+		}
 		const action = parseAccountAction(record.action);
 		if (action.hostId !== state.hostId || ids.has(action.requestId)) throw Error("Conflicting host account scope"); ids.add(action.requestId);
 		if (record.transactionId !== undefined && (typeof record.transactionId !== "string" || !/^pi-account-[a-f0-9-]{36}$/.test(record.transactionId))) throw Error("Invalid account transmission");
@@ -49,11 +57,14 @@ export class HostAccountClient {
 	private closed = false;
 	private readonly stop = new AbortController();
 	private activeSend?: Promise<void>;
-	private after = "";
+	private readonly schedule = new AccountDeliverySchedule();
+	private readonly wake = new DeliveryWake();
+	private work?: Promise<void>;
 	private membershipAuthority?: (conversationId: string) => boolean;
-	bindMembershipAuthority(check: (conversationId: string) => boolean): void {
+	private terminalAuthority?: (conversationId: string) => boolean;
+	bindMembershipAuthority(check: (conversationId: string) => boolean, isTerminal: (conversationId: string) => boolean = id => !check(id)): void {
 		if (this.membershipAuthority) throw Error("Membership authority is already bound");
-		this.membershipAuthority = check;
+		this.membershipAuthority = check; this.terminalAuthority = isTerminal;
 	}
 	private readonly baselineFile: AtomicJsonFile<string[]>;
 	private parseBaseline(value: unknown): string[] {
@@ -93,6 +104,7 @@ export class HostAccountClient {
 			if (!isDeepStrictEqual(next, this.state)) {
 				try { await this.file.write(next); } catch (error) { this.failed = true; throw error; }
 				this.state = next;
+				this.wake.notify();
 			}
 			return result;
 		});
@@ -103,13 +115,17 @@ export class HostAccountClient {
 		if (bodies.length > 4096) throw Error("Account provisioning capacity exhausted");
 		const actions = bodies.map(body => { const value = { ...body, version: "1.0.0", hostId: this.state.hostId }; return parseAccountAction({ ...value, ...accountActionIdentity(value) }); });
 		return this.change(state => {
-			const known = new Map(state.records.map(r => [r.action.requestId, r.action]));
+			const known = new Map(state.records.map(r => [r.action.requestId, r]));
 			for (const action of actions) {
 				if (action.operation === "room.membership.restore" && state.records.some(r => r.action.operation === "room.membership.restore" && r.action.operationId === action.operationId && r.action.requestId !== action.requestId)) throw Error("Membership operation scope changed");
 				if ((action.operation === "room.membership.authorize" || action.operation === "room.membership.confirm") && state.records.some(r => r.action.operation === action.operation && r.action.restoreRequestId === action.restoreRequestId && r.action.requestId !== action.requestId)) throw Error("Membership authorization scope changed");
 				const old = known.get(action.requestId);
-				if (old && !isDeepStrictEqual(old, action)) throw Error("Conflicting host account request");
-				if (!old) { state.records.push({ action }); known.set(action.requestId, action); }
+				if (old && !isDeepStrictEqual(old.action, action)) throw Error("Conflicting host account request");
+				if (!old) { const record = { action }; state.records.push(record); known.set(action.requestId, record); }
+				else if (action.operation === "room.membership.inspect" && old.ack?.status === "complete" && old.ackAt !== undefined && this.now() - old.ackAt >= 90_000 &&
+					(old.sentAt === undefined || old.sentAt <= old.ackAt) && !old.delivery?.demand) {
+					old.delivery = { attempts: old.delivery?.attempts ?? 0, nextAt: this.now(), demand: true };
+				}
 			}
 			return structuredClone(actions);
 		});
@@ -223,6 +239,8 @@ export class HostAccountClient {
 					(r.action.membership === "leave" ? r.action.membershipEventId : r.action.departureEventId) === ack.departureEventId && r.ack?.status === "complete")) continue;
 				if (record.action.operation === "room.ensure" && record.action.kind === "conversation" && record.ack?.code === "departed" && !record.superseded && ack.code !== "departed") continue;
 				if (record.action.operation !== "room.ensure" && record.action.operation !== "room.membership.inspect" && record.ack && record.ack.status !== "pending") continue;
+				const progress = !record.ack || !isDeepStrictEqual({ ...record.ack, revision: 0 }, { ...ack, revision: 0 });
+				if (progress) record.delivery = { attempts: 0, nextAt: this.now() + (ack.status === "complete" ? maintenanceDelay(record) : 30_000) };
 				record.ack = ack; record.ackAt = this.now(); delete record.superseded;
 				if ((record.action.operation === "coordinator.membership.restore" || record.action.operation === "room.membership.restore") && ack.status === "complete") {
 					const restore = record.action;
@@ -232,36 +250,92 @@ export class HostAccountClient {
 			}
 		});
 	}
+	/** Lifecycle belongs here; inventory reconciliation must not delay transmission. */
+	start(): void {
+		if (this.closed) throw Error("Host account authority is unavailable");
+		this.work ??= this.pump();
+	}
+	private supplemental(record: Record, state: State): boolean {
+		return state.records.some(negative => (negative.action.operation === "room.retire" || negative.action.operation === "space.retire") && negative.action.roomId === record.action.roomId && negative.ack?.status === "pending" && negative.ack.code === "unverified");
+	}
+	private membershipParent(record: Record, state: State): Record | undefined {
+		const a = record.action;
+		return a.operation === "room.membership.restore" ? record : a.operation === "room.membership.authorize" || a.operation === "room.membership.confirm"
+			? state.records.find(r => r.action.requestId === a.restoreRequestId && r.action.operation === "room.membership.restore" && r.action.roomId === a.roomId && r.action.conversationId === a.conversationId) : undefined;
+	}
+	private eligible(state: State): Record[] {
+		if ((state.retryAt ?? 0) > this.now()) return [];
+		return state.records.filter(r => !r.cancelled || this.supplemental(r, state))
+			.filter(r => {
+				const a = r.action;
+				if (a.operation === "room.ensure" && state.records.some(n => (n.action.operation === "room.retire" || n.action.operation === "space.retire") && n.action.roomId === a.roomId)) return this.supplemental(r, state);
+				if (a.operation !== "room.membership.restore" && a.operation !== "room.membership.authorize" && a.operation !== "room.membership.confirm") return true;
+				const parent = this.membershipParent(r, state);
+				return Boolean(parent?.action.operation === "room.membership.restore" && !this.membershipCancelled(parent) && parent.action.expiresAt > this.now());
+			})
+			.filter(r => r.action.operation === "room.ensure" || r.action.operation === "room.membership.inspect" || !r.ack || r.ack.status === "pending");
+	}
+	private async pump(): Promise<void> {
+		while (!this.stop.signal.aborted && !this.failed) {
+			const start = this.now(); let count = 0;
+			for (; count < 8 && !this.stop.signal.aborted && !this.failed; count++) {
+				try { if (!await this.flush(this.stop.signal)) break; } catch { /* Persisted attempt bounds retry; uncertain writes poison. */ }
+				if (this.now() - start >= 1000) { count++; break; }
+			}
+			const version = this.wake.version();
+			const due = (this.state.retryAt ?? 0) > this.now() ? this.state.retryAt! : this.eligible(this.state).reduce((at, r) => Math.min(at, deliveryDue(r)), Infinity);
+			await this.wake.wait(version, count ? 25 : Math.min(30_000, Math.max(25, due - this.now())), this.stop.signal);
+		}
+	}
 	/** One bounded transmission, independent of sync/IPC. Never hold the journal lane over HTTP. */
-	async flush(signal: AbortSignal): Promise<void> {
-		if (this.flushing || this.closed) return; this.flushing = true;
+	async flush(signal: AbortSignal): Promise<boolean> {
+		if (this.flushing || this.closed || signal.aborted) return false; this.flushing = true;
 		try {
+			// The delivery loop is independent of provisioning: reconcile known
+			// terminal authority before selection, not on the next inventory tick.
+			if (this.terminalAuthority) await this.cancelRetired(id => this.terminalAuthority!(id));
 			const candidate = await this.change(state => {
-				const eligible = state.records.filter(r => !r.cancelled || state.records.some(negative => negative.action.operation === "room.retire" && negative.action.roomId === r.action.roomId && negative.ack?.status === "pending" && negative.ack.code === "unverified"))
-					.filter(r => r.action.operation !== "room.membership.restore" || !this.membershipCancelled(r) && r.action.expiresAt > this.now())
-					.filter(r => r.action.operation === "room.ensure" || r.action.operation === "room.membership.inspect" || !r.ack || r.ack.status === "pending")
-					.filter(r => !r.sentAt || this.now() - r.sentAt >= 30_000).sort((a, b) => a.action.requestId.localeCompare(b.action.requestId));
-				const record = eligible.find(r => r.action.requestId > this.after) ?? eligible[0]; if (!record) return;
-				this.after = record.action.requestId; record.transactionId ??= `pi-account-${randomUUID()}`; record.sentAt = this.now();
+				const record = this.schedule.select(this.eligible(state), this.now()); if (!record) return;
+				record.delivery = attemptedTiming(record, this.now()); record.transactionId ??= `pi-account-${randomUUID()}`; record.sentAt = this.now();
 				return structuredClone(record);
 			});
-			if (!candidate || this.closed) return;
+			if (!candidate || this.closed || signal.aborted) return false;
+			// Selection awaited a durable write. Re-read cancellation/parent scope
+			// after that await and re-fence the registry immediately before HTTP.
+			const current = this.eligible(this.state).find(r => r.action.requestId === candidate.action.requestId && r.transactionId === candidate.transactionId);
+			if (!current) return false;
+			if (candidate.action.operation === "room.ensure" && candidate.action.conversationId) {
+				const id = candidate.action.conversationId;
+				if (!this.terminalAuthority) throw Error("Conversation transmission authority is unavailable");
+				if (this.terminalAuthority(id) && !(current.cancelled && this.supplemental(current, this.state))) {
+					await this.cancelRetired(value => value === id); return false;
+				}
+			}
 			if (candidate.action.operation === "room.membership.restore" || candidate.action.operation === "room.membership.authorize" || candidate.action.operation === "room.membership.confirm") {
 				const action = candidate.action;
-				const parent = action.operation === "room.membership.restore" ? this.state.records.find(r => r.action.requestId === action.requestId) : this.state.records.find(r => r.action.requestId === action.restoreRequestId);
+				const parent = this.membershipParent(current, this.state);
 				if (!this.membershipAuthority) throw Error("Membership transmission authority is unavailable");
-				if (!parent || this.membershipCancelled(parent) || !this.membershipAuthority(action.conversationId)) {
-					await this.cancelRetired(id => id === action.conversationId); return;
+				if (!parent || parent.action.operation !== "room.membership.restore" || parent.action.expiresAt <= this.now() || this.membershipCancelled(parent)) return false;
+				if (!this.membershipAuthority(action.conversationId)) {
+					await this.cancelRetired(id => id === action.conversationId); return false;
 				}
 			}
 			this.activeSend = this.transport.sendAccountRequest(this.state.ownerUserId, this.state.ownerDeviceId, candidate.transactionId!, candidate.action,
 				AbortSignal.any([signal, this.stop.signal, AbortSignal.timeout(10_000)]));
-			await this.activeSend;
+			try { await this.activeSend; }
+			catch (error) {
+				if (!this.closed && error instanceof MatrixError && error.status === 429) {
+					const delay = Number.isSafeInteger(error.retryAfterMs) && error.retryAfterMs! >= 0 ? error.retryAfterMs! : 30_000;
+					await this.change(state => { state.retryAt = Math.max(state.retryAt ?? 0, this.now() + Math.max(1000, delay)); });
+				}
+				throw error;
+			}
 			await this.change(state => {
 				const record = state.records.find(r => r.action.requestId === candidate.action.requestId);
 				if (record && record.transactionId === candidate.transactionId) delete record.transactionId;
 			});
+			return true;
 		} finally { this.flushing = false; this.activeSend = undefined; }
 	}
-	async close(): Promise<void> { this.closed = true; this.stop.abort(); await this.activeSend?.catch(() => {}); await this.lane; }
+	async close(): Promise<void> { this.closed = true; this.stop.abort(); await this.activeSend?.catch(() => {}); await this.work; await this.lane; }
 }

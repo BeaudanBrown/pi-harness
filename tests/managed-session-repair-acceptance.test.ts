@@ -86,13 +86,13 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, name: string
   worker.ingest(member.membership === "invite" ? { rooms: { invite: { [manifest.roomId]: { invite_state: { events: [...snapshots.get(manifest.roomId)!, memberEvent()] } } } } } : {});
   await worker.step(signal); await worker.flush(signal);
  };
- await pump(); assert.equal(store.room(manifest.roomId)?.verified, true);
  const matrix = { operatorUserId: operator, botUserId: bot,
   assertManagedProvenance: async (room: string, expected: unknown) => { assert.equal(room, manifest.roomId); assert.deepEqual(snapshots.get(room)!.find(e => e.type === MANAGED_PROVENANCE_EVENT)!.content, expected); },
   operatorMembershipEvent: async (room: string) => { assert.equal(room, manifest.roomId); return { ...member }; },
   inviteOperator: async (room: string) => { assert.equal(room, manifest.roomId); effects.push(`invite:${room}`); member = { eventId: "$repair-invite", sender: bot, membership: "invite" }; if (loseInvite) throw Error("lost invitation response"); },
  } as unknown as ManagedMatrixClient;
  const account = new HostAccountOwner(client, registry, matrix);
+ await pump(); assert.equal(store.room(manifest.roomId)?.verified, true);
  const runtime = new RuntimeRepairOwner({ registry, observe: target => observeRuntimeRepair({ manifest, target, file, cwd: root,
   windows: { check: async () => "gone" }, observe: async () => ({ conflicts: false, bootId: "12345678-1234-1234-1234-123456789abc", unreadableProcesses: [] }) }) });
  const repair = new ConversationRepairOwner({ registry, runtime, account });

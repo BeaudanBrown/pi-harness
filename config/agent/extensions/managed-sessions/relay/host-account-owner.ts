@@ -49,6 +49,7 @@ export class HostAccountOwner {
 	}
 	start(retire: (id: string) => Promise<unknown>): void {
 		if (this.work) return;
+		this.client.start();
 		this.work = (async () => {
 			while (!this.stop.signal.aborted) {
 				try { await this.provision(); } catch { /* New setup failure does not starve existing cleanup. */ }
@@ -64,7 +65,6 @@ export class HostAccountOwner {
 							}); if (retired) break;
 						}
 					}
-					await this.client.flush(this.stop.signal);
 				} catch { /* Exact pending intents survive; account outages do not stop local Pi. */ }
 				await matrixDelay(3000, this.stop.signal).catch(() => {});
 			}
@@ -72,7 +72,10 @@ export class HostAccountOwner {
 	}
 	async close(): Promise<void> { this.stop.abort(); await this.client.close(); await this.work; }
 	constructor(readonly client: HostAccountClient, private readonly registry: RelayRegistry, private readonly matrix: ManagedMatrixClient, private readonly hierarchy?: LiveHierarchy, private readonly archives?: Pick<ArchiveHierarchy, "accountBaseline" | "accountInventory">) {
-		client.bindMembershipAuthority(id => !registry.retirement(id) && !registry.archiveRecord(id) && Boolean(registry.manifestByConversationId(id)));
+		// Initial hierarchy enrollment may precede its manifest. Missing identity
+		// blocks repair, but is not negative retirement authority for enrollment.
+		const terminal = (id: string) => Boolean(registry.retirement(id) || registry.archiveRecord(id));
+		client.bindMembershipAuthority(id => !terminal(id) && Boolean(registry.manifestByConversationId(id)), terminal);
 	}
 	async initialize(): Promise<void> {
 		await this.client.load();

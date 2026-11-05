@@ -126,7 +126,11 @@ test("host hierarchy producer and NAS consumer roundtrip preserves existing rule
 	worker.ingest({ rooms: { leave: { [fresh.roomId]: { timeline: { events: [{ type: "m.room.member", state_key: matrix.operatorUserId, sender: matrix.operatorUserId, event_id: "$departed", content: { membership: "leave" } }] } } } } });
 	await worker.step(new AbortController().signal); await worker.flush(new AbortController().signal);
 	let finish!: () => void; const departed = new Promise<void>(resolve => { finish = resolve; }); const hold = new Promise<void>(resolve => { release = resolve; });
+	// This fixture advances its own clock and drives flush explicitly. Do not
+	// race that deterministic driver against the independently tested live pump.
+	const start = t.mock.method(client, "start", () => {});
 	account.start(async id => { assert.equal(id, second.conversationId); retired.add(id); active = [coordinator]; finish(); await hold; }); await departed;
+	assert.equal(start.mock.callCount(), 1);
 	const id = retirementId(hostId, second.conversationId), target = { kind: "operator_leave_forget" as const, roomId: fresh.roomId, userId: matrix.operatorUserId };
 	const effect = { ...target, phase: "pending" as const, effectId: retirementEffectId(id, target) };
 	pending = [{ version: 1, hostId, conversationId: second.conversationId, creationKey: "new-account-room", retirementId: id, retiredAt: now, cleanup: [effect] }];
