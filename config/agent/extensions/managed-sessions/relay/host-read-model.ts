@@ -1,3 +1,4 @@
+import type { AccountSchedulingDiagnostics } from "../../matrix-shared/account-diagnostics.js";
 import { HOST_CONTROL_VERSION, parseHostResponse, savedSessionKey, type HostConversationSummary, type HostResult } from "../live-workspace-contracts.js";
 import type { RuntimeObservation } from "./runtime-observer.js";
 import { HostControlError } from "./host-control-error.js";
@@ -21,6 +22,7 @@ export class HostReadModel {
 		hostId: string; registry: Pick<RelayRegistry, "conversationMetadata" | "retirement">; matrixReady: () => boolean; accountState?: () => "ready" | "pending" | "unavailable"; accountSetup?: (id: string) => "ready" | "pending" | "notification_setup_uncertain";
 		archives?: Pick<ArchiveHostControls, "list">;
 		repairExecution?: boolean;
+		accountScheduling?: () => AccountSchedulingDiagnostics;
 		queueResumption?: () => boolean;
 		repairInspection?: Pick<ConversationRepairInspection, "inspect">;
 		lifecycle?: Pick<HostLifecycle, "workspaceList" | "worktreeInventory">; windowFirstOpen?: boolean; savedSessionOpen?: boolean; savedSessionImport?: boolean; now?: () => number; runtimeObservations?: () => ReadonlyMap<string, RuntimeObservation>;
@@ -30,7 +32,7 @@ export class HostReadModel {
 		const action = request.action;
 		switch (action.operation) {
 			case "host.status": return { hostId: this.options.hostId, relayState: this.options.matrixReady() ? "ready" : "disconnected",
-				capabilities: ["host-control-v1", "queue-cancellation-v1", ...(this.options.repairExecution ? ["conversation-repair-v1" as const] : []), ...(this.options.queueResumption?.() ? ["queue-resumption-v1" as const] : []), ...(this.options.repairInspection ? ["repair-inspection-v1" as const] : []), ...(this.options.archives ? ["readable-archive-v1" as const] : []), ...(this.options.windowFirstOpen ? ["window-first-open-v1" as const] : []), ...(this.options.savedSessionOpen ? ["saved-session-open-v1" as const] : []), ...(this.options.savedSessionImport ? ["saved-session-import-v1" as const] : [])], accountState: this.options.accountState?.() ?? "unavailable" } satisfies HostResult<"host.status">;
+				capabilities: ["host-control-v1", "queue-cancellation-v1", ...(this.options.accountScheduling ? ["account-scheduling-diagnostics-v1" as const] : []), ...(this.options.repairExecution ? ["conversation-repair-v1" as const] : []), ...(this.options.queueResumption?.() ? ["queue-resumption-v1" as const] : []), ...(this.options.repairInspection ? ["repair-inspection-v1" as const] : []), ...(this.options.archives ? ["readable-archive-v1" as const] : []), ...(this.options.windowFirstOpen ? ["window-first-open-v1" as const] : []), ...(this.options.savedSessionOpen ? ["saved-session-open-v1" as const] : []), ...(this.options.savedSessionImport ? ["saved-session-import-v1" as const] : [])], accountState: this.options.accountState?.() ?? "unavailable", ...(this.options.accountScheduling ? { accountScheduling: this.options.accountScheduling() } : {}) } satisfies HostResult<"host.status">;
 			case "conversation.repair.inspect": {
 				if (!this.options.repairInspection) throw new HostControlError("upgrade_required", "Repair inspection is unavailable");
 				return this.options.repairInspection.inspect(action.conversationId);

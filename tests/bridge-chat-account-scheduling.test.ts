@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { AccountStore, ACCOUNT_REQUEST_EVENT } from "../config/agent/extensions/bridge-chat/account-store.js";
+import { AccountProofError } from "../config/agent/extensions/bridge-chat/account-proof.js";
 import { AccountWorker, type AccountMatrixPort } from "../config/agent/extensions/bridge-chat/account-worker.js";
 import { accountActionIdentity, parseAccountAction, type AccountAction } from "../config/agent/extensions/managed-sessions/live-workspace-contracts.js";
 import { MatrixError } from "../config/agent/extensions/matrix-shared/http.js";
@@ -31,9 +32,37 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
  t.after(async () => { stop.abort(); await task; store.close(); await rm(root, { recursive: true, force: true }); });
  return { get store() { return store; }, get worker() { return worker; }, port, sent, stop, advance: (ms: number) => { now += ms; },
   ingest: (...actions: AccountAction[]) => worker.ingest({ to_device: { events: actions.map(frame) } }),
-  run: () => task = worker.run(stop.signal),
+  run: (report?: (snapshot: ReturnType<AccountWorker["diagnostics"]>) => void) => task = worker.run(stop.signal, undefined, report),
   restart: () => { store.close(); store = new AccountStore(file, owner, () => now); worker = new AccountWorker(store, hosts, owner, port, rules, () => now); worker.ingest({}); } };
 }
+
+test("NAS diagnostics expose only bounded metadata and never select or expedite work", async t => {
+ const f = await fixture(t), a = ensure(1); f.ingest(a);
+ const before = f.store.get(a.requestId); const initial = f.worker.diagnostics();
+ assert.equal(initial.classes.find(r => r.kind === "ordinary")!.due, 1); assert.deepEqual(f.store.get(a.requestId), before);
+ f.port.state = async () => { throw new AccountProofError("unverified"); };
+ await f.worker.step(signal()); const snapshot = f.worker.diagnostics(), maintenance = snapshot.classes.find(r => r.kind === "maintenance")!;
+ assert.equal(maintenance.parked, 1); assert.equal(maintenance.nextRetryInMs, 30_000); assert.equal(maintenance.progress.unverified, 1);
+ assert.equal(snapshot.classes.find(r => r.kind === "acknowledgement")!.due, 1);
+ for (const secret of [a.roomId, a.requestId, bot, owner, "payloadDigest", "txn"]) assert.equal(JSON.stringify(snapshot).includes(secret), false);
+ for (let i = 0; i < 10; i++) f.worker.diagnostics(); assert.equal(await f.worker.step(signal()), false);
+ f.advance(35_000); assert.equal(f.worker.diagnostics().classes.find(r => r.kind === "maintenance")!.oldestDueAgeMs, 5000);
+ f.store.acknowledge(a.requestId, hosts[0], "rejected", "unsupported_encryption");
+ const rejected = f.worker.diagnostics(); assert.equal(rejected.classes.reduce((n, r) => n + r.progress.unsupportedEncryption, 0), 1);
+ assert.equal(rejected.classes.reduce((n, r) => n + r.settled, 0), 1);
+ f.worker.suspend(); assert.equal(f.worker.diagnostics().state, "suspended"); assert.equal(await f.worker.flush(signal()), false);
+});
+test("NAS owning-process reporting observes in-flight work and stops with its lifecycle", async t => {
+ const f = await fixture(t); f.ingest(ensure(1)); t.mock.timers.enable({ apis: ["setInterval"] });
+ let entered!: () => void; const entering = new Promise<void>(resolve => { entered = resolve; });
+ f.port.joined = async (_room, abort) => { entered(); await new Promise<void>(resolve => abort.addEventListener("abort", () => resolve(), { once: true })); return true; };
+ const snapshots: ReturnType<AccountWorker["diagnostics"]>[] = [];
+ const task = f.run(d => snapshots.push(d)); await entering;
+ f.advance(60_000); t.mock.timers.tick(60_000);
+ assert.equal(snapshots.length, 2); assert.equal(snapshots[1].classes.reduce((n, r) => n + r.inFlight, 0), 1); assert.equal(snapshots[1].observedAt, 160_000);
+ f.stop.abort(); await task; assert.equal(f.worker.diagnostics().classes.reduce((n, r) => n + r.inFlight, 0), 0);
+ t.mock.timers.tick(60_000); assert.equal(snapshots.length, 2);
+});
 
 test("NAS prioritizes a fresh inspection over fifty due ordinary effects", async t => {
  const f = await fixture(t); f.ingest(...Array.from({ length: 50 }, (_, i) => ensure(i + 1)), inspect(99));

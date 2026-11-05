@@ -13,7 +13,7 @@ export function maintenanceDelay(record: SchedulableAccountRecord): number {
 export function deliveryDue(record: SchedulableAccountRecord): number {
  return record.delivery?.nextAt ?? (record.sentAt === undefined ? 0 : record.sentAt + (record.ack?.status === "complete" ? maintenanceDelay(record) : 30_000));
 }
-function lane(record: SchedulableAccountRecord): Lane {
+export function accountDeliveryClass(record: SchedulableAccountRecord): Lane {
  if (record.delivery?.demand) return "interactive";
  if (record.ack?.code === "unverified" || record.ack?.status === "complete" || (record.sentAt !== undefined && !record.ack)) return "maintenance";
  const op = record.action.operation;
@@ -32,7 +32,7 @@ export class AccountDeliverySchedule {
   const due = eligible.filter(r => deliveryDue(r) <= now).sort((a, b) => (a.sentAt ?? -1) - (b.sentAt ?? -1) || a.action.requestId.localeCompare(b.action.requestId));
   for (let i = 0; i < turns.length; i++) {
    const index = (this.turn + i) % turns.length;
-   const record = due.find(r => lane(r) === turns[index]);
+   const record = due.find(r => accountDeliveryClass(r) === turns[index]);
    if (record) { this.turn = (index + 1) % turns.length; return record; }
   }
   return undefined;

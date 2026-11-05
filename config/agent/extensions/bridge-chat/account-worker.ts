@@ -1,3 +1,4 @@
+import type { AccountSchedulingDiagnostics } from "../matrix-shared/account-diagnostics.js";
 import { DeliveryWake } from "../matrix-shared/delivery-wake.js";
 import { MatrixError } from "../matrix-shared/http.js";
 import { parseAccountAction } from "../managed-sessions/live-workspace-contracts.js";
@@ -24,10 +25,18 @@ export class AccountWorker {
 	private running = false;
 	private stepping = false;
 	private flushing = false;
+	private activeWork?: string;
+	private activeAck?: string;
+	diagnostics(): AccountSchedulingDiagnostics {
+		return this.store.diagnostics(this.hosts, !this.intakeReady ? "suspended" : this.running ? "running" : "idle", { work: this.activeWork, ack: this.activeAck });
+	}
 	/** One serial account pump, independent of shared sync and assistant work. */
-	async run(signal: AbortSignal, unavailable: () => void = () => {}): Promise<void> {
+	async run(signal: AbortSignal, unavailable: () => void = () => {}, report?: (snapshot: AccountSchedulingDiagnostics) => void): Promise<void> {
 		if (this.running) throw Error("Account delivery is already running");
 		this.running = true;
+		const sample = () => { try { report?.(this.diagnostics()); } catch { unavailable(); } };
+		const reporting = report ? setInterval(sample, 60_000) : undefined;
+		if (report) sample();
 		try {
 			while (!signal.aborted) {
 				const version = this.wake.version(); let worked = false, failed = false;
@@ -43,7 +52,7 @@ export class AccountWorker {
 				if (failed || worked) await this.wake.wait(this.wake.version(), failed ? 1000 : 25, signal);
 				else await this.wake.wait(version, this.intakeReady ? this.store.dueDelay(this.hosts) : 1000, signal);
 			}
-		} finally { this.running = false; }
+		} finally { clearInterval(reporting); this.running = false; }
 	}
 	constructor(private readonly store: AccountStore, private readonly hosts: readonly AccountHost[], private readonly owner: string,
 		private readonly matrix: AccountMatrixPort, private readonly rules: AccountRulePort, private readonly now = Date.now) {}
@@ -130,8 +139,9 @@ export class AccountWorker {
 		try {
 			this.store.recheckDepartures();
 			const request = this.store.nextRequest(this.hosts); if (!request) return false;
+			this.activeWork = request.action.requestId;
 			await this.perform(request, signal); return true;
-		} finally { this.stepping = false; }
+		} finally { this.stepping = false; this.activeWork = undefined; }
 	}
 	private async perform(request: AccountRequest, signal: AbortSignal): Promise<void> {
 		const host = this.host(request); if (!host) return;
@@ -229,11 +239,12 @@ export class AccountWorker {
 		this.flushing = true;
 		try {
 			const value = this.store.transmission(this.hosts); if (!value || !this.hosts.some(h => h.botUserId === value.recipient && h.deviceId === value.deviceId && h.hostId === value.payload.hostId)) return false;
+			this.activeAck = value.requestId;
 			await this.matrix.toDevice(ACCOUNT_ACK_EVENT, value.recipient, value.deviceId, value.transactionId, value.payload, signal);
 			this.store.transmitted(value); return true;
 		} catch (error) {
 			if (error instanceof MatrixError && error.status === 429) this.store.deferTransport(error.retryAfterMs ?? 30_000);
 			throw error;
-		} finally { this.flushing = false; }
+		} finally { this.flushing = false; this.activeAck = undefined; }
 	}
 }

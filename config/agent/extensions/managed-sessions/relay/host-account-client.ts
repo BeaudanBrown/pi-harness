@@ -1,3 +1,4 @@
+import { accountSchedulingDiagnostics, type AccountDiagnosticItem, type AccountSchedulingDiagnostics } from "../../matrix-shared/account-diagnostics.js";
 import { randomUUID } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { join } from "node:path";
@@ -5,7 +6,7 @@ import { isDeepStrictEqual } from "node:util";
 import { accountActionIdentity, parseAccountAction, parseAccountAck, type AccountAction, type AccountAck } from "../live-workspace-contracts.js";
 import { AtomicJsonFile, ensurePrivateDirectory } from "./atomic-json.js";
 import { MatrixError } from "../../matrix-shared/http.js";
-import { AccountDeliverySchedule, DeliveryWake, attemptedTiming, deliveryDue, maintenanceDelay, type DeliveryTiming } from "./account-delivery-schedule.js";
+import { AccountDeliverySchedule, DeliveryWake, accountDeliveryClass, attemptedTiming, deliveryDue, maintenanceDelay, type DeliveryTiming } from "./account-delivery-schedule.js";
 
 type Record = { action: AccountAction; transactionId?: string; sentAt?: number; ack?: AccountAck; ackAt?: number; superseded?: true; cancelled?: true; invitationAttempted?: true; delivery?: DeliveryTiming };
 type State = { version: 1; hostId: string; ownerUserId: string; ownerDeviceId: string; records: Record[]; retryAt?: number };
@@ -57,6 +58,7 @@ export class HostAccountClient {
 	private closed = false;
 	private readonly stop = new AbortController();
 	private activeSend?: Promise<void>;
+	private inFlightRequest?: string;
 	private readonly schedule = new AccountDeliverySchedule();
 	private readonly wake = new DeliveryWake();
 	private work?: Promise<void>;
@@ -250,6 +252,21 @@ export class HostAccountClient {
 			}
 		});
 	}
+	/** Local last-known scheduling facts only; never selects, writes or sends. */
+	diagnostics(): AccountSchedulingDiagnostics {
+		const now = this.now(), cooldown = this.state.retryAt ?? 0;
+		const available = this.loaded && !this.closed && !this.failed;
+		const eligible = new Set(this.eligible({ ...this.state, retryAt: 0 }).map(r => r.action.requestId));
+		const items = this.state.records.map((r): AccountDiagnosticItem => {
+			const a = r.action, dueAt = deliveryDue(r);
+			const terminal = a.operation === "room.ensure" && a.conversationId && (!this.terminalAuthority || this.terminalAuthority(a.conversationId)) && !(r.cancelled && this.supplemental(r, this.state));
+			const state = this.inFlightRequest === a.requestId ? "inFlight" : !available || terminal ? "blocked"
+				: !eligible.has(a.requestId) ? r.ack && r.ack.status !== "pending" && !r.cancelled ? "settled" : "blocked"
+				: Math.max(cooldown, dueAt) > now ? "parked" : "due";
+			return { kind: accountDeliveryClass(r), state, ...(r.delivery || r.sentAt !== undefined ? { dueAt } : { dueAt: now }), progress: r.ack?.code };
+		});
+		return accountSchedulingDiagnostics(now, !available ? "unavailable" : this.work ? "running" : "idle", cooldown, items);
+	}
 	/** Lifecycle belongs here; inventory reconciliation must not delay transmission. */
 	start(): void {
 		if (this.closed) throw Error("Host account authority is unavailable");
@@ -320,6 +337,7 @@ export class HostAccountClient {
 					await this.cancelRetired(id => id === action.conversationId); return false;
 				}
 			}
+			this.inFlightRequest = candidate.action.requestId;
 			this.activeSend = this.transport.sendAccountRequest(this.state.ownerUserId, this.state.ownerDeviceId, candidate.transactionId!, candidate.action,
 				AbortSignal.any([signal, this.stop.signal, AbortSignal.timeout(10_000)]));
 			try { await this.activeSend; }
@@ -335,7 +353,7 @@ export class HostAccountClient {
 				if (record && record.transactionId === candidate.transactionId) delete record.transactionId;
 			});
 			return true;
-		} finally { this.flushing = false; this.activeSend = undefined; }
+		} finally { this.flushing = false; this.activeSend = undefined; this.inFlightRequest = undefined; }
 	}
 	async close(): Promise<void> { this.closed = true; this.stop.abort(); await this.activeSend?.catch(() => {}); await this.work; await this.lane; }
 }

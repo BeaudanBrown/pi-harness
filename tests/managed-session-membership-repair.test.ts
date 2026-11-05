@@ -29,6 +29,19 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   retire: () => { terminal = true; }, lose: () => { lose = true; }, advance: () => { now += 400_000; },
   restart: async () => { await client.close(); client = new HostAccountClient(dir, "host", "@owner:test", "OWNER", transport, () => now); await client.load(); } };
 }
+for (const scenario of ["missing", "unsupported", "unverified", "stale", "terminal_stale", "ready"] as const)
+ test(`repair inspection distinguishes ${scenario} evidence without effects`, async t => {
+  const f = await fixture(t);
+  const request = await f.client.request({ operation: "room.membership.inspect", roomId: f.identity.roomId, conversationId: f.identity.conversationId, membershipEventId: "$left" });
+  if (scenario !== "missing") await f.acknowledge(request, {
+   ...(scenario === "unverified" ? { status: "pending" as const, code: "unverified" as const } : {}),
+   ...(scenario !== "unsupported" ? { membershipRepair: { capability: "original-room-repair-v1" as const, retired: scenario === "terminal_stale" } } : {}) });
+  if (scenario === "stale" || scenario === "terminal_stale") f.advance();
+  const messages = { missing: /awaiting an inspection response/, unsupported: /lacks the required repair capability/, unverified: /supports original-room repair.*authority is unverified/, stale: /evidence is stale/, terminal_stale: /terminal on NAS/ };
+  if (scenario === "ready") await assert.doesNotReject(f.owner().snapshot(f.identity.conversationId));
+  else await assert.rejects(f.owner().snapshot(f.identity.conversationId), messages[scenario]);
+  assert.equal(f.invites, 0); await f.client.close();
+ });
 const op = `operation_${"a".repeat(32)}`;
 for (const kind of ["project", "coordinator"] as const) test(`production ${kind} adapter binds original provenance and rechecks terminal authority after I/O`, async t => {
  const f = await fixture(t); const coordinatorId = deriveConversationId("host", "coordinator");

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { accountSchedulingDiagnostics } from "../config/agent/extensions/matrix-shared/account-diagnostics.js";
 import test from "node:test";
 import { mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -29,6 +30,20 @@ const request = (action: HostReadAction) => ({ version: HOST_CONTROL_VERSION, ac
 async function read<O extends HostReadAction["operation"]>(model: HostReadModel, action: Extract<HostReadAction, { operation: O }>) {
 	return parseHostResponse(action.operation, { version: HOST_CONTROL_VERSION, requestId: "read-1", ok: true, data: await model.read(request(action)) });
 }
+
+test("host status conditionally exposes strict scheduling diagnostics and accepts old responses", async () => {
+ const options = { hostId: "host", registry: { conversationMetadata: () => [], retirement: () => undefined }, matrixReady: () => false };
+ const old = await read(new HostReadModel(options), { operation: "host.status" }); assert.ok(old.ok);
+ assert.equal(old.data.accountScheduling, undefined); assert.equal(old.data.capabilities.includes("account-scheduling-diagnostics-v1"), false);
+ const snapshot = accountSchedulingDiagnostics(1000, "idle", 0, []);
+ const current = await read(new HostReadModel({ ...options, accountScheduling: () => snapshot }), { operation: "host.status" }); assert.ok(current.ok);
+ assert.equal(current.data.capabilities.includes("account-scheduling-diagnostics-v1"), true); assert.deepEqual(current.data.accountScheduling, snapshot);
+ for (const bad of [{ ...snapshot, path: "/private" }, { ...snapshot, state: "ready" }, { ...snapshot, cooldownMs: -1 }, { ...snapshot, classes: [...snapshot.classes, snapshot.classes[0]] }, { ...snapshot, classes: Array(5).fill(snapshot.classes[0]) },
+  { ...snapshot, classes: snapshot.classes.slice(1) },
+  { ...snapshot, classes: snapshot.classes.map(r => ({ ...r, payload: "private" })) }]) {
+  assert.throws(() => parseHostResponse("host.status", { ...current, data: { ...current.data, accountScheduling: bad } }));
+ }
+});
 
 test("retired status reports cleanup without exposing receipts or returning a resumable conversation", async () => {
 	const retired: RetirementRecord = { version: 1, hostId: "host", conversationId: base.conversationId, creationKey: "first", retirementId: id("retirement"), retiredAt: 1 };

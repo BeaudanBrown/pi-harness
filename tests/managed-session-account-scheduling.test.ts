@@ -25,6 +25,28 @@ async function fixture(t: { after(fn: () => Promise<void>): void }) {
   restart: async () => { await client.close(); client = new HostAccountClient(directory, "host", owner, "NAS", port, () => now); await client.load(); client.bindMembershipAuthority(() => live); },
   saved: async () => JSON.parse(await readFile(join(directory, "account.json"), "utf8")) };
 }
+test("host diagnostics are read-only aggregates with accurate retry age and in-flight state", async t => {
+ const f = await fixture(t), a = await f.client.request(inspect(1));
+ const before = await readFile(join(f.directory, "account.json"), "utf8");
+ assert.equal(f.client.diagnostics().classes.find(r => r.kind === "interactive")!.due, 1);
+ assert.equal(await readFile(join(f.directory, "account.json"), "utf8"), before);
+ f.onSend(() => assert.equal(f.client.diagnostics().classes.reduce((n, r) => n + r.inFlight, 0), 1));
+ await f.client.flush(signal()); await f.ack(a, "pending", "unverified");
+ const parked = f.client.diagnostics().classes.find(r => r.kind === "maintenance")!;
+ assert.equal(parked.parked, 1); assert.equal(parked.nextRetryInMs, 30_000); assert.equal(parked.progress.unverified, 1);
+ f.advance(35_000); const due = f.client.diagnostics(); assert.equal(due.classes.find(r => r.kind === "maintenance")!.oldestDueAgeMs, 5000);
+ for (const secret of [f.directory, owner, a.requestId, a.roomId, "membershipEventId", "transactionId"]) assert.equal(JSON.stringify(due).includes(secret), false);
+ await f.ack(a, "rejected", "unsupported_encryption", 2);
+ assert.equal(f.client.diagnostics().classes.reduce((n, r) => n + r.progress.unsupportedEncryption, 0), 1);
+ await f.client.close(); assert.equal(f.client.diagnostics().state, "unavailable");
+});
+test("host diagnostics report cooldown without bypassing it or claiming fresh authority", async t => {
+ const f = await fixture(t); await f.client.request(inspect(1)); f.fail(new MatrixError("http", "PRIVATE failure", 429, true, 90_000));
+ await assert.rejects(f.client.flush(signal())); const before = await f.saved();
+ const d = f.client.diagnostics(); assert.equal(d.cooldownMs, 90_000); assert.equal(d.classes.find(r => r.kind === "maintenance")!.nextRetryInMs, 90_000);
+ assert.deepEqual(await f.saved(), before); assert.equal(JSON.stringify(d).includes("PRIVATE"), false);
+});
+
 test("fresh inspection skips fifty due completed ensures instead of waiting 150 seconds", async t => {
  const f = await fixture(t);
  for (let i = 0; i < 50; i++) await f.ack(await f.client.request(ensure(i)));

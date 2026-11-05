@@ -58,7 +58,8 @@ async function main(): Promise<void> {
 		enterStage("running");
 		// Separate bounded work: NAS/account outages do not occupy model requests or
 		// delay the shared sync cursor while waiting for account HTTP effects.
-		if (accounts) accountTask = accounts.run(stop.signal, () => console.log('{"event":"managed_account_unavailable"}'));
+		if (accounts) accountTask = accounts.run(stop.signal, () => console.log('{"event":"managed_account_unavailable"}'),
+			snapshot => console.log(JSON.stringify({ event: "managed_account_schedule", ...snapshot })));
 		while (!stop.signal.aborted) {
 			try {
 				const batch = await matrix.sync(fresh ? "" : store.get("cursor"), [config.ownerUserId, ...config.remoteOwnerUserIds], store.pending(), stop.signal, !!accounts);

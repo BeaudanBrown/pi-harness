@@ -25,9 +25,13 @@ export class MembershipRepairOwner {
  async snapshot(conversationId: string): Promise<MembershipRepairPlan> {
   const observed = await this.observe(conversationId);
   const request = await this.options.client.request({ operation: "room.membership.inspect", roomId: observed.identity.roomId, conversationId, membershipEventId: observed.member.eventId });
-  const ack = this.options.client.freshAck(request.requestId);
-  if (ack?.membershipRepair?.retired) throw Error("Original room is terminal on NAS and is not restorable");
-  if (ack?.status !== "complete" || ack.membershipRepair?.capability !== "original-room-repair-v1") throw Error("NAS membership repair support is unconfirmed; await account connectivity or upgrade NAS before effects");
+  const cached = this.options.client.ack(request.requestId), ack = this.options.client.freshAck(request.requestId);
+  if (cached?.membershipRepair?.retired) throw Error("Original room is terminal on NAS and is not restorable");
+  if (!ack) throw Error(cached ? "NAS inspection evidence is stale; await a fresh original-room inspection before effects" : "NAS repair support is unconfirmed; awaiting an inspection response before effects");
+  if (ack.membershipRepair?.capability !== "original-room-repair-v1") throw Error(ack.status === "complete"
+   ? "NAS inspection response lacks the required repair capability; verify or upgrade NAS before effects"
+   : "NAS inspection is pending; repair capability and original-room authority remain unconfirmed");
+  if (ack.status !== "complete") throw Error("NAS supports original-room repair, but original-room authority is unverified; resolve room provenance and membership evidence before effects");
   if (!isDeepStrictEqual(observed, await this.observe(conversationId))) throw Error("Membership scope changed; obtain fresh consent");
   return { ...observed, ...(ack.membershipRepair.departureEventId ? { departureEventId: ack.membershipRepair.departureEventId } : {}) };
  }

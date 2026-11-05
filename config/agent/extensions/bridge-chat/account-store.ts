@@ -1,3 +1,4 @@
+import { accountSchedulingDiagnostics, type AccountWorkClass, type AccountDiagnosticItem, type AccountSchedulingDiagnostics } from "../matrix-shared/account-diagnostics.js";
 import { randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { DatabaseSync } from "node:sqlite";
@@ -146,6 +147,23 @@ export class AccountStore {
 		this.atomic(() => this.db.prepare("UPDATE account_schedule SET retry_at=MAX(retry_at,?) WHERE id=1").run(this.now() + Math.ceil(milliseconds)));
 	}
 	private cooldown(): number { return Number(this.db.prepare("SELECT retry_at FROM account_schedule WHERE id=1").get()!.retry_at); }
+	/** Read only through the owning connection; no selection, cursor or hint writes. */
+	diagnostics(hosts: readonly AccountHost[], state: AccountSchedulingDiagnostics["state"], active: { work?: string; ack?: string } = {}): AccountSchedulingDiagnostics {
+		const now = this.now(), cooldown = this.cooldown(), items: AccountDiagnosticItem[] = [];
+		if (hosts.length) {
+			const scope = hosts.map(() => "(sender=? AND json_extract(payload,'$.hostId')=?)").join(" OR ");
+			for (const r of this.db.prepare(`SELECT id,next_at,(${this.laneSql}) AS lane,json_extract(ack,'$.status') AS status,json_extract(ack,'$.code') AS code FROM account_requests WHERE ${scope}`).all(...hosts.flatMap(h => [h.botUserId, h.hostId]))) {
+				const dueAt = Number(r.next_at) || now;
+				items.push({ kind: r.lane as AccountWorkClass, state: active.work === r.id ? "inFlight" : r.status && r.status !== "pending" ? "settled" : state === "suspended" ? "blocked" : Math.max(dueAt, cooldown) > now ? "parked" : "due", dueAt, progress: typeof r.code === "string" ? r.code : undefined });
+			}
+			const scopeAck = hosts.map(() => "(recipient=? AND device=? AND json_extract(payload,'$.hostId')=?)").join(" OR ");
+			for (const r of this.db.prepare(`SELECT id,next_at FROM account_outbox WHERE ${scopeAck}`).all(...hosts.flatMap(h => [h.botUserId, h.deviceId, h.hostId]))) {
+				const dueAt = Number(r.next_at) || now;
+				items.push({ kind: "acknowledgement", state: active.ack === r.id ? "inFlight" : state === "suspended" ? "blocked" : Math.max(dueAt, cooldown) > now ? "parked" : "due", dueAt });
+			}
+		}
+		return accountSchedulingDiagnostics(now, state, cooldown, items);
+	}
 	dueDelay(hosts: readonly AccountHost[]): number {
 		if (!hosts.length || this.cooldown() > this.now()) return 1000;
 		const requestScope = hosts.map(() => "(sender=? AND json_extract(payload,'$.hostId')=?)").join(" OR ");

@@ -3,6 +3,7 @@
 import { createHash } from "node:crypto";
 import { Type, type Static, type TSchema } from "typebox";
 import { Check } from "typebox/value";
+import { AccountSchedulingDiagnosticsSchema } from "../matrix-shared/account-diagnostics.js";
 import { MatrixRoomIdSchema } from "../matrix-shared/room-id.js";
 import { ConversationIdSchema, MatrixUserIdSchema, WorkspaceIdentitySchema } from "./identity-contracts.js";
 import { ForkSummarySchema, parseForkSummary } from "./fork-context.js";
@@ -21,7 +22,7 @@ export const APPROVAL_LIFETIME_MS = 15 * 60_000;
 export const HOST_INVENTORY_PAGE_SIZE = 50;
 export const HOST_INVENTORY_MAX_PAGE_SIZE = 100;
 export const LIVE_WORKSPACE_CAPABILITIES = [
-	"host-control-v1", "repair-inspection-v1", "conversation-repair-v1", "queue-resumption-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
+	"host-control-v1", "account-scheduling-diagnostics-v1", "repair-inspection-v1", "conversation-repair-v1", "queue-resumption-v1", "approval-v1", "retirement-v1", "generation-navigation-v1",
 	"commentary-v1", "notification-disposition-v1", "readable-archive-v1", "queue-cancellation-v1", "window-first-open-v1", "saved-session-open-v1", "saved-session-import-v1",
 ] as const;
 const strict = <T extends Record<string, TSchema>>(properties: T) => Type.Object(properties, { additionalProperties: false });
@@ -170,7 +171,7 @@ export const HostPreviewTargetSchema = Type.Union([
 ]);
 const previewResult = strict({ previewId: stable("preview"), expiresAt: Type.String({ format: "date-time" }), targets: Type.Array(HostPreviewTargetSchema, { maxItems: 100 }), activeRuns: Type.Array(strict({ conversationId: ConversationIdSchema, runId: identifier }), { maxItems: 100 }), blockers: Type.Array(text(512), { maxItems: 100 }), warnings: Type.Optional(Type.Array(text(512), { maxItems: 10 })) });
 export const HostResultSchemas = {
-	"host.status": strict({ hostId: identifier, relayState: enumeration(["ready", "disconnected"]), capabilities, accountState: enumeration(["ready", "pending", "unavailable"]) }),
+	"host.status": strict({ hostId: identifier, relayState: enumeration(["ready", "disconnected"]), capabilities, accountState: enumeration(["ready", "pending", "unavailable"]), accountScheduling: Type.Optional(AccountSchedulingDiagnosticsSchema) }),
 	"workspace.list": listResult(Type.Union([
 		strict({ rootKey: identifier, workspace: text(128), checkoutId: stable("checkout"), projectKey: stable("project"), availability, ...displayFields }),
 		strict({ rootKey: identifier, workspace: text(128), reconciliationRequired: Type.Literal(true), projectKey: Type.Optional(stable("project")), availability, ...displayFields }),
