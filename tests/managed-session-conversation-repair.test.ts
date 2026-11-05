@@ -55,6 +55,71 @@ async function finish(f: Awaited<ReturnType<typeof fixture>>, operationId = op()
  assert.equal(f.registry.conversationRepairReceipt(f.id)?.phase, "complete");
 }
 
+test("delayed account acknowledgement after thirty polls completes within original approval expiry", async t => {
+ const f = await fixture(t, "project", false);
+ await f.registry.recordAcceptedInput(f.id, f.input());
+ t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+ let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+ f.setRestore(async () => { entered(); return f.calls() > 35 ? "ready" : "pending"; });
+ const plan = await f.owner.preview(f.id);
+ await f.owner.apply(plan, op(), {}); await started;
+ for (let i = 0; i < 36; i++) {
+  await new Promise<void>(resolve => setImmediate(resolve)); t.mock.timers.tick(1000);
+ }
+ await f.owner.drain();
+ assert.equal(f.registry.conversationRepairReceipt(f.id)?.phase, "complete");
+ assert.equal(f.registry.conversationRepairReceipt(f.id)?.expiresAt, plan.expiresAt);
+ assert.deepEqual(f.registry.dispatchableInputs(f.id), []);
+ assert.equal(f.registry.pendingInputs(f.id)[0].status, "accepted");
+});
+
+for (const reply of ["pending", "ready"] as const) test(`original expiry fences a delayed ${reply} account reply`, async t => {
+ const f = await fixture(t, "project", false);
+ await f.registry.recordAcceptedInput(f.id, f.input());
+ t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+ let entered!: () => void, release!: () => void;
+ const started = new Promise<void>(resolve => { entered = resolve; });
+ const gate = new Promise<void>(resolve => { release = resolve; });
+ f.setRestore(async () => { entered(); await gate; return reply; });
+ const plan = await f.owner.preview(f.id);
+ await f.owner.apply(plan, op(), {}); await started;
+ t.mock.timers.tick(300_000); release();
+ await new Promise<void>(resolve => setImmediate(resolve)); t.mock.timers.tick(1000);
+ await f.owner.drain();
+ assert.equal(f.calls(), 1);
+ assert.equal(f.owner.isRunning(op()), false);
+ assert.equal(f.registry.conversationRepairReceipt(f.id)?.phase, "account_pending");
+ assert.equal(f.registry.conversationRepairReceipt(f.id)?.expiresAt, plan.expiresAt);
+ assert.deepEqual(f.registry.dispatchableInputs(f.id), []);
+});
+test("pending reply just before expiry sleeps only until the original deadline", async t => {
+ const f = await fixture(t, "project", false);
+ t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+ let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+ f.setRestore(async () => { t.mock.timers.tick(299_950); entered(); return "pending"; });
+ await f.owner.apply(await f.owner.preview(f.id), op(), {}); await started;
+ await new Promise<void>(resolve => setImmediate(resolve));
+ t.mock.timers.tick(49); await new Promise<void>(resolve => setImmediate(resolve));
+ assert.equal(f.owner.isRunning(op()), true);
+ t.mock.timers.tick(1); await new Promise<void>(resolve => setImmediate(resolve));
+ assert.equal(f.owner.isRunning(op()), false); assert.equal(f.calls(), 1);
+ assert.equal(f.registry.conversationRepairReceipt(f.id)?.phase, "account_pending");
+});
+
+test("shutdown aborts delayed account polling without releasing preserved work", async t => {
+ const f = await fixture(t, "project", false);
+ await f.registry.recordAcceptedInput(f.id, f.input());
+ t.mock.timers.enable({ apis: ["setTimeout", "Date"], now: Date.now() });
+ let entered!: () => void; const started = new Promise<void>(resolve => { entered = resolve; });
+ f.setRestore(async () => { entered(); return "pending"; });
+ await f.owner.apply(await f.owner.preview(f.id), op(), {}); await started;
+ await new Promise<void>(resolve => setImmediate(resolve));
+ await f.owner.close(); t.mock.timers.tick(60_000);
+ assert.equal(f.calls(), 1); assert.equal(f.owner.isRunning(op()), false);
+ assert.equal(f.registry.conversationRepairReceipt(f.id)?.phase, "account_pending");
+ assert.deepEqual(f.registry.dispatchableInputs(f.id), []);
+});
+
 test("repair has no queue choices, preserves work/history and leaves project and coordinator dormant", async t => {
  for (const kind of ["project", "coordinator"] as const) {
   const f = await fixture(t, kind); const original = await readFile(f.file); await f.registry.recordAcceptedInput(f.id, f.input());

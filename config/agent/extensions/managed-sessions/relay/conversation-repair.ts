@@ -86,15 +86,17 @@ export class ConversationRepairOwner {
   await this.options.registry.advanceConversationRepair(id, operationId, "account_pending");
   if (plan.account) {
    let ready = false;
-   for (let attempt = 0; attempt < 30 && !ready; attempt++) {
+   // Account transport is queued independently. Keep this live invocation
+   // within its original frozen deadline, not an unrelated thirty-poll budget.
+   while (!ready) {
     this.current(plan, operationId);
     try { ready = (await this.options.account.restoreRoomMembership(plan.account, operationId, plan.expiresAt)).setupState === "ready"; }
     catch (error) { if (!(error instanceof Error) || !/unconfirmed/.test(error.message)) throw error; }
-    if (!ready) await new Promise<void>(resolve => { const timer = setTimeout(done, 1000); const signal = this.stop.signal;
+    this.current(plan, operationId);
+    if (!ready) await new Promise<void>(resolve => { const timer = setTimeout(done, Math.min(1000, Math.max(0, plan.expiresAt - this.now()))); const signal = this.stop.signal;
      function done() { clearTimeout(timer); signal.removeEventListener("abort", done); resolve(); }
      signal.addEventListener("abort", done, { once: true }); if (signal.aborted) done(); });
    }
-   if (!ready) return;
   }
   this.current(plan, operationId);
   await this.options.registry.advanceConversationRepair(id, operationId, "runtime_pending");

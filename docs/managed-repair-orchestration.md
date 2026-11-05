@@ -66,8 +66,9 @@ uncertainty; supersession does not claim distributed cancellation of HTTP.
 Archive/retirement authority wins at every local admission/read boundary and in
 the existing account protocol. No queue or repair history is implicitly pruned.
 
-The original invocation may poll account progress for at most 30 attempts, within
-its five-minute plan deadline, without blocking Matrix approval intake. Restart
+The original invocation polls account progress at one-second intervals within
+its original five-minute plan deadline, without blocking Matrix approval intake.
+It does not reset or extend that deadline while waiting for queued replies. Restart
 never recreates that invocation or replays approval. Incomplete receipts remain
 held: obtain a fresh preview and fresh consent. NAS admission expiry rules from
 #149 remain authoritative; an expired/unprotected departure can become terminal.
