@@ -83,7 +83,7 @@ async function fixture(t: { after(fn: () => Promise<void>): void }, name: string
  const signal = new AbortController().signal;
  const pump = async () => {
   await client.flush(signal);
-  worker.ingest(member.membership === "invite" ? { rooms: { invite: { [manifest.roomId]: { invite_state: { events: [...snapshots.get(manifest.roomId)!, memberEvent()] } } } } } : {});
+  worker.ingest(member.membership === "invite" ? { rooms: { invite: { [manifest.roomId]: { invite_state: { events: [...snapshots.get(manifest.roomId)!, memberEvent()] } } } } } : member.membership === "join" ? { rooms: { join: { [manifest.roomId]: { timeline: { events: [memberEvent()] } } } } } : {});
   await worker.step(signal); await worker.flush(signal);
  };
  const matrix = { operatorUserId: operator, botUserId: bot,

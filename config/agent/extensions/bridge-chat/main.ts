@@ -58,13 +58,7 @@ async function main(): Promise<void> {
 		enterStage("running");
 		// Separate bounded work: NAS/account outages do not occupy model requests or
 		// delay the shared sync cursor while waiting for account HTTP effects.
-		if (accounts) accountTask = (async () => {
-			while (!stop.signal.aborted) {
-				try { await accounts.step(AbortSignal.any([stop.signal, AbortSignal.timeout(5000)])); } catch { console.log('{"event":"managed_account_unavailable"}'); }
-				try { await accounts.flush(AbortSignal.any([stop.signal, AbortSignal.timeout(5000)])); } catch { /* Exact pending transmission remains durable. */ }
-				await matrixDelay(1000, stop.signal).catch(() => {});
-			}
-		})();
+		if (accounts) accountTask = accounts.run(stop.signal, () => console.log('{"event":"managed_account_unavailable"}'));
 		while (!stop.signal.aborted) {
 			try {
 				const batch = await matrix.sync(fresh ? "" : store.get("cursor"), [config.ownerUserId, ...config.remoteOwnerUserIds], store.pending(), stop.signal, !!accounts);

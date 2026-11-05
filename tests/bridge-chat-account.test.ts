@@ -173,7 +173,8 @@ const machineEvent = (action: AccountAction) => ({ type: ACCOUNT_REQUEST_EVENT, 
 const inviteState = () => [{ type: "m.room.member", state_key: owner, sender: bot, content: { membership: "invite" } }];
 const leaveBatch = (room: string, event: string) => ({ rooms: { leave: { [room]: { timeline: { events: [{ type: "m.room.member", state_key: owner, sender: owner, event_id: event, content: { membership: "leave" } }] } } } } });
 async function workerFixture(t: { after: (fn: () => Promise<void>) => void }, action = ensure(), now = Date.now) {
-	const file = await filename(t); let store = new AccountStore(file, owner, now); t.after(async () => store.close());
+	const file = await filename(t); let offset = 0; const clock = () => now() + offset;
+	let store = new AccountStore(file, owner, clock); t.after(async () => store.close());
 	const matrixRules = rules(), snapshots = hierarchy(action), joined = new Set<string>();
 	const effects: string[] = []; const sent: Array<{ txn: string; content: unknown }> = []; let loseAck = false; let loseLeave = false;
 	const port: AccountMatrixPort = {
@@ -189,8 +190,8 @@ async function workerFixture(t: { after: (fn: () => Promise<void>) => void }, ac
 	let worker = new AccountWorker(store, hosts, owner, port, matrixRules.port);
 	const ingest = (a: AccountAction, invite = true) => worker.ingest({ to_device: { events: [machineEvent(a)] }, ...(invite ? { rooms: { invite: { [a.roomId]: { invite_state: { events: inviteState() } } } } } : {}) });
 	const step = () => worker.step(new AbortController().signal), flush = () => worker.flush(new AbortController().signal);
-	const restart = () => { store.close(); store = new AccountStore(file, owner, now); worker = new AccountWorker(store, hosts, owner, port, matrixRules.port); worker.ingest({}); };
-	return { get store() { return store; }, get worker() { return worker; }, restart, port, matrixRules, effects, sent, joined, ingest, step, flush, setLoseAck: (v: boolean) => { loseAck = v; }, setLoseLeave: (v: boolean) => { loseLeave = v; } };
+	const restart = () => { store.close(); store = new AccountStore(file, owner, clock); worker = new AccountWorker(store, hosts, owner, port, matrixRules.port); worker.ingest({}); };
+	return { advance: (ms: number) => { offset += ms; }, get store() { return store; }, get worker() { return worker; }, restart, port, matrixRules, effects, sent, joined, ingest, step, flush, setLoseAck: (v: boolean) => { loseAck = v; }, setLoseLeave: (v: boolean) => { loseLeave = v; } };
 }
 
 test("failed account batch commits neither partial actions nor unsafe effects before a healthy sync", async t => {
@@ -207,10 +208,10 @@ test("NAS worker initializes before join, verifies readiness, and uses fresh tra
 	f.ingest(action); assert.equal(f.effects.length, 0, "durable intake has no HTTP effects");
 	const join = f.port.join; f.port.join = async (room, signal) => { assert.equal(f.matrixRules.writes(), 1, "silent rule precedes invitation acceptance"); await join(room, signal); };
 	await f.step(); assert.equal(f.store.get(action.requestId)?.ack?.status, "complete"); assert.equal(f.store.room(action.roomId)?.verified, true);
-	f.setLoseAck(true); await assert.rejects(f.flush()); const original = f.store.transmission()!;
-	f.restart(); f.setLoseAck(false); await f.flush(); assert.equal(f.sent[0].txn, f.sent[1].txn, "uncertain HTTP attempt retains transaction");
+	f.setLoseAck(true); await assert.rejects(f.flush()); const original = f.sent[0].txn;
+	f.restart(); f.setLoseAck(false); assert.equal(await f.flush(), false); f.advance(30_000); await f.flush(); assert.equal(f.sent[0].txn, f.sent[1].txn, "uncertain HTTP attempt retains transaction");
 	f.ingest(action); await f.flush();
-	assert.notEqual(f.sent[2].txn, original.transactionId, "accepted send redelivery must enqueue a new device message");
+	assert.notEqual(f.sent[2].txn, original, "accepted send redelivery must enqueue a new device message");
 	assert.deepEqual(f.sent[2].content, f.sent[0].content); assert.deepEqual(f.effects, [`join:${action.roomId}`]); assert.equal(f.matrixRules.writes(), 1);
 });
 
@@ -221,6 +222,7 @@ test("pending ack loss cannot remove a newer progress transmission and different
 	assert.equal(f.store.transmission()?.payload.status, "complete");
 	const second = signed({ ...action, roomId: "!other:test", creationKey: "other", conversationId: `conv_${"b".repeat(32)}` }); f.ingest(second);
 	f.store.acknowledge(second.requestId, hosts[0], "pending");
+	f.advance(30_000);
 	const first = f.store.transmission()!, next = f.store.transmission()!; assert.notEqual(first.requestId, next.requestId);
 });
 
@@ -237,7 +239,7 @@ test("retirement fences before leave, survives response loss, and refuses ensure
 	const retire = signed({ version: "1.0.0", hostId: "host", operation: "room.retire", roomId: action.roomId, conversationId: action.conversationId, retirementId: `retirement_${"a".repeat(32)}` });
 	f.setLoseLeave(true); f.ingest(retire, false); assert.equal(f.store.room(action.roomId)?.retired, true, "intake precedes effects");
 	await f.step(); assert.equal(f.store.get(retire.requestId)?.ack?.status, "pending");
-	f.restart(); f.setLoseLeave(false); for (let i = 0; i < 3; i++) await f.step(); assert.equal(f.store.get(retire.requestId)?.ack?.status, "complete");
+	f.restart(); f.setLoseLeave(false); f.advance(30_000); for (let i = 0; i < 3; i++) await f.step(); assert.equal(f.store.get(retire.requestId)?.ack?.status, "complete");
 	assert.equal(f.effects.filter(v => v.startsWith("leave:")).length, 1, "already-left recovery does not repeat leave");
 	f.ingest(action); await f.step(); assert.equal(f.effects.filter(v => v.startsWith("join:")).length, 1);
 });
@@ -349,7 +351,9 @@ test("uncertain join is not repeated after reload; observed acceptance can finis
  let attempts = 0; f.port.join = async () => { attempts++; throw Error("lost"); };
  for (let i = 0; i < 3; i++) await f.step(); f.restart(); for (let i = 0; i < 3; i++) await f.step();
  assert.equal(attempts, 1); assert.notEqual(f.store.get(request.requestId)?.ack?.status, "complete");
- f.joined.add(action.roomId); for (let i = 0; i < 3; i++) await f.step();
+ f.joined.add(action.roomId);
+ f.worker.ingest({ rooms: { join: { [action.roomId]: { timeline: { events: [{ type: "m.room.member", state_key: owner, sender: owner, event_id: "$joined", content: { membership: "join" } }] } } } } });
+ for (let i = 0; i < 3; i++) await f.step();
  assert.equal(f.store.get(request.requestId)?.ack?.code, "join_observed"); f.ingest(confirmRepair(request), false);
  for (let i = 0; i < 3; i++) await f.step(); assert.equal(f.store.get(request.requestId)?.ack?.status, "complete");
 });

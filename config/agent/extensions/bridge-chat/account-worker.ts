@@ -1,3 +1,5 @@
+import { DeliveryWake } from "../matrix-shared/delivery-wake.js";
+import { MatrixError } from "../matrix-shared/http.js";
 import { parseAccountAction } from "../managed-sessions/live-workspace-contracts.js";
 import { AccountStore, ACCOUNT_REQUEST_EVENT, ACCOUNT_ACK_EVENT, type AccountHost, type AccountRequest } from "./account-store.js";
 import { AccountProofError, accountRoomProofs, verifyManagedHierarchy, verifyManagedInvite, type EnsureRoom } from "./account-proof.js";
@@ -18,13 +20,38 @@ const events = (v: unknown): unknown[] => { if (!Array.isArray(v) || v.length > 
 /** Deterministic consumer only; never calls the model socket or assistant store. */
 export class AccountWorker {
 	private intakeReady = false;
+	private readonly wake = new DeliveryWake();
+	private running = false;
+	private stepping = false;
+	private flushing = false;
+	/** One serial account pump, independent of shared sync and assistant work. */
+	async run(signal: AbortSignal, unavailable: () => void = () => {}): Promise<void> {
+		if (this.running) throw Error("Account delivery is already running");
+		this.running = true;
+		try {
+			while (!signal.aborted) {
+				const version = this.wake.version(); let worked = false, failed = false;
+				const bounded = () => AbortSignal.any([signal, AbortSignal.timeout(5000)]);
+				try {
+					const start = this.now();
+					for (let count = 0; count < 8 && this.now() - start < 1000 && !signal.aborted; count++) {
+						if (!await this.flush(bounded())) break; worked = true;
+					}
+				} catch { failed = true; unavailable(); }
+				try { if (!signal.aborted) worked = await this.step(bounded()) || worked; }
+				catch { failed = true; unavailable(); }
+				if (failed || worked) await this.wake.wait(this.wake.version(), failed ? 1000 : 25, signal);
+				else await this.wake.wait(version, this.intakeReady ? this.store.dueDelay(this.hosts) : 1000, signal);
+			}
+		} finally { this.running = false; }
+	}
 	constructor(private readonly store: AccountStore, private readonly hosts: readonly AccountHost[], private readonly owner: string,
-		private readonly matrix: AccountMatrixPort, private readonly rules: AccountRulePort) {}
+		private readonly matrix: AccountMatrixPort, private readonly rules: AccountRulePort, private readonly now = Date.now) {}
 	/** Persist before the shared cursor. No network effects during intake. */
 	ingest(value: unknown, fresh = false): void {
 		this.intakeReady = false;
 		this.store.intakeBatch(() => this.ingestBatch(value, fresh));
-		this.intakeReady = true;
+		this.intakeReady = true; this.wake.notify();
 	}
 	suspend(): void { this.intakeReady = false; }
 	private requireIntake(): void { if (!this.intakeReady) throw Error("Account intake is not reconciled"); }
@@ -53,7 +80,10 @@ export class AccountWorker {
 				const r = object(raw), membership = [...events(object(r.state).events ?? []), ...events(object(r.timeline).events ?? [])]
 					.map(object).filter(e => e.type === "m.room.member" && e.state_key === this.owner);
 				for (const e of fresh ? membership.slice(-1) : membership) {
-					if (e.sender === this.owner && object(e.content).membership === "leave" && typeof e.event_id === "string") this.store.departed(roomId, e.event_id);
+					if (e.sender === this.owner && typeof e.event_id === "string") {
+						if (object(e.content).membership === "leave") this.store.departed(roomId, e.event_id);
+						if (object(e.content).membership === "join") this.store.observedJoin(roomId, e.event_id);
+					}
 				}
 			}
 		}
@@ -94,10 +124,16 @@ export class AccountWorker {
 		this.requireIntake(); this.store.verified(action.roomId);
 		return uncertain ? "notification_setup_uncertain" : "complete";
 	}
-	async step(signal: AbortSignal): Promise<void> {
-		if (!this.intakeReady) return;
-		this.store.recheckDepartures();
-		const request = this.store.nextRequest(this.hosts); if (!request) return;
+	async step(signal: AbortSignal): Promise<boolean> {
+		if (!this.intakeReady || signal.aborted || this.stepping) return false;
+		this.stepping = true;
+		try {
+			this.store.recheckDepartures();
+			const request = this.store.nextRequest(this.hosts); if (!request) return false;
+			await this.perform(request, signal); return true;
+		} finally { this.stepping = false; }
+	}
+	private async perform(request: AccountRequest, signal: AbortSignal): Promise<void> {
 		const host = this.host(request); if (!host) return;
 		const action = request.action;
 		try {
@@ -182,15 +218,22 @@ export class AccountWorker {
 			}
 			this.store.acknowledge(action.requestId, host, "complete");
 		} catch (error) {
+			if (error instanceof MatrixError && error.status === 429) this.store.deferTransport(error.retryAfterMs ?? 30_000);
 			// A failed room is retried independently. Only explicit unsupported encryption is terminal.
 			this.store.acknowledge(action.requestId, host, error instanceof AccountProofError && error.code === "unsupported_encryption" ? "rejected" : "pending",
 				error instanceof AccountProofError ? error.code : undefined);
 		}
 	}
-	async flush(signal: AbortSignal): Promise<void> {
-		if (!this.intakeReady) return;
-		const value = this.store.transmission(this.hosts); if (!value || !this.hosts.some(h => h.botUserId === value.recipient && h.deviceId === value.deviceId && h.hostId === value.payload.hostId)) return;
-		await this.matrix.toDevice(ACCOUNT_ACK_EVENT, value.recipient, value.deviceId, value.transactionId, value.payload, signal);
-		this.store.transmitted(value);
+	async flush(signal: AbortSignal): Promise<boolean> {
+		if (!this.intakeReady || signal.aborted || this.flushing) return false;
+		this.flushing = true;
+		try {
+			const value = this.store.transmission(this.hosts); if (!value || !this.hosts.some(h => h.botUserId === value.recipient && h.deviceId === value.deviceId && h.hostId === value.payload.hostId)) return false;
+			await this.matrix.toDevice(ACCOUNT_ACK_EVENT, value.recipient, value.deviceId, value.transactionId, value.payload, signal);
+			this.store.transmitted(value); return true;
+		} catch (error) {
+			if (error instanceof MatrixError && error.status === 429) this.store.deferTransport(error.retryAfterMs ?? 30_000);
+			throw error;
+		} finally { this.flushing = false; }
 	}
 }

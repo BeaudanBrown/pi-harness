@@ -341,8 +341,13 @@ test("IPC keeps authenticated attachments after recoverable operation errors", a
 	assert.equal((await response).type, "self.result");
 });
 
+// Retain a real timer for simulated load even when the fixture's protocol clock is mocked.
+const probeFixtureWallTimer = setTimeout;
 for (const probe of ["recovery.check", "host.run.check"] as const) for (const pressure of ["timeout", "capacity"] as const) {
 	test(`${probe} ${pressure} behind replay acknowledgements preserves the attachment and queue`, { timeout: 5000 }, async t => {
+		// Advance only the intentionally expired probe. Socket/fs scheduling and
+		// the healthy connect/status roundtrips must not consume its 50ms budget.
+		t.mock.timers.enable({ apis: ["setTimeout"] });
 		let release!: () => void; const blocked = new Promise<void>(resolve => { release = resolve; });
 		let entered!: () => void; const replayEntered = new Promise<void>(resolve => { entered = resolve; });
 		const seen: string[] = []; const diagnostics: ConnectionDiagnostic[] = [];
@@ -355,6 +360,7 @@ for (const probe of ["recovery.check", "host.run.check"] as const) for (const pr
 			}
 			if (envelope.type === "recovery.confirm") return { ...base, type: "recovery.acknowledge", payload: { requestId: envelope.payload.requestId } };
 			if (envelope.type === "host.run.confirm") return { ...base, type: "host.acknowledge", payload: {} };
+			if (envelope.type === "self.status") await new Promise(resolve => probeFixtureWallTimer(resolve, 100));
 			return { ...base, type: "self.result", payload: { operation: "self.status", status: "ok", conversationState: "active" } };
 		}, true);
 		t.after(async () => { release(); await f.server.close(); await rm(f.root, { recursive: true, force: true }); });
@@ -368,8 +374,10 @@ for (const probe of ["recovery.check", "host.run.check"] as const) for (const pr
 			onConnectionDiagnostic: record => diagnostics.push(record),
 			onEnvelope: async envelope => {
 				try {
-					if (envelope.type === "recovery.check") await client.confirmRecovery(String(envelope.payload.requestId), false, null);
-					else if (envelope.type === "host.run.check") await client.confirmHostRun(String(envelope.payload.checkId), null);
+					const reply = envelope.type === "recovery.check" ? client.confirmRecovery(String(envelope.payload.requestId), false, null)
+						: envelope.type === "host.run.check" ? client.confirmHostRun(String(envelope.payload.checkId), null) : undefined;
+					if (reply && pressure === "timeout") t.mock.timers.tick(50);
+					await reply;
 				} finally { handled(); }
 			} });
 		t.after(() => client.close()); await client.connect();
@@ -379,11 +387,11 @@ for (const probe of ["recovery.check", "host.run.check"] as const) for (const pr
 		await replayEntered;
 		f.server.sendToConversation({ protocolVersion: MANAGED_SESSION_PROTOCOL_VERSION, role: "relay", messageId: "fresh-probe", conversationId: value.conversationId,
 			type: probe, payload: probe === "recovery.check" ? { requestId: "probe" } : { checkId: "probe" } });
-		await handlerDone; await new Promise(resolve => setTimeout(resolve, 20));
+		await handlerDone;
 		release();
 		assert.equal(client.connected, true, "a short-lived probe timeout must not abort the queued durable replay");
 		assert.deepEqual(await replay, Array(replayCount).fill(true));
-		await client.selfStatus(); // Also drains the late correlated probe response.
+		await assert.doesNotReject(client.selfStatus(), "ordinary status after replay must tolerate simulated suite load"); // Also drains the late correlated probe response.
 		assert.equal(client.connected, true); assert.equal(f.server.attachment(value.conversationId)!.attachmentId, attachmentId);
 		assert.deepEqual(diagnostics, []); assert.deepEqual(f.registry.pendingInputs(value.conversationId), before);
 		assert.equal(seen.filter(type => type === "input.acknowledge").length, replayCount, "no replay retry or input injection");
