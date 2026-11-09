@@ -38,7 +38,11 @@ export class RecoveryMonitor {
 					await this.check(tickets[index++]!).catch(() => this.diagnostic("Recovery check retained for retry"));
 				}
 			}));
-			if (!this.stopped) await this.alerts.drain();
+			if (!this.stopped) await this.alerts.drain(async alert => {
+				const fresh = await this.inspect(alert.ticket);
+				if (!fresh || !fresh.stillCurrent()) return "unknown";
+				return fresh.attentionId === alert.attentionId && !fresh.originalNotifying ? "current" : "obsolete";
+			});
 		})().finally(() => { this.running = undefined; });
 		return this.running;
 	}
@@ -46,9 +50,16 @@ export class RecoveryMonitor {
 		return this.registry.conversationSnapshot(conversationId)?.attachment?.attachmentId;
 	}
 	private async check(ticket: RecoveryTicket): Promise<void> {
+		const fresh = await this.inspect(ticket);
+		if (!fresh || !fresh.stillCurrent()) return;
+		if (fresh.originalNotifying && fresh.attentionId) {
+			await this.alerts.originalAccepted(ticket.target.conversationId, ticket.target.piSessionId, fresh.attentionId);
+		} else await this.alerts.confirm(ticket, fresh.attentionId, fresh.stillCurrent);
+	}
+	private async inspect(ticket: RecoveryTicket): Promise<{ attentionId: string | null; stillCurrent: () => boolean; originalNotifying?: boolean } | undefined> {
 		const { conversationId, piSessionId } = ticket.target;
 		const manifest = this.registry.manifestByConversationId(conversationId);
-		if (!manifest || manifest.piSessionId !== piSessionId) { await this.alerts.confirm(ticket, null, () => true); return; }
+		if (!manifest || manifest.piSessionId !== piSessionId) return { attentionId: null, stillCurrent: () => true };
 		if (this.backlogPending(conversationId) || !this.server.supports(conversationId, "recovery-attention-v1")) return;
 		const attachmentId = this.attachmentId(conversationId);
 		if (!attachmentId) return;
@@ -66,7 +77,9 @@ export class RecoveryMonitor {
 			this.server.supports(conversationId, "recovery-attention-v1") &&
 			this.registry.manifestByConversationId(conversationId)?.piSessionId === piSessionId &&
 			!this.backlogPending(conversationId) && (approval ? approval.stillCurrent() : this.checkpointCurrent(ticket, evidence.checkpointId));
-		await this.alerts.confirm(ticket, evidence.checkpointId ?? approval?.id ?? null, stillCurrent);
+		const projection = evidence.checkpointId ? this.registry.conversationSnapshot(conversationId)?.projection.find(item =>
+			item.entryId === deriveTranscriptEntryId(piSessionId, `checkpoint:${evidence.checkpointId}`) && item.kind === "checkpoint") : undefined;
+		return { attentionId: evidence.checkpointId ?? approval?.id ?? null, stillCurrent, originalNotifying: projection?.disposition === "notify" };
 	}
 	private checkpointCurrent(ticket: RecoveryTicket, checkpointId: string | null): boolean {
 		if (checkpointId === null) return true;

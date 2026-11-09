@@ -521,7 +521,7 @@ export async function startManagedSessionRelay(environment: NodeJS.ProcessEnv = 
 					notificationDisposition: () => matrixHealthy ? "notify" : "silent",
 					onNotifyingPoll: async (record) => {
 						const manifest = registry.manifestByConversationId(record.request.actor.conversationId);
-						if (manifest && registry.activeGeneration(manifest).generationId === record.request.actor.generationId) await recoveryAlerts.originalAccepted(manifest.conversationId, manifest.piSessionId);
+						if (manifest && registry.activeGeneration(manifest).generationId === record.request.actor.generationId) await recoveryAlerts.originalAccepted(manifest.conversationId, manifest.piSessionId, record.approvalId);
 					},
 					owner: owner!,
 					attachment: (id) => server!.attachment(id), capable: (id) => server!.supports(id, "approval-v1"),

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -28,6 +29,53 @@ test("recovery selection survives lost acknowledgement, later epochs, and obsole
 	await second.confirm(second.pending()[0]!, checkpointId, () => true);
 	await second.drain(); await second.drain(); await second.close();
 	assert.equal(sent.length, 2); assert.deepEqual(sent[0], sent[1], "uncertain accepted payload is never reclassified or duplicated in the next epoch");
+});
+
+test("unchanged attention notifies once across 100 outages and restart", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "managed-attention-dedupe-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const path = join(root, "alerts.json"); const sent: RecoveryAlert[] = [];
+	let alerts = new RecoveryAlerts(path, async alert => { sent.push(alert); }); await alerts.load();
+	for (let i = 0; i < 100; i++) {
+		await alerts.outage([target]); await alerts.healthy();
+		await alerts.confirm(alerts.pending()[0]!, checkpointId, () => true); await alerts.drain();
+		if (i === 50) { await alerts.close(); alerts = new RecoveryAlerts(path, async alert => { sent.push(alert); }); await alerts.load(); }
+	}
+	assert.equal(sent.length, 1);
+	await alerts.outage([target]); await alerts.healthy();
+	await alerts.confirm(alerts.pending()[0]!, "new-question", () => true); await alerts.drain();
+	assert.equal(sent.length, 2); await alerts.close();
+});
+
+test("unattempted obsolete attention is suppressed; unknown evidence holds without sending", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "managed-attention-fresh-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const sent: RecoveryAlert[] = []; const alerts = new RecoveryAlerts(join(root, "state"), async alert => { sent.push(alert); });
+	await alerts.load(); await alerts.outage([target]); await alerts.healthy();
+	await alerts.confirm(alerts.pending()[0]!, checkpointId, () => true);
+	await alerts.drain(async () => "unknown"); assert.equal(sent.length, 0); assert.equal(alerts.explain(target.conversationId).receipts[0]!.state, "selected");
+	await alerts.drain(async () => "obsolete"); assert.equal(sent.length, 0); assert.equal(alerts.explain(target.conversationId).receipts[0]!.state, "suppressed");
+	await alerts.close();
+});
+
+test("original notifying intent suppresses later recovery even across restart", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "managed-attention-original-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const path = join(root, "state"); const sent: RecoveryAlert[] = [];
+	const first = new RecoveryAlerts(path, async alert => { sent.push(alert); }); await first.load();
+	await first.originalAccepted(target.conversationId, target.piSessionId, checkpointId); await first.close();
+	const next = new RecoveryAlerts(path, async alert => { sent.push(alert); }); await next.load();
+	await next.outage([target]); await next.healthy(); await next.confirm(next.pending()[0]!, checkpointId, () => true); await next.drain();
+	assert.equal(sent.length, 0); assert.equal(next.explain(target.conversationId).history.at(-1)!.event, "duplicate_suppressed"); await next.close();
+});
+
+test("v1 uncertain delivery keeps legacy transaction identity even after attention is obsolete", async (t) => {
+	const root = await mkdtemp(join(tmpdir(), "managed-attention-migrate-")); t.after(() => rm(root, { recursive: true, force: true }));
+	const path = join(root, "state"); const ticket = { target, epoch: 1, checked: true };
+	const sourceId = `recovery:${createHash("sha256").update(JSON.stringify([1, target.conversationId, target.piSessionId, target.roomId])).digest("hex")}`;
+	await writeFile(path, JSON.stringify({ version: 1, epoch: 1, down: false, tickets: [ticket], alerts: [{ ticket, attentionId: checkpointId, sourceId, body: "frozen legacy message", sent: false }] }));
+	const sent: RecoveryAlert[] = []; const alerts = new RecoveryAlerts(path, async alert => { sent.push(alert); }); await alerts.load();
+	await alerts.outage([target]); await alerts.healthy(); await alerts.confirm(alerts.pending()[0]!, checkpointId, () => true);
+	await alerts.drain(async () => "obsolete"); assert.equal(sent.length, 1); assert.equal(sent[0]!.sourceId, sourceId); assert.equal(sent[0]!.body, "frozen legacy message");
+	await alerts.outage([target]); await alerts.healthy(); await alerts.confirm(alerts.pending()[0]!, checkpointId, () => true); await alerts.drain();
+	assert.equal(sent.length, 1); await alerts.close();
 });
 
 test("fresh original checkpoint coalesces recovery and one failed room does not block another", async (t) => {

@@ -82,7 +82,7 @@ export class RelayEventProjector {
 				...(existing ? existing.disposition ? { disposition: existing.disposition } : {} : { disposition: this.checkpointDisposition() }),
 				chunks: [{ chunkId: deriveChunkId(expectedEntryId, 0), transactionId, status: "pending" }],
 			}, intent);
-			if (projection.disposition !== "silent" && projection.chunks.some((chunk) => chunk.status === "pending")) await this.recovery?.originalAccepted(manifest.conversationId, manifest.piSessionId);
+			if (projection.disposition !== "silent" && projection.chunks.some((chunk) => chunk.status === "pending")) await this.recovery?.originalAccepted(manifest.conversationId, manifest.piSessionId, payload.checkpointId);
 			if (projection.chunks[0]?.transactionId !== transactionId) throw new RelayRegistryError("invalid_state", "Checkpoint poll projection has a conflicting transaction");
 			const runtime = this.registry.conversationSnapshot(manifest.conversationId);
 			if (runtime?.publishingCheckpointPoll?.checkpointId === payload.checkpointId || runtime?.activeCheckpointPoll?.checkpointId === payload.checkpointId) {
@@ -127,7 +127,7 @@ export class RelayEventProjector {
 		}, body, "assistant_final", kind === "checkpoint");
 		if (this.registry.queueItemHeld(conversationId, "projection", entryId)) throw new RelayRegistryError("invalid_state", "Repair preserved this output; a separate queue decision is required");
 		if (kind === "checkpoint" && projection.disposition === "notify" && projection.chunks.some((chunk) => chunk.status === "pending")) {
-			await this.recovery?.originalAccepted(conversationId, piSessionId);
+			await this.recovery?.originalAccepted(conversationId, piSessionId, sourceKey.startsWith("checkpoint:") ? sourceKey.slice("checkpoint:".length) : undefined);
 		}
 		for (let index = 0; index < projection.chunks.length; index += 1) {
 			const chunkState = projection.chunks[index]!;
