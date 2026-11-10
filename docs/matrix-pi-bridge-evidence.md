@@ -91,6 +91,70 @@ Canonical full-epic verification and builds remain #171. The deployed tmux crash
 in #158 has not been diagnosed/fixed by these isolated tests. Old processes do
 not honor the new native locks; quiescing them remains a cutover requirement.
 
+### #163 isolated text bridge and delivery ledger
+
+The replacement now has an asynchronous native adapter, private user-owned Unix
+socket, one host-local SQLite ledger, and per-room Matrix delivery. There is no
+new daemon activation or room provisioning in this slice: #164 wires packaging/
+launchers, #165 supplies rooms and Spaces, and #166 adds polls/images and richer
+controls. The existing managed runtime is still present until #170.
+
+Important implementation boundaries:
+- The daemon holds a kernel lock before opening/recovering its ledger or removing
+  a stale socket. Socket and state directories are owner-only. The adapter imports
+  neither Matrix HTTP nor process launching. Local launch receives only a saved
+  binding through the #162 seam; production environment sanitization belongs to
+  the #164 launcher wiring.
+- First successful registration cuts at the **current persisted native tail**;
+  an old/copied native marker is not permission to backfill. Reconnect retains the
+  original database boundary. Native new/fork keeps native identity semantics.
+- Pi's native custom-entry persistence now flushes buffered entries and fsyncs.
+  This makes an idle session real without a model turn and persists local-only
+  enrollment changes before private work. Headless workers do not enroll; resuming
+  a previously bridged file headlessly disables its projection before new work.
+- Raw event identity/cursor/checkpoints commit together. Queued input can recover;
+  `handed` becomes per-message `interrupted` after lost attachment/restart and is
+  never automatically resent. One immutable notice per interrupted event replaces
+  recurring recovery-attention announcements. Fresh instructions remain usable.
+- Normal busy input uses native steering; `!follow-up TEXT` uses the native
+  follow-up queue. `!abort` withdraws older pending input and requests native abort;
+  `!stop` additionally requests native shutdown. Neither claims tool effects were
+  undone or work completed. Later fresh intent can reopen the original session,
+  but cannot be handed to an attachment already stopping. Native preflight and
+  observed idle are not external-effect receipts.
+- Remote origin is native **message metadata**, not guessed from text. A copied
+  or locally restored Matrix-captioned prompt is fresh local input and projects
+  normally. Thinking, tool results, internal entries and pre-binding history do
+  not project. The history reader only accepts complete persisted JSONL records,
+  fsyncs the observed file before freezing output, caches unchanged observations,
+  and checkpoints only after immutable output materialization.
+- Output retries use the same persisted payload/transaction ID. A partial sync
+  gap checkpoints each recovered page without advancing the global cursor;
+  other rooms still intake independently. Invalid/missing history is an explicit
+  error, not authority to create a replacement session.
+
+Evidence so far:
+- **10 focused bridge scenarios passed, zero skips**, including real packaged Pi
+  and an ordinary TUI in a disposable tmux server: asynchronous/offline startup,
+  persisted-only projection (`message_end` was observed before persistence),
+  provenance, reconnect without replay, native new, worker exclusion, busy
+  follow-up withdrawal, abort, stop, private-history boundaries, lost output ACK,
+  duplicate/membership filtering, restart-safe sync gaps and daemon exclusion.
+- Two additional packaged native cases prove idle custom-entry persistence and
+  post-expansion attribution/preflight. The native writer/local helper regressions
+  remain covered.
+- Canonical affected checks: **155 unit tests and 856 managed-session regression
+  tests passed, zero skips**, with the patched Pi package built. The real RPC probe
+  exposed that its idle shutdown flag is observed at the next RPC checkpoint;
+  the separate ordinary TUI test proves immediate native idle shutdown.
+- Source TypeScript LSP and compiler checks passed. Isolated copied upstream
+  declaration scratch files under `.pi/tmp/` lack their surrounding SDK and are
+  not project compilation inputs.
+- Paired pinned Standards/Spec issue review found no material findings
+  (`2026-11-10T03-08-44-498Z-worktree-6219d38916af-ee4fa9c90f56`). The final
+  cumulative review/gate remains #171; these fixtures are not live delivery
+  receipts.
+
 ## Rebuild and migration readiness
 
 Pending implementation and cumulative verification. Do not run a host switch merely

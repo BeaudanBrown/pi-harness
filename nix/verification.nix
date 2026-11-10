@@ -115,6 +115,7 @@ let
     ${typeSetup}
     mkdir -p "$out/build" "$out/source"
     tsc --project tsconfig.test.json --outDir "$out/build"
+    cp ${nativeSessionLock}/lib/session-lock.cjs "$out/build/config/agent/extensions/matrix-bridge/session-lock.cjs"
     cp -R config eval tests bin scripts .aloop.json .pi-types "$out/source/"
   '';
 
