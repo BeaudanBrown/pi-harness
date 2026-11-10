@@ -1,0 +1,14 @@
+{
+  "version": 1,
+  "scenarios": [
+    { "name": "offline-local", "seam": "native-launch", "given": ["relay absent", "Matrix offline", "NAS offline"], "when": ["open native session"], "expect": ["local input available", "bridge retries asynchronously"] },
+    { "name": "one-writer", "seam": "native-launch", "given": ["saved native session"], "when": ["open concurrently", "kill owning Pi", "open again"], "expect": ["only one writer at a time", "no repair or stale reservation"] },
+    { "name": "fresh-after-uncertainty", "seam": "adapter-socket", "given": ["potentially executed event A"], "when": ["restart bridge", "duplicate event A", "fresh event B"], "expect": ["A marked interrupted, not replayed", "B dispatched once"] },
+    { "name": "frozen-output", "seam": "matrix-http", "given": ["persisted eligible assistant entry", "first send response lost"], "when": ["restart bridge", "retry send"], "expect": ["same transaction ID", "byte-equivalent payload", "one Matrix event"] },
+    { "name": "native-switch", "seam": "native-session", "given": ["bound session A"], "when": ["fork B", "resume A", "navigate tree"], "expect": ["B has distinct binding", "A retains room", "tree retains A binding", "no historical backfill"] },
+    { "name": "collaboration", "seam": "matrix-http", "given": ["joined collaborator", "active choice poll"], "when": ["collaborator votes", "duplicate vote", "outsider messages"], "expect": ["answer dispatched once", "outsider ignored"] },
+    { "name": "image-caption", "seam": "adapter-socket", "given": ["supported original PNG bytes", "caption"], "when": ["receive Matrix image event", "duplicate event"], "expect": ["one ordered user turn with image and caption", "original image bytes"] },
+    { "name": "task-handoff", "seam": "task-create", "given": ["approved source/base/branch/summary", "Matrix offline"], "when": ["create task", "repeat same creation", "Matrix reconnects"], "expect": ["one worktree and native session", "one eventual room", "visible summary", "zero child model turns"] },
+    { "name": "busy-archive", "seam": "archive", "given": ["active turn", "original session/room/worktree"], "when": ["archive", "receive new input", "active turn finishes", "restore"], "expect": ["final output published", "new input not dispatched", "original history preserved", "no stale replay", "original live grouping restored"] }
+  ]
+}

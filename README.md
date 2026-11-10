@@ -2,6 +2,14 @@
 
 Thin shared configuration for the Pi coding agent.
 
+**Replacement in progress:** [epic #160](https://github.com/BeaudanBrown/pi-harness/issues/160)
+and [ADR 0003](docs/architecture/decisions/0003-matrix-pi-bridge.md) supersede the
+managed-platform target described below. Native Pi will work independently of
+bridge availability, retaining polls, inbound images, automatic Spaces/invitations,
+reversible archive and approved task-worktree handoffs. See
+[replacement acceptance evidence](docs/matrix-pi-bridge-evidence.md) for release
+status. This notice is not a claim that the replacement is shipped or deployed.
+
 This repository is intentionally small. It does not implement a general
 workstream manager, tmux switcher, TUI, or arbitrary context attachment model.
 It does provide the narrowly scoped managed-session host relay defined by ADR

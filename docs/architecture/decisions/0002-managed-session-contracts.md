@@ -1,6 +1,11 @@
 # ADR 0002: Managed-session domain and contract boundaries
 
-- **Status:** Accepted
+- **Status:** Historical baseline; conflicting targets superseded by [ADR 0003](0003-matrix-pi-bridge.md) under epic #160
+
+The replacement target keeps native Pi independent of bridge health, one room per
+native file, reversible archive, polls/images/automatic organization and narrow
+approved task-workspace creation. The implementation below remains historical
+and deployed until an explicitly approved migration; it is not the new target.
 - **Date:** 2026-08-31
 - **Issue:** [#38](https://github.com/BeaudanBrown/pi-harness/issues/38)
 - **Epic:** [#37](https://github.com/BeaudanBrown/pi-harness/issues/37)
