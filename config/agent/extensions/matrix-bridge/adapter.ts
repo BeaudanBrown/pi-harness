@@ -29,12 +29,17 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
   const valid = (scope: Scope, peer?: Peer): boolean => current === scope && scope.active && (!peer || scope.peer === peer && !peer.socket.destroyed) &&
     scope.ctx.sessionManager.getSessionId() === scope.nativeId && scope.ctx.sessionManager.getSessionFile() === scope.file;
   const status = (scope: Scope, message: string) => { if (valid(scope)) scope.ctx.ui.setStatus("matrix-bridge", message); };
+  const remoteStatus = (scope: Scope, view: Record<string, unknown>) => {
+    const setup = object(view.setup ?? {});
+    status(scope, view.syncError || view.error ? "Bridge connected · remote delivery needs attention" : !view.room ? "Bridge connected · room setup pending" :
+      setup.stage && setup.stage !== "ready" ? `Matrix bridge connected · ${string(setup.stage, 16)} setup pending` : "Matrix bridge connected");
+  };
   const activity = async (scope: Scope, peer: Peer) => {
     const idle = scope.ctx.isIdle() && !scope.ctx.hasPendingMessages();
     if (idle) for (const id of scope.inputs) if (!scope.preflight.has(id)) scope.settled.add(id);
     const settled = [...scope.settled].slice(0, 128);
     const view = object(await peer.request("activity", { idle, settled }));
-    status(scope, view.syncError || view.error ? "Bridge connected · remote delivery needs attention" : view.room ? "Matrix bridge connected" : "Bridge connected · room setup pending");
+    remoteStatus(scope, view);
     for (const id of settled) { scope.inputs.delete(id); scope.settled.delete(id); }
   };
   const attach = async (scope: Scope, cfg: AdapterConfig): Promise<void> => {
@@ -92,7 +97,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
       peer.on("close", () => { if (valid(scope)) { scope.peer = undefined; status(scope, "Matrix offline · local Pi available"); } });
       const registration = object(await peer.request("register", { file: scope.file, nativeId: scope.nativeId, boundary: scope.boundary, title: scope.ctx.sessionManager.getSessionName() ?? basename(scope.ctx.cwd), idle: scope.ctx.isIdle(), stopping: scope.stopping === true }));
       if (!valid(scope, peer)) { peer.close(); return; }
-      status(scope, registration.room ? "Matrix bridge connected" : "Bridge connected · room setup pending");
+      remoteStatus(scope, registration);
       const tick = async (): Promise<void> => {
         if (!valid(scope)) return;
         if (!scope.peer) { await attach(scope, cfg); return; }

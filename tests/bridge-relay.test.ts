@@ -99,6 +99,34 @@ test("output recovery freezes payloads and transaction IDs; native private conte
   } finally { peer?.close(); await relay.stop(); rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("already-bound input/output remain usable while independent setup HTTP is blocked", async t => {
+  const f = fixture(); f.config.operatorUserId = friend;
+  let unblock!: () => void, requested = false;
+  const blocked = new Promise<unknown>((_resolve, reject) => { unblock = () => reject(Error("setup unavailable")); });
+  const request = f.matrix.http.request.bind(f.matrix.http);
+  t.mock.method(f.matrix.http, "request", (...args: Parameters<typeof request>) => {
+    if (args[1].endsWith("/state")) { requested = true; return blocked; }
+    return request(...args);
+  });
+  const relay = new BridgeRelay(f.config, f.matrix, async () => { throw Error("must not launch"); });
+  let peer: Peer | undefined;
+  try {
+    await relay.start(false);
+    const handed: string[] = [];
+    const registration = await attach(f, async (_method, params) => { handed.push(String(params.id)); return { accepted: true }; }); peer = registration.peer;
+    relay.store.setRoom(registration.key, room);
+    appendFileSync(f.file, JSON.stringify({ type: "message", id: "answer", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Available while setup is pending" }] } }) + "\n");
+    relay.store.intake("input", [{ id: "$during-setup", room, event: message("$during-setup") }]);
+    const pending = relay.organization!.pump(); assert.equal(requested, true);
+    await relay.pump();
+    assert.deepEqual(handed, ["$during-setup"]); assert.equal(f.sent.size, 1);
+    const view = object(await peer.request("status", { key: registration.key }));
+    assert.equal(view.error, null); assert.equal(object(view.setup).stage, "room");
+    unblock(); await pending;
+    assert.match(String(object(object(await peer.request("status", { key: registration.key })).setup).error), /setup unavailable/);
+  } finally { unblock(); peer?.close(); await relay.stop(); rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("a second daemon cannot replace the live private socket", async () => {
   const f = fixture(); const relay = new BridgeRelay(f.config, f.matrix, async () => {});
   try {

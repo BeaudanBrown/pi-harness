@@ -6,6 +6,7 @@ import { AccountStore } from "./account-store.js";
 import { AccountWorker } from "./account-worker.js";
 import { AccountMatrix } from "./account-matrix.js";
 import { AccountRules } from "./account-notifications.js";
+import { TrustedInvitations } from "./trusted-invites.js";
 import { modelAnswer } from "./socket.js";
 import { transportFailure, type TransportStage } from "./diagnostics.js";
 
@@ -45,7 +46,7 @@ async function main(): Promise<void> {
 	if (identity.user_id !== config.ownerUserId || identity.is_guest === true || typeof identity.device_id !== "string" || !identity.device_id) throw Error("Dedicated owner login required");
 	enterStage("database_open");
 	const store = new Store(path.join(process.env.STATE_DIRECTORY!, "requests.sqlite"));
-	let accountStore: AccountStore | undefined; let accountTask: Promise<void> | undefined;
+	let accountStore: AccountStore | undefined; let accountTask: Promise<void> | undefined; let invitationTask: Promise<void> | undefined;
 	try {
 		const hosts = config.managedAccountHosts ?? [];
 		if (hosts.length) accountStore = new AccountStore(path.join(process.env.STATE_DIRECTORY!, "managed-account.sqlite"), config.ownerUserId);
@@ -60,6 +61,17 @@ async function main(): Promise<void> {
 		// delay the shared sync cursor while waiting for account HTTP effects.
 		if (accounts) accountTask = accounts.run(stop.signal, () => console.log('{"event":"managed_account_unavailable"}'),
 			snapshot => console.log(JSON.stringify({ event: "managed_account_schedule", ...snapshot })));
+		if (Object.keys(config.trustedBridgeBots ?? {}).length) invitationTask = (async () => {
+			while (!stop.signal.aborted) {
+				let invitations: TrustedInvitations | undefined;
+				try {
+					invitations = new TrustedInvitations(path.join(process.env.STATE_DIRECTORY!, "bridge-invites.sqlite"), matrix.http, config.ownerUserId, config.trustedBridgeBots!);
+					await invitations.run(stop.signal, (status, unavailable) => console.log(JSON.stringify({ event: "bridge_invitations", unavailable, ...status })));
+				} catch { console.log('{"event":"bridge_invitations_unavailable"}'); }
+				finally { invitations?.close(); }
+				if (!stop.signal.aborted) await matrixDelay(5000, stop.signal).catch(() => {});
+			}
+		})();
 		while (!stop.signal.aborted) {
 			try {
 				const batch = await matrix.sync(fresh ? "" : store.get("cursor"), [config.ownerUserId, ...config.remoteOwnerUserIds], store.pending(), stop.signal, !!accounts);
@@ -77,6 +89,6 @@ async function main(): Promise<void> {
 			}
 			await store.step(matrix, (q, workspace) => modelAnswer(config.modelSocket, q, stop.signal, workspace, !!config.filesDirectory), config, Date.now, stop.signal);
 		}
-	} finally { stop.abort(); await accountTask; accountStore?.close(); store.close(); }
+	} finally { stop.abort(); await Promise.all([accountTask, invitationTask]); accountStore?.close(); store.close(); }
 }
 void main().catch(error => { console.error(transportFailure(stage, error)); process.exitCode = 1; });

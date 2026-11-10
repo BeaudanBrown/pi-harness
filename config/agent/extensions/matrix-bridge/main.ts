@@ -41,9 +41,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args.length !== 4 || args[0] !== "--config" || args[2] !== "--credential-file") throw Error("Usage: pi-matrix-bridge --config FILE --credential-file FILE");
   const raw = object(JSON.parse(readFileSync(args[1]!, "utf8")));
   if (!Array.isArray(raw.roots) || !raw.roots.length || !Array.isArray(raw.ignoredSenderUserIds)) throw Error("Invalid bridge roots or ignored users");
-  const config: RelayConfig = { hostId: string(raw.hostId, 128), stateDirectory: hostPath(string(raw.stateDirectory)), socket: hostPath(string(raw.socket)), roots: raw.roots.map(root => hostPath(string(root))) };
+  if (raw.hostSpace !== undefined && typeof raw.hostSpace !== "boolean") throw Error("Invalid host Space preference");
+  const config: RelayConfig = { hostId: string(raw.hostId, 128), stateDirectory: hostPath(string(raw.stateDirectory)), socket: hostPath(string(raw.socket)), roots: raw.roots.map(root => hostPath(string(root))), operatorUserId: string(raw.operatorUserId, 255), hostSpace: raw.hostSpace !== false };
   const client = new BridgeMatrix(new MatrixHttp({ homeserver: string(raw.homeserver), accessToken: credential(readFileSync(args[3]!, "utf8")) }, fetch, { maxAttempts: 1 }),
     string(raw.botUserId, 255), new Set(raw.ignoredSenderUserIds.map(sender => string(sender, 255))));
+  const account = object(await client.http.request("GET", "/_matrix/client/v3/account/whoami", undefined, AbortSignal.timeout(8000)));
+  if (account.user_id !== client.userId || account.is_guest === true) throw Error("Matrix credential does not match the configured host bot");
   const relay = new BridgeRelay(config, client, localOpen(string(raw.localHelper)));
   const shutdown = () => { void relay.stop().catch(() => { process.exitCode = 1; }); };
   process.once("SIGTERM", shutdown); process.once("SIGINT", shutdown);

@@ -6,13 +6,15 @@ import { BridgeStore, type Binding } from "./store.js";
 import { history, offerHistory } from "./history.js";
 import { allowedWorkspace, connect, object, Peer, string, type ObjectValue } from "./wire.js";
 import { BridgeMatrix, syncIntoStore } from "./matrix.js";
+import { BridgeOrganization } from "./organization.js";
 
-export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[] };
+export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; operatorUserId?: string; hostSpace?: boolean };
 type Attachment = { peer: Peer; idle: boolean; key: string; stopping?: boolean };
 const running = new Set<string>();
 /** Single daemon, native-session routing and transactional delivery only. */
 export class BridgeRelay {
   readonly store: BridgeStore;
+  readonly organization?: BridgeOrganization;
   private release: () => void;
   private server?: Server;
   private readonly peers = new Set<Peer>();
@@ -35,6 +37,9 @@ export class BridgeRelay {
     this.release = () => { unlock(); running.delete(key); };
     try { this.store = new BridgeStore(join(key, "bridge.sqlite"), config.hostId); }
     catch (error) { this.release(); throw error; }
+    try {
+      if (config.operatorUserId) this.organization = new BridgeOrganization(this.store, matrix.http, { hostId: config.hostId, botUserId: matrix.userId, operatorUserId: config.operatorUserId, hostSpace: config.hostSpace });
+    } catch (error) { this.store.close(); this.release(); throw error; }
   }
   async start(background = true): Promise<void> {
     const directory = dirname(this.config.socket);
@@ -101,13 +106,13 @@ export class BridgeRelay {
     });
     await new Promise<void>((resolve, reject) => { this.server!.once("error", reject); this.server!.listen(this.config.socket, () => { chmodSync(this.config.socket, 0o600); resolve(); }); });
     if (background) {
-      this.interval = setInterval(() => { void this.pump(); }, 500);
+      this.interval = setInterval(() => { void this.pump(); void this.organization?.pump().catch(() => {}); }, 500);
       this.syncWork = this.syncLoop();
     }
   }
   private status(binding: Binding): ObjectValue {
     const current = this.attached.get(binding.key);
-    return { ...binding, runtime: current ? current.stopping ? "stopping" : current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
+    return { ...binding, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.stopping ? "stopping" : current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
   }
   private async syncLoop(): Promise<void> {
     while (!this.stopSignal.signal.aborted) {
@@ -203,6 +208,7 @@ export class BridgeRelay {
     this.stopSignal.abort(); clearInterval(this.interval);
     for (const key of this.attached.keys()) this.store.disconnect(key);
     for (const peer of this.peers) peer.close();
+    await this.organization?.stop();
     await this.syncWork;
     while (this.roomWork.size) await new Promise(resolve => setTimeout(resolve, 10));
     if (this.server) await new Promise<void>(resolve => this.server!.close(() => resolve()));

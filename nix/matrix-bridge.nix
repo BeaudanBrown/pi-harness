@@ -17,6 +17,7 @@ stdenvNoCC.mkDerivation {
         "typeRoots": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@types"],
         "baseUrl": ".",
         "paths": {
+          "typebox": ["${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox/build/index.d.mts"],
           "markdown-it": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/index.d.ts"],
           "markdown-it/*": ["${matrixMarkdown}/lib/node_modules/@types/markdown-it/*"]
         },
@@ -35,6 +36,7 @@ stdenvNoCC.mkDerivation {
     cp ${nativeSessionLock}/lib/session-lock.cjs "$out/lib/matrix-bridge/session-lock.cjs"
     cp config/agent/extensions/matrix-bridge/local.py "$out/lib/matrix-bridge/local.py"
     ln -s ${matrixMarkdown}/lib/node_modules/markdown-it "$out/lib/node_modules/markdown-it"
+    ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$out/lib/node_modules/typebox"
     cat > "$out/bin/pi-matrix-bridge" <<EOF
     #!${runtimeShell}
     exec ${lib.getExe nodejs} "$out/lib/matrix-bridge/main.js" "\$@"

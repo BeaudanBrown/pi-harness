@@ -15,7 +15,7 @@ let
     exec ${cfg.package}/bin/pi-session "$@"
   '';
   daemonConfig = pkgs.writeText "pi-matrix-bridge.json" (builtins.toJSON {
-    inherit (cfg) hostId stateDirectory socket roots homeserver botUserId operatorUserId ignoredSenderUserIds;
+    inherit (cfg) hostId stateDirectory socket roots homeserver botUserId operatorUserId ignoredSenderUserIds hostSpace;
     localHelper = "${helper}/bin/pi-session";
   });
 in {
@@ -49,6 +49,7 @@ in {
     homeserver = mkOption { type = types.nullOr types.str; default = null; };
     botUserId = mkOption { type = types.nullOr types.str; default = null; };
     operatorUserId = mkOption { type = types.nullOr types.str; default = null; description = "Human owner invited by asynchronous room/Space setup; not a participant allowlist."; };
+    hostSpace = mkOption { type = types.bool; default = true; description = "Present projects below an optional host Space; never a coordinator session or launch requirement."; };
     ignoredSenderUserIds = mkOption { type = types.listOf types.str; default = [ ]; };
     tmuxPackage = mkOption { type = types.package; default = pkgs.tmux; description = "Host-owned tmux client; use the independently owned shared server wrapper on persistent hosts."; };
     windowLauncher = mkOption { type = types.nullOr types.package; default = null; description = "Optional host-owned tmux_project package providing native-window with fixed argv JSON. No managed host protocol."; };

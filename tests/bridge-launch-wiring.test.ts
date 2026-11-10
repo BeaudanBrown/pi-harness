@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { credential, localEnvironment, localOpen } from "../config/agent/extensions/matrix-bridge/main.js";
+import { credential, localEnvironment, localOpen, main } from "../config/agent/extensions/matrix-bridge/main.js";
 import type { Binding } from "../config/agent/extensions/matrix-bridge/store.js";
 import { interactiveProcess } from "../config/agent/extensions/matrix-bridge/adapter.js";
 
@@ -40,6 +40,18 @@ test("automatic enrollment recognizes human text mode and excludes headless, wor
     process.argv = argv;
     keys.forEach((key, index) => { if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index]; });
     streams.forEach((stream, index) => { const descriptor = descriptors[index]; if (descriptor) Object.defineProperty(stream, "isTTY", descriptor); else Reflect.deleteProperty(stream, "isTTY"); });
+  }
+});
+
+test("host credential identity is verified before any background setup or store creation", async t => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-identity-")); t.after(() => rmSync(root, { recursive: true, force: true }));
+  const config = join(root, "config.json"), token = join(root, "credential");
+  writeFileSync(token, "PI_MATRIX_ACCESS_TOKEN=fixture-token");
+  writeFileSync(config, JSON.stringify({ hostId: "fixture", stateDirectory: join(root, "state"), socket: join(root, "socket"), roots: [root], homeserver: "https://example.test", botUserId: "@bot:example.test", operatorUserId: "@owner:example.test", ignoredSenderUserIds: [], localHelper: "/fixture-helper" }));
+  for (const account of [{ user_id: "@wrong:example.test" }, { user_id: "@bot:example.test", is_guest: true }]) {
+    t.mock.method(globalThis, "fetch", async (url: URL) => { assert.equal(url.pathname, "/_matrix/client/v3/account/whoami"); return Response.json(account); });
+    await assert.rejects(main(["--config", config, "--credential-file", token]), /configured host bot/);
+    assert.equal(existsSync(join(root, "state")), false);
   }
 });
 

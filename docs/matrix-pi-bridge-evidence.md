@@ -265,6 +265,103 @@ Only this evidence text was changed afterward. The cumulative epic review and a
 fresh canonical gate remain #171 release requirements; none of these fixtures
 prove live Matrix delivery, NAS operation or safety around existing legacy writers.
 
+### #165 preflight: background organization and trusted invitations
+
+Current issue: native room/Space provisioning and a narrow account-side invitation
+consumer. No model controls, process inspection, lifecycle registry, archive
+closure, notification-policy writes or general account-action protocol. #166
+owns richer interactions; #167/#168 own approved workspace/archive mutations;
+#169 owns legacy identity/departure import; #170 removes old account machinery.
+NAS source changes are authorized, not deployment or live membership effects.
+
+| Acceptance | Planned seam | Required focused evidence |
+| --- | --- | --- |
+| One native room despite lost creation response | Frozen setup node/alias in existing bridge progress; immutable create provenance; saved room IDs win over aliases/names | Drop create ACK before/after server commit, restart, alias collision/removal, foreign creator and unsupported version; never create a second room after uncertainty |
+| Host → project → checkout → conversation | Background organizer, bounded fixed-argv read-only Git grouping; shared node work coalesced | Two sessions share project/checkout Spaces; linked worktree has distinct checkout; no-Git workspace works; Git failure produces setup-pending only |
+| Bound delivery survives grouping/account failures | Separate setup and delivery work/backoff, bounded status warning | Healthy text continues during blocked Space link, Git error and operator invitation outage; local startup never waits |
+| Narrow exact-host invitation acceptance | Optional consumer in existing owner transport, independent sync cursor/work, separate private account-local invitation journal (not the assistant/legacy account database) | Trusted sender plus immutable room proof; reject arbitrary invite/encryption/foreign creator; restart/lost join ACK; observed departure and current membership recheck suppress retry |
+| Preserve user policy and isolation | No push-rule writes, leave/forget/unban or operator token on host | Endpoint allowlist assertions; account-policy changes do not reset assistant requests/watermarks; helper failure does not occupy model work |
+| Nix/downstream handoff | Public grouping config; exact host/bot map on NAS replacing managed account policy in consuming source | Package/module checks and both-host evaluation only; preserve unrelated staged NAS changes and stateless `!pi` |
+
+Crash boundaries to implement/test:
+1. Persist node identity/creation payload before external work. On uncertain create,
+   resolve and verify the same private alias only; an absent alias is pending, not
+   permission for a second create. Definitively rejected requests may retry safely.
+2. Persist returned room ID before hierarchy work; verify immutable provenance and
+   creator before adopting a recovered room. Grouping failure cannot unset routing.
+3. Links are read/compare/PUT state with the same endpoints/content. Interrupted
+   link work resumes independently; no process or account acknowledgement gates it.
+4. Record invitation attempt before POST. Unknown outcome is observed, never
+   blindly reinvited; leave/ban is negative authority, not a repair invitation.
+5. Account intake and its cursor commit together. Recheck a current scoped account
+   snapshot before first join, then persist attempted before POST. Lost join ACK
+   is observed, not replayed; departures remain suppressed across restart.
+   Matrix offers no conditional membership CAS: do not claim a client-side check
+   can serialize a simultaneous human action on another client.
+6. Shutdown cancels/awaits only bridge/account HTTP work; no Pi/tmux/room teardown.
+
+Protocol references: Matrix Client-Server API `/createRoom` copies custom
+`creation_content` into immutable `m.room.create`; `/sync` invitations include
+stripped create state (required since spec 1.16). Room v12 may have additional
+creators, which the existing shared single-creator verifier rejects. Sources:
+<https://spec.matrix.org/v1.19/client-server-api/> and
+<https://spec.matrix.org/v1.19/server-server-api/>. No live API probe was used.
+Implemented seams: `matrix-bridge/organization.ts`, the shared immutable room
+verifier, and `bridge-chat/trusted-invites.ts`. Setup uses the existing host
+ledger's progress rows; it adds no runtime registry or daemon. The account
+consumer deliberately uses a separate private `bridge-invites.sqlite` database:
+this isolates its cursor/attempts from assistant requests and leaves the historical
+account database untouched for #169. The preflight's proposed shared connection
+was not adopted. This is one optional owner-account consumer in the existing
+transport, not a second host database or a general mutation platform.
+
+Acceptance evidence before review:
+- **9 organization tests** use real SQLite reopen, HTTP-boundary fixtures and
+  disposable Git repositories. They cover concurrent shared nodes/links, lost
+  create/link/invite acknowledgements, definitive rejection, alias absence and
+  collisions, immutable provenance, no-Git workspaces and linked worktrees.
+- **12 invitation tests** cover exact trust/proof, transactional offer/cursor
+  rollback, independent policy, lost ACK observation without replay, server retry
+  delay, filtered join/leave sections, persistent departures, trust revocation,
+  exclusive ownership and orderly shutdown. An endpoint allowlist rules out
+  notification, to-device, leave/forget and unban effects.
+- A public IPC/delivery test blocks setup HTTP while already-bound input and
+  persisted output continue. Credential identity tests reject a mismatched/guest
+  bot before any database or setup creation. The unchanged actual-Pi offline
+  helper tests still pass; optional organization is not a local launch gate.
+- Affected Nix gates pass: **177 unit tests**, **127 chat tests**, source, module,
+  package and TypeScript checks; behavioral tests have **zero skips**. Includes
+  existing 17 engineering and 17 headless probes. Log:
+  `2026-11-10T08-35-39-634Z-native-165-pre-review-affected-476f98e93a83`.
+- Both-host **evaluation only** plus source checks pass (**6 tests**); NAS has the
+  exact grill/NAS native-bot map and both hosts have empty legacy account policy.
+  Log: `2026-11-10T08-11-53-040Z-native-165-consuming-evaluation-ced850f610c3`.
+- Downstream commit `c8d681d64b4a9086a9bbd19aa69f6e410f836e78` changes only
+  native invitation configuration, its checks and guidance. Normal hooks pass.
+  A temporary index excluded the pre-existing Signal fix in the same NAS file.
+  The restored real index equals the expected preserved tree exactly:
+  `ec5ea41a6c1c24505bc546f414779511f8a9f697`; all six pre-existing staged files
+  remain staged. The #164 patch hash is not reused across changed base commits.
+
+Legacy room provenance/departure conversion remains #169; this slice never
+rewrites immutable create events or opens the old account journal. Unknown room
+creation with an unavailable alias remains setup-pending rather than duplicating
+rooms. Matrix membership has no CAS; the scoped pre-join recheck cannot serialize
+another client's simultaneous action. These are protocol/fixture results, not
+live homeserver receipts.
+
+Paired pinned Standards/Spec review completed at
+`.pi/tmp/reviews/2026-11-10T08-39-24-059Z-worktree-f3cf8015908d-07d0d815c5cc/`,
+including the exact downstream committed diff/source export (SHA-256
+`c847ee7b8d40eb2f5b060ebd8c5e8f1f0e43d6af997686dc00594b38eb8c655d`).
+Neither axis found a current-issue defect. The Spec low/deployment-only note is
+accepted: live acceptance remains #172, not evidence supplied by these fixtures.
+**`nix run .#verify` then passed all 12 gates**, including 177 unit, 127 chat and
+856 legacy tests, zero skips. Final log:
+`2026-11-10T08-41-40-416Z-native-165-canonical-boundary-9ce56855a24f`.
+Only this evidence text changed after the gate. Cumulative review/fresh
+verification remain #171 requirements; no push, deployment or migration occurred.
+
 ## Rebuild and migration readiness
 
 Pending implementation and cumulative verification. Do not run a host switch merely

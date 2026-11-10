@@ -491,6 +491,15 @@ let
     filesServices = (bridgeChatModule.extendModules {
       modules = [ { services.pi-harness.bridgeChat.assistant.files.enable = true; } ];
     }).config.systemd.services;
+    nativeInvitations = (bridgeChatModule.extendModules {
+      modules = [ { services.pi-harness.bridgeChat.assistant.trustedBridgeBots.fixture = "@bot:example.com"; } ];
+    }).config.services.pi-harness.bridgeChat.assistant.trustedBridgeBots;
+    rejectsMixedInvitations = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
+      modules = [ { services.pi-harness.bridgeChat.assistant = {
+        trustedBridgeBots.fixture = "@bot:example.com";
+        managedAccountHosts = [ { hostId = "fixture"; botUserId = "@bot:example.com"; deviceId = "fixture"; } ];
+      }; } ];
+    }).config.assertions);
     rejectsEmptyScope = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
       modules = [ { services.pi-harness.bridgeChat.assistant.roomIds = lib.mkForce [ ]; } ];
     }).config.assertions);
@@ -513,6 +522,7 @@ let
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$TMPDIR/chat-tests/node_modules/typebox"
     node --test --test-concurrency=1 "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
     jq -e '(.assertions | all) and .rejectsEmptyScope and .rejectsStoreSecret
+      and .rejectsMixedInvitations and .nativeInvitations == {"fixture":"@bot:example.com"}
       and (.services["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
       and .services["pi-chat-model"].serviceConfig.User == "operator"
       and .services["pi-chat-model"].serviceConfig.DynamicUser == false

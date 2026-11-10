@@ -1,4 +1,5 @@
 import { accountHosts, type AccountHost } from "./account-store.js";
+import { trustedBridgeBots, type TrustedBridgeBots } from "./trusted-invites.js";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { MatrixHttp, MatrixError } from "../matrix-shared/http.js";
@@ -9,7 +10,7 @@ import { inspectArtifactBytes } from "../managed-sessions/adapter/artifact-expor
 import { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS } from "./limits.js";
 export { MAX_QUESTION, MAX_ANSWER, MAX_AGE_MS, MAX_PENDING, MAX_RECORDS };
 export const FAILURE = "I couldn't complete that request. Please send a new !pi command to try again.";
-export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string; workspaceRoomIds?: string[]; filesDirectory?: string; managedAccountHosts?: AccountHost[] };
+export type ChatConfig = { homeserver: string; ownerUserId: string; remoteOwnerUserIds: string[]; roomIds: string[]; allJoinedRooms: boolean; modelSocket: string; workspaceRoomIds?: string[]; filesDirectory?: string; managedAccountHosts?: AccountHost[]; trustedBridgeBots?: TrustedBridgeBots };
 export function object(value: unknown): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw Error("Invalid object");
 	return value as Record<string, unknown>;
@@ -27,11 +28,15 @@ export function validateConfig(value: unknown): ChatConfig {
 		c.managedAccountHosts = accountHosts(c.managedAccountHosts);
 		if ((c.managedAccountHosts as AccountHost[]).some(h => h.botUserId === c.ownerUserId)) throw Error("Owner cannot be a managed host bot");
 	}
+	if (c.trustedBridgeBots !== undefined) {
+		c.trustedBridgeBots = trustedBridgeBots(c.trustedBridgeBots);
+		if (Object.values(c.trustedBridgeBots as TrustedBridgeBots).includes(String(c.ownerUserId)) || Object.keys(c.trustedBridgeBots as object).length && (c.managedAccountHosts as AccountHost[] | undefined)?.length) throw Error("Native invitations require a distinct owner and no concurrent managed account consumer");
+	}
 	return c as ChatConfig;
 }
 export function assistantPolicyFingerprint(config: ChatConfig, token: string): string {
 	// Account policy must not discard pending questions or reset assistant watermarks.
-	const { managedAccountHosts: _accountPolicy, ...assistantConfig } = config;
+	const { managedAccountHosts: _accountPolicy, trustedBridgeBots: _invitationPolicy, ...assistantConfig } = config;
 	return createHash("sha256").update("typescript-v1:" + JSON.stringify(assistantConfig) + token).digest("hex");
 }
 export function command(event: unknown, senders: Set<string>, floor: number, now: number): string | undefined {

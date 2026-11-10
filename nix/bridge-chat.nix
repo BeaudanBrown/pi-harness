@@ -9,7 +9,7 @@ let
     PI_MANAGED_SESSIONS_IMAGE_NORMALIZER = "${filePackage}/bin/pi-chat-image";
   };
   settings = pkgs.writeText "pi-chat-transport.json" (builtins.toJSON ({
-    inherit (cfg) homeserver ownerUserId remoteOwnerUserIds roomIds allJoinedRooms workspaceRoomIds managedAccountHosts;
+    inherit (cfg) homeserver ownerUserId remoteOwnerUserIds roomIds allJoinedRooms workspaceRoomIds managedAccountHosts trustedBridgeBots;
     modelSocket = socket;
   } // lib.optionalAttrs cfg.files.enable { inherit filesDirectory; }));
   workspacePolicy = pkgs.writeText "pi-chat-workspace-policy.json" (builtins.toJSON ({
@@ -67,6 +67,11 @@ in {
       type = lib.types.attrsOf lib.types.str; default = { };
       description = "Descriptions of host-approved named commands; execution argv belongs to workspaceExecutor.commands, not the model or project files.";
     };
+    trustedBridgeBots = lib.mkOption {
+      type = lib.types.attrsOf (lib.types.strMatching "@[^[:space:]:]+:[^[:space:]]+");
+      default = { };
+      description = "Exact host-ID to bot-MXID map for first invitation acceptance into verified native bridge rooms/Spaces. Independent journal and cursor; never changes notification rules or rejoins departures.";
+    };
     managedAccountHosts = lib.mkOption {
       type = lib.types.listOf (lib.types.submodule { options = {
         hostId = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"; };
@@ -81,6 +86,12 @@ in {
   };
   config = lib.mkIf cfg.enable {
     assertions = [
+      { assertion = builtins.length (builtins.attrNames cfg.trustedBridgeBots) <= 64
+          && lib.all (host: builtins.match "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}" host != null) (builtins.attrNames cfg.trustedBridgeBots)
+          && builtins.length (lib.unique (builtins.attrValues cfg.trustedBridgeBots)) == builtins.length (builtins.attrNames cfg.trustedBridgeBots)
+          && !(builtins.elem cfg.ownerUserId (builtins.attrValues cfg.trustedBridgeBots))
+          && (cfg.trustedBridgeBots == { } || cfg.managedAccountHosts == [ ]);
+        message = "Native invitation hosts require unique exact bot identities, distinct from the owner, and cannot run with the legacy account consumer."; }
       { assertion = builtins.length cfg.managedAccountHosts <= 64
           && builtins.length (lib.unique (map (h: h.hostId) cfg.managedAccountHosts)) == builtins.length cfg.managedAccountHosts
           && builtins.length (lib.unique (map (h: h.botUserId) cfg.managedAccountHosts)) == builtins.length cfg.managedAccountHosts
