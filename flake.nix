@@ -50,8 +50,15 @@
         pkgs = nixpkgs.legacyPackages.${system};
         inherit (pkgs) lib;
         upstreamPiPackage = nix-ai-tools.packages.${system}.pi;
+        nativeSessionLock = pkgs.callPackage ./nix/pi-session-lock.nix { };
         piPackage = upstreamPiPackage.overrideAttrs (old: {
-          patches = (old.patches or [ ]) ++ [ ./nix/patches/pi-prompt-expanded-hook.patch ];
+          patches = (old.patches or [ ]) ++ [
+            ./nix/patches/pi-prompt-expanded-hook.patch
+            ./nix/patches/pi-native-session-lock.patch
+          ];
+          postPatch = (old.postPatch or "") + ''
+            cp ${nativeSessionLock}/lib/session-lock.cjs dist/core/session-lock.cjs
+          '';
           # Apply after npm dependencies exist, before Bun embeds the CLI modules.
           preInstall = ''
             patch -p1 < ${./nix/patches/pi-queued-message-removal.patch}
@@ -561,6 +568,7 @@
             pkgs
             lib
             piPackage
+            nativeSessionLock
             piHarnessPackage
             piHarnessResources
             piRPackage

@@ -1,0 +1,229 @@
+--- a/dist/core/session-manager.js
++++ b/dist/core/session-manager.js
+@@ -1,3 +1,4 @@
++import nativeSessionLock from "./session-lock.cjs";
+ import { uuidv7 } from "@earendil-works/pi-ai";
+ import { randomUUID } from "crypto";
+ import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";
+@@ -5,7 +6,7 @@
+ import { join, resolve } from "path";
+ import { createInterface } from "readline";
+ import { StringDecoder } from "string_decoder";
+-import { APP_NAME, getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
++import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
+ import { normalizePath, resolvePath } from "../utils/paths.js";
+ import { createBranchSummaryMessage, createCompactionSummaryMessage, createCustomMessage, } from "./messages.js";
+ export const CURRENT_SESSION_VERSION = 3;
+@@ -274,7 +275,14 @@
+     }
+ }
+ /** Exported for testing */
+-export function loadEntriesFromFile(filePath) {
++export function loadEntriesFromFile(filePath, strict = false) {
++    const parse = (line) => {
++        const entry = parseSessionEntryLine(line);
++        if (strict && line.trim() && (!entry || typeof entry !== "object" || Array.isArray(entry) || typeof entry.type !== "string")) {
++            throw new Error("Cannot resume malformed native session; original file left unchanged");
++        }
++        return entry;
++    };
+     const resolvedFilePath = normalizePath(filePath);
+     if (!existsSync(resolvedFilePath))
+         return [];
+@@ -292,7 +300,7 @@
+             let lineStart = 0;
+             let newlineIndex = pending.indexOf("\n", lineStart);
+             while (newlineIndex !== -1) {
+-                const entry = parseSessionEntryLine(pending.slice(lineStart, newlineIndex));
++                const entry = parse(pending.slice(lineStart, newlineIndex));
+                 if (entry)
+                     entries.push(entry);
+                 lineStart = newlineIndex + 1;
+@@ -301,7 +309,7 @@
+             pending = pending.slice(lineStart);
+         }
+         pending += decoder.end();
+-        const finalEntry = parseSessionEntryLine(pending);
++        const finalEntry = parse(pending);
+         if (finalEntry)
+             entries.push(finalEntry);
+     }
+@@ -315,8 +323,8 @@
+     if (header.type !== "session" || typeof header.id !== "string") {
+         return [];
+     }
+-    if (pending)
+-        appendFileSync(resolvedFilePath, "\n");
++    // Discovery/fork reads must never repair a file behind its active writer.
++    // Trailing newline repair happens only while opening under the native lock.
+     return entries;
+ }
+ /**
+@@ -584,6 +592,26 @@
+  * handles compaction summaries and follows the path from root to current leaf.
+  */
+ export class SessionManager {
++    _releaseSessionLock;
++    _lockedFile;
++    _disposed = false;
++    _holdSessionFile(file) {
++        if (!this.persist) return;
++        if (this._disposed) throw new Error("Native session manager is disposed");
++        const key = nativeSessionLock.canonical(file);
++        if (key === this._lockedFile) return;
++        const release = nativeSessionLock.acquireSessionLock(key);
++        this._releaseSessionLock?.();
++        this._releaseSessionLock = release;
++        this._lockedFile = key;
++    }
++    dispose() {
++        if (!this.persist) return;
++        this._disposed = true;
++        this._releaseSessionLock?.();
++        this._releaseSessionLock = undefined;
++        this._lockedFile = undefined;
++    }
+     sessionId = "";
+     sessionFile;
+     sessionDir;
+@@ -613,43 +641,43 @@
+     setSessionFile(sessionFile) {
+         this._setSessionFile(sessionFile);
+     }
+-    _setSessionFile(sessionFile, preloadedFileEntries) {
+-        this.sessionFile = resolvePath(sessionFile);
+-        if (existsSync(this.sessionFile)) {
+-            this.fileEntries = preloadedFileEntries ?? loadEntriesFromFile(this.sessionFile);
+-            // If file was empty, initialize it with a valid session header. If it was
+-            // non-empty but did not parse as a pi session, fail without modifying it.
+-            if (this.fileEntries.length === 0) {
+-                const explicitPath = this.sessionFile;
+-                if (statSync(explicitPath).size > 0) {
+-                    throw new Error(`Session file is not a valid ${APP_NAME} session: ${explicitPath}`);
+-                }
+-                this.newSession();
+-                this.sessionFile = explicitPath;
+-                this._rewriteFile();
+-                this.flushed = true;
+-                return;
+-            }
+-            const header = this.fileEntries.find((e) => e.type === "session");
+-            this.sessionId = header?.id ?? createSessionId();
+-            if (migrateToCurrentVersion(this.fileEntries)) {
+-                this._rewriteFile();
++    _setSessionFile(sessionFile, _preloadedFileEntries) {
++        if (this._disposed) throw new Error("Native session manager is disposed");
++        const file = nativeSessionLock.canonical(sessionFile);
++        const release = nativeSessionLock.acquireSessionLock(file);
++        let entries;
++        try {
++            // Re-read after ownership, not a potentially stale discovery snapshot.
++            entries = loadEntriesFromFile(file, true);
++            if (!entries.length || entries[0].type !== "session") {
++                throw new Error(`Cannot resume missing or invalid native session: ${file}`);
+             }
+-            this._buildIndex();
+-            this.flushed = true;
+-        }
+-        else {
+-            const explicitPath = this.sessionFile;
+-            this.newSession();
+-            this.sessionFile = explicitPath; // preserve explicit path from --session flag
+-        }
++            const fd = openSync(file, "r");
++            try {
++                const size = statSync(file).size;
++                const tail = Buffer.alloc(1);
++                if (size && readSync(fd, tail, 0, 1, size - 1) && tail[0] !== 10) appendFileSync(file, "\n");
++            } finally { closeSync(fd); }
++        } catch (error) { release(); throw error; }
++        this._releaseSessionLock?.();
++        this._releaseSessionLock = release;
++        this._lockedFile = file;
++        this.sessionFile = file;
++        this.fileEntries = entries;
++        this.sessionId = entries[0].id;
++        if (migrateToCurrentVersion(this.fileEntries)) this._rewriteFile();
++        this._buildIndex();
++        this.flushed = true;
+     }
+     newSession(options) {
+         if (options?.id !== undefined) {
+             assertValidSessionId(options.id);
+         }
+-        this.sessionId = options?.id ?? createSessionId();
++        const id = options?.id ?? createSessionId();
+         const timestamp = new Date().toISOString();
++        const file = join(this.getSessionDir(), `${timestamp.replace(/[:.]/g, "-")}_${id}.jsonl`);
++        if (this.persist) this._holdSessionFile(file);
++        this.sessionId = id;
+         const header = {
+             type: "session",
+             version: CURRENT_SESSION_VERSION,
+@@ -695,6 +723,7 @@
+     _rewriteFile() {
+         if (!this.persist || !this.sessionFile)
+             return;
++        this._holdSessionFile(this.sessionFile);
+         const fd = openSync(this.sessionFile, "w");
+         try {
+             for (const entry of this.fileEntries) {
+@@ -726,6 +755,7 @@
+     _persist(entry) {
+         if (!this.persist || !this.sessionFile)
+             return;
++        this._holdSessionFile(this.sessionFile);
+         const hasAssistant = this.fileEntries.some((e) => e.type === "message" && e.message.role === "assistant");
+         if (!hasAssistant) {
+             if (this.flushed) {
+@@ -1132,6 +1162,7 @@
+                 labelEntries.push(labelEntry);
+                 parentId = labelEntry.id;
+             }
++            this._holdSessionFile(newSessionFile);
+             this.fileEntries = [header, ...pathWithoutLabels, ...labelEntries];
+             this.sessionId = newSessionId;
+             this.sessionFile = newSessionFile;
+@@ -1266,14 +1297,14 @@
+             cwd: resolvedTargetCwd,
+             parentSession: resolvedSourcePath,
+         };
+-        writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
+-        // Copy all non-header entries from source
+-        for (const entry of sourceEntries) {
+-            if (entry.type !== "session") {
+-                appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
++        const release = nativeSessionLock.acquireSessionLock(newSessionFile);
++        try {
++            writeFileSync(newSessionFile, `${JSON.stringify(newHeader)}\n`, { flag: "wx" });
++            for (const entry of sourceEntries) {
++                if (entry.type !== "session") appendFileSync(newSessionFile, `${JSON.stringify(entry)}\n`);
+             }
+-        }
+-        return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
++            return new SessionManager(resolvedTargetCwd, dir, newSessionFile, true);
++        } finally { release(); }
+     }
+     /**
+      * List all sessions for a directory.
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -598,6 +598,7 @@
+         this._disconnectFromAgent();
+         this._eventListeners = [];
+         cleanupSessionResources(this.sessionId);
++        this.sessionManager.dispose();
+     }
+     // =========================================================================
+     // Read-only State Access
+--- a/dist/core/session-manager.d.ts
++++ b/dist/core/session-manager.d.ts
+@@ -182,6 +182,8 @@
+  * handles compaction summaries and follows the path from root to current leaf.
+  */
+ export declare class SessionManager {
++    /** Release native writer ownership when the manager is no longer used. */
++    dispose(): void;
+     private sessionId;
+     private sessionFile;
+     private sessionDir;

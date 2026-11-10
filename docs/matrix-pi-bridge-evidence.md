@@ -49,9 +49,47 @@ mock internal methods or assert private database layouts as behavioral evidence.
 
 ## Verification results
 
-Implementation results will be appended per logical commit/issue. The contract
-fixture is `tests/fixtures/matrix-bridge/workflows.json`; it specifies reusable
-input/output scenarios rather than an invented execution simulator.
+### #161 contract
+
+Committed `b8b00e3`: ADR/amendment links, terminology and public-seam scenario
+fixture. Nine scenarios and relative documentation links validated; JSON/Markdown
+LSP clean. `tests/fixtures/matrix-bridge/workflows.json` specifies inputs/expected
+behavior, not an invented execution simulator.
+
+### #162 native writer and local helper
+
+The pinned harness uses Pi **0.84.4** (the operator conversation's installed Pi
+0.85.0 is not the package under test). A small N-API `flock` primitive works in
+both its Bun executable and Node SDK. Native SessionManager acquires ownership
+before reading/repairing/migrating a resume target, changes ownership on native
+new/fork, and releases through disposal/exit. Same-process transient native
+handoff references share one kernel lock; unrelated exec children cannot retain
+it. Scratch files survive harmlessly; they contain no durable launch admission.
+
+The Python `list/open/status` helper uses the same lock identity and a transient
+per-file open lock. It runs without the relay or Matrix. A busy real owner is
+reported even without a usable tmux focus hint; never kill/adopt it or start a
+duplicate. tmux failures include stage/exit/local stderr; lost open replies can
+retry without an unobserved-launch repair. These are not deployed picker changes.
+
+Evidence:
+- Four kernel-process tests: cross-process exclusion, SIGKILL release, transient
+  same-process handoff, exec child close-on-exec, path aliases/stale files.
+- Four packaged native/local tests: Bun/Node exclusion; new/resume/reload;
+  fork/tree/dispose; missing/empty/malformed history preserved; concurrent
+  disposable tmux open, lost-response reuse, server loss and reopen. **8 passed,
+  zero skips**, no credentials/models/Matrix/shared live server.
+- `nix build .#checks.x86_64-linux.unit-tests --no-link`: passed, including the
+  broader ordinary suite and new tests. Initially caught FORCE_COLOR formatting
+  of a test child's numeric PID; JSON encoding corrected the fixture.
+- Patched pinned Pi package built successfully. The configured NAS builder was
+  unavailable; Nix built locally. No NixOS output was built or activated.
+- LSP and staged diff checks clean. Paired issue Standards/Spec review reported
+  no findings (`2026-11-10T01-32-19-524Z-worktree-92806ab321ba-765d07295dc7`).
+
+Canonical full-epic verification and builds remain #171. The deployed tmux crash
+in #158 has not been diagnosed/fixed by these isolated tests. Old processes do
+not honor the new native locks; quiescing them remains a cutover requirement.
 
 ## Rebuild and migration readiness
 

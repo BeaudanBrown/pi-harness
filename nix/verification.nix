@@ -3,6 +3,7 @@
   lib,
   source,
   piPackage,
+  nativeSessionLock,
   piHarnessPackage,
   piHarnessResources,
   piRPackage,
@@ -147,16 +148,23 @@ let
   unitTests = runCompiledTests {
     name = "pi-harness-unit-tests";
     nodeArgs = "--test-concurrency=2";
+    extraInputs = [ pkgs.python3 pkgs.tmux ];
     selector = ''
       find ${testBuild}/build/tests -maxdepth 1 -type f -name '*.test.js' \
         ! -name 'eval-*.test.js' \
         ! -name 'lsp-live.test.js' \
         ! -name 'managed-session-*.test.js' \
         ! -name 'bridge-chat-*.test.js' | sort
+      find tests -maxdepth 1 -type f -name 'bridge-*.test.mjs' ! -name 'bridge-chat-*' | sort
     '';
     environment = ''
       export PI_HARNESS_JQ=${lib.getExe pkgs.jq}
       export PI_TEST_BASH=${lib.getExe pkgs.bash}
+      export PI_NATIVE_LOCK_ADDON=${nativeSessionLock}/lib/session-lock.node
+      export PI_BRIDGE_TEST_PI=${piPackage}/bin/pi
+      export PI_BRIDGE_TEST_SDK=${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist
+      export PI_TEST_TMUX=${pkgs.tmux}/bin/tmux
+      export PI_TEST_PYTHON=${pkgs.python3}/bin/python3
     '';
   };
 

@@ -70,7 +70,10 @@ executed by a deterministic suite:
 - `tests/eval-*.test.ts` belongs to the sanitized evaluation self-test;
 - `tests/lsp-live.test.ts` belongs to the explicit live LSP gate;
 - `tests/managed-session-*.test.ts` belongs to the managed-session suite;
-- every other `tests/*.test.ts` belongs to the ordinary unit suite.
+- every other `tests/*.test.ts` belongs to the ordinary unit suite;
+- `tests/bridge-*.test.mjs` (excluding `bridge-chat-*`) also belong to unit-tests:
+  these exercise the packaged native Pi writer and disposable local tmux helper,
+  require the real package paths, and must not silently skip.
 
 Prompt expansion is exercised by the real-Pi managed adapter tests rather than a
 second standalone probe. Source-file existence is left to compilation and package
