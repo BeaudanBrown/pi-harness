@@ -9,7 +9,7 @@ import { BridgeStore, identity, type Binding } from "./store.js";
 import { object, string } from "./wire.js";
 
 export type Grouping = { project: string; checkout: string; projectName: string; checkoutName: string };
-export type SetupStatus = { stage: "room" | "grouping" | "invitation" | "ready"; error?: string; grouping?: Grouping };
+export type SetupStatus = { stage: "room" | "grouping" | "invitation" | "ready"; error?: string; grouping?: Grouping; archived?: boolean; archiveRevision?: number };
 type RoomNode = { stamp: BridgeRoomStamp; name: string; operator: string; attempted: boolean; room?: string; inviteAttempted?: boolean };
 export type OrganizationConfig = { hostId: string; botUserId: string; operatorUserId: string; hostSpace?: boolean };
 const execute = promisify(execFile);
@@ -42,6 +42,7 @@ export class BridgeOrganization {
   private readonly invitations = new Map<string, Promise<string | undefined>>();
   private readonly links = new Map<string, Promise<void>>();
   private readonly jobs = new Map<string, Promise<void>>();
+  private readonly groups = new Map<string, Promise<void>>();
   private readonly retryAt = new Map<string, number>();
   private readonly signal = new AbortController();
   private readonly server: string;
@@ -51,7 +52,10 @@ export class BridgeOrganization {
     roomStamp({ version: 1, host: config.hostId, node: "0".repeat(64), kind: "host" });
     this.server = config.botUserId.slice(config.botUserId.indexOf(":") + 1);
   }
-  status(key: string): SetupStatus { return this.store.progress<SetupStatus>(`setup:${key}`) ?? { stage: "room" }; }
+  status(key: string): SetupStatus {
+    const saved = this.store.progress<SetupStatus>(`setup:${key}`) ?? { stage: "room" }, binding = this.store.binding(key);
+    return binding && ((saved.archiveRevision ?? 0) !== (binding.archiveRevision ?? 0) || Boolean(saved.archived) !== binding.archived) ? { ...saved, stage: "grouping" } : saved;
+  }
   private saveStatus(key: string, status: SetupStatus): void {
     if (!isDeepStrictEqual(this.store.progress(`setup:${key}`), status)) this.store.saveProgress(`setup:${key}`, status);
   }
@@ -139,26 +143,36 @@ export class BridgeOrganization {
     try { return object(await this.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/${type}/${encodeURIComponent(key)}`)); }
     catch (error) { if (error instanceof MatrixError && error.status === 404) return {}; throw error; }
   }
-  private link(parent: RoomNode, child: RoomNode): Promise<void> {
-    const key = identity("link", parent.room!, child.room!);
+  private link(parent: RoomNode, child: RoomNode, present = true): Promise<void> {
+    const key = identity("link", parent.room!, child.room!, String(present));
     const active = this.links.get(key); if (active) return active;
-    const work = this.ensureLink(parent, child).finally(() => this.links.delete(key));
+    const work = this.ensureLink(parent, child, present).finally(() => this.links.delete(key));
     this.links.set(key, work); return work;
   }
-  private async ensureLink(parent: RoomNode, child: RoomNode): Promise<void> {
+  private async ensureLink(parent: RoomNode, child: RoomNode, present: boolean): Promise<void> {
     for (const [room, type, key, content] of [
       [parent.room!, "m.space.child", child.room!, { via: [this.server], suggested: true }],
       [child.room!, "m.space.parent", parent.room!, { via: [this.server], canonical: true }],
     ] as const) {
       const current = await this.stateContent(room, type, key);
-      if (!isDeepStrictEqual(current, content)) await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/${type}/${encodeURIComponent(key)}`, content);
+      const desired = present ? content : {};
+      if (!isDeepStrictEqual(current, desired)) await this.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/${type}/${encodeURIComponent(key)}`, desired);
     }
+  }
+  private async existing(kind: BridgeRoomKind, key: string): Promise<RoomNode | undefined> {
+    const saved = this.store.progress<RoomNode>(`setup-node:${identity("room", this.config.hostId, this.config.botUserId, kind, key)}`);
+    return saved?.attempted ? this.node(kind, key, saved.name, saved.room) : undefined;
+  }
+  private async inGroup(key: string, fn: () => Promise<void>): Promise<void> {
+    const work = (this.groups.get(key) ?? Promise.resolve()).catch(() => {}).then(fn);
+    this.groups.set(key, work);
+    try { await work; } finally { if (this.groups.get(key) === work) this.groups.delete(key); }
   }
   /** Each binding has its own work/backoff; this never shares delivery admission. */
   async pump(): Promise<void> {
     if (this.signal.signal.aborted) return;
     for (const binding of this.store.bindings()) {
-      if (!binding.enabled || binding.archived || this.jobs.has(binding.key) || this.status(binding.key).stage === "ready" || (this.retryAt.get(binding.key) ?? 0) > Date.now()) continue;
+      if (!binding.enabled || this.jobs.has(binding.key) || this.status(binding.key).stage === "ready" || (this.retryAt.get(binding.key) ?? 0) > Date.now()) continue;
       if (this.jobs.size >= 8) break;
       const job = this.step(binding).catch(error => {
         const old = this.status(binding.key);
@@ -178,20 +192,41 @@ export class BridgeOrganization {
     const firstInvite = this.invite(conversation).then(value => value, () => "Operator invitation setup pending");
     let failure: string | undefined;
     let grouping = this.status(binding.key).grouping;
-    this.saveStatus(binding.key, { stage: "grouping", ...(grouping ? { grouping } : {}) });
+    const save = (value: SetupStatus) => this.saveStatus(binding.key, { ...value, archived: binding.archived, archiveRevision: binding.archiveRevision ?? 0 });
+    save({ stage: "grouping", ...(grouping ? { grouping } : {}) });
     try {
-      if (!grouping) { grouping = await this.grouping(binding.cwd); this.saveStatus(binding.key, { stage: "grouping", grouping }); }
-      const project = await this.node("project", grouping.project, grouping.projectName);
-      const checkout = await this.node("checkout", grouping.checkout, grouping.checkoutName);
-      nodes.push(project, checkout);
-      if (this.config.hostSpace !== false) {
-        const host = await this.node("host", this.config.hostId, this.config.hostId); nodes.push(host);
-        await this.link(host, project);
-      }
-      await this.link(project, checkout); await this.link(checkout, conversation);
+      if (!grouping && !binding.archived) { grouping = await this.grouping(binding.cwd); save({ stage: "grouping", grouping }); }
+      await this.inGroup(grouping?.checkout ?? binding.key, async () => {
+        if ((this.store.binding(binding.key)?.archiveRevision ?? 0) !== (binding.archiveRevision ?? 0)) throw Error("Archive policy changed; presentation will reconcile");
+        if (binding.archived) {
+          const archive = await this.node("archive", this.config.hostId, "Archive"); nodes.push(archive);
+          if (this.config.hostSpace !== false) {
+            const host = await this.node("host", this.config.hostId, this.config.hostId); nodes.push(host); await this.link(host, archive);
+          }
+          await this.link(archive, conversation); // Destination before removing any live edge.
+          if (grouping) {
+            const checkout = await this.existing("checkout", grouping.checkout);
+            if (checkout) {
+              await this.link(checkout, conversation, false);
+              const live = this.store.bindings().some(item => item.enabled && !item.archived && this.status(item.key).grouping?.checkout === grouping!.checkout);
+              if (!live) { const project = await this.existing("project", grouping.project); if (project) await this.link(project, checkout, false); }
+            }
+          }
+        } else {
+          if (!grouping) throw Error("Live grouping is unavailable");
+          const project = await this.node("project", grouping.project, grouping.projectName), checkout = await this.node("checkout", grouping.checkout, grouping.checkoutName);
+          nodes.push(project, checkout);
+          if (this.config.hostSpace !== false) {
+            const host = await this.node("host", this.config.hostId, this.config.hostId); nodes.push(host); await this.link(host, project);
+          }
+          await this.link(project, checkout); await this.link(checkout, conversation);
+          const archive = await this.existing("archive", this.config.hostId);
+          if (archive) await this.link(archive, conversation, false);
+        }
+      });
     } catch (error) { failure = error instanceof Error ? error.message.slice(0, 500) : "Grouping setup pending"; }
     const pending = [await firstInvite, ...await Promise.all(nodes.slice(1).map(node => this.invite(node).catch(() => "Operator invitation setup pending")))].find(Boolean);
-    this.saveStatus(binding.key, { stage: failure ? "grouping" : pending ? "invitation" : "ready", ...(grouping ? { grouping } : {}), ...(failure || pending ? { error: failure ?? pending } : {}) });
+    save({ stage: failure ? "grouping" : pending ? "invitation" : "ready", ...(grouping ? { grouping } : {}), ...(failure || pending ? { error: failure ?? pending } : {}) });
     if (failure || pending) this.retryAt.set(binding.key, Date.now() + 5000);
   }
   async stop(): Promise<void> {

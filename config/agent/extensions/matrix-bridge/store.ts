@@ -7,12 +7,12 @@ import { interactionSpec, pollStart, pollEnd, POLL_START, type Interaction, type
 import { taskApprovalText, type TaskRecord } from "./task-contract.js";
 
 export type SessionRegistration = { file: string; nativeId: string; cwd: string; title: string; boundary: string | null };
-export type Binding = SessionRegistration & { key: string; room?: string; archived: boolean; enabled: boolean; grouping?: Record<string, string> };
+export type Binding = SessionRegistration & { key: string; room?: string; archived: boolean; archiveRevision?: number; resumePending?: boolean; enabled: boolean; grouping?: Record<string, string> };
 export type RawEvent = { id: string; room: string; event: Record<string, unknown> };
 export type ImageInfo = { mimeType: string; sha256: string; byteLength: number };
 export type Prompt = { text: string; sender: string; deliverAs?: "steer" | "followUp"; control?: NativeControl; argument?: string; question?: string; image?: ImageInfo };
 export type InputState = "received" | "queued" | "handed" | "settled" | "interrupted" | "ignored";
-export type Input = { id: string; binding: string; position: number; event: Record<string, unknown>; prompt?: Prompt; state: InputState; interaction?: string };
+export type Input = { id: string; binding: string; position: number; event: Record<string, unknown>; prompt?: Prompt; state: InputState; held?: boolean; archiveRevision?: number; interaction?: string };
 export type Output = { id: string; binding: string; source: string; type: string; content: Record<string, unknown>; eventId?: string };
 export const identity = (domain: string, ...values: string[]): string => createHash("sha256").update(JSON.stringify(["pi-bridge-v1", domain, ...values])).digest("hex");
 
@@ -38,7 +38,7 @@ export class BridgeStore {
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
       const oldHost = this.getMeta("host"), version = this.getMeta("version");
       if (oldHost !== undefined && oldHost !== hostId) throw Error("Bridge database belongs to another host");
-      if (version !== undefined && !["1", "2", "3"].includes(version)) throw Error("Unsupported bridge database version");
+      if (version !== undefined && !["1", "2", "3", "4"].includes(version)) throw Error("Unsupported bridge database version");
       this.db.exec(`CREATE TABLE IF NOT EXISTS bindings(key TEXT PRIMARY KEY, file TEXT NOT NULL UNIQUE, room TEXT UNIQUE, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS inputs(id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), position INTEGER NOT NULL,
           event TEXT NOT NULL, prompt TEXT, state TEXT NOT NULL CHECK(state IN ('received','queued','handed','settled','interrupted','ignored')));
@@ -51,8 +51,10 @@ export class BridgeStore {
         const oldHost = this.getMeta("host");
         if (oldHost !== undefined && oldHost !== hostId) throw Error("Bridge database belongs to another host");
         const version = this.getMeta("version");
-        if (version !== undefined && !["1", "2", "3"].includes(version)) throw Error("Unsupported bridge database version");
+        if (version !== undefined && !["1", "2", "3", "4"].includes(version)) throw Error("Unsupported bridge database version");
         if (!this.db.prepare("PRAGMA table_info(inputs)").all().some(column => column.name === "interaction")) this.db.exec("ALTER TABLE inputs ADD COLUMN interaction TEXT");
+        if (!this.db.prepare("PRAGMA table_info(inputs)").all().some(column => column.name === "held")) this.db.exec("ALTER TABLE inputs ADD COLUMN held INTEGER NOT NULL DEFAULT 0");
+        if (!this.db.prepare("PRAGMA table_info(inputs)").all().some(column => column.name === "archive_revision")) this.db.exec("ALTER TABLE inputs ADD COLUMN archive_revision INTEGER NOT NULL DEFAULT -1");
         this.db.exec(`CREATE TABLE IF NOT EXISTS interactions(id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), source TEXT NOT NULL, value TEXT NOT NULL,
           state TEXT NOT NULL CHECK(state IN ('active','answered','cancelled')), answer TEXT, UNIQUE(binding,source));
           CREATE INDEX IF NOT EXISTS interaction_state ON interactions(binding,state);
@@ -60,7 +62,7 @@ export class BridgeStore {
           CREATE TABLE IF NOT EXISTS images(input TEXT NOT NULL REFERENCES inputs(id), offset INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(input,offset));
           CREATE TABLE IF NOT EXISTS tasks(key TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), phase TEXT NOT NULL, value TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS task_phase ON tasks(phase);`);
-        this.setMeta("host", hostId); this.setMeta("version", "3");
+        this.setMeta("host", hostId); this.setMeta("version", "4");
         this.db.exec("UPDATE inputs SET state='interrupted' WHERE state='handed'");
       });
     } catch (error) { this.db.close(); throw error; }
@@ -107,6 +109,26 @@ export class BridgeStore {
       if (!enabled) this.db.prepare("UPDATE inputs SET state='ignored' WHERE binding=? AND state IN ('received','queued')").run(key);
     });
   }
+  setArchived(key: string, archived: boolean, expectedRevision: number): Binding {
+    return this.atomic(() => {
+      const binding = this.binding(key); if (!binding) throw Error("Unknown native binding");
+      if ((binding.archiveRevision ?? 0) !== expectedRevision) throw Error("Archive state changed; inspect current status before confirming again");
+      if (binding.archived === archived) return binding;
+      const next = { ...binding, archived, archiveRevision: expectedRevision + 1, resumePending: true };
+      this.saveBinding(next);
+      this.db.prepare("UPDATE inputs SET held=1 WHERE binding=? AND state IN ('received','queued','handed')").run(key);
+      this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state IN ('queued','handed')").run(key);
+      this.cancelInteractions(key);
+      this.materialize(key, `archive:${next.archiveRevision}`, [{ type: "m.room.message", content: { msgtype: "m.notice", "m.mentions": {}, body: archived ?
+        "Archived: future remote input/wake is disabled. Existing work may finish and publish. History, membership and files remain; this room may still appear in All Rooms. Archive grouping updates in the background. A fresh Matrix sync is required before remote restore; check !status." :
+        "Restored: original grouping updates in the background. Held/uncertain messages will not replay. Fresh remote input resumes after Matrix sync catches up; check !status before sending a new instruction." } }]);
+      return next;
+    });
+  }
+  resumeAfterSync(key: string, revision: number): void {
+    const binding = this.binding(key);
+    if (binding?.resumePending && (binding.archiveRevision ?? 0) === revision) this.saveBinding({ ...binding, resumePending: false });
+  }
   setRoom(key: string, room: string): void {
     const binding = this.binding(key); if (!binding) throw Error("Unknown binding");
     if (binding.room && binding.room !== room) throw Error("Room binding is immutable");
@@ -118,22 +140,26 @@ export class BridgeStore {
       let position = Number(this.getMeta("position") ?? 0);
       for (const input of events) {
         const binding = this.byRoom(input.room); if (!binding) continue;
-        this.db.prepare("INSERT OR IGNORE INTO inputs(id,binding,position,event,prompt,state,interaction) VALUES (?,?,?,?,NULL,'received',?)")
-          .run(input.id, binding.key, ++position, JSON.stringify(input.event), this.activeInteraction(binding.key)?.id ?? null);
+        this.db.prepare("INSERT OR IGNORE INTO inputs(id,binding,position,event,prompt,state,interaction,held,archive_revision) VALUES (?,?,?,?,NULL,'received',?,?,?)")
+          .run(input.id, binding.key, ++position, JSON.stringify(input.event), this.activeInteraction(binding.key)?.id ?? null, binding.archived || binding.resumePending ? 1 : 0, binding.resumePending ? -1 : binding.archiveRevision ?? 0);
       }
       for (const [key, value] of Object.entries(checkpoints)) this.saveProgress(key, value);
       this.setMeta("position", String(position)); this.setMeta("cursor", cursor);
     });
   }
   private decodeInput(row: Record<string, unknown>): Input {
-    return { id: String(row.id), binding: String(row.binding), position: Number(row.position), state: row.state as InputState, event: JSON.parse(String(row.event)) as Record<string, unknown>, ...(row.prompt ? { prompt: JSON.parse(String(row.prompt)) as Prompt } : {}), ...(row.interaction ? { interaction: String(row.interaction) } : {}) };
+    return { id: String(row.id), binding: String(row.binding), position: Number(row.position), state: row.state as InputState, archiveRevision: Number(row.archive_revision), ...(row.held ? { held: true } : {}), event: JSON.parse(String(row.event)) as Record<string, unknown>, ...(row.prompt ? { prompt: JSON.parse(String(row.prompt)) as Prompt } : {}), ...(row.interaction ? { interaction: String(row.interaction) } : {}) };
   }
   received(key: string): Input[] {
     return this.db.prepare("SELECT * FROM inputs WHERE binding=? AND state='received' ORDER BY position LIMIT 100").all(key).map(row => this.decodeInput(row));
   }
   authorize(id: string, prompt: Prompt | undefined, options: { interaction?: string; image?: Buffer } = {}): boolean {
     return this.atomic(() => {
-      const input = this.db.prepare("SELECT binding FROM inputs WHERE id=? AND state='received'").get(id); if (!input) return false;
+      const input = this.db.prepare("SELECT binding,held FROM inputs WHERE id=? AND state='received'").get(id); if (!input) return false;
+      const binding = this.binding(String(input.binding));
+      if (prompt && (input.held || !binding?.enabled || binding.archived || binding.resumePending)) {
+        this.db.prepare("UPDATE inputs SET state='interrupted' WHERE id=?").run(id); return false;
+      }
       if (prompt && options.interaction && this.db.prepare("UPDATE interactions SET state='answered',answer=? WHERE id=? AND binding=? AND state='active'").run(id, options.interaction, input.binding!).changes !== 1) prompt = undefined;
       if (prompt && options.image) {
         if (!prompt.image || prompt.image.sha256 !== createHash("sha256").update(options.image).digest("hex") || prompt.image.byteLength !== options.image.length) throw Error("Image authorization integrity mismatch");
@@ -153,7 +179,7 @@ export class BridgeStore {
   }
   inputChunk(key: string, id: string, offset: number): { text: string; done: boolean } {
     if (!Number.isSafeInteger(offset) || offset < 0) throw Error("Invalid input offset");
-    const row = this.db.prepare("SELECT prompt FROM inputs WHERE binding=? AND id=? AND state IN ('handed','interrupted','settled')").get(key, id);
+    const row = this.db.prepare("SELECT prompt FROM inputs WHERE binding=? AND id=? AND state='handed' AND held=0").get(key, id);
     if (!row?.prompt || offset > String(row.prompt).length) throw Error("Unknown native input");
     const value = String(row.prompt);
     return { text: value.slice(offset, offset + 4096), done: offset + 4096 >= value.length };
@@ -174,7 +200,7 @@ export class BridgeStore {
   takeInput(key: string, expectedId?: string): Input | undefined {
     return this.atomic(() => {
       const binding = this.binding(key);
-      if (!binding?.enabled || binding.archived) return undefined;
+      if (!binding?.enabled || binding.archived || binding.resumePending) return undefined;
       const row = this.db.prepare("SELECT * FROM inputs WHERE binding=? AND state IN ('received','queued') ORDER BY position LIMIT 1").get(key);
       if (!row || row.state === "received" || expectedId !== undefined && row.id !== expectedId) return undefined;
       this.db.prepare("UPDATE inputs SET state='handed' WHERE id=?").run(row.id!);

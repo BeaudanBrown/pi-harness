@@ -1,0 +1,276 @@
+--- a/dist/core/agent-session.d.ts
++++ b/dist/core/agent-session.d.ts
+@@ -156,8 +156,10 @@
+     expandPromptTemplates?: boolean;
+     /** Called after command, skill, and prompt expansion; may return attributed text. */
+     onPromptExpanded?: (text: string) => string | void;
+-    /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++    /** Called synchronously when this queued input is withdrawn without consumption. */
+     onQueuedMessageRemoved?: () => void;
++    /** Rechecked at queue consumption; false withdraws only this input without aborting. */
++    queuedPreflight?: () => boolean;
+     /** Image attachments */
+     images?: ImageContent[];
+     /** When streaming, how to queue the message: "steer" (interrupt) or "followUp" (wait). Required if streaming. */
+@@ -391,6 +393,9 @@
+      * @throws Error if text is an extension command
+      */
+     followUp(text: string, images?: ImageContent[]): Promise<void>;
++    private _recordQueuedPresentation;
++    private _removeQueuedPresentation;
++    private _queuePreflight;
+     private _queueSteer;
+     private _queueFollowUp;
+     /**
+@@ -434,8 +439,10 @@
+         onPromptExpanded?: (text: string) => string | void;
+         preflightResult?: (success: boolean) => void;
+         userMessageMetadata?: Readonly<Record<string, string>>;
+-        /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++        /** Called synchronously when this queued input is withdrawn without consumption. */
+         onQueuedMessageRemoved?: () => void;
++        /** Rechecked at queue consumption; false withdraws only this input without aborting. */
++        queuedPreflight?: () => boolean;
+     }): Promise<void>;
+     /**
+      * Clear all queued messages and return them.
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -89,6 +89,7 @@
+     _steeringMessages = [];
+     // Object identity, not text/UI snapshots: consumed messages must never be cancelled.
+     _queuedMessageRemovalCallbacks = new WeakMap();
++    _queuedMessageIdentities = new WeakMap();
+     /** Tracks pending follow-up messages for UI display. Removed when delivered. */
+     _followUpMessages = [];
+     /** Messages queued to be included with the next user prompt as context ("asides"). */
+@@ -364,23 +365,8 @@
+         // This ensures the UI sees the updated queue state
+         if (event.type === "message_start" && event.message.role === "user") {
+             this._overflowRecoveryAttempted = false;
+-            const messageText = contentText(event.message.content, "");
+-            if (messageText) {
+-                // Check steering queue first
+-                const steeringIndex = this._steeringMessages.indexOf(messageText);
+-                if (steeringIndex !== -1) {
+-                    this._steeringMessages.splice(steeringIndex, 1);
+-                    this._emitQueueUpdate();
+-                }
+-                else {
+-                    // Check follow-up queue
+-                    const followUpIndex = this._followUpMessages.indexOf(messageText);
+-                    if (followUpIndex !== -1) {
+-                        this._followUpMessages.splice(followUpIndex, 1);
+-                        this._emitQueueUpdate();
+-                    }
+-                }
+-            }
++            this._removeQueuedPresentation(event.message);
++            this._queuedMessageRemovalCallbacks.delete(event.message);
+         }
+         // Emit to extensions first
+         await this._emitExtensionEvent(event);
+@@ -867,10 +853,10 @@
+                     throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+                 }
+                 if (options.streamingBehavior === "followUp") {
+-                    await this._queueFollowUp(expandedText, currentImages, options?.onQueuedMessageRemoved, options?.userMessageMetadata);
++                    await this._queueFollowUp(expandedText, currentImages, options?.onQueuedMessageRemoved, options?.userMessageMetadata, options?.queuedPreflight);
+                 }
+                 else {
+-                    await this._queueSteer(expandedText, currentImages, options?.onQueuedMessageRemoved, options?.userMessageMetadata);
++                    await this._queueSteer(expandedText, currentImages, options?.onQueuedMessageRemoved, options?.userMessageMetadata, options?.queuedPreflight);
+                 }
+                 preflightResult?.(true);
+                 return;
+@@ -1046,12 +1032,34 @@
+         expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+         await this._queueFollowUp(expandedText, images);
+     }
+-    /**
+-     * Internal: Queue a steering message (already expanded, no extension command check).
+-     */
+-    async _queueSteer(text, images, onQueuedMessageRemoved, metadata) {
+-        this._steeringMessages.push(text);
+-        this._emitQueueUpdate();
++    _recordQueuedPresentation(queue, message, text) {
++        const identities = this._queuedMessageIdentities.get(queue) ?? [];
++        this._queuedMessageIdentities.set(queue, identities);
++        identities.push(message); queue.push(text); this._emitQueueUpdate();
++    }
++    _removeQueuedPresentation(message) {
++        for (const queue of [this._steeringMessages, this._followUpMessages]) {
++            const identities = this._queuedMessageIdentities.get(queue), index = identities?.indexOf(message) ?? -1;
++            if (index < 0) continue;
++            identities.splice(index, 1); queue.splice(index, 1); this._emitQueueUpdate(); return;
++        }
++    }
++    /** Withdraw a queued input by object identity without aborting the active run. */
++    _queuePreflight(message, preflight) {
++        if (!preflight) return undefined;
++        return () => {
++            let accepted = false;
++            try { accepted = preflight() !== false; } catch { /* withdraw only this queued input */ }
++            if (accepted) return true;
++            this._removeQueuedPresentation(message);
++            const callback = this._queuedMessageRemovalCallbacks.get(message);
++            this._queuedMessageRemovalCallbacks.delete(message);
++            callback?.();
++            return false;
++        };
++    }
++    /** Internal: Queue an already expanded steering message. */
++    async _queueSteer(text, images, onQueuedMessageRemoved, metadata, queuedPreflight) {
+         const content = [{ type: "text", text }];
+         if (images) {
+             content.push(...images);
+@@ -1059,14 +1067,13 @@
+         const message = { role: "user", content, timestamp: Date.now() };
+         if (metadata) message.metadata = structuredClone(metadata);
+         if (onQueuedMessageRemoved) this._queuedMessageRemovalCallbacks.set(message, onQueuedMessageRemoved);
+-        this.agent.steer(message);
++        this._recordQueuedPresentation(this._steeringMessages, message, text);
++        this.agent.steer(message, this._queuePreflight(message, queuedPreflight));
+     }
+     /**
+      * Internal: Queue a follow-up message (already expanded, no extension command check).
+      */
+-    async _queueFollowUp(text, images, onQueuedMessageRemoved, metadata) {
+-        this._followUpMessages.push(text);
+-        this._emitQueueUpdate();
++    async _queueFollowUp(text, images, onQueuedMessageRemoved, metadata, queuedPreflight) {
+         const content = [{ type: "text", text }];
+         if (images) {
+             content.push(...images);
+@@ -1074,7 +1081,8 @@
+         const message = { role: "user", content, timestamp: Date.now() };
+         if (metadata) message.metadata = structuredClone(metadata);
+         if (onQueuedMessageRemoved) this._queuedMessageRemovalCallbacks.set(message, onQueuedMessageRemoved);
+-        this.agent.followUp(message);
++        this._recordQueuedPresentation(this._followUpMessages, message, text);
++        this.agent.followUp(message, this._queuePreflight(message, queuedPreflight));
+     }
+     /**
+      * Throw an error if the text is an extension command.
+@@ -1188,6 +1196,7 @@
+             expandPromptTemplates: options?.expandPromptTemplates ?? false,
+             onPromptExpanded: options?.onPromptExpanded,
+             preflightResult: options?.preflightResult,
++            queuedPreflight: options?.queuedPreflight,
+             userMessageMetadata: options?.userMessageMetadata,
+             onQueuedMessageRemoved: options?.onQueuedMessageRemoved,
+             streamingBehavior: options?.deliverAs,
+--- a/dist/core/extensions/types.d.ts
++++ b/dist/core/extensions/types.d.ts
+@@ -307,8 +307,10 @@
+         onPromptExpanded?: (text: string) => string | void;
+         preflightResult?: (success: boolean) => void;
+         userMessageMetadata?: Readonly<Record<string, string>>;
+-        /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++        /** Called synchronously when this queued input is withdrawn without consumption. */
+         onQueuedMessageRemoved?: () => void;
++        /** Rechecked at queue consumption; false withdraws only this input without aborting. */
++        queuedPreflight?: () => boolean;
+     }): Promise<void>;
+ }
+ /** Rendering options for tool results */
+@@ -990,8 +992,10 @@
+         onPromptExpanded?: (text: string) => string | void;
+         preflightResult?: (success: boolean) => void;
+         userMessageMetadata?: Readonly<Record<string, string>>;
+-        /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++        /** Called synchronously when this queued input is withdrawn without consumption. */
+         onQueuedMessageRemoved?: () => void;
++        /** Rechecked at queue consumption; false withdraws only this input without aborting. */
++        queuedPreflight?: () => boolean;
+     }): void;
+     /** Append a custom entry to the session for state persistence (not sent to LLM). */
+     appendEntry<T = unknown>(customType: string, data?: T): void;
+@@ -1198,8 +1202,10 @@
+     onPromptExpanded?: (text: string) => string | void;
+     preflightResult?: (success: boolean) => void;
+     userMessageMetadata?: Readonly<Record<string, string>>;
+-    /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
++    /** Called synchronously when this queued input is withdrawn without consumption. */
+     onQueuedMessageRemoved?: () => void;
++    /** Rechecked at queue consumption; false withdraws only this input without aborting. */
++    queuedPreflight?: () => boolean;
+ }) => void;
+ export type AppendEntryHandler = <T = unknown>(customType: string, data?: T) => void;
+ export type SetSessionNameHandler = (name: string) => void;
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent.d.ts
+@@ -81,9 +81,9 @@
+     set followUpMode(mode: QueueMode);
+     get followUpMode(): QueueMode;
+     /** Queue a message to be injected after the current assistant turn finishes. */
+-    steer(message: AgentMessage): void;
++    steer(message: AgentMessage, preflight?: () => boolean): void;
+     /** Queue a message to run only after the agent would otherwise stop. */
+-    followUp(message: AgentMessage): void;
++    followUp(message: AgentMessage, preflight?: () => boolean): void;
+     /** Remove all queued steering messages. */
+     clearSteeringQueue(): AgentMessage[];
+     /** Remove all queued follow-up messages. */
+--- a/node_modules/@earendil-works/pi-agent-core/dist/agent.js
++++ b/node_modules/@earendil-works/pi-agent-core/dist/agent.js
+@@ -50,28 +50,30 @@
+ }
+ class PendingMessageQueue {
+     messages = [];
++    preflights = new WeakMap();
+     mode;
+     constructor(mode) {
+         this.mode = mode;
+     }
+-    enqueue(message) {
++    enqueue(message, preflight) {
++        if (preflight) this.preflights.set(message, preflight);
+         this.messages.push(message);
+     }
+     hasItems() {
+         return this.messages.length > 0;
+     }
+     drain() {
+-        if (this.mode === "all") {
+-            const drained = this.messages.slice();
+-            this.messages = [];
+-            return drained;
+-        }
+-        const first = this.messages[0];
+-        if (!first) {
+-            return [];
+-        }
+-        this.messages = this.messages.slice(1);
+-        return [first];
++        const drained = [], count = this.messages.length;
++        for (let i = 0; i < count && this.messages.length; i++) {
++            // Detach before callbacks. A withdrawn head must not strand the next input.
++            const message = this.messages.shift(), preflight = this.preflights.get(message);
++            this.preflights.delete(message);
++            let accepted = false;
++            try { accepted = preflight?.() !== false; } catch { /* fail closed for this input only */ }
++            if (accepted) drained.push(message);
++            if (drained.length && this.mode !== "all") break;
++        }
++        return drained;
+     }
+     clear() {
+         const removed = this.messages;
+@@ -172,12 +174,12 @@
+         return this.followUpQueue.mode;
+     }
+     /** Queue a message to be injected after the current assistant turn finishes. */
+-    steer(message) {
+-        this.steeringQueue.enqueue(message);
++    steer(message, preflight) {
++        this.steeringQueue.enqueue(message, preflight);
+     }
+     /** Queue a message to run only after the agent would otherwise stop. */
+-    followUp(message) {
+-        this.followUpQueue.enqueue(message);
++    followUp(message, preflight) {
++        this.followUpQueue.enqueue(message, preflight);
+     }
+     /** Remove all queued steering messages. */
+     clearSteeringQueue() {

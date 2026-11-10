@@ -6,12 +6,13 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
+import { BridgeStore } from "../config/agent/extensions/matrix-bridge/store.js";
 import { BridgeRelay } from "../config/agent/extensions/matrix-bridge/relay.js";
 import { BridgeMatrix } from "../config/agent/extensions/matrix-bridge/matrix.js";
 import { MatrixHttp } from "../config/agent/extensions/matrix-shared/http.js";
 import { InteractionHttp, ROOM, USER, textEvent } from "./fixtures/matrix-bridge/interaction-http.js";
 import { POLL_START, POLL_RESPONSE } from "../config/agent/extensions/matrix-bridge/interaction.js";
-import { Peer } from "../config/agent/extensions/matrix-bridge/wire.js";
+import { connect, object, Peer, remoteText } from "../config/agent/extensions/matrix-bridge/wire.js";
 import { imageInfo } from "../config/agent/extensions/matrix-bridge/media.js";
 import { localTasks } from "../config/agent/extensions/matrix-bridge/local-process.js";
 
@@ -29,7 +30,7 @@ function piProcess(root: string, file: string, extension: string, extra: string[
   });
   const pending = new Map<string, { resolve: (event: Record<string, unknown>) => void; reject: (error: Error) => void; timer: NodeJS.Timeout }>();
   let buffer = "", stderr = "", next = 0;
-  const ui: Record<string, unknown>[] = [];
+  const ui: Record<string, unknown>[] = [], queues: Record<string, unknown>[] = [];
   child.stderr.on("data", chunk => { stderr = (stderr + chunk).slice(-8000); });
   child.stdout.on("data", chunk => {
     buffer += String(chunk);
@@ -38,6 +39,7 @@ function piProcess(root: string, file: string, extension: string, extra: string[
       const line = buffer.slice(0, end); buffer = buffer.slice(end + 1);
       let event: Record<string, unknown>; try { event = JSON.parse(line) as Record<string, unknown>; } catch { continue; }
       if (event.type === "extension_ui_request" && event.method === "confirm") ui.push(event);
+      if (event.type === "queue_update") queues.push(event);
       if (event.type === "response") { const item = pending.get(String(event.id)); if (item) { clearTimeout(item.timer); pending.delete(String(event.id)); item.resolve(event); } }
     }
   });
@@ -53,7 +55,7 @@ function piProcess(root: string, file: string, extension: string, extra: string[
     pending.set(id, { resolve, reject, timer });
     child.stdin.write(JSON.stringify({ id, type, ...extra }) + "\n", error => { if (error) failPending(error); });
   });
-  return { child, send, ui, confirm: (id: unknown, confirmed: boolean) => child.stdin.write(JSON.stringify({ type: "extension_ui_response", id, confirmed }) + "\n"), stop: async () => { if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; } } };
+  return { child, send, ui, queues, confirm: (id: unknown, confirmed: boolean) => child.stdin.write(JSON.stringify({ type: "extension_ui_response", id, confirmed }) + "\n"), stop: async () => { if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; } } };
 }
 
 test("real native Pi bridges persisted text, survives daemon loss, and uses a fresh binding for native new", { timeout: 30000 }, async () => {
@@ -230,13 +232,15 @@ test("native abort withdraws in-flight images and asynchronous controls before l
   const modelWaiting = join(root, "model-waiting"), modelRelease = join(root, "model-release");
   writeFileSync(extension, `import {existsSync,writeFileSync} from "node:fs"; import {installAdapter} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/adapter.ts"))}; export default pi => installAdapter({...pi,setModel:async(model,options)=>{writeFileSync(${JSON.stringify(modelWaiting)},"");while(!existsSync(${JSON.stringify(modelRelease)}))await new Promise(resolve=>setTimeout(resolve,10));return pi.setModel(model,options);}},{config:${JSON.stringify({ socket, roots: [root] })},interactive:()=>true});`);
   const bytes = readFileSync(resolve("tests/fixtures/matrix-bridge/input.png")), info = imageInfo(bytes);
+  const dispatchLedger = join(root, "ledger/bridge.sqlite"), ledger = new BridgeStore(dispatchLedger, "host");
+  const binding = ledger.register({ file, nativeId: "transfer", cwd: root, title: "Transfer", boundary: null });
   let peer: Peer | undefined, release!: () => void, observed!: () => void;
   const gate = new Promise<void>(resolve => { release = resolve; }), reading = new Promise<void>(resolve => { observed = resolve; });
   const server = createServer(connection => {
     peer = new Peer(connection, async (method, params) => {
       if (method === "input.read") return { text: JSON.stringify(params.id === "$image" ? { text: "caption", sender: USER, image: info } : ["$model", "$fresh-model"].includes(String(params.id)) ? { text: "!model bridge-probe/fake-text", sender: USER, control: "model", argument: "bridge-probe/fake-text" } : { text: "!abort", sender: USER, control: "abort" }), done: true };
       if (method === "image.read") { observed(); await gate; return { data: bytes.toString("base64"), sha256: info.sha256, offset: 0, done: true }; }
-      return { room: ROOM, intakeReady: true };
+      return { room: ROOM, intakeReady: true, key: binding.key, dispatchLedger };
     });
   });
   await new Promise<void>(resolve => server.listen(socket, () => { chmodSync(socket, 0o600); resolve(); }));
@@ -257,7 +261,7 @@ test("native abort withdraws in-flight images and asynchronous controls before l
     assert.ok(!readFileSync(file, "utf8").includes('"input":"$model"'), "an aborted control must not publish late success");
     assert.equal((await peer!.request("input", { id: "$fresh-model" }) as { accepted: boolean }).accepted, true);
     assert.equal(((await live.send("get_state")).data as { model: { id: string } }).model.id, "fake-text", "fresh controls must not remain locked behind a withdrawn callback");
-  } finally { writeFileSync(modelRelease, ""); release(); peer?.close(); await live.stop(); await new Promise<void>(resolve => server.close(() => resolve())); rmSync(root, { recursive: true, force: true }); }
+  } finally { writeFileSync(modelRelease, ""); release(); peer?.close(); await live.stop(); await new Promise<void>(resolve => server.close(() => resolve())); ledger.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("real Pi task tool requires a fresh native UI or operator poll and opens its child idle until new human input", { timeout: 60000 }, async () => {
@@ -317,6 +321,87 @@ test("real Pi task tool requires a fresh native UI or operator poll and opens it
     assert.equal(readFileSync(parentLog + "/modelcalls.jsonl", "utf8").trim().split("\n").length, 3, "approval must not become another source model turn");
     assert.equal(readFileSync(remote.plan.nativeFile, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(entry => entry.type === "message").length, 0);
   } finally { await child?.stop(); await live.stop(); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("actual Pi archive UI is reversible and stale-safe; busy work finishes while old remote input stays held", { timeout: 60000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-native-archive-")), file = join(root, "native.jsonl"), extension = join(root, "bridge.ts"), socket = join(root, "bridge.sock");
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "archive-native", cwd: root, timestamp: new Date().toISOString() }) + "\n");
+  writeFileSync(extension, `import {installAdapter} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/adapter.ts"))}; export default pi=>installAdapter(pi,{config:${JSON.stringify({ socket, roots: [root] })},interactive:()=>true});`);
+  const http = new InteractionHttp(); let opens = 0;
+  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root], operatorUserId: USER }, http.matrix, async () => { opens++; }); await relay.start(false); relay.store.intake("ready", []);
+  const live = piProcess(root, file, extension), state = async () => (await live.send("get_state")).data as { isStreaming: boolean };
+  const text = async (id: string, body: string) => { await relay.syncOnce(); relay.store.intake(id, [{ id, room: ROOM, event: textEvent(id, body) }]); await relay.pump(); };
+  try {
+    await live.send("get_state"); await until(() => relay.store.bindings().length === 1); const key = relay.store.bindings()[0]!.key; relay.store.setRoom(key, ROOM);
+    const cancel = live.send("prompt", { message: "/bridge-archive" }); await until(() => live.ui.length === 1); live.confirm(live.ui[0]!.id, false); await cancel; assert.equal(relay.store.binding(key)!.archived, false);
+    const archive = live.send("prompt", { message: "/bridge-archive" }); await until(() => live.ui.length === 2); live.confirm(live.ui[1]!.id, true); await archive; await until(() => relay.store.binding(key)!.archived);
+    const stale = live.send("prompt", { message: "/bridge-restore" }); await until(() => live.ui.length === 3);
+    relay.archive(key, false, 1); relay.archive(key, true, 2); live.confirm(live.ui[2]!.id, true); await stale;
+    assert.equal(relay.store.binding(key)!.archived, true); assert.equal(relay.store.binding(key)!.archiveRevision, 3);
+    await text("$restore-before-run", "!restore"); await relay.syncOnce(); assert.equal(relay.store.binding(key)!.resumePending, false);
+    await live.send("prompt", { message: "hold for abort" }); await until(async () => (await state()).isStreaming);
+    await text("$native-follow-up", "!follow-up NATIVE_PENDING_MUST_NOT_RUN"); await text("$native-steer", "!steer NATIVE_STEERING_MUST_NOT_RUN");
+    assert.equal(((await live.send("get_state")).data as { pendingMessageCount: number }).pendingMessageCount, 2, "both remote inputs reached real native queues before archive");
+    await live.send("follow_up", { message: "LOCAL_FOLLOWUP_IS_RETAINED" });
+    relay.store.intake("queued", [{ id: "$old-queued", room: ROOM, event: textEvent("$old-queued", "OLD_PENDING_MUST_NOT_RUN") }]); relay.store.authorize("$old-queued", { text: "OLD_PENDING_MUST_NOT_RUN", sender: USER });
+    await text("$archive-busy", "!archive"); assert.equal(relay.store.binding(key)!.archived, true); assert.equal((await state()).isStreaming, true, "archive must not abort existing execution");
+    assert.ok(process.env.PI_TASK_TEST_HELPER && process.env.PI_TEST_TMUX);
+    const list = (...args: string[]) => JSON.parse(execFileSync(join(dirname(process.env.PI_TASK_TEST_HELPER!), "pi-session"), ["list", ...args], { encoding: "utf8", env: { HOME: join(root, "home"), PATH: process.env.PATH, PI_BRIDGE_SESSION_ROOTS: JSON.stringify([root]), PI_BRIDGE_STATE_DIRECTORY: join(root, "state"), PI_BRIDGE_TMUX: process.env.PI_TEST_TMUX, PI_BRIDGE_TMUX_SOCKET: join(root, "disposable-tmux.sock"), PI_SESSION_LOCK_DIRECTORY: join(root, "locks") } })) as Array<{ id: string }>;
+    assert.equal(list().some(row => row.id === "archive-native"), false); assert.equal(list("--all").some(row => row.id === "archive-native"), true);
+    const deadline = Date.now() + 15000; while ((await state()).isStreaming) { if (Date.now() > deadline) throw Error("Existing native work did not finish"); await new Promise(resolve => setTimeout(resolve, 50)); }
+    await relay.pump(); assert.ok([...http.sent.values()].some(event => event.content.body === "probe answer")); assert.doesNotMatch(readFileSync(file, "utf8"), /OLD_PENDING_MUST_NOT_RUN/);
+    await text("$while-archived", "ARCHIVED_TEXT_MUST_NOT_RUN"); await text("$restore", "!restore");
+    http.syncs.push({ next_batch: "restore-boundary", rooms: { join: { [ROOM]: { timeline: { events: [textEvent("$offline-old", "OFFLINE_TEXT_MUST_NOT_RUN")], limited: false } } } } });
+    await relay.syncOnce(); await relay.pump(); await text("$fresh-after-restore", "fresh after restore");
+    await until(() => readFileSync(file, "utf8").includes("fresh after restore")); await until(async () => !(await state()).isStreaming);
+    assert.doesNotMatch(readFileSync(file, "utf8"), /OLD_PENDING_MUST_NOT_RUN|NATIVE_PENDING_MUST_NOT_RUN|NATIVE_STEERING_MUST_NOT_RUN|ARCHIVED_TEXT_MUST_NOT_RUN|OFFLINE_TEXT_MUST_NOT_RUN/);
+    assert.match(readFileSync(file, "utf8"), /LOCAL_FOLLOWUP_IS_RETAINED/);
+    assert.equal(readFileSync(join(root, "modelcalls.jsonl"), "utf8").trim().split("\n").length, 3); assert.equal(opens, 0);
+    assert.equal(list().some(row => row.id === "archive-native"), true); assert.equal(relay.store.binding(key)!.room, ROOM);
+    const oldUi = live.send("prompt", { message: "/bridge-archive" }); await until(() => live.ui.length === 4);
+    await live.send("new_session"); await until(() => relay.store.bindings().length === 2); live.confirm(live.ui[3]!.id, true); await oldUi;
+    assert.ok(relay.store.bindings().every(binding => !binding.archived), "a previous native session's UI cannot archive its replacement or the original after switching");
+  } finally { await live.stop(); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("committed archive fences native queue consumption before any policy notification reaches Pi", { timeout: 20000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-archive-wire-race-")), file = join(root, "native.jsonl"), socket = join(root, "bridge.sock"), proxySocket = join(root, "proxy.sock"), extension = join(root, "bridge.ts"), releaseModel = join(root, "release-model");
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "archive-race", cwd: root, timestamp: new Date().toISOString() }) + "\n");
+  writeFileSync(extension, `import {installAdapter} from ${JSON.stringify(process.env.PI_BRIDGE_TEST_ADAPTER ?? resolve("config/agent/extensions/matrix-bridge/adapter.ts"))}; process.env.BRIDGE_PROBE_HOLD_RELEASE=${JSON.stringify(releaseModel)}; export default pi=>installAdapter(pi,{config:${JSON.stringify({ socket: proxySocket, roots: [root] })},interactive:()=>true});`);
+  const http = new InteractionHttp(), relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] }, http.matrix, async () => { throw Error("No wake expected"); }); await relay.start(false); relay.store.intake("ready", []);
+  let hold = false, release!: () => void, observed!: () => void;
+  const gate = new Promise<void>(resolve => { release = resolve; }), withheld = new Promise<void>(resolve => { observed = resolve; }), peers: Peer[] = [];
+  const server = createServer(client => {
+    void (async () => {
+      let downstream: Peer;
+      const upstream = await connect(socket, async (method, params) => {
+        if (hold && method === "archive-policy") { observed(); await gate; }
+        return downstream.request(method, params);
+      });
+      downstream = new Peer(client, async (method, params) => {
+        const result = await upstream.request(method, params);
+        return hold && method === "activity" ? { ...object(result), archived: false, archiveRevision: 0, resumePending: false } : result;
+      });
+      peers.push(upstream, downstream); downstream.on("close", () => upstream.close()); upstream.on("close", () => downstream.close());
+    })().catch(() => client.destroy());
+  });
+  await new Promise<void>(resolve => server.listen(proxySocket, () => { chmodSync(proxySocket, 0o600); resolve(); })); const live = piProcess(root, file, extension);
+  try {
+    await live.send("get_state"); await until(() => relay.store.bindings().length === 1); const key = relay.store.bindings()[0]!.key; relay.store.setRoom(key, ROOM);
+    await live.send("prompt", { message: "hold for abort" }); await until(async () => ((await live.send("get_state")).data as { isStreaming: boolean }).isStreaming);
+    await live.send("set_follow_up_mode", { mode: "all" });
+    const same = remoteText(USER, "$queued-race", "MUST_NOT_CONSUME_AFTER_ARCHIVE_COMMIT");
+    await live.send("follow_up", { message: same }); await live.send("follow_up", { message: "LOCAL_RETAINED_AFTER_FENCE" });
+    relay.store.intake("queued", [{ id: "$queued-race", room: ROOM, event: textEvent("$queued-race", "!follow-up MUST_NOT_CONSUME_AFTER_ARCHIVE_COMMIT") }]); await relay.pump();
+    assert.equal(((await live.send("get_state")).data as { pendingMessageCount: number }).pendingMessageCount, 3); const queueBoundary = live.queues.length;
+    hold = true; relay.archive(key, true, 0); await withheld; assert.equal(relay.store.binding(key)!.archived, true);
+    writeFileSync(releaseModel, ""); await until(async () => !((await live.send("get_state")).data as { isStreaming: boolean }).isStreaming);
+    const saved = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line) as { message?: { metadata?: Record<string, string> } });
+    assert.ok(!saved.some(entry => entry.message?.metadata?.["pi.bridge.event"] === "$queued-race"), "visible identical local text is retained, but the remote queued identity is never consumed");
+    const removal = live.queues.slice(queueBoundary).find(event => Array.isArray(event.followUp) && event.followUp.length === 2);
+    assert.deepEqual(removal?.followUp, [same, "LOCAL_RETAINED_AFTER_FENCE"], "withdraw only the remote queue entry; retain local order even with identical text");
+    assert.equal(readFileSync(join(root, "modelcalls.jsonl"), "utf8").trim().split("\n").length, 2);
+  } finally { hold = false; release(); writeFileSync(releaseModel, ""); await live.stop(); for (const peer of peers) peer.close(); await new Promise<void>(resolve => server.close(() => resolve())); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
 });
 
 test("the production enrollment policy excludes an RPC worker even when configured", { timeout: 15000 }, async () => {

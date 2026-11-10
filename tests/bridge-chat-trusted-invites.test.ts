@@ -10,10 +10,11 @@ import { BridgeStore } from "../config/agent/extensions/matrix-bridge/store.js";
 import { BRIDGE_ROOM_STAMP } from "../config/agent/extensions/matrix-shared/bridge-room.js";
 import { BOT, OWNER, SetupHttp } from "./fixtures/matrix-bridge/setup-http.js";
 
-async function fixture(t: TestContext) {
+async function fixture(t: TestContext, archived = false) {
   const root = mkdtempSync(join(tmpdir(), "bridge-invites-")), http = new SetupHttp(), path = join(root, "invitations.sqlite");
   const store = new BridgeStore(join(root, "bridge.sqlite"), "host");
   const binding = store.register({ file: join(root, "native.jsonl"), cwd: root, nativeId: "native", title: "Room", boundary: null });
+  if (archived) store.setArchived(binding.key, true, 0);
   const organizer = new BridgeOrganization(store, http.bot, { hostId: "host", botUserId: BOT, operatorUserId: OWNER }, async () => { throw Error("Grouping offline"); });
   await organizer.pump(); await organizer.stop(); const room = store.binding(binding.key)!.room!; store.close();
   let helper = new TrustedInvitations(path, http.owner, OWNER, { host: BOT }), open = true;
@@ -30,6 +31,13 @@ test("native invitation acceptance is exact-host, once-only, independently curso
   assert.equal(f.helper.cursor(), cursor, "scoped recheck does not advance global invitation intake");
   f.restart(); await f.helper.syncOnce(); await f.helper.pump(); assert.equal(f.http.count("/join"), 1);
   assert.ok(f.http.calls.filter(call => call.actor === OWNER).every(call => call.method === "GET" && call.path.endsWith("/sync") || call.method === "POST" && call.path.endsWith("/join")));
+});
+
+test("the host Archive Space uses the same trusted first-invitation proof and respects later departure", async t => {
+  const f = await fixture(t, true), archive = [...f.http.rooms.keys()].find(id => f.http.kind(id) === "archive"); assert.ok(archive);
+  await f.helper.syncOnce(); await f.helper.pump(); assert.equal(f.helper.status().joined, 3); const joins = f.http.count("/join");
+  f.http.member(archive, "leave"); await f.helper.syncOnce(); f.http.member(archive, "invite", BOT); f.restart(); await f.helper.syncOnce(); await f.helper.pump();
+  assert.equal(f.helper.status().departed, 1); assert.equal(f.http.count("/join"), joins);
 });
 
 test("native invitation policy is separate from assistant policy and incompatible with the old account consumer", () => {

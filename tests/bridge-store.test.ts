@@ -80,12 +80,12 @@ test("schema-one upgrade preserves durable delivery facts and advances the versi
     store.close();
     // Reconstitute the exact prior additive schema, not a production downgrade.
     const prior = new DatabaseSync(file);
-    prior.exec("DROP TABLE tasks; DROP TABLE images; DROP TABLE interactions; DROP INDEX output_receipt; ALTER TABLE inputs DROP COLUMN interaction; UPDATE meta SET value='1' WHERE key='version'"); prior.close();
+    prior.exec("DROP TABLE tasks; DROP TABLE images; DROP TABLE interactions; DROP INDEX output_receipt; ALTER TABLE inputs DROP COLUMN interaction; ALTER TABLE inputs DROP COLUMN held; ALTER TABLE inputs DROP COLUMN archive_revision; UPDATE meta SET value='1' WHERE key='version'"); prior.close();
     store = new BridgeStore(file, "host");
     assert.equal(store.cursor(), "saved-cursor"); assert.equal(store.binding(binding.key)?.boundary, "boundary");
     assert.equal(store.nextInput(binding.key)?.prompt?.text, "preserved"); assert.deepEqual(store.outputs(binding.key)[0], output);
     const inspect = new DatabaseSync(file, { readOnly: true });
-    assert.equal(inspect.prepare("SELECT value FROM meta WHERE key='version'").get()!.value, "3"); inspect.close();
+    assert.equal(inspect.prepare("SELECT value FROM meta WHERE key='version'").get()!.value, "4"); inspect.close();
     assert.throws(() => new BridgeStore(file, "wrong-host"), /another host/);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -99,10 +99,21 @@ test("schema-two upgrade preserves interaction, media, output and cursor identit
     const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
     store.intake("saved-cursor-two", [{ id: "$image", room: "!room:example.test", event: {} }]); store.authorize("$image", { text: "caption", sender: "@friend:example.test", image: imageInfo(bytes) }, { image: bytes });
     store.saveProgress("setup:original", { room: "!room:example.test", stage: "invitation" }); store.close();
-    const prior = new DatabaseSync(file); prior.exec("DROP TABLE tasks; UPDATE meta SET value='2' WHERE key='version'"); prior.close();
+    const prior = new DatabaseSync(file); prior.exec("DROP TABLE tasks; ALTER TABLE inputs DROP COLUMN held; ALTER TABLE inputs DROP COLUMN archive_revision; UPDATE meta SET value='2' WHERE key='version'"); prior.close();
     store = new BridgeStore(file, "host"); assert.equal(store.cursor(), "saved-cursor-two"); assert.deepEqual(store.interaction(question.id), question);
     assert.equal(store.outputs(binding.key, `interaction:${question.id}`)[0]!.eventId, "$original-poll"); assert.equal(store.takeInput(binding.key)?.id, "$image");
     assert.deepEqual(Buffer.from(store.imageChunk(binding.key, "$image", 0).data, "base64"), bytes); assert.deepEqual(store.progress("setup:original"), { room: "!room:example.test", stage: "invitation" }); assert.deepEqual(store.tasks(["approval"]), []);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("schema-three upgrade preserves approved task identity and frozen native plan while adding archive intake holds", () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-upgrade-three-")), file = join(root, "bridge.sqlite"); let store = new BridgeStore(file, "host");
+  try {
+    const binding = store.register({ file: "/p/source.jsonl", nativeId: "source", cwd: "/p", title: "Source", boundary: null });
+    const record = store.requestTask({ plan: { version: 1, key: "a".repeat(64), source: { key: binding.key, file: binding.file, nativeId: binding.nativeId, cwd: binding.cwd }, intent: { branch: "task/test", base_ref: "HEAD", title: "Test", handoff_summary: "Visible" }, base: "b".repeat(40), common: "/p/.git", sourceRoot: "/p", container: "/task", worktree: "/task/test", nativeFile: "/sessions/task.jsonl", nativeId: "f9d894d6-5594-45be-b4ba-2878f5cc7591" }, phase: "approved", request: { id: "c".repeat(64), surface: "local", expires: Date.now() + 900000 }, approval: { via: "local-ui", at: Date.now() } });
+    store.close(); const prior = new DatabaseSync(file); prior.exec("ALTER TABLE inputs DROP COLUMN held; ALTER TABLE inputs DROP COLUMN archive_revision; UPDATE meta SET value='3' WHERE key='version'"); prior.close();
+    store = new BridgeStore(file, "host"); assert.deepEqual(store.task(record.plan.key), record); assert.equal(store.binding(binding.key)!.archived, false);
+    store.setArchived(binding.key, true, 0); assert.equal(store.binding(binding.key)!.archived, true); assert.deepEqual(store.task(record.plan.key), record);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

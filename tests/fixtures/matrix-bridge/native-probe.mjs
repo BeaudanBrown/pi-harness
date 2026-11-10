@@ -1,4 +1,4 @@
-import { appendFileSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync } from "node:fs";
 import { createAssistantMessageEventStream } from "@earendil-works/pi-ai";
 export default function (pi) {
   let sequence = 0;
@@ -35,7 +35,11 @@ export default function (pi) {
         }
         stream.end();
       };
-      if (slow) { timer = setTimeout(emit, 10000); options?.signal?.addEventListener("abort", abort, { once: true }); }
+      if (slow) {
+        const released = () => { if (existsSync(process.env.BRIDGE_PROBE_HOLD_RELEASE)) emit(); else timer = setTimeout(released, 10); };
+        timer = setTimeout(process.env.BRIDGE_PROBE_HOLD_RELEASE ? released : emit, process.env.BRIDGE_PROBE_HOLD_RELEASE ? 10 : 10000);
+        options?.signal?.addEventListener("abort", abort, { once: true });
+      }
       else queueMicrotask(emit);
       return stream;
     },

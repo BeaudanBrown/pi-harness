@@ -10,6 +10,7 @@ import { BridgeOrganization } from "./organization.js";
 import { authorizeInput } from "./input.js";
 import { TaskWorkspaces, type TaskRunner } from "./tasks.js";
 import { taskKey } from "./task-contract.js";
+import { archiveCommand } from "./interaction.js";
 
 export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; operatorUserId?: string; hostSpace?: boolean };
 type Attachment = { peer: Peer; idle: boolean; key: string; stopping?: boolean };
@@ -17,6 +18,7 @@ const running = new Set<string>();
 /** Single daemon, native-session routing and transactional delivery only. */
 export class BridgeRelay {
   readonly store: BridgeStore;
+  private readonly dispatchLedger: string;
   readonly organization?: BridgeOrganization;
   readonly tasks?: TaskWorkspaces;
   private release: () => void;
@@ -39,7 +41,8 @@ export class BridgeRelay {
     const unlock = nativeLock.acquireSessionLock(join(key, "daemon-owner"));
     running.add(key);
     this.release = () => { unlock(); running.delete(key); };
-    try { this.store = new BridgeStore(join(key, "bridge.sqlite"), config.hostId); }
+    this.dispatchLedger = join(key, "bridge.sqlite");
+    try { this.store = new BridgeStore(this.dispatchLedger, config.hostId); }
     catch (error) { this.release(); throw error; }
     try {
       if (config.operatorUserId) this.organization = new BridgeOrganization(this.store, matrix.http, { hostId: config.hostId, botUserId: matrix.userId, operatorUserId: config.operatorUserId, hostSpace: config.hostSpace });
@@ -89,6 +92,11 @@ export class BridgeRelay {
           return this.status(binding);
         }
         if (!key || this.attached.get(key)?.peer !== peer) throw Error("Native session registration required");
+        if (method === "archive.status") return this.status(this.store.binding(key)!);
+        if (method === "archive.set") {
+          if (typeof params.archived !== "boolean" || !Number.isSafeInteger(params.revision)) throw Error("A current native UI archive decision is required");
+          return this.archive(key, params.archived, Number(params.revision));
+        }
         if (["task.prepare", "task.publish-approval", "task.confirm-local", "task.status"].includes(method)) {
           if (!this.tasks || this.attached.get(key)?.stopping) throw Error("Task workspace creation is unavailable; local Pi remains available");
           const binding = this.store.binding(key)!;
@@ -130,9 +138,14 @@ export class BridgeRelay {
       this.syncWork = this.syncLoop();
     }
   }
+  archive(key: string, archived: boolean, revision: number): ObjectValue {
+    const binding = this.store.setArchived(key, archived, revision), attachment = this.attached.get(key);
+    if (attachment) void attachment.peer.request("archive-policy", { archived: binding.archived, revision: binding.archiveRevision ?? 0, resumePending: binding.resumePending === true }).catch(() => attachment.peer.close());
+    return this.status(binding);
+  }
   private status(binding: Binding): ObjectValue {
     const current = this.attached.get(binding.key);
-    return { ...binding, intakeReady: this.store.cursor() !== undefined, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.stopping ? "stopping" : current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
+    return { ...binding, dispatchLedger: this.dispatchLedger, intakeReady: this.store.cursor() !== undefined, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.stopping ? "stopping" : current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
   }
   private async syncLoop(): Promise<void> {
     while (!this.stopSignal.signal.aborted) {
@@ -164,14 +177,21 @@ export class BridgeRelay {
         catch (error) { historyReady = false; this.failures.set(binding.key, error instanceof Error ? error.message : "Native history unavailable"); }
         binding = this.store.binding(binding.key)!;
         if (!binding.room) return;
-        const gap = this.store.progress(`gap:${binding.room}`);
-        for (const input of !gap && historyReady ? this.store.received(binding.key) : []) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
-          this.tasks ? (interaction, accepted) => this.tasks!.answer(binding, input, interaction, accepted) : undefined);
-        if (historyReady && !gap && binding.enabled && !binding.archived) {
+        const room = binding.room, gap = this.store.progress(`gap:${room}`);
+        for (const input of !gap ? this.store.received(binding.key) : []) if (historyReady || archiveCommand(input.event) !== undefined) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
+          this.tasks ? (interaction, accepted) => this.tasks!.answer(binding, input, interaction, accepted) : undefined,
+          archived => {
+            if (input.event.sender !== this.config.operatorUserId) { this.store.finishInput(binding.key, input.id, "Only the configured operator may archive or restore this conversation."); return; }
+            try { this.archive(binding.key, archived, input.archiveRevision ?? -1); this.store.finishInput(binding.key, input.id, "Archive policy recorded; grouping is asynchronous. No process was stopped and no pending input was replayed."); }
+            catch { this.store.finishInput(binding.key, input.id, "Archive policy changed during this request. Check !status and issue a fresh command."); }
+          });
+        binding = this.store.binding(binding.key)!;
+        if (historyReady && !gap && binding.enabled && !binding.archived && !binding.resumePending) {
           const input = this.store.nextInput(binding.key);
           if (input?.state === "queued" && input.prompt) {
-            if (!await this.matrix.joined(binding.room, input.prompt.sender)) this.store.interruptInput(binding.key, input.id);
-            else {
+            const joined = await this.matrix.joined(room, input.prompt.sender), fresh = this.store.binding(binding.key);
+            if (!joined) this.store.interruptInput(binding.key, input.id);
+            else if (fresh?.enabled && !fresh.archived && !fresh.resumePending && (fresh.archiveRevision ?? 0) === (binding.archiveRevision ?? 0)) {
               const attachment = this.attached.get(binding.key);
               if (!attachment && ["status", "abort", "stop"].includes(input.prompt.control ?? "")) {
                 this.store.finishInput(binding.key, input.id, "No native adapter is connected. No stop/abort was sent and process exit is not implied. Use local Pi, or !start to open without starting a model turn.");
@@ -190,7 +210,7 @@ export class BridgeRelay {
                 if (taken) {
                   if (taken.prompt?.control === "abort" || taken.prompt?.control === "stop") this.store.interruptBefore(binding.key, taken.id);
                   try {
-                    const receipt = object(await attachment.peer.request("input", { id: taken.id }));
+                    const receipt = object(await attachment.peer.request("input", { id: taken.id, archived: false, revision: binding.archiveRevision ?? 0, resumePending: false }));
                     if (receipt.stopping === true) attachment.stopping = true;
                     if (receipt.accepted !== true) {
                       if (typeof receipt.message === "string") this.store.finishInput(binding.key, taken.id, string(receipt.message, 4096));
@@ -210,7 +230,7 @@ export class BridgeRelay {
         } }]);
         this.store.closeInteractions(binding.key);
         // Archive never suppresses an already executing turn's output.
-        if (binding.enabled) for (const output of this.store.outputs(binding.key)) this.store.sent(output.id, await this.matrix.send(binding.room, output));
+        if (binding.enabled) for (const output of this.store.outputs(binding.key)) this.store.sent(output.id, await this.matrix.send(room, output));
         this.retryAt.delete(binding.key);
         if (historyReady) this.failures.delete(binding.key);
       } catch (error) {

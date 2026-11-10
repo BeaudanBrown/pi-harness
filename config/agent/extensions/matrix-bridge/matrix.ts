@@ -31,22 +31,22 @@ function events(room: string, value: unknown): RawEvent[] {
  * sync cursor moves only when every relevant room covers the whole interval.
  */
 export async function syncIntoStore(matrix: BridgeMatrix, store: BridgeStore, signal?: AbortSignal): Promise<Array<{ room: string; error: string }>> {
-  const since = store.cursor();
+  const since = store.cursor(), bindings = store.bindings();
   const query = new URLSearchParams({ timeout: "30000", filter: JSON.stringify({ room: { timeline: { limit: 100 } } }) });
   if (since) query.set("since", since);
   const { nextBatch, response } = await matrix.http.sync(query, signal);
-  if (!since) { store.intake(nextBatch, []); return []; } // Establish a live boundary, never backfill room history.
+  if (!since) { store.intake(nextBatch, []); for (const binding of bindings) if (binding.resumePending) store.resumeAfterSync(binding.key, binding.archiveRevision ?? 0); return []; } // Establish a live boundary, never backfill room history.
   const joined = object(object(object(response).rooms ?? {}).join ?? {});
   const errors: Array<{ room: string; error: string }> = [];
   let complete = true;
-  await Promise.all(store.bindings().filter(binding => binding.room).map(async binding => {
+  await Promise.all(bindings.filter(binding => binding.room).map(async binding => {
     const room = binding.room!, checkpoint = `room-cursor:${room}`, gapKey = `gap:${room}`;
     try {
       const timeline = object(object(joined[room] ?? {}).timeline ?? { events: [] });
       const tail = events(room, timeline.events ?? []);
       let gap = store.progress<Gap | null>(gapKey);
       let from = store.progress<string>(checkpoint) ?? since;
-      if (from === nextBatch && !gap) return;
+      if (from === nextBatch && !gap) { if (binding.resumePending) store.resumeAfterSync(binding.key, binding.archiveRevision ?? 0); return; }
       if (!gap && timeline.limited === true) {
         gap = { from, to: nextBatch, tail: tail.map(event => event.id), tokens: [from] };
         store.saveProgress(gapKey, gap);
@@ -73,6 +73,9 @@ export async function syncIntoStore(matrix: BridgeMatrix, store: BridgeStore, si
         }
         if (gap || from !== nextBatch) { complete = false; return; }
       } else store.intake(since, tail, { [checkpoint]: nextBatch });
+      // Only a snapshot begun after this restore can release its intake fence.
+      // Previously received events keep their held bit permanently.
+      if (binding.resumePending) store.resumeAfterSync(binding.key, binding.archiveRevision ?? 0);
     } catch (error) {
       complete = false;
       errors.push({ room, error: error instanceof Error ? error.message : "Matrix intake failed" });

@@ -595,6 +595,157 @@ Artifacts: `2026-11-10T16-38-56-504Z-native-167-canonical-boundary-1c7a007f9fe2`
 `2026-11-10T16-45-34-808Z-native-167-final-packages-5164a8069414`.
 No production creation is authorized.
 
+### #168 preflight: reversible archive, never process closure
+
+Scope: one stored archive policy shared by explicit human Matrix commands and
+native local UI confirmation. No model archive tool is retained in this slice
+(the issue makes agent requests optional); agents can ask the operator to use
+`!archive`/`!restore` or the native commands. Thus no model assertion or ordinary
+question vote can grant this mutation, and no general approval catalogue returns.
+#169 owns import; #170 deletion; #171 cumulative readiness; live operations remain
+separately approved #172 work.
+
+| Acceptance | Implementation/evidence seam | Actual focused evidence |
+| --- | --- | --- |
+| Immediate remote/picker policy without kill | Atomic archive bit/revision and input hold; native consumption reads committed policy, not notification cache | Actual-Pi busy/queued/delayed-notification cases; original final output and local follow-up retained; helper default/all discovery; passed in the 32-case command below |
+| Restore only future input | Preserve queued/uncertain inputs, retire polls, freeze intake holds and fresh sync before dispatch; no replay/repair | Archive atomic-hold, original-poll, command-revision, backlog/restart and in-flight sync cases; schema 1/2/3 preservation; same 32-case pass |
+| Independent local/human authority | Current operator commands, native UI confirmation and revision/session checks; no model mutation tool | Native cancel/accept/ABA/session-switch and current/departed collaborator cases; same pass |
+| Reversible presentation | One host Archive Space; destination before source; retained original grouping/room IDs; last-live checkout visibility only | Archive hierarchy/last-live checkout, invitation/departure, lost-ACK and original bytes/identity assertions; 43-case presentation command passed |
+| Offline/partial/racing operations | Durable desired policy before effects, same-checkout serialization, scoped status/retry | Prompt/vote/wake, stale-command, in-flight-sync, blocked hierarchy and unrelated-output cases; delayed-notification native race reproduced red then passed with committed-policy read |
+
+Crash matrix: policy + held inputs + cancelled polls commit together before any
+organization side effect. Lost human/UI replies reuse current state; stale revision
+is rejected. Matrix updates observe the desired policy after restart, link the
+destination before removing the source, and retain original node receipts/grouping.
+
+| Crash boundary | Before / side effect | Durable record or identity | Interruption / retry | Evidence |
+| --- | --- | --- | --- | --- |
+| Archive/restore commit | Prior revision, raw/queued/handed inputs and active polls; no Matrix/process effect | One SQLite transaction updates revision/bit/holds, cancels polls and materializes `archive:REVISION` notice | Before commit: old policy. After commit: new policy, held input and notice together. Stale UI/command revisions reject, duplicates are no-ops | Atomic hold, stale-command/restart, schema upgrades, native ABA/session-switch cases |
+| Native consumption | Remote input is queued or entering native preflight; policy RPC may be withheld | Fresh read-only query of the same committed binding, matching file/native ID/revision/enabled/archive/resume flags | Read before concurrent commit authorizes already in-flight work; read after commit rejects even without notification. Unknown/unsafe/read failure rejects remote input only; local queue and active run continue | Exact reviewed adapter red; delayed-policy transport-proxy green; readonly identity/missing/corrupt/symlink checks; both queue modes |
+| Fresh-sync release | New revision has `resumePending`; Matrix catch-up may contain old prompts/commands/votes | Intake/cursor and permanent per-message holds/revisions commit before clearing only the matching revision's fence | Crash before release leaves fence pending for a later successful sync; an older in-flight snapshot cannot release a newer revision. No held item regains authority | Restart-before-sync, in-flight snapshot, offline backlog including old command/vote, normal repeated-cursor cases; limited-gap regression retained |
+| Destination link | Original room and live grouping receipts exist; Archive/live destination two-way state writes may partially succeed | Original node/alias receipts; desired archive revision and saved grouping in `setup:KEY`; exact link contents observed by GET | Destination precedes source unlink; unknown PUT outcome is re-read, not inferred failed. Restart retries desired policy with same IDs | Link ordering and lost-ACK restart; concurrent policy change during held write |
+| Source unlink / completion | Destination linked; old checkout/archive edges may remain; final live sibling can change | Current archive bits plus saved original checkout/project; same-checkout serialized jobs; status records completed revision | Unlink only presentation with empty state content; no deletion/membership effect. Changed revision stays visibly pending and reconciles; unrelated output continues | Last-live checkout/restore, rapid transitions, blocked hierarchy/unrelated output; first-invitation/departure cases |
+
+No room/session/worktree deletion, leave/forget, membership repair, process scan,
+shutdown or prerequisite queue cleanup. An already handed-off action may have
+acted; archive cannot undo it. Future dispatch is fenced independently of Matrix
+or NAS health. Each policy transition requires a fresh successful sync before
+remote commands can resume (and before ordinary input resumes after restore).
+Per-message intake revisions reject old commands after restart; catch-up messages
+have no mutation authority even once that fence clears. Held inputs remain
+visible, never replayed. Matrix has no conditional state-write CAS, so tests do
+not claim serialization against another human client.
+
+Implemented schema-four archive/revision/held-input transactions, exact
+current-operator commands, native UI confirmation, and same-checkout serialized
+background presentation. Destination links precede source unlinks; original
+room/grouping receipts remain. Empty live checkout edges are removed without
+removing rooms or membership. The new Archive kind shares existing immutable
+room provenance and first-invitation/departure policy. No downstream change is
+needed: the native helper/picker already consumes the stored archive flag.
+
+The stronger actual-Pi fixture found a real gap: already handed-off native
+steering/follow-up queues ran after archive, despite the ledger hold and adapter
+preflight. `pi-bridge-queued-preflight.patch` adds an optional per-message guard
+at native queue consumption. Withdrawal updates native queue presentation and
+its existing removal callback, never aborts the current run, and does not remove
+local queued messages. Both native queue modes retain later valid/unguarded
+messages when earlier ones are withdrawn or throw. Unguarded behavior remains
+unchanged. This patch is required by tested SDK behavior, not an invented hook.
+
+Focused evidence: 12 archive cases exercise atomic holds, current operator and
+stale-command authority, prompt/vote/wake membership races, in-flight sync,
+offline backlog/restart, last-live checkout, lost hierarchy ACK, and desired-policy
+changes during a blocked write with unrelated output still flowing. Seven store
+cases include schema 1/2/3 preservation. Seven actual-Pi cases include native UI
+cancel/accept, stale ABA and session-switch responses, an active run finishing
+with final output, withdrawn real remote queues, retained local follow-up,
+offline default/all discovery, and only fresh remote intent after restore. Six
+native SDK cases additionally check the public queue API in both modes. The
+shared trusted-invitation suite now includes Archive first-join/departure.
+
+Evidence under `.pi/tmp/workers/`:
+- `2026-11-10T17-05-33-699Z-native-168-archive-first-fc2aabf7f102`: initial 35 focused checks passed.
+- `2026-11-10T17-07-39-115Z-native-168-actual-ui-busy-archive-a6cb2c519e06`: 15 native/task/intake checks passed.
+- `2026-11-10T17-10-48-318Z-native-168-races-and-native-switch-c855b11107d2`: 23 checks passed.
+- `2026-11-10T17-31-57-091Z-native-168-queued-handoff-regression-13f9a2d150ed`: real queued steering/follow-up regression failed as expected; 23 other cases passed.
+- `2026-11-10T17-37-21-067Z-native-168-guarded-queue-package-c132f3190e50`: guarded pinned Pi package built.
+- `2026-11-10T17-38-34-803Z-native-168-queued-guard-green-3ed2d1cce8b4`: all 30 native/archive/store/SDK cases passed.
+
+- `2026-11-10T17-41-45-506Z-native-168-presentation-invites-final-focused-caa4bc907ca3`: all 43 archive/invitation/organization/interaction cases passed, including unrelated output during blocked presentation.
+- `2026-11-10T17-41-45-506Z-native-168-broader-affected-d78d4cc84a54`: TypeScript, package/source/module contracts, 235 unit and 128 chat cases passed, zero skips.
+
+Review `2026-11-10T17-44-38-027Z-worktree-cfa590dbe0e1-8a3ad7601974`
+found one low Standards evidence-record finding and one high Spec queue-authority
+race, both current issue. This table/commands repair the documentation finding.
+The Spec finding was reproduced against the reviewed adapter while a public IPC
+proxy withheld `archive-policy` and kept activity policy stale, then released the
+real native queue after commit. `dispatch-fence.ts` now reads just the native
+binding's policy using a fresh read-only, zero-wait SQLite connection at native
+preflight/queue consumption. Unsafe/missing/corrupt/unknown policy fails closed
+for remote input only. The pinned Bun lacks `node:sqlite`: actual-runtime testing
+caught the import failure; Bun now uses built-in `bun:sqlite`, Node uses built-in
+`node:sqlite`, lazily without adding a dependency. This is a new narrow reader
+of the existing ledger, not a second store, scheduler, writer or local launch gate.
+Because remediation adds this cross-runtime authority seam, a targeted paired
+re-review was warranted rather than claiming the earlier snapshot reviewed it.
+Re-review `2026-11-10T18-02-18-387Z-worktree-95d22e3a925d-b6aef0fecc39`
+found a medium Spec queue-presentation defect for identical remote/local text,
+and a medium Standards reminder that canonical verification must still follow
+remediation before closure. The display defect reproduced red: withdrawing the
+remote duplicate reordered remaining local queue text. Native queue presentation
+now tracks the actual message identity, including consumption, not `indexOf(text)`.
+The same real-Pi fixture passes with a local duplicate and intervening local
+message in all mode; metadata proves the remote identity was never consumed.
+This refines existing queue bookkeeping, not the reviewed authority design.
+No accepted current-issue finding remains; the final canonical gate below also
+satisfies the review's closure prerequisite.
+
+Review remediation evidence:
+- `2026-11-10T17-54-25-547Z-native-168-review-delayed-policy-red-8198c1f72de2`: expected real native replay with the reviewed adapter, no fixture failure.
+- `2026-11-10T17-54-46-486Z-native-168-review-fence-green-17954d5fedef`: caught unsupported `node:sqlite` in the packaged Bun; 25 other cases passed, seven native cases could not load.
+- `2026-11-10T17-56-00-848Z-native-168-review-fence-runtime-green-013e8583d8ee`: all 32 actual-native/archive/store/SDK cases passed, zero skips.
+- `2026-11-10T17-59-44-854Z-native-168-review-remediation-affected-dfdc5e00e6ae`: the same broader command below passed after remediation: 237 unit, 128 chat, zero skips and fresh package/source/module/type contracts.
+- `2026-11-10T18-06-47-850Z-native-168-review-queue-identity-red-ce413c96b725`: expected identical-text native queue presentation failure.
+- `2026-11-10T18-08-17-272Z-native-168-review-identity-green-138e89437ad0`: identity-corrected pinned Pi build and all 32 focused cases passed.
+- `2026-11-10T17-59-44-855Z-native-168-consuming-evaluation-4432d052a909`: `python3 /home/beau/documents/nix-dotfiles/modules/cli/pi-harness/check-native-integration.py --harness-source "$PWD" --evaluate` passed all six source/grill/NAS evaluation checks, no activation.
+
+Exact commands and outcomes (scratch driver compiles `tsc --project
+tsconfig.test.json --outDir .pi/tmp/bridge-build`, copies current native CJS,
+sets isolated HOME/XDG/locks and mandatory packaged helpers, then `node --test`):
+
+```sh
+# Passed: 32 cases, including delayed policy, real queues, and both SQLite runtimes.
+export PI_BRIDGE_TEST_PI="$PWD/.pi/tmp/archive-168/pi/bin/pi"
+export PI_BRIDGE_TEST_SDK="$PWD/.pi/tmp/archive-168/pi/lib/node_modules/@earendil-works/pi-coding-agent/dist"
+bash .pi/tmp/task-167/check.sh \
+  .pi/tmp/bridge-build/tests/bridge-adapter-real-pi.test.js \
+  .pi/tmp/bridge-build/tests/bridge-archive.test.js \
+  .pi/tmp/bridge-build/tests/bridge-store.test.js tests/bridge-native-pi.test.mjs
+
+# Passed: 43 cases before the two additional review regressions.
+bash .pi/tmp/task-167/check.sh \
+  .pi/tmp/bridge-build/tests/bridge-archive.test.js \
+  .pi/tmp/bridge-build/tests/bridge-chat-trusted-invites.test.js \
+  .pi/tmp/bridge-build/tests/bridge-organization.test.js \
+  .pi/tmp/bridge-build/tests/bridge-interaction.test.js
+
+# Passed before review remediation: 235 unit, 128 chat, zero skips, all contracts.
+nix build .#checks.x86_64-linux.unit-tests .#checks.x86_64-linux.bridge-chat \
+  .#checks.x86_64-linux.source-contracts .#checks.x86_64-linux.module-contracts \
+  .#checks.x86_64-linux.package-contracts --no-link --keep-going -L
+```
+
+Final verification:
+- `nix run -L .#verify` passed all 12 gates: **237 unit / 128 chat / 856 legacy**, zero skips (`2026-11-10T18-10-00-597Z-native-168-canonical-final-0521b7e1cfaf`). No assertions, timeouts or concurrency were weakened. Earlier #166/#167 legacy timing/cleanup caveats remain historical, not reproduced here.
+- `nix build .#pi .#matrix-bridge .#bridge-chat .#pi-harness --no-link -L` passed (`2026-11-10T18-13-16-461Z-native-168-final-packages-e9d97f6ac804`).
+- The consuming evaluation command above passed all six checks again with the final Pi correction (`2026-11-10T18-13-16-461Z-native-168-final-consuming-evaluation-1379b3a37312`).
+- Only this final evidence text changed after the gate; no production/test change required a rerun. No downstream files changed for #168.
+
+Evidence uses real disposable Pi/RPC, SQLite and local discovery with
+fake model/Matrix HTTP, not a visual picker exercise, live Matrix/NAS receipt,
+operator-account repair, deployment or safe coexistence with legacy writers.
+
 ## Rebuild and migration readiness
 
 Pending implementation and cumulative verification. Do not run a host switch merely

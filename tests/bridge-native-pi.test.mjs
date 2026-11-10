@@ -120,6 +120,30 @@ test("the first custom entry durably creates an idle native session without a mo
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 
+test("native queue guards skip withdrawn or throwing inputs without stranding unguarded messages in either mode", () => {
+  const f = fixture();
+  try {
+    const core = pathToFileURL(join(sdk, "../node_modules/@earendil-works/pi-agent-core/dist/agent.js")).href;
+    const result = f.script(`import assert from 'node:assert/strict'; import { Agent } from ${JSON.stringify(core)};
+      for (const mode of ['one-at-a-time', 'all']) for (const kind of ['steer', 'followUp']) {
+        const model={id:'fake',name:'Fake',api:'fake',provider:'fake',baseUrl:'https://invalid',reasoning:false,input:['text'],contextWindow:1000,maxTokens:100};
+        const message = text => ({role:'user',content:[{type:'text',text}],timestamp:Date.now()});
+        const answer={role:'assistant',content:[{type:'text',text:'ok'}],api:'fake',provider:'fake',model:'fake',stopReason:'stop',timestamp:Date.now(),usage:{input:0,output:0,cacheRead:0,cacheWrite:0,totalTokens:0,cost:{input:0,output:0,cacheRead:0,cacheWrite:0,total:0}}};
+        const streamFn = async () => ({async *[Symbol.asyncIterator](){yield {type:'done',reason:'stop',message:answer};}, result:async()=>answer});
+        const agent=new Agent({initialState:{model},streamFn,steeringMode:mode,followUpMode:mode}); let guards=0;
+        agent[kind](message('removed'),()=>{guards++;return false;});
+        agent[kind](message('throwing'),()=>{guards++;throw Error('withdraw');});
+        agent[kind](message('allowed'),()=>{guards++;return true;});
+        agent[kind](message('local'));
+        await agent.prompt('initial');
+        const text=agent.state.messages.filter(m=>m.role==='user').flatMap(m=>m.content.map(c=>c.text));
+        assert.ok(!text.includes('removed')&&!text.includes('throwing')); assert.ok(text.includes('allowed')&&text.includes('local'));
+        assert.equal(guards,3); assert.equal(agent.hasQueuedMessages(),false);
+      }`);
+    assert.equal(result.status, 0, result.stderr);
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
 test("native fork, tree navigation and dispose never leave the previous session locked", () => {
   const f = fixture();
   try {

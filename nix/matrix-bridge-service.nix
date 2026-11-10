@@ -59,7 +59,7 @@ in {
     };
     homeserver = mkOption { type = types.nullOr types.str; default = null; };
     botUserId = mkOption { type = types.nullOr types.str; default = null; };
-    operatorUserId = mkOption { type = types.nullOr types.str; default = null; description = "Human owner invited by background setup and authorized for task approval. Ordinary conversation still has no participant allowlist."; };
+    operatorUserId = mkOption { type = types.nullOr types.str; default = null; description = "Human owner invited by background setup and authorized for task approval and explicit archive/restore commands. Ordinary conversation still has no participant allowlist."; };
     hostSpace = mkOption { type = types.bool; default = true; description = "Present projects below an optional host Space; never a coordinator session or launch requirement."; };
     ignoredSenderUserIds = mkOption { type = types.listOf types.str; default = [ ]; };
     tmuxPackage = mkOption { type = types.package; default = pkgs.tmux; description = "Host-owned tmux client; use the independently owned shared server wrapper on persistent hosts."; };

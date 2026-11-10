@@ -1,5 +1,5 @@
 import { MatrixError } from "../matrix-shared/http.js";
-import { CONTROL_HELP, nativeControl, pollVote, POLL_RESPONSE, type Interaction } from "./interaction.js";
+import { archiveCommand, CONTROL_HELP, nativeControl, pollVote, POLL_RESPONSE, type Interaction } from "./interaction.js";
 import { CAPTIONLESS_IMAGE_PROMPT, imageInfo } from "./media.js";
 import type { BridgeMatrix } from "./matrix.js";
 import type { Binding, BridgeStore, Input, Prompt } from "./store.js";
@@ -7,17 +7,25 @@ import { object } from "./wire.js";
 
 /** Room-scoped authorization; parsing alone never grants execution authority. */
 export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, binding: Binding, input: Input, signal?: AbortSignal,
-  approval?: (interaction: Interaction, accepted: boolean) => Promise<void>): Promise<void> {
+  approval?: (interaction: Interaction, accepted: boolean) => Promise<void>,
+  archive?: (archived: boolean) => void): Promise<void> {
   const ignore = () => { store.authorize(input.id, undefined); };
   const explain = (message: string) => store.finishInput(binding.key, input.id, message);
   const event = input.event, sender = typeof event.sender === "string" ? event.sender : "";
-  if (!binding.enabled || binding.archived || !binding.room || !/^@[^:\s]+:[^\s]+$/.test(sender) || matrix.ignoredSender(sender)) return ignore();
+  if (!binding.enabled || !binding.room || !/^@[^:\s]+:[^\s]+$/.test(sender) || matrix.ignoredSender(sender)) return ignore();
   let content: Record<string, unknown>, relation: Record<string, unknown>;
   try { content = object(event.content ?? {}); relation = object(content["m.relates_to"] ?? {}); } catch { return ignore(); }
   if (relation.rel_type === "m.replace" || Object.hasOwn(content, "m.new_content")) return ignore();
   const voting = event.type === POLL_RESPONSE || event.type === "m.poll.response", vote = pollVote(event.type, content);
   if (voting && !vote || !voting && !["m.room.message", "m.room.encrypted"].includes(String(event.type))) return ignore();
   if (!await matrix.joined(binding.room, sender)) return ignore();
+  const archived = archiveCommand(event);
+  if (archived !== undefined) { if (archive) archive(archived); else ignore(); return; }
+  const current = store.binding(binding.key);
+  if (current?.archived || current?.resumePending || input.held) {
+    if (event.type === "m.room.message" && content.body === "!status") return explain(`Archive: ${current?.archived ? "archived" : "live"}. ${current?.resumePending ? "Fresh Matrix sync is pending." : "Held input is not replayed."} Use !restore to restore; no process exit is implied.`);
+    return explain("This input was held at an archive/restore boundary and was not dispatched. Use !status, then send a fresh instruction when remote input is enabled.");
+  }
   if (event.type === "m.room.encrypted") return explain("Encrypted input is not supported by this bridge. Send unencrypted text or a supported image.");
   let interaction: Interaction | undefined;
   if (vote) {

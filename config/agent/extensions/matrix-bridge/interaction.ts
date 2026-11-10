@@ -5,6 +5,12 @@ export type InteractionSpec = { kind: "question" | "model" | "thinking" | "appro
 export type Interaction = InteractionSpec & { id: string; binding: string; source: string; state: "active" | "answered" | "cancelled"; answer?: string };
 export const POLL_START = "org.matrix.msc3381.poll.start", POLL_RESPONSE = "org.matrix.msc3381.poll.response", POLL_END = "org.matrix.msc3381.poll.end";
 
+export function archiveCommand(event: Record<string, unknown>): boolean | undefined {
+  const content = event.content as Record<string, unknown> | undefined;
+  if (event.type !== "m.room.message" || content?.msgtype !== "m.text" || typeof content.body !== "string" || content["m.new_content"] || content["m.relates_to"]) return;
+  if (content.body.trim() === "!archive") return true;
+  if (content.body.trim() === "!restore") return false;
+}
 export function interactionSpec(value: unknown): InteractionSpec {
   const input = object(value), kind = input.kind;
   if (kind !== "question" && kind !== "model" && kind !== "thinking" && kind !== "approval") throw Error("Invalid interaction kind");
@@ -53,4 +59,4 @@ export function nativeControl(text: string): { name: NativeControl; argument?: s
   if (argument && !["model", "thinking", "compact"].includes(match[1]!)) return "unknown";
   return { name: match[1] as NativeControl, ...(argument ? { argument } : {}) };
 }
-export const CONTROL_HELP = "Native Pi controls: !help, !status, !start (open idle, no model turn), !stop, !abort, !model [provider/model or filter], !thinking [level], !compact [focus], !follow-up TEXT, !steer TEXT. Local Pi remains available without Matrix.";
+export const CONTROL_HELP = "Native Pi controls: !help, !status, !start (open idle, no model turn), !stop, !abort, !model [provider/model or filter], !thinking [level], !compact [focus], !follow-up TEXT, !steer TEXT. The configured operator may use !archive / !restore (no stop, deletion or replay; fresh sync required between policy changes). Local UI: /bridge-archive /bridge-restore. Local Pi remains available without Matrix.";

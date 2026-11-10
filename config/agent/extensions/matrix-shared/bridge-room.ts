@@ -1,13 +1,13 @@
 import { isSoleRoomCreator } from "./room-creator.js";
 
 export const BRIDGE_ROOM_STAMP = "lol.bepis.pi.bridge";
-export type BridgeRoomKind = "host" | "project" | "checkout" | "conversation";
+export type BridgeRoomKind = "host" | "project" | "checkout" | "conversation" | "archive";
 export type BridgeRoomStamp = { version: 1; host: string; node: string; kind: BridgeRoomKind };
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 export function roomStamp(value: unknown): BridgeRoomStamp {
   const stamp = object(value);
   if (stamp.version !== 1 || typeof stamp.host !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(stamp.host) ||
-      typeof stamp.node !== "string" || !/^[a-f0-9]{64}$/.test(stamp.node) || !["host", "project", "checkout", "conversation"].includes(String(stamp.kind))) throw Error("Invalid native bridge room identity");
+      typeof stamp.node !== "string" || !/^[a-f0-9]{64}$/.test(stamp.node) || !["host", "project", "checkout", "conversation", "archive"].includes(String(stamp.kind))) throw Error("Invalid native bridge room identity");
   return { version: 1, host: stamp.host, node: stamp.node, kind: stamp.kind as BridgeRoomKind };
 }
 /** Shared by host setup and the account's invitation reader. Names/aliases and

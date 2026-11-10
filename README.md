@@ -35,6 +35,14 @@ unsupported media/models are explained rather than silently dropping the image
 or switching models. See the [implementation evidence](docs/matrix-pi-bridge-evidence.md)
 for tested boundaries and outstanding release work.
 
+The configured operator can send `!archive` / `!restore`; native humans can use
+`/bridge-archive` / `/bridge-restore` with UI confirmation. Archive hides the
+default picker entry and disables future remote input, not running Pi. Original
+history, membership and worktrees stay intact; grouping moves to a host Archive
+Space asynchronously. Rooms may still appear in All Rooms. Check `!status` after
+a fresh Matrix sync before another remote policy change or new restored input:
+held messages, old commands and polls never replay. There is no model archive tool.
+
 ## What This Flake Provides
 
 - the upstream `pi` CLI from `llm-agents.nix`

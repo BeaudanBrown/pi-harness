@@ -6,10 +6,11 @@ import { RemoteCheckpointSchema, renderRemoteCheckpoint, validateRemoteCheckpoin
 import { nativeControlResult, type ControlResult } from "./native-controls.js";
 import { nativeControl, type NativeControl } from "./interaction.js";
 import { readImage } from "./media.js";
+import { dispatchAllowed, type DispatchFence } from "./dispatch-fence.js";
 import { TaskWorkspaceSchema, taskKey } from "./task-contract.js";
 
 export type AdapterConfig = { socket: string; roots: string[] };
-type Scope = { ctx: ExtensionContext; file: string; nativeId: string; boundary: string; active: boolean; epoch: number; registered?: boolean; intakeReady?: boolean; compactionEpoch?: number; controlEpoch?: number; stopping?: boolean; peer?: Peer; timer?: NodeJS.Timeout; seen: Set<string>; inputs: Set<string>; preflight: Set<string>; settled: Set<string> };
+type Scope = { ctx: ExtensionContext; file: string; nativeId: string; boundary: string; active: boolean; epoch: number; archiveRevision?: number; remoteBlocked?: boolean; dispatchFence?: DispatchFence; registered?: boolean; intakeReady?: boolean; compactionEpoch?: number; controlEpoch?: number; stopping?: boolean; peer?: Peer; timer?: NodeJS.Timeout; seen: Set<string>; inputs: Set<string>; preflight: Set<string>; settled: Set<string> };
 export function interactiveProcess(): boolean {
   const args = process.argv.slice(1);
   if (process.env.PI_HARNESS_ENABLE_PI_R === "1" || process.env.PI_HARNESS_ENABLE_AGENTGRAPH === "1" || process.env.PI_HARNESS_AGENT_PROFILE && process.env.PI_HARNESS_AGENT_PROFILE !== "engineering-full") return false;
@@ -35,10 +36,19 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
     scope.ctx.sessionManager.getSessionId() === scope.nativeId && scope.ctx.sessionManager.getSessionFile() === scope.file;
   const revoke = (scope: Scope) => { scope.epoch++; scope.controlEpoch = undefined; scope.compactionEpoch = undefined; };
   const status = (scope: Scope, message: string) => { if (valid(scope)) scope.ctx.ui.setStatus("matrix-bridge", message); };
+  const archivePolicy = (scope: Scope, view: Record<string, unknown>) => {
+    const revision = Number(view.archiveRevision ?? view.revision ?? 0);
+    if (!Number.isSafeInteger(revision) || revision < (scope.archiveRevision ?? 0)) return;
+    const blocked = view.archived === true || view.resumePending === true;
+    if (scope.archiveRevision !== undefined && (scope.archiveRevision !== revision || scope.remoteBlocked !== blocked)) revoke(scope);
+    scope.archiveRevision = revision; scope.remoteBlocked = blocked;
+  };
   const remoteStatus = (scope: Scope, view: Record<string, unknown>) => {
+    archivePolicy(scope, view);
+    if (typeof view.dispatchLedger === "string" && typeof view.key === "string") scope.dispatchFence = { ledger: hostPath(view.dispatchLedger), binding: string(view.key, 64), file: scope.file, nativeId: scope.nativeId };
     scope.intakeReady = view.intakeReady === true;
     const setup = object(view.setup ?? {});
-    status(scope, view.syncError || view.error ? "Bridge connected · remote delivery needs attention" : !view.room ? "Bridge connected · room setup pending" :
+    status(scope, view.archived ? "Archived · local Pi available; existing work may finish" : view.resumePending ? "Restored · fresh Matrix sync pending" : view.syncError || view.error ? "Bridge connected · remote delivery needs attention" : !view.room ? "Bridge connected · room setup pending" :
       setup.stage && setup.stage !== "ready" ? `Matrix bridge connected · ${string(setup.stage, 16)} setup pending` : "Matrix bridge connected");
   };
   const activity = async (scope: Scope, peer: Peer) => {
@@ -54,8 +64,10 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
     try {
       const peer = await connect(cfg.socket, async (method, params) => {
         if (!valid(scope, peer)) throw Error("Native session changed or bridge disconnected");
+        if (method === "archive-policy") { archivePolicy(scope, params); return {}; }
         if (method !== "input") throw Error("Unknown native adapter operation");
-        const id = string(params.id, 255), epoch = scope.epoch;
+        if (typeof params.archived === "boolean") archivePolicy(scope, params);
+        const id = string(params.id, 255), epoch = scope.epoch, revision = scope.archiveRevision ?? 0;
         // A live adapter also deduplicates across reconnects. The daemon never
         // retries uncertain input; this guard is not an execution receipt.
         if (scope.seen.has(id)) return { accepted: false, duplicate: true };
@@ -71,7 +83,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
         const input = object(JSON.parse(serialized)); scope.intakeReady = true;
         const text = string(input.text, Number.MAX_SAFE_INTEGER), sender = string(input.sender, 255);
         if (!valid(scope, peer) || scope.stopping) throw Error("Input connection changed or native stop is pending");
-        const live = () => valid(scope, peer) && scope.epoch === epoch && !scope.stopping;
+        const live = () => valid(scope, peer) && scope.epoch === epoch && !scope.stopping && !scope.remoteBlocked && dispatchAllowed(scope.dispatchFence, revision);
         const publishControl = (result: ControlResult) => { if (live()) pi.appendEntry("matrix-bridge.control", { nativeId: scope.nativeId, input: id, sender, result }); };
         if (input.control !== undefined) {
           const command = string(input.control, 32) as NativeControl;
@@ -119,13 +131,14 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
           const timer = setTimeout(() => reject(Error("Native preflight did not settle")), 8000);
           // The callback is a native dispatch/preflight result, never a claim
           // about completion or external tool effects.
-          const delivery: NonNullable<Parameters<ExtensionAPI["sendUserMessage"]>[1]> & { preflightResult: (success: boolean) => void; userMessageMetadata: Readonly<Record<string, string>> } = {
+          const delivery: NonNullable<Parameters<ExtensionAPI["sendUserMessage"]>[1]> & { preflightResult: (success: boolean) => void; userMessageMetadata: Readonly<Record<string, string>>; queuedPreflight: () => boolean } = {
             deliverAs: input.deliverAs === "followUp" ? "followUp" : "steer", expandPromptTemplates: !image,
             onPromptExpanded: expanded => {
               if (!live() || !questionOpen() || image && !scope.ctx.model?.input.includes("image")) throw Error("Native question, model or input changed during preflight");
               if (question) pi.appendEntry("matrix-bridge.answer", { nativeId: scope.nativeId, question, input: id });
               return image ? expanded : remoteText(sender, id, expanded);
             },
+            queuedPreflight: live,
             userMessageMetadata: { "pi.bridge.event": id, "pi.bridge.sender": sender },
             preflightResult: accepted => { clearTimeout(timer); scope.preflight.delete(id); if (!accepted) scope.inputs.delete(id); resolve({ accepted }); },
             onQueuedMessageRemoved: () => {
@@ -188,6 +201,19 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
     } catch { ctx.ui.setStatus("matrix-bridge", "Matrix offline · local Pi available"); }
   };
   const toolsAvailable = (options.config || process.env.PI_MATRIX_BRIDGE_UI_CONFIG) && eligible() && process.env.PI_BRIDGE_LOCAL_ONLY !== "1" && process.env.PI_HARNESS_LOCAL_ONLY !== "1";
+  if (toolsAvailable) for (const [name, archived] of [["bridge-archive", true], ["bridge-restore", false]] as const) pi.registerCommand(name, {
+    description: `${archived ? "Archive" : "Restore"} this Matrix conversation after a native human confirmation; never stop Pi or replay input.`,
+    handler: async (_args, ctx) => {
+      const scope = current, peer = scope?.peer;
+      if (!scope || !peer || !scope.registered || !ctx.hasUI || !valid(scope, peer)) throw Error("No connected native binding; local Pi remains available");
+      const epoch = scope.epoch;
+      const live = () => valid(scope, peer) && scope.epoch === epoch && ctx.sessionManager.getSessionId() === scope.nativeId;
+      const view = object(await peer.request("archive.status", {})); if (!live()) return;
+      const accepted = await ctx.ui.confirm(archived ? "Archive this conversation?" : "Restore this conversation?", "History, membership, worktree and running Pi are retained. No stop or replay. Archive hides the default picker entry and disables future remote input. Restore requires a fresh Matrix sync; grouping updates asynchronously. The room may remain visible in All Rooms.");
+      if (!accepted || !live()) return;
+      remoteStatus(scope, object(await peer.request("archive.set", { archived, revision: Number(view.archiveRevision ?? 0) })));
+    },
+  });
   if (toolsAvailable) pi.registerTool({
     name: "remote_checkpoint", label: "Remote Checkpoint", description: "Record a durable question, blocker or completion boundary for this native session's Matrix room, then stop the current run pending fresh input.",
     promptSnippet: "Use only for an intentional question, blocker or issue-completion approval boundary, not routine progress.",

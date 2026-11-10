@@ -89,6 +89,12 @@ bounded task/provisioning progress. Do not sync the database across hosts. Priva
 scratch locks/window observations are reconstructible, not additional lifecycle
 stores. Runtime ownership must be proved at the actual native writer seam,
 including switch/fork/reload, crashes and child descriptor inheritance.
+The native adapter may synchronously read only its own binding's dispatch policy
+from this same database at remote handoff/queue consumption: asynchronous socket
+notifications alone cannot fence a concurrent archive commit. Use a fresh read-only
+connection with no lock wait; missing, unsafe or unavailable policy rejects remote
+input, never ordinary local Pi, an already active run, or local queued input. This
+is no second store, write capability or process/launch admission authority.
 
 Persist input before advancing sync. Only queued-before-handoff input can retry
 automatically. Commit the potentially-dispatched state before sending to Pi;
