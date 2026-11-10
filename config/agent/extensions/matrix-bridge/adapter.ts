@@ -6,6 +6,7 @@ import { RemoteCheckpointSchema, renderRemoteCheckpoint, validateRemoteCheckpoin
 import { nativeControlResult, type ControlResult } from "./native-controls.js";
 import { nativeControl, type NativeControl } from "./interaction.js";
 import { readImage } from "./media.js";
+import { TaskWorkspaceSchema, taskKey } from "./task-contract.js";
 
 export type AdapterConfig = { socket: string; roots: string[] };
 type Scope = { ctx: ExtensionContext; file: string; nativeId: string; boundary: string; active: boolean; epoch: number; registered?: boolean; intakeReady?: boolean; compactionEpoch?: number; controlEpoch?: number; stopping?: boolean; peer?: Peer; timer?: NodeJS.Timeout; seen: Set<string>; inputs: Set<string>; preflight: Set<string>; settled: Set<string> };
@@ -186,7 +187,8 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
       current = scope; void attach(scope, cfg);
     } catch { ctx.ui.setStatus("matrix-bridge", "Matrix offline · local Pi available"); }
   };
-  if ((options.config || process.env.PI_MATRIX_BRIDGE_UI_CONFIG) && eligible() && process.env.PI_BRIDGE_LOCAL_ONLY !== "1" && process.env.PI_HARNESS_LOCAL_ONLY !== "1") pi.registerTool({
+  const toolsAvailable = (options.config || process.env.PI_MATRIX_BRIDGE_UI_CONFIG) && eligible() && process.env.PI_BRIDGE_LOCAL_ONLY !== "1" && process.env.PI_HARNESS_LOCAL_ONLY !== "1";
+  if (toolsAvailable) pi.registerTool({
     name: "remote_checkpoint", label: "Remote Checkpoint", description: "Record a durable question, blocker or completion boundary for this native session's Matrix room, then stop the current run pending fresh input.",
     promptSnippet: "Use only for an intentional question, blocker or issue-completion approval boundary, not routine progress.",
     promptGuidelines: ["Do not mirror routine progress, thinking, tool activity or ordinary terminal answers to Matrix.", "Issue completion needs implementation, verification, caveats, Git state and an exact approval request.", "Omit code and diffs unless explicitly requested by the operator."],
@@ -197,6 +199,47 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
       pi.appendEntry("matrix-bridge.question", { nativeId: scope.nativeId, checkpoint });
       const entry = ctx.sessionManager.getLeafId(); revoke(scope); ctx.abort();
       return { content: [{ type: "text", text: "Checkpoint recorded in native history. Matrix publication is asynchronous; the run is stopped pending fresh input." }], details: { entry, waiting: true } };
+    },
+  });
+  if (toolsAvailable) pi.registerTool({
+    name: "create_task_workspace", label: "Create Task Workspace",
+    description: "Request a separately approved new Git branch/linked worktree and saved native Pi conversation containing only the explicit handoff. The child remains idle; exact-intent retries reuse the frozen base and owned resources.",
+    promptSnippet: "Use for an independently approved task-workspace handoff, never to start task execution.",
+    promptGuidelines: ["Use this narrow operation, not a shell or a general host dispatcher, for a model-requested task workspace.",
+      "The natural-language request, model claims and ordinary question votes are not approval. Each distinct intent needs a separate local human confirmation or the original configured-operator approval poll.",
+      "Do not copy raw history, hidden output, credentials, pending approvals or uncommitted files into the summary. Do not begin work in the child; a later human instruction is separate intent."],
+    parameters: TaskWorkspaceSchema,
+    execute: async (callId, intent, signal, _onUpdate, ctx) => {
+      const scope = current, peer = scope?.peer;
+      if (!scope || !peer || !scope.registered || !valid(scope, peer) || ctx.sessionManager.getSessionId() !== scope.nativeId) throw Error("No registered native binding for task creation; local Pi remains available");
+      const epoch = scope.epoch, leaf = ctx.sessionManager.getLeafId();
+      const live = () => valid(scope, peer) && scope.epoch === epoch && !scope.stopping && !signal?.aborted &&
+        (!leaf || ctx.sessionManager.getBranch().some(entry => entry.id === leaf));
+      const user = [...ctx.sessionManager.getBranch()].reverse().find(entry => entry.type === "message" && entry.message.role === "user");
+      const origin = user?.type === "message" ? user.message as unknown as Record<string, unknown> : {};
+      const metadata = object(origin.metadata ?? {});
+      const surface = ctx.hasUI && typeof metadata["pi.bridge.event"] !== "string" ? "local" : "matrix";
+      let view = object(await peer.request("task.prepare", { intent, call: `${leaf ?? "root"}:${callId}`, surface }, 30000));
+      if (!live()) throw Error("Task proposal became stale before local confirmation; no local approval was submitted");
+      const key = taskKey(view.key), request = taskKey(view.request);
+      pi.appendEntry("matrix-bridge.task-request", { nativeId: scope.nativeId, key, request });
+      if (surface === "matrix" && view.phase === "approval") {
+        view = object(await peer.request("task.publish-approval", { key, request }));
+        if (!live()) throw Error("Native context changed after approval publication. Inspect the original poll rather than assuming cancellation.");
+      }
+      if (surface === "local" && view.phase === "approval") {
+        const accepted = await ctx.ui.confirm("Create task workspace?", `${string(view.approvalText, 8000)}\n\nWorkspace: ${string(view.cwd)}\nNative history: ${string(view.file)}`, { signal });
+        if (!live()) throw Error("Local task confirmation was withdrawn before submission");
+        // The boolean comes from this native UI callback, never model arguments.
+        view = object(await peer.request("task.confirm-local", { key, request, accepted }, 60000));
+        if (!live()) throw Error("Native context changed after the decision; an approved creation may still complete. Inspect the original conversation rather than assuming cancellation.");
+      }
+      const message = view.localReady === true ? `Task workspace and saved native session are ready. No child model turn was started. ${view.remotePending === true ? "Remote setup is pending." : "Remote setup has completed."} Use a separate fresh human instruction in the child when ready.` :
+        view.phase === "approval" ? "Task proposal recorded. The configured operator must independently approve the original poll (or reply directly with Approve/Cancel). No task execution was started." :
+        view.phase === "declined" ? "Task proposal declined or expired. No creation was dispatched by this decision." :
+        typeof view.error === "string" ? string(view.error, 1000) : "Approved creation is still pending; partial resources are preserved. No child model turn was started.";
+      revoke(scope); ctx.abort();
+      return { content: [{ type: "text", text: message }], details: { ...view, waiting: true } };
     },
   });
   pi.on("session_start", (_event, ctx) => { start(ctx); });

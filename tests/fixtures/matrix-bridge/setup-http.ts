@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { MatrixHttp } from "../../../config/agent/extensions/matrix-shared/http.js";
 import { BRIDGE_ROOM_STAMP } from "../../../config/agent/extensions/matrix-shared/bridge-room.js";
 
@@ -7,6 +8,8 @@ export const BOT = "@bot:example.test", OWNER = "@owner:example.test";
 export class SetupHttp {
   readonly rooms = new Map<string, Event[]>();
   readonly aliases = new Map<string, string>();
+  readonly sent = new Map<string, { event_id: string; room_id: string; type: string; sender: string; content: Record<string, unknown> }>();
+  outage = false;
   readonly calls: Array<{ method: string; path: string; body?: Record<string, unknown>; actor: string }> = [];
   createFailure?: "before" | "after";
   linkFailure = false;
@@ -38,6 +41,7 @@ export class SetupHttp {
     const actor = new Headers(init?.headers).get("Authorization") === "Bearer owner" ? OWNER : BOT;
     const body = init?.body ? JSON.parse(String(init.body)) as Record<string, unknown> : undefined;
     this.calls.push({ method, path, body, actor });
+    if (this.outage) throw Error("Mock Matrix transport is offline");
     const response = (value: unknown, status = 200) => new Response(JSON.stringify(value), { status });
     if (this.rejectOnce && path.endsWith(this.rejectOnce.suffix)) {
       const rejection = this.rejectOnce; this.rejectOnce = undefined;
@@ -75,6 +79,12 @@ export class SetupHttp {
     }
     const parts = path.split("/").map(decodeURIComponent), room = parts[5]!, events = this.rooms.get(room);
     if (!events) return response({ errcode: "M_NOT_FOUND" }, 404);
+    if (parts[6] === "send") {
+      const transaction = parts[8]!, previous = this.sent.get(transaction);
+      if (previous) assert.deepEqual(previous.content, body, "frozen send changed during retry");
+      const event = previous ?? { event_id: `$sent${++this.serial}`, room_id: room, type: parts[7]!, sender: actor, content: body! };
+      this.sent.set(transaction, event); return response({ event_id: event.event_id });
+    }
     if (parts[6] === "invite") {
       this.member(room, "invite", actor);
       if (this.inviteFailure) { this.inviteFailure = false; throw Error("lost invite acknowledgement"); }

@@ -80,13 +80,29 @@ test("schema-one upgrade preserves durable delivery facts and advances the versi
     store.close();
     // Reconstitute the exact prior additive schema, not a production downgrade.
     const prior = new DatabaseSync(file);
-    prior.exec("DROP TABLE images; DROP TABLE interactions; DROP INDEX output_receipt; ALTER TABLE inputs DROP COLUMN interaction; UPDATE meta SET value='1' WHERE key='version'"); prior.close();
+    prior.exec("DROP TABLE tasks; DROP TABLE images; DROP TABLE interactions; DROP INDEX output_receipt; ALTER TABLE inputs DROP COLUMN interaction; UPDATE meta SET value='1' WHERE key='version'"); prior.close();
     store = new BridgeStore(file, "host");
     assert.equal(store.cursor(), "saved-cursor"); assert.equal(store.binding(binding.key)?.boundary, "boundary");
     assert.equal(store.nextInput(binding.key)?.prompt?.text, "preserved"); assert.deepEqual(store.outputs(binding.key)[0], output);
     const inspect = new DatabaseSync(file, { readOnly: true });
-    assert.equal(inspect.prepare("SELECT value FROM meta WHERE key='version'").get()!.value, "2"); inspect.close();
+    assert.equal(inspect.prepare("SELECT value FROM meta WHERE key='version'").get()!.value, "3"); inspect.close();
     assert.throws(() => new BridgeStore(file, "wrong-host"), /another host/);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("schema-two upgrade preserves interaction, media, output and cursor identities while adding task creation", () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-upgrade-two-")), file = join(root, "bridge.sqlite"); let store = new BridgeStore(file, "host");
+  try {
+    const binding = store.register({ file: "/p/native.jsonl", nativeId: "native", cwd: "/p", title: "Task", boundary: "boundary" }); store.setRoom(binding.key, "!room:example.test");
+    const question = store.offerInteraction(binding.key, "question", { kind: "question", nativeEntry: "question", question: "Keep?", options: ["Yes", "No"] });
+    const output = store.outputs(binding.key)[0]!; store.sent(output.id, "$original-poll");
+    const bytes = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+    store.intake("saved-cursor-two", [{ id: "$image", room: "!room:example.test", event: {} }]); store.authorize("$image", { text: "caption", sender: "@friend:example.test", image: imageInfo(bytes) }, { image: bytes });
+    store.saveProgress("setup:original", { room: "!room:example.test", stage: "invitation" }); store.close();
+    const prior = new DatabaseSync(file); prior.exec("DROP TABLE tasks; UPDATE meta SET value='2' WHERE key='version'"); prior.close();
+    store = new BridgeStore(file, "host"); assert.equal(store.cursor(), "saved-cursor-two"); assert.deepEqual(store.interaction(question.id), question);
+    assert.equal(store.outputs(binding.key, `interaction:${question.id}`)[0]!.eventId, "$original-poll"); assert.equal(store.takeInput(binding.key)?.id, "$image");
+    assert.deepEqual(Buffer.from(store.imageChunk(binding.key, "$image", 0).data, "base64"), bytes); assert.deepEqual(store.progress("setup:original"), { room: "!room:example.test", stage: "invitation" }); assert.deepEqual(store.tasks(["approval"]), []);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 

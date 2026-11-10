@@ -55,7 +55,7 @@ let
   sessionDirectoryEnabled = cfg.sessionDirectory != null;
   managedSessionsEnabled = cfg.managedSessions.enable;
   bridge = import ./matrix-bridge-service.nix {
-    inherit lib pkgs;
+    inherit lib pkgs pinRuntime;
     cfg = cfg.matrixBridge;
     harnessPackage = cfg.package;
     nativeLauncher = nativePiWithRuntime;

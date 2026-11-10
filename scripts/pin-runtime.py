@@ -45,7 +45,13 @@ def main():
     finally:
         # SIGKILL can leave a stale root. Prefer retention to deleting a closure
         # still needed by an orphan. Explicit maintenance may remove dead pins.
-        if child is None or child.poll() is not None:
+        # A failed finite task helper may have transferred a Git-effect lease
+        # to a surviving waiter. Do not unroot that closure on uncertain exit;
+        # explicit maintenance can remove the conservative pin later. Ordinary
+        # Pi retains its existing lifetime policy, with no process inspection.
+        retain = os.environ.get("PI_RUNTIME_RETAIN_ON_FAILURE") == "1"
+        uncertain = child is not None and child.poll() not in (None, 0)
+        if (child is None or child.poll() is not None) and not (retain and uncertain):
             root.unlink(missing_ok=True)
             directory.rmdir()
 

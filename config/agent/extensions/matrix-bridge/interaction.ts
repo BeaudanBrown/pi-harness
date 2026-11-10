@@ -1,13 +1,13 @@
 import { object, string } from "./wire.js";
 
 export type NativeControl = "help" | "status" | "start" | "stop" | "abort" | "model" | "thinking" | "compact";
-export type InteractionSpec = { kind: "question" | "model" | "thinking"; question: string; options?: string[]; nativeEntry?: string };
+export type InteractionSpec = { kind: "question" | "model" | "thinking" | "approval"; question: string; options?: string[]; nativeEntry?: string; approval?: string };
 export type Interaction = InteractionSpec & { id: string; binding: string; source: string; state: "active" | "answered" | "cancelled"; answer?: string };
 export const POLL_START = "org.matrix.msc3381.poll.start", POLL_RESPONSE = "org.matrix.msc3381.poll.response", POLL_END = "org.matrix.msc3381.poll.end";
 
 export function interactionSpec(value: unknown): InteractionSpec {
   const input = object(value), kind = input.kind;
-  if (kind !== "question" && kind !== "model" && kind !== "thinking") throw Error("Invalid interaction kind");
+  if (kind !== "question" && kind !== "model" && kind !== "thinking" && kind !== "approval") throw Error("Invalid interaction kind");
   const question = string(input.question, 8000);
   let options: string[] | undefined;
   if (input.options !== undefined) {
@@ -15,14 +15,19 @@ export function interactionSpec(value: unknown): InteractionSpec {
     options = input.options.map(option => string(option, 1024));
     if (new Set(options).size !== options.length) throw Error("Duplicate interaction choices");
   }
-  const spec: InteractionSpec = { kind, question, ...(options ? { options } : {}), ...(input.nativeEntry !== undefined ? { nativeEntry: string(input.nativeEntry, 128) } : {}) };
+  let approval: string | undefined;
+  if (kind === "approval") {
+    approval = string(input.approval, 64);
+    if (!/^[a-f0-9]{64}$/.test(approval) || JSON.stringify(options) !== JSON.stringify(["Approve", "Cancel"]) || input.nativeEntry !== undefined) throw Error("Invalid approval interaction");
+  } else if (input.approval !== undefined) throw Error("Approval identity is not a native question or preference");
+  const spec: InteractionSpec = { kind, question, ...(options ? { options } : {}), ...(input.nativeEntry !== undefined ? { nativeEntry: string(input.nativeEntry, 128) } : {}), ...(approval ? { approval } : {}) };
   if (Buffer.byteLength(JSON.stringify(pollStart(spec)), "utf8") > 60000) throw Error("Interaction exceeds one Matrix event; narrow the choices");
   return spec;
 }
 export function pollStart(spec: InteractionSpec): { type: string; content: Record<string, unknown> } {
   if (!spec.options) return { type: "m.room.message", content: { msgtype: "m.notice", body: spec.question, "m.mentions": {} } };
   return { type: POLL_START, content: {
-    "m.mentions": {}, "org.matrix.msc1767.text": [spec.question, ...spec.options.map((option, index) => `${index + 1}. ${option}`), "Reply with text if polls are unavailable."].join("\n"),
+    "m.mentions": {}, "org.matrix.msc1767.text": [spec.question, ...spec.options.map((option, index) => `${index + 1}. ${option}`), spec.kind === "approval" ? "The configured operator may reply directly with Approve or Cancel if polls are unavailable." : "Reply with text if polls are unavailable."].join("\n"),
     [POLL_START]: { kind: "org.matrix.msc3381.poll.disclosed", max_selections: 1, question: { "org.matrix.msc1767.text": spec.question },
       answers: spec.options.map((option, index) => ({ id: `answer-${index}`, "org.matrix.msc1767.text": option })) },
   } };

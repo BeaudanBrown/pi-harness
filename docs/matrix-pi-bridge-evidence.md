@@ -493,6 +493,108 @@ text changed after the passing gate. Final isolated production packages (`pi`,
 
 No production mutation, migration, restart, push or rollout evidence is implied.
 
+### #167 preflight: approved task workspace and idle handoff
+
+Current scope is one typed `create_task_workspace(branch, base_ref, title,
+handoff_summary)` operation, inferred from its calling native binding. There is
+no coordinator, general host dispatcher, launch admission record, worktree
+removal, branch deletion, merge, fetch, push or production creation. #168 owns
+archive effects; #169 migration; #170 deletion; #171 cumulative release.
+
+| Acceptance | Intended seam | Required evidence |
+| --- | --- | --- |
+| Independent per-call approval | Freeze source/intent/base commit before approval; native local confirmation or an explicit original approval poll accepted only from the configured current operator, never a model argument or arbitrary collaborator answer | Actual native tool/UI boundary and Matrix approval fixtures; rejection, stale/changed intent, duplicate/cross-binding vote, expired approval and missing source |
+| Safe linked worktree/new branch | Fixed-argv, project-environment-aware local helper; serialize by Git common directory; positively identified owned partial resources only | Real disposable Git, dirty source unchanged, same/different concurrent intent, occupied branch/path, symlinks, project direnv and no force/reset/delete/fetch |
+| Native idle visible handoff | New file/header identity and explicit visible summary only; no native agent turn or automatic child launch | Actual SDK/native Pi open plus idle evidence; no copied source dirt/history/hidden output/credentials/approvals; later human prompt is separate intent |
+| Small durable creation record | Frozen key/source/base/branch/path/native identity and approval receipt; idempotent reconciliation of owned effects | Crash after every effect and before its receipt, lost response/reopen, unchanged intent reuses resources, altered intent cannot reuse approval |
+| Background remote organization | Register child binding and enqueue existing room/Space/invitation setup; local ready is independent of Matrix/NAS delivery | Matrix outage after approval returns local ready/remote pending; recovery exposes the same room link without recreating Git/session resources |
+
+Crash analysis: creation intent/base/identity precede mutation; independent
+approval is durable before Git effects; branch and directory/worktree ownership
+must be provable after lost acknowledgement (existence or matching HEAD alone is
+not ownership). Source/common-directory/target validation is repeated before
+mutation. Native child content is durable before registration; registration is
+idempotent by native identity. Unknown filesystem/Git outcomes are reconciled
+from owned evidence, never by force, reset, deletion or adoption of foreign work.
+The source remains the same conversation/worktree. Matrix publication is outside
+the local creation critical section. Approval/creation state is distinct from
+native process ownership; local Pi remains usable without the optional bridge.
+
+Implementation now provides one finite task helper and one small SQLite creation
+record, not a process registry. Exact intent reuses its frozen commit and native
+identity. Different intent requires new approval. Preparation does not publish
+an approval poll: the native caller first rechecks its call/abort/branch scope,
+then requests publication. Originating persisted history is projected before
+that poll. Approval is durable before any creation; current configured-operator
+membership/identity is distinct from ordinary joined-member conversation access.
+
+| Implemented boundary | Evidence before final review |
+| --- | --- |
+| Native local UI / Matrix authority | Actual packaged Pi calls the real tool using a deterministic provider. Aborted UI and a late response cannot grant; a fresh call with the same model tool-call ID gets a new request. Matrix-origin metadata selects the original operator poll; participant votes never create or become model prompts. |
+| Idle child / discovery | Real SDK-generated history contains only explicit visible handoff/context markers. Offline packaged `pi-session list` finds it without a ledger. Actual Pi opens it with zero provider calls; a separate child human prompt produces the first call and never enters the source session. |
+| Git ownership / concurrency | Real Git rejects occupied and dangling-symbolic refs, foreign directories/symlinks, changed plans and missing sources. Source dirt/history stay unchanged. Same-process duplicates and different intents serialize by common directory; completed retries preserve later human commits. |
+| Crash boundaries | SIGKILL before container/native publication and after container/branch/worktree/session; owned resources recover without replacement. A real blocked Git hook survives creator death: the inherited Git lease blocks reconciliation, does not reach hooks, and ignored diagnostics avoid parent-loss SIGPIPE. |
+| Approval / recovery / outage | Eight service cases use packaged helper, SQLite reopen and mock HTTP: current operator, expiry, supersession, cancellation, unpublished drafts, binding affinity, independent local UI, fixed base, lost result and room acknowledgement, local-ready/remote-pending and eventual same room/link. Missing completed resources are reported, not recreated. |
+| Environment / framing / retention | Trusted real direnv allow-journal/PATH reaches Git/hooks only. Host interpreter/SDK/locks/native root cannot be redirected by project exports; daemon credentials are absent. Bounded malformed helper replies do not expose stderr or kill possible effects. Native JSON decoding retains split UTF-8. Failed approved creator wrappers conservatively retain their runtime root for possible orphan Git work; no PID inspection/cleanup service. |
+| Additive ledger upgrade | Both schema-one and schema-two reopen preserve cursor, binding, queued input, frozen transaction/receipt, question, media chunks and setup identity while adding task state. |
+
+Red/green findings included the missing atomic no-replace primitive, dangling
+symbolic-ref mutation, rejection of completed retries after human commits, native
+metadata read at the wrong level, and originating-history cancellation of a fresh
+approval. The real-native test exposed both approval integration defects. A
+trusted project fixture also exposed the missing `XDG_DATA_HOME` allow-journal
+path; sanitation now preserves that noncredential configuration location.
+`renameat2(RENAME_NOREPLACE)` fails closed without an unsafe rename fallback.
+A separate non-refcounted setup lock and a pre-acquired FD transferred atomically
+to the finite Git waiter close the same-process and pre-child-lock gaps. The
+waiter starts with the host environment, receives bounded project Git data, and
+does not cancel an approved Git effect merely because its caller disappeared.
+
+Focused evidence: 18 task-worker cases, 8 approval/service, 5 actual-Pi cases,
+6 store cases, 5 launch/protocol cases and 5 runtime-pin policy cases have passed
+in their recorded runs (overlapping suites are not additive new coverage).
+All five native filesystem cases passed in the affected gate. Broader affected
+checks passed **220 unit + 127 chat**, source/module/package contracts and fresh
+TypeScript compilation, with zero skips; six source/both-host evaluations passed.
+The final cross-process conflicting-intent regression also passed before review.
+Editor-only C `node_api.h` and stale TypeScript module-resolution diagnostics do
+not reproduce in actual Nix compilation.
+
+Key worker artifacts under `.pi/tmp/workers/`:
+- `2026-11-10T15-08-41-319Z-native-167-task-ownership-red-e86f31cd17e4`
+- `2026-11-10T15-26-47-729Z-native-167-task-ownership-green-2ed33c54acdc`
+- `2026-11-10T15-53-22-093Z-native-167-actual-ui-and-origin-red-63ade05171fc`
+- `2026-11-10T15-57-01-525Z-native-167-actual-approval-order-red-5dd3728da2e4`
+- `2026-11-10T16-01-15-862Z-native-167-actual-approval-green-aab883767bf7`
+- `2026-11-10T16-21-21-383Z-native-167-process-death-boundaries-85c5854c5ff6`
+- `2026-11-10T16-28-34-316Z-native-167-project-environment-red-4c21bc1a7881`
+- `2026-11-10T16-31-48-737Z-native-167-environment-crash-protocol-green-bf3c2eb58557`
+- `2026-11-10T16-29-24-830Z-native-167-runtime-pin-policy-19e637667925`
+- `2026-11-10T16-32-24-820Z-native-167-affected-gates-fc31986d4ae3`
+- `2026-11-10T16-32-24-820Z-native-167-consuming-host-evaluation-4dbef4ffb6ef`
+
+These are disposable-process/Git/SQLite/native SDK and authenticated-HTTP-boundary
+fixtures, not live Matrix/NAS delivery, actual power-loss testing, or production
+creation. Conservative failed-creator GC pins can require explicit maintenance;
+they never reserve launch or require a bridge repair. Paired pinned review (`2026-11-10T16-36-50-040Z-worktree-c432773fb309-5e6d879af293`,
+fixed point `6a483af`) reported no Standards findings and one low current-issue
+Spec finding: the evidence's pre-final test count was 17 instead of 18. Corrected;
+no current-scope finding remains.
+
+Final `nix run -L .#verify` passed all twelve gates: **221 unit, 127 chat and
+856 legacy tests**, zero skips. Its first attempt passed the native/other gates
+but hit one unchanged legacy coordinator test's cleanup `ENOTEMPTY`; three
+exact-artifact focused repetitions and the unchanged canonical rerun passed.
+The initial cause remains unproven; no assertions, timeouts, concurrency or
+legacy production code were weakened. This is separate from the retained #166
+timing caveat. Final isolated Pi/bridge/chat/harness packages also passed.
+Only this evidence text changed after the final code gate.
+Artifacts: `2026-11-10T16-38-56-504Z-native-167-canonical-boundary-1c7a007f9fe2`,
+`2026-11-10T16-43-10-922Z-native-167-legacy-cleanup-isolation-ac9b42158051`,
+`2026-11-10T16-43-17-877Z-native-167-canonical-recheck-87f8a3935d59`, and
+`2026-11-10T16-45-34-808Z-native-167-final-packages-5164a8069414`.
+No production creation is authorized.
+
 ## Rebuild and migration readiness
 
 Pending implementation and cumulative verification. Do not run a host switch merely

@@ -4,6 +4,7 @@ import { dirname } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { IMAGE_CHUNK_BYTES } from "./wire.js";
 import { interactionSpec, pollStart, pollEnd, POLL_START, type Interaction, type InteractionSpec, type NativeControl } from "./interaction.js";
+import { taskApprovalText, type TaskRecord } from "./task-contract.js";
 
 export type SessionRegistration = { file: string; nativeId: string; cwd: string; title: string; boundary: string | null };
 export type Binding = SessionRegistration & { key: string; room?: string; archived: boolean; enabled: boolean; grouping?: Record<string, string> };
@@ -37,7 +38,7 @@ export class BridgeStore {
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
       const oldHost = this.getMeta("host"), version = this.getMeta("version");
       if (oldHost !== undefined && oldHost !== hostId) throw Error("Bridge database belongs to another host");
-      if (version !== undefined && !["1", "2"].includes(version)) throw Error("Unsupported bridge database version");
+      if (version !== undefined && !["1", "2", "3"].includes(version)) throw Error("Unsupported bridge database version");
       this.db.exec(`CREATE TABLE IF NOT EXISTS bindings(key TEXT PRIMARY KEY, file TEXT NOT NULL UNIQUE, room TEXT UNIQUE, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS inputs(id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), position INTEGER NOT NULL,
           event TEXT NOT NULL, prompt TEXT, state TEXT NOT NULL CHECK(state IN ('received','queued','handed','settled','interrupted','ignored')));
@@ -50,14 +51,16 @@ export class BridgeStore {
         const oldHost = this.getMeta("host");
         if (oldHost !== undefined && oldHost !== hostId) throw Error("Bridge database belongs to another host");
         const version = this.getMeta("version");
-        if (version !== undefined && !["1", "2"].includes(version)) throw Error("Unsupported bridge database version");
+        if (version !== undefined && !["1", "2", "3"].includes(version)) throw Error("Unsupported bridge database version");
         if (!this.db.prepare("PRAGMA table_info(inputs)").all().some(column => column.name === "interaction")) this.db.exec("ALTER TABLE inputs ADD COLUMN interaction TEXT");
         this.db.exec(`CREATE TABLE IF NOT EXISTS interactions(id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), source TEXT NOT NULL, value TEXT NOT NULL,
           state TEXT NOT NULL CHECK(state IN ('active','answered','cancelled')), answer TEXT, UNIQUE(binding,source));
           CREATE INDEX IF NOT EXISTS interaction_state ON interactions(binding,state);
           CREATE INDEX IF NOT EXISTS output_receipt ON outputs(event_id) WHERE event_id IS NOT NULL;
-          CREATE TABLE IF NOT EXISTS images(input TEXT NOT NULL REFERENCES inputs(id), offset INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(input,offset));`);
-        this.setMeta("host", hostId); this.setMeta("version", "2");
+          CREATE TABLE IF NOT EXISTS images(input TEXT NOT NULL REFERENCES inputs(id), offset INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(input,offset));
+          CREATE TABLE IF NOT EXISTS tasks(key TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), phase TEXT NOT NULL, value TEXT NOT NULL);
+          CREATE INDEX IF NOT EXISTS task_phase ON tasks(phase);`);
+        this.setMeta("host", hostId); this.setMeta("version", "3");
         this.db.exec("UPDATE inputs SET state='interrupted' WHERE state='handed'");
       });
     } catch (error) { this.db.close(); throw error; }
@@ -233,17 +236,72 @@ export class BridgeStore {
     return this.decodeInteraction(this.db.prepare("SELECT interactions.* FROM interactions JOIN outputs ON outputs.source='interaction:' || interactions.id AND outputs.binding=interactions.binding WHERE interactions.binding=? AND outputs.event_id=?").get(key, eventId));
   }
   offerInteraction(key: string, source: string, value: InteractionSpec): Interaction {
+    return this.atomic(() => this.materializeInteraction(key, source, value));
+  }
+  private materializeInteraction(key: string, source: string, value: InteractionSpec): Interaction {
+    const id = identity("interaction", key, source), existing = this.interaction(id); if (existing) return existing;
+    const spec = interactionSpec(value);
+    this.cancelInteractions(key);
+    if (spec.nativeEntry) {
+      this.saveProgress(`question-cutoff:${key}`, Number(this.getMeta("position") ?? 0));
+      this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state='queued'").run(key);
+    }
+    this.db.prepare("INSERT INTO interactions VALUES (?,?,?,?,'active',NULL)").run(id, key, source, JSON.stringify(spec));
+    this.materialize(key, `interaction:${id}`, [pollStart(spec)]);
+    return this.interaction(id)!;
+  }
+  task(key: string): TaskRecord | undefined {
+    const row = this.db.prepare("SELECT value FROM tasks WHERE key=?").get(key); return row ? JSON.parse(String(row.value)) as TaskRecord : undefined;
+  }
+  tasks(phases: TaskRecord["phase"][]): TaskRecord[] {
+    return this.db.prepare(`SELECT value FROM tasks WHERE phase IN (${phases.map(() => "?").join(",")}) ORDER BY rowid LIMIT 100`).all(...phases).map(row => JSON.parse(String(row.value)) as TaskRecord);
+  }
+  saveTask(record: TaskRecord): void {
+    const old = this.task(record.plan.key);
+    if (!old || JSON.stringify(old.plan) !== JSON.stringify(record.plan)) throw Error("Frozen task identity is immutable");
+    this.db.prepare("UPDATE tasks SET phase=?,value=? WHERE key=?").run(record.phase, JSON.stringify(record), record.plan.key);
+  }
+  requestTask(record: TaskRecord): TaskRecord {
     return this.atomic(() => {
-      const id = identity("interaction", key, source), existing = this.interaction(id); if (existing) return existing;
-      const spec = interactionSpec(value);
-      this.cancelInteractions(key);
-      if (spec.nativeEntry) {
-        this.saveProgress(`question-cutoff:${key}`, Number(this.getMeta("position") ?? 0));
-        this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state='queued'").run(key);
+      const old = this.task(record.plan.key);
+      if (old && (JSON.stringify(old.plan.intent) !== JSON.stringify(record.plan.intent) || JSON.stringify(old.plan.source) !== JSON.stringify(record.plan.source))) throw Error("Changed task intent is not a retry");
+      if (old?.approval || old?.request.id === record.request.id) return old;
+      record = { ...record, plan: old?.plan ?? record.plan };
+      if (old?.request.interaction) this.cancelInteractions(record.plan.source.key, old.request.interaction);
+      this.db.prepare("INSERT INTO tasks VALUES (?,?,?,?) ON CONFLICT(key) DO UPDATE SET phase=excluded.phase,value=excluded.value").run(record.plan.key, record.plan.source.key, record.phase, JSON.stringify(record));
+      return record;
+    });
+  }
+  publishTaskApproval(key: string, request: string, at: number): void {
+    this.atomic(() => {
+      const record = this.task(key); if (!record || record.request.id !== request || record.request.surface !== "matrix") throw Error("Task approval publication is stale");
+      if (record.phase !== "approval") return;
+      const binding = this.binding(record.plan.source.key);
+      if (record.request.expires < at || !binding?.enabled || binding.archived) throw Error("Task approval expired or its source is unavailable");
+      if (record.request.interaction) {
+        if (this.interaction(record.request.interaction)?.state !== "active") this.saveTask({ ...record, phase: "declined" });
+        return; // Never revive an earlier poll.
       }
-      this.db.prepare("INSERT INTO interactions VALUES (?,?,?,?,'active',NULL)").run(id, key, source, JSON.stringify(spec));
-      this.materialize(key, `interaction:${id}`, [pollStart(spec)]);
-      return this.interaction(id)!;
+      const interaction = this.materializeInteraction(binding.key, `task-approval:${request}`,
+        { kind: "approval", question: taskApprovalText(record.plan) + "\nOnly the configured operator may approve this request.", options: ["Approve", "Cancel"], approval: key });
+      this.saveTask({ ...record, request: { ...record.request, interaction: interaction.id } });
+    });
+  }
+  decideTask(key: string, request: string, accepted: boolean, receipt: NonNullable<TaskRecord["approval"]>, inputId?: string): boolean {
+    return this.atomic(() => {
+      const record = this.task(key); if (!record || record.phase !== "approval" || record.request.id !== request || !Number.isSafeInteger(record.request.expires) || record.request.expires < receipt.at) return false;
+      const binding = this.binding(record.plan.source.key); if (!binding?.enabled) return false;
+      if (receipt.via === "matrix") {
+        const interaction = record.request.interaction ? this.interaction(record.request.interaction) : undefined;
+        const input = inputId ? this.db.prepare("SELECT * FROM inputs WHERE id=?").get(inputId) : undefined;
+        if (record.request.surface !== "matrix" || binding.archived || !input || input.state !== "received" || input.binding !== binding.key ||
+            JSON.parse(String(input.event)).sender !== receipt.sender || receipt.sender !== record.request.operator || receipt.event !== inputId ||
+            !interaction || interaction.binding !== binding.key || interaction.state !== "active" || interaction.kind !== "approval" || interaction.approval !== key) return false;
+        this.db.prepare("UPDATE interactions SET state='answered',answer=? WHERE id=?").run(inputId!, interaction.id);
+        this.db.prepare("UPDATE inputs SET state='settled' WHERE id=?").run(inputId!);
+      } else if (record.request.surface !== "local" || inputId !== undefined) return false;
+      this.saveTask({ ...record, phase: accepted ? "approved" : "declined", ...(accepted ? { approval: receipt } : {}) });
+      return true;
     });
   }
   cancelInteractions(key: string, id?: string): void { this.db.prepare("UPDATE interactions SET state='cancelled' WHERE binding=? AND state='active' AND (? IS NULL OR id=?)").run(key, id ?? null, id ?? null); }

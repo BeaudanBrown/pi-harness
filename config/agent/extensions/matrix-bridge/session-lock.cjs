@@ -61,4 +61,19 @@ function acquireSessionLock(file) {
   };
 }
 
-module.exports = { acquireSessionLock, canonical, lockPath };
+function tryTaskLock(common, purpose) {
+  if (purpose !== "setup" && purpose !== "git") throw Error("unknown task lock purpose");
+  const file = path.join(lockDirectory(), "task-" + purpose + "-" + createHash("sha256").update(common).digest("hex") + ".lock");
+  const fd = fs.openSync(file, fs.constants.O_CREAT | fs.constants.O_RDWR | fs.constants.O_NOFOLLOW, 0o600);
+  try {
+    const stat = fs.fstatSync(fd);
+    if (!stat.isFile() || stat.uid !== process.getuid() || stat.nlink !== 1 || (stat.mode & 0o077)) throw Error("unsafe task setup lock");
+    if (!addon().lock(fd)) { fs.closeSync(fd); return undefined; }
+  } catch (error) { fs.closeSync(fd); throw error; }
+  // Unlike native SessionManager references, separate task calls in this same
+  // process must exclude each other. No PID hint, ownership file or reservation.
+  let released = false;
+  return { fd, release: () => { if (!released) { released = true; fs.closeSync(fd); } } };
+}
+const renameNoReplace = (source, target) => addon().renameNoReplace(source, target);
+module.exports = { acquireSessionLock, canonical, lockPath, renameNoReplace, tryTaskLock };

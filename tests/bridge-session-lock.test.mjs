@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, lstatSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { once } from "node:events";
@@ -70,4 +71,20 @@ test("path aliases share ownership and stale lock files are harmless", async () 
   assert.equal(result.status, 0, result.stderr);
   assert.equal(attempt().status, 0);
   assert.equal(readFileSync(session, "utf8"), '{"type":"session","version":3,"id":"test"}\n');
+});
+
+test("owned directory/file publication never replaces a foreign path, even an empty directory", () => {
+  const { renameNoReplace } = createRequire(import.meta.url)(native);
+  const source = join(root, "owned-staging"), target = join(root, "published"); mkdirSync(source);
+  writeFileSync(join(source, "owner"), "frozen-creation-key"); mkdirSync(target);
+  const inode = lstatSync(target).ino;
+  assert.throws(() => renameNoReplace(source, target), error => error.code === "EEXIST");
+  assert.equal(lstatSync(target).ino, inode); assert.equal(readFileSync(join(source, "owner"), "utf8"), "frozen-creation-key");
+  const published = join(root, "published-owned"); renameNoReplace(source, published);
+  assert.equal(existsSync(source), false); assert.equal(readFileSync(join(published, "owner"), "utf8"), "frozen-creation-key");
+  const file = join(root, "frozen-native.jsonl"), staged = join(root, "staged-native.jsonl"); writeFileSync(staged, "owned"); writeFileSync(file, "foreign");
+  assert.throws(() => renameNoReplace(staged, file), error => error.code === "EEXIST"); assert.equal(readFileSync(file, "utf8"), "foreign");
+  const alias = join(root, "foreign-alias"); symlinkSync(file, alias);
+  assert.throws(() => renameNoReplace(staged, alias), error => error.code === "EEXIST"); assert.equal(lstatSync(alias).isSymbolicLink(), true);
+  assert.throws(() => renameNoReplace(staged + "\0ignored", join(root, "unsafe")), /path/i); assert.equal(existsSync(staged), true);
 });

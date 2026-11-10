@@ -1,14 +1,10 @@
-import { execFile } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { isAbsolute } from "node:path";
-import { promisify } from "node:util";
 import { MatrixHttp } from "../matrix-shared/http.js";
 import { BridgeMatrix } from "./matrix.js";
 import { BridgeRelay, type RelayConfig } from "./relay.js";
-import type { Binding } from "./store.js";
+import { localOpen, localTasks } from "./local-process.js";
+export { localEnvironment, localOpen } from "./local-process.js";
 import { hostPath, object, string } from "./wire.js";
-
-const execute = promisify(execFile);
 export function credential(source: string): string {
   // Consume the existing SOPS environment-file format without evaluating shell
   // text or exporting its value to Pi/tmux/Git children.
@@ -18,24 +14,6 @@ export function credential(source: string): string {
   const value = match?.[1] ?? match?.[2] ?? match?.[3];
   if (!value || value.length > 4096) throw Error("Invalid Matrix credential file");
   return value;
-}
-export function localEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
-  const clean: NodeJS.ProcessEnv = {};
-  for (const key of ["HOME", "USER", "LOGNAME", "PATH", "SHELL", "TERM", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) {
-    if (env[key] !== undefined) clean[key] = env[key];
-  }
-  return clean;
-}
-export function localOpen(helper: string): (binding: Binding) => Promise<unknown> {
-  if (!isAbsolute(helper)) throw Error("The local open helper must be an absolute packaged executable");
-  return async binding => {
-    const result = await execute(helper, ["open", binding.file, "--expected-id", binding.nativeId], {
-      env: localEnvironment(process.env), timeout: 15000, maxBuffer: 65536,
-    });
-    const value = object(JSON.parse(result.stdout));
-    if (value.file !== binding.file || value.id !== binding.nativeId) throw Error("Local open returned a different native identity");
-    return value;
-  };
 }
 export async function main(args = process.argv.slice(2)): Promise<void> {
   if (args.length !== 4 || args[0] !== "--config" || args[2] !== "--credential-file") throw Error("Usage: pi-matrix-bridge --config FILE --credential-file FILE");
@@ -47,7 +25,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     string(raw.botUserId, 255), new Set(raw.ignoredSenderUserIds.map(sender => string(sender, 255))));
   const account = object(await client.http.request("GET", "/_matrix/client/v3/account/whoami", undefined, AbortSignal.timeout(8000)));
   if (account.user_id !== client.userId || account.is_guest === true) throw Error("Matrix credential does not match the configured host bot");
-  const relay = new BridgeRelay(config, client, localOpen(string(raw.localHelper)));
+  const relay = new BridgeRelay(config, client, localOpen(string(raw.localHelper)), raw.taskHelper === undefined ? undefined : localTasks(string(raw.taskHelper)));
   const shutdown = () => { void relay.stop().catch(() => { process.exitCode = 1; }); };
   process.once("SIGTERM", shutdown); process.once("SIGINT", shutdown);
   try { await relay.start(); }

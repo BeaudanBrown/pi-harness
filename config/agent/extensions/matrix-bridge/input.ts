@@ -6,7 +6,8 @@ import type { Binding, BridgeStore, Input, Prompt } from "./store.js";
 import { object } from "./wire.js";
 
 /** Room-scoped authorization; parsing alone never grants execution authority. */
-export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, binding: Binding, input: Input, signal?: AbortSignal): Promise<void> {
+export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, binding: Binding, input: Input, signal?: AbortSignal,
+  approval?: (interaction: Interaction, accepted: boolean) => Promise<void>): Promise<void> {
   const ignore = () => { store.authorize(input.id, undefined); };
   const explain = (message: string) => store.finishInput(binding.key, input.id, message);
   const event = input.event, sender = typeof event.sender === "string" ? event.sender : "";
@@ -29,6 +30,7 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
       return ignore();
     }
     if (interaction.state !== "active" || !interaction.options?.[vote.index]) return ignore();
+    if (interaction.kind === "approval") { if (approval) await approval(interaction, vote.index === 0); else ignore(); return; }
     const answer = interaction.options[vote.index]!;
     store.authorize(input.id, interaction.kind === "question" ? { text: `Answer to the recorded question: ${answer}`, sender, question: interaction.nativeEntry } :
       { text: answer, sender, control: interaction.kind, argument: answer }, { interaction: interaction.id });
@@ -47,6 +49,11 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
   if (referenced && referenced.state !== "active") return ignore();
   let text = typeof content.body === "string" ? content.body : "";
   if (reply && text.startsWith("> ") && text.includes("\n\n")) text = text.slice(text.indexOf("\n\n") + 2);
+  if (referenced?.kind === "approval") {
+    const answer = text.trim().toLowerCase();
+    if (content.msgtype !== "m.text" || !["approve", "cancel"].includes(answer)) return explain("The configured operator must use the approval poll or reply directly with Approve or Cancel. Ordinary conversation is not approval.");
+    if (approval) await approval(referenced, answer === "approve"); else ignore(); return;
+  }
   if (content.msgtype === "m.text") {
     const control = nativeControl(text);
     if (control === "unknown") return explain(`Unknown native control. ${CONTROL_HELP}`);
@@ -55,6 +62,8 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
   }
   interaction = referenced;
   interaction ??= input.interaction ? store.interaction(input.interaction) : undefined;
+  // Unrelated text is a fresh instruction, never implicit mutation approval.
+  if (interaction?.kind === "approval") interaction = undefined;
   if (interaction && interaction.state !== "active") return ignore();
   if (interaction && !reply) {
     const published = store.interactionPosition(interaction);
@@ -62,7 +71,7 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
     if (input.position <= published) return explain("This input preceded the displayed question. Send a fresh answer or reply directly to that question.");
   }
   if (!interaction && input.position <= (store.progress<number>(`question-cutoff:${binding.key}`) ?? -1)) return explain("This input was pending at a question boundary. It was not submitted; send a fresh instruction to continue.");
-  if (interaction && interaction.kind !== "question") {
+  if (interaction && (interaction.kind === "model" || interaction.kind === "thinking")) {
     const number = /^(?:[1-9]|1[0-9]|20)$/.test(text.trim()) ? Number(text.trim()) - 1 : -1;
     const answer = interaction.options?.includes(text.trim()) ? text.trim() : interaction.options?.[number];
     if (!answer || content.msgtype !== "m.text") return explain("Reply with one of the displayed choices, its number, or use an explicit !model/!thinking command.");

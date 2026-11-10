@@ -1,4 +1,4 @@
-{ lib, pkgs, cfg, harnessPackage, nativeLauncher, sessionDirectory, hostName }:
+{ lib, pkgs, cfg, harnessPackage, nativeLauncher, sessionDirectory, hostName, pinRuntime }:
 let
   inherit (lib) mkOption types;
   publicConfig = pkgs.writeText "pi-matrix-bridge-ui.json" (builtins.toJSON {
@@ -14,9 +14,20 @@ let
     ${lib.optionalString (cfg.windowLauncher != null) ''export PI_BRIDGE_WINDOW_LAUNCHER=${lib.escapeShellArg (lib.getExe cfg.windowLauncher)}''}
     exec ${cfg.package}/bin/pi-session "$@"
   '';
+  taskHelper = pkgs.writeShellScriptBin "pi-task-workspace" ''
+    set -euo pipefail
+    # A failed approved creator can leave a finite Git waiter alive. Retain its
+    # closure conservatively rather than inspecting/killing descendant PIDs.
+    if [[ "''${1:-}" == create ]]; then export PI_RUNTIME_RETAIN_ON_FAILURE=1; fi
+    ${pinRuntime}
+    unset PI_RUNTIME_RETAIN_ON_FAILURE
+    ${lib.optionalString (sessionDirectory != null) ''export PI_TASK_SESSION_DIRECTORY=${lib.escapeShellArg sessionDirectory}''}
+    exec ${cfg.package}/bin/pi-task-workspace "$@"
+  '';
   daemonConfig = pkgs.writeText "pi-matrix-bridge.json" (builtins.toJSON {
     inherit (cfg) hostId stateDirectory socket roots homeserver botUserId operatorUserId ignoredSenderUserIds hostSpace;
     localHelper = "${helper}/bin/pi-session";
+    taskHelper = "${taskHelper}/bin/pi-task-workspace";
   });
 in {
   inherit helper;
@@ -48,12 +59,12 @@ in {
     };
     homeserver = mkOption { type = types.nullOr types.str; default = null; };
     botUserId = mkOption { type = types.nullOr types.str; default = null; };
-    operatorUserId = mkOption { type = types.nullOr types.str; default = null; description = "Human owner invited by asynchronous room/Space setup; not a participant allowlist."; };
+    operatorUserId = mkOption { type = types.nullOr types.str; default = null; description = "Human owner invited by background setup and authorized for task approval. Ordinary conversation still has no participant allowlist."; };
     hostSpace = mkOption { type = types.bool; default = true; description = "Present projects below an optional host Space; never a coordinator session or launch requirement."; };
     ignoredSenderUserIds = mkOption { type = types.listOf types.str; default = [ ]; };
     tmuxPackage = mkOption { type = types.package; default = pkgs.tmux; description = "Host-owned tmux client; use the independently owned shared server wrapper on persistent hosts."; };
     windowLauncher = mkOption { type = types.nullOr types.package; default = null; description = "Optional host-owned tmux_project package providing native-window with fixed argv JSON. No managed host protocol."; };
-    retainRuntime = mkOption { type = types.bool; default = true; description = "Root each ordinary Pi launcher closure for its running lifetime; upgrades never replace live Pi."; };
+    retainRuntime = mkOption { type = types.bool; default = true; description = "Root ordinary Pi and finite task-helper closures for their running lifetimes; upgrades never replace live Pi."; };
   };
   assertions = [
     {

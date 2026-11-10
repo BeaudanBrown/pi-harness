@@ -170,6 +170,13 @@ let
       export PI_BRIDGE_TEST_SDK=${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist
       export PI_BRIDGE_TEST_STORE=${testBuild}/build/config/agent/extensions/matrix-bridge/store.js
       export PI_BRIDGE_TEST_MAIN=${matrixBridge}/lib/matrix-bridge/main.js
+      export PI_TASK_TEST_HELPER=${matrixBridge}/bin/pi-task-workspace
+      export PI_TASK_TEST_GIT=${lib.getExe pkgs.git}
+      export PI_TASK_TEST_PYTHON=${lib.getExe pkgs.python3}
+      export PI_TASK_TEST_GIT_WAITER=${matrixBridge}/lib/matrix-bridge/task-git.py
+      export PI_TASK_TEST_DIRENV=${lib.getExe pkgs.direnv}
+      export PI_TASK_TEST_ENV=${lib.getExe' pkgs.coreutils "env"}
+      export PI_TASK_TEST_SESSION_MANAGER=${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist/core/session-manager.js
       export PI_TEST_TMUX=${pkgs.tmux}/bin/tmux
       export PI_TEST_PYTHON=${pkgs.python3}/bin/python3
       export PI_TEST_DIRENV=${lib.getExe pkgs.direnv}

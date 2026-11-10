@@ -8,6 +8,8 @@ import { allowedWorkspace, connect, object, Peer, string, type ObjectValue } fro
 import { BridgeMatrix, syncIntoStore } from "./matrix.js";
 import { BridgeOrganization } from "./organization.js";
 import { authorizeInput } from "./input.js";
+import { TaskWorkspaces, type TaskRunner } from "./tasks.js";
+import { taskKey } from "./task-contract.js";
 
 export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; operatorUserId?: string; hostSpace?: boolean };
 type Attachment = { peer: Peer; idle: boolean; key: string; stopping?: boolean };
@@ -16,6 +18,7 @@ const running = new Set<string>();
 export class BridgeRelay {
   readonly store: BridgeStore;
   readonly organization?: BridgeOrganization;
+  readonly tasks?: TaskWorkspaces;
   private release: () => void;
   private server?: Server;
   private readonly peers = new Set<Peer>();
@@ -27,7 +30,7 @@ export class BridgeRelay {
   private interval?: NodeJS.Timeout;
   private syncWork?: Promise<void>;
   private syncError?: string;
-  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, private readonly open: (binding: Binding) => Promise<unknown>) {
+  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, private readonly open: (binding: Binding) => Promise<unknown>, taskRunner?: TaskRunner) {
     mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
     const directory = lstatSync(config.stateDirectory);
     if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid!() || (directory.mode & 0o077)) throw Error("Bridge state directory must be private");
@@ -40,6 +43,7 @@ export class BridgeRelay {
     catch (error) { this.release(); throw error; }
     try {
       if (config.operatorUserId) this.organization = new BridgeOrganization(this.store, matrix.http, { hostId: config.hostId, botUserId: matrix.userId, operatorUserId: config.operatorUserId, hostSpace: config.hostSpace });
+      if (taskRunner) this.tasks = new TaskWorkspaces(this.store, taskRunner, config, key => this.organization?.status(key).stage !== "ready");
     } catch (error) { this.store.close(); this.release(); throw error; }
   }
   async start(background = true): Promise<void> {
@@ -85,6 +89,20 @@ export class BridgeRelay {
           return this.status(binding);
         }
         if (!key || this.attached.get(key)?.peer !== peer) throw Error("Native session registration required");
+        if (["task.prepare", "task.publish-approval", "task.confirm-local", "task.status"].includes(method)) {
+          if (!this.tasks || this.attached.get(key)?.stopping) throw Error("Task workspace creation is unavailable; local Pi remains available");
+          const binding = this.store.binding(key)!;
+          if (method === "task.prepare") {
+            if (params.surface !== "local" && params.surface !== "matrix") throw Error("Invalid independent approval surface");
+            return this.tasks.prepare(binding, params.intent, string(params.call, 512), params.surface);
+          }
+          if (method === "task.publish-approval") return this.tasks.publishApproval(binding, taskKey(params.key), taskKey(params.request));
+          if (method === "task.confirm-local") {
+            if (typeof params.accepted !== "boolean") throw Error("A local UI decision is required");
+            return this.tasks.confirmLocal(binding, taskKey(params.key), taskKey(params.request), params.accepted);
+          }
+          return this.tasks.status(binding, taskKey(params.key));
+        }
         if (method === "input.read") return this.store.inputChunk(key, string(params.id, 255), Number(params.offset));
         if (method === "image.read") return this.store.imageChunk(key, string(params.id, 255), Number(params.offset));
         if (method === "withdrawn") { this.store.interruptInput(key, string(params.id, 255)); return {}; }
@@ -135,6 +153,7 @@ export class BridgeRelay {
   }
   async pump(): Promise<void> {
     if (this.stopSignal.signal.aborted) return;
+    await this.tasks?.pump();
     await Promise.all(this.store.bindings().map(async binding => {
       if (this.roomWork.has(binding.key) || (this.retryAt.get(binding.key) ?? 0) > Date.now()) return;
       this.roomWork.add(binding.key);
@@ -146,7 +165,8 @@ export class BridgeRelay {
         binding = this.store.binding(binding.key)!;
         if (!binding.room) return;
         const gap = this.store.progress(`gap:${binding.room}`);
-        for (const input of !gap && historyReady ? this.store.received(binding.key) : []) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal);
+        for (const input of !gap && historyReady ? this.store.received(binding.key) : []) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
+          this.tasks ? (interaction, accepted) => this.tasks!.answer(binding, input, interaction, accepted) : undefined);
         if (historyReady && !gap && binding.enabled && !binding.archived) {
           const input = this.store.nextInput(binding.key);
           if (input?.state === "queued" && input.prompt) {
@@ -205,6 +225,7 @@ export class BridgeRelay {
     for (const key of this.attached.keys()) this.store.disconnect(key);
     for (const peer of this.peers) peer.close();
     await this.organization?.stop();
+    await this.tasks?.stop(); // Do not cancel a Git effect merely because the bridge stops.
     await this.syncWork;
     while (this.roomWork.size) await new Promise(resolve => setTimeout(resolve, 10));
     if (this.server) await new Promise<void>(resolve => this.server!.close(() => resolve()));
