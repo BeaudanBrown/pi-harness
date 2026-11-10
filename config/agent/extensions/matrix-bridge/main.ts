@@ -1,0 +1,56 @@
+import { execFile } from "node:child_process";
+import { readFileSync } from "node:fs";
+import { isAbsolute } from "node:path";
+import { promisify } from "node:util";
+import { MatrixHttp } from "../matrix-shared/http.js";
+import { BridgeMatrix } from "./matrix.js";
+import { BridgeRelay, type RelayConfig } from "./relay.js";
+import type { Binding } from "./store.js";
+import { hostPath, object, string } from "./wire.js";
+
+const execute = promisify(execFile);
+export function credential(source: string): string {
+  // Consume the existing SOPS environment-file format without evaluating shell
+  // text or exporting its value to Pi/tmux/Git children.
+  const lines = source.split(/\r?\n/).map(line => line.trim()).filter(line => line && !line.startsWith("#"));
+  if (lines.length !== 1) throw Error("Matrix credential file must contain exactly PI_MATRIX_ACCESS_TOKEN");
+  const match = /^PI_MATRIX_ACCESS_TOKEN=(?:"([^"\s]+)"|'([^'\s]+)'|([^\s'"]+))$/.exec(lines[0]!);
+  const value = match?.[1] ?? match?.[2] ?? match?.[3];
+  if (!value || value.length > 4096) throw Error("Invalid Matrix credential file");
+  return value;
+}
+export function localEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const clean: NodeJS.ProcessEnv = {};
+  for (const key of ["HOME", "USER", "LOGNAME", "PATH", "SHELL", "TERM", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME"]) {
+    if (env[key] !== undefined) clean[key] = env[key];
+  }
+  return clean;
+}
+export function localOpen(helper: string): (binding: Binding) => Promise<unknown> {
+  if (!isAbsolute(helper)) throw Error("The local open helper must be an absolute packaged executable");
+  return async binding => {
+    const result = await execute(helper, ["open", binding.file, "--expected-id", binding.nativeId], {
+      env: localEnvironment(process.env), timeout: 15000, maxBuffer: 65536,
+    });
+    const value = object(JSON.parse(result.stdout));
+    if (value.file !== binding.file || value.id !== binding.nativeId) throw Error("Local open returned a different native identity");
+    return value;
+  };
+}
+export async function main(args = process.argv.slice(2)): Promise<void> {
+  if (args.length !== 4 || args[0] !== "--config" || args[2] !== "--credential-file") throw Error("Usage: pi-matrix-bridge --config FILE --credential-file FILE");
+  const raw = object(JSON.parse(readFileSync(args[1]!, "utf8")));
+  if (!Array.isArray(raw.roots) || !raw.roots.length || !Array.isArray(raw.ignoredSenderUserIds)) throw Error("Invalid bridge roots or ignored users");
+  const config: RelayConfig = { hostId: string(raw.hostId, 128), stateDirectory: hostPath(string(raw.stateDirectory)), socket: hostPath(string(raw.socket)), roots: raw.roots.map(root => hostPath(string(root))) };
+  const client = new BridgeMatrix(new MatrixHttp({ homeserver: string(raw.homeserver), accessToken: credential(readFileSync(args[3]!, "utf8")) }, fetch, { maxAttempts: 1 }),
+    string(raw.botUserId, 255), new Set(raw.ignoredSenderUserIds.map(sender => string(sender, 255))));
+  const relay = new BridgeRelay(config, client, localOpen(string(raw.localHelper)));
+  const shutdown = () => { void relay.stop().catch(() => { process.exitCode = 1; }); };
+  process.once("SIGTERM", shutdown); process.once("SIGINT", shutdown);
+  try { await relay.start(); }
+  catch (error) { await relay.stop(); throw error; }
+}
+if (require.main === module) void main().catch(error => {
+  // Config/transport errors never print credential contents or remote payloads.
+  console.error(error instanceof Error ? error.message : "Matrix bridge startup failed"); process.exitCode = 1;
+});

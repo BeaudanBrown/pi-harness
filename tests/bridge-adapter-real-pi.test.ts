@@ -33,10 +33,17 @@ function piProcess(root: string, file: string, extension: string) {
       if (event.type === "response") { const item = pending.get(String(event.id)); if (item) { clearTimeout(item.timer); pending.delete(String(event.id)); item.resolve(event); } }
     }
   });
-  child.once("exit", () => { for (const item of pending.values()) { clearTimeout(item.timer); item.reject(Error(`Native Pi exited: ${stderr}`)); } pending.clear(); });
+  const failPending = (error: Error) => { for (const item of pending.values()) { clearTimeout(item.timer); item.reject(error); } pending.clear(); };
+  child.once("exit", () => failPending(Error(`Native Pi exited: ${stderr}`)));
+  child.once("error", failPending);
+  // Idle RPC shutdown may close stdin before the exit event is observed. The
+  // next checkpoint rejects normally; an unhandled EPIPE is not test evidence.
+  child.stdin.on("error", failPending);
   const send = (type: string, extra: Record<string, unknown> = {}) => new Promise<Record<string, unknown>>((resolve, reject) => {
+    if (child.exitCode !== null || child.signalCode !== null) { reject(Error(`Native Pi already exited: ${stderr}`)); return; }
     const id = String(++next), timer = setTimeout(() => { pending.delete(id); reject(Error(`Native Pi RPC timed out: ${stderr}`)); }, 10000);
-    pending.set(id, { resolve, reject, timer }); child.stdin.write(JSON.stringify({ id, type, ...extra }) + "\n");
+    pending.set(id, { resolve, reject, timer });
+    child.stdin.write(JSON.stringify({ id, type, ...extra }) + "\n", error => { if (error) failPending(error); });
   });
   return { child, send, stop: async () => { if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; } } };
 }

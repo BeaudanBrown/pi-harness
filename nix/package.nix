@@ -4,6 +4,7 @@
   callPackage,
   bash,
   nodejs,
+  direnv,
   piPackage,
   piHarnessResources,
   mattPocockSkillsResources,
@@ -13,6 +14,7 @@
   agentgraphPiResources ? null,
   piLspExtension ? null,
   managedSessionRelay ? null,
+  matrixBridge ? null,
   fzf ? null,
   tmux ? null,
   d2 ? null,
@@ -160,6 +162,15 @@ fi''}
 exec "${lib.getExe piPackage}" "\''${resource_args[@]}" "\$@"
 EOF
     chmod +x "$out/bin/pi"
+    ${lib.optionalString (matrixBridge != null) ''
+    cat > "$out/bin/pi-session" <<EOF
+#!${bash}/bin/bash
+export PI_BRIDGE_PI="\''${PI_BRIDGE_PI:-$out/bin/pi}"
+export PI_BRIDGE_DIRENV="\''${PI_BRIDGE_DIRENV:-${lib.getExe direnv}}"
+exec ${matrixBridge}/bin/pi-session "\$@"
+EOF
+    chmod +x "$out/bin/pi-session"
+    ''}
 
     cat > "$out/bin/pi-aloop" <<EOF
 #!${bash}/bin/bash
@@ -228,7 +239,7 @@ EOF
     agentProfiles = profileDocument;
     agentProfileExtension = piHarnessResources.agentProfileExtension;
     managedSessionExtensions = piHarnessResources.managedSessionExtensions;
-    inherit managedSessionRelay;
+    inherit managedSessionRelay matrixBridge;
     mattpocockSkills = mattPocockSkillsResources;
     agentgraph = agentgraphPackage;
     agentgraphPostgres = agentgraphPostgresPackage;

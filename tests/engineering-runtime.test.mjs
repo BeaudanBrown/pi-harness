@@ -9,6 +9,9 @@ const normal = process.env.PI_HARNESS_NORMAL_PI;
 const managed = process.env.PI_HARNESS_MANAGED_PI;
 const local = process.env.PI_HARNESS_LOCAL_PI;
 const localOnly = process.env.PI_HARNESS_LOCAL_ONLY_PI;
+const native = process.env.PI_HARNESS_NATIVE_PI;
+const nativeLocalOnly = process.env.PI_HARNESS_NATIVE_LOCAL_ONLY_PI;
+if (!native || !nativeLocalOnly) throw new Error("Packaged native bridge launchers are required");
 if (!localOnly) throw new Error("Packaged pi-local-only launcher is required");
 if (!normal || !managed || !local || !process.env.PI_HARNESS_WORKER_EXTENSION) throw new Error("Packaged engineering launchers are required");
 
@@ -58,7 +61,7 @@ export default function(pi) {
       if (child.status !== 0) throw new Error("Nested probe failed: " + child.stderr);
       nestedResult = JSON.parse(readFileSync(nestedPath, "utf8"));
     }
-    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ nestedResult, managedTransport, argv: process.argv.slice(2), pathEntries: (process.env.PATH ?? "").split(":"), hostProbe: spawnSync("pi-host-profile-probe", [], { encoding: "utf8" }).stdout ?? null, decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
+    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ nestedResult, managedTransport, publicBridge: process.env.PI_MATRIX_BRIDGE_UI_CONFIG ? JSON.parse(readFileSync(process.env.PI_MATRIX_BRIDGE_UI_CONFIG, "utf8")) : null, secretKeys: ["MATRIX_ACCESS_TOKEN", "MATRIX_OPERATOR_TOKEN", "CREDENTIALS_DIRECTORY"].filter(key => process.env[key]), lspEnabled: process.env.PI_HARNESS_LSP_ENABLED, registeredTools: pi.getAllTools().map(tool => tool.name), argv: process.argv.slice(2), pathEntries: (process.env.PATH ?? "").split(":"), hostProbe: spawnSync("pi-host-profile-probe", [], { encoding: "utf8" }).stdout ?? null, decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
   });
 }
 `);
@@ -66,8 +69,8 @@ export default function(pi) {
     ...(nested ? { ENGINEERING_NESTED_LAUNCHER: managed } : {}) };
   if (role === "project") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "session.jsonl"), PI_MANAGED_SESSIONS_IMAGE_NORMALIZER: "/untrusted/project-decoder" });
   if (role === "coordinator") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "coordinator", PI_MANAGED_COORDINATOR_CWD: cwd, PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "coordinator.jsonl") });
-  if (role === "local-only") Object.assign(env, { PI_MATRIX_ACCESS_TOKEN: "fixture-only", PI_BRIDGE_CHAT_SOCKET: "/must-not-connect", PI_MANAGED_SESSIONS_STATE_DIR: "/must-not-use" });
-  if (role === "fallback" || role === "local-only") Object.assign(env, {
+  if (["local-only", "native", "native-local-only"].includes(role)) Object.assign(env, { PI_MATRIX_ACCESS_TOKEN: "fixture-only", PI_BRIDGE_CHAT_SOCKET: "/must-not-connect", PI_MANAGED_SESSIONS_STATE_DIR: "/must-not-use", MATRIX_ACCESS_TOKEN: "fixture-only", MATRIX_OPERATOR_TOKEN: "fixture-only", CREDENTIALS_DIRECTORY: "/must-not-read" });
+  if (["fallback", "local-only", "native", "native-local-only"].includes(role)) Object.assign(env, {
     PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "stale-project.jsonl"), PI_MANAGED_COORDINATOR_CWD: cwd,
     PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "stale-coordinator.jsonl"), PI_MANAGED_SESSION_ATTACHMENT_NONCE: "a".repeat(32),
     PI_MANAGED_SESSION_CONVERSATION_ID: "conv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PI_MANAGED_SESSION_CONCEPT: "stale",
@@ -95,7 +98,7 @@ export default function(pi) {
   return { result: JSON.parse(await readFile(resultPath, "utf8")), cwd };
 }
 
-for (const [name, launcher, role] of [["normal", normal, undefined], ["managed project", managed, "project"], ["managed ordinary fallback", managed, "fallback"], ["explicit local-only", localOnly, "local-only"]]) {
+for (const [name, launcher, role] of [["normal", normal, undefined], ["managed project", managed, "project"], ["managed ordinary fallback", managed, "fallback"], ["explicit local-only", localOnly, "local-only"], ["native bridge", native, "native"], ["native local-only", nativeLocalOnly, "native-local-only"]]) {
   test(`${name} packaged launcher supplies the engineering baseline from empty PATH`, async (t) => {
     const { result } = await probe(t, launcher, role, false);
     assert.equal(result.injected, true);
@@ -105,8 +108,17 @@ for (const [name, launcher, role] of [["normal", normal, undefined], ["managed p
       for (const path of ["/run/wrappers/bin", "/nix/profile/bin", "/nix/var/nix/profiles/default/bin", "/run/current-system/sw/bin"]) assert.ok(result.pathEntries.includes(path));
     } else assert.equal(result.hostProbe, null, "ordinary launchers do not gain managed host fallbacks");
     assert.equal(result.diagnosisAborted, true, "already-aborted diagnosis must not select or start a model");
-    if (role === "fallback" || role === "local-only") assert.deepEqual(result.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
-    if (role === "local-only") assert.deepEqual(result.managedTransport, {}, "local-only removes inherited managed and Matrix transport configuration");
+    if (["fallback", "local-only", "native", "native-local-only"].includes(role)) assert.deepEqual(result.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
+    if (role === "local-only" || role === "native-local-only") assert.deepEqual(result.managedTransport, {}, "local-only removes inherited managed and Matrix transport configuration");
+    if (role === "native" || role === "native-local-only") {
+      assert.deepEqual(result.secretKeys, []);
+      assert.equal(result.lspEnabled, "1");
+      for (const tool of ["web_search", "run_worker", "review_agents", "github_issue_inspect", "lsp_diagnostics"]) assert.ok(result.registeredTools.includes(tool), tool);
+      if (role === "native") {
+        assert.deepEqual(Object.keys(result.managedTransport), ["PI_MATRIX_BRIDGE_UI_CONFIG"]);
+        assert.deepEqual(result.publicBridge, { socket: "%t/pi-matrix-bridge/bridge.sock", roots: ["%h/projects"] });
+      } else assert.equal(result.publicBridge, null);
+    }
     for (const [name, tool] of Object.entries(result.tools)) { assert.equal(tool.code, 0, name); assert.ok(tool.path, name); if ("versionExit" in tool) assert.equal(tool.versionExit, 0, name); }
   });
   test(`${name} preserves project executable precedence`, async (t) => {

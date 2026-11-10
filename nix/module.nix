@@ -54,6 +54,14 @@ let
   ];
   sessionDirectoryEnabled = cfg.sessionDirectory != null;
   managedSessionsEnabled = cfg.managedSessions.enable;
+  bridge = import ./matrix-bridge-service.nix {
+    inherit lib pkgs;
+    cfg = cfg.matrixBridge;
+    harnessPackage = cfg.package;
+    nativeLauncher = nativePiWithRuntime;
+    sessionDirectory = cfg.sessionDirectory;
+    hostName = config.networking.hostName or "host";
+  };
   nonNullString = value: if value == null then "" else value;
   managedRelayPackage = if cfg.managedSessions.relayPackage == null then cfg.package else cfg.managedSessions.relayPackage;
   configuredManagedLauncherPackage = if cfg.managedSessions.launcherPackage == null then pkgs.runCommand "missing-managed-session-launcher" { } "mkdir -p $out" else cfg.managedSessions.launcherPackage;
@@ -133,7 +141,7 @@ let
     fi
   '';
 
-  pinRuntime = lib.optionalString (managedSessionsEnabled && cfg.managedSessions.retainRuntime) ''
+  pinRuntime = lib.optionalString ((managedSessionsEnabled && cfg.managedSessions.retainRuntime) || (cfg.matrixBridge.enable && cfg.matrixBridge.retainRuntime)) ''
     launcher="$(${pkgs.coreutils}/bin/readlink -f "$0")"
     if [[ "''${PI_HARNESS_PINNED_LAUNCHER:-}" != "$launcher" ]]; then
       export PI_RUNTIME_NIX_STORE=${pkgs.nix}/bin/nix-store
@@ -155,6 +163,7 @@ let
       for key in "''${!PI_MANAGED_@}" "''${!PI_MATRIX_@}" "''${!PI_BRIDGE_CHAT_@}"; do unset "$key"; done
       unset PI_HARNESS_AGENT_PROFILE
     fi
+    ${bridge.environment}
     ${lib.optionalString (!(cfg.package ? engineeringRuntimePath)) engineeringRuntimeEnvironment}
     export PATH="$PATH":${lib.makeBinPath fallbackRuntimePackages}
     ${lspEnabledEnvironment}
@@ -183,7 +192,9 @@ let
   '';
 
   localOnlyPi = pkgs.writeShellScriptBin "pi-local-only" ''
+    unset MATRIX_ACCESS_TOKEN MATRIX_OPERATOR_TOKEN CREDENTIALS_DIRECTORY
     export PI_HARNESS_LOCAL_ONLY=1
+    export PI_BRIDGE_LOCAL_ONLY=1
     exec ${piWithRuntime}/bin/pi "$@"
   '';
 
@@ -536,6 +547,8 @@ in
       '';
     };
 
+    matrixBridge = bridge.options;
+
     managedSessions = {
       enable = lib.mkEnableOption "boot-persistent managed Matrix sessions";
 
@@ -697,6 +710,10 @@ in
   config = lib.mkIf cfg.enable {
     assertions = [
       {
+        assertion = !(managedSessionsEnabled && cfg.matrixBridge.enable);
+        message = "Legacy managed sessions and the native Matrix bridge cannot run concurrently; perform the approved offline cutover first.";
+      }
+      {
         assertion = !cfg.lsp.enable || cfg.lsp.extension != null;
         message = "services.pi-harness.lsp.enable requires a pi-lsp-extension package.";
       }
@@ -750,11 +767,15 @@ in
         assertion = !managedSessionsEnabled || lib.all (name: builtins.match "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}" name != null) (builtins.attrNames cfg.managedSessions.workspaceRoots);
         message = "services.pi-harness.managedSessions.workspaceRoots keys must be stable identifiers.";
       }
-    ];
+    ] ++ bridge.assertions;
 
-    users.users = lib.optionalAttrs (managedSessionsEnabled && cfg.managedSessions.user != null) {
+    users.users = (lib.optionalAttrs (managedSessionsEnabled && cfg.managedSessions.user != null) {
       ${cfg.managedSessions.user}.linger = true;
-    };
+    }) // (lib.optionalAttrs (cfg.matrixBridge.enable && cfg.matrixBridge.user != null) {
+      ${cfg.matrixBridge.user}.linger = true;
+    });
+
+    systemd.user.services.pi-matrix-bridge = lib.mkIf cfg.matrixBridge.enable bridge.service;
 
     systemd.user.services.pi-managed-session-relay = lib.mkIf managedSessionsEnabled {
       description = "Boot-persistent Pi managed-session host relay";
@@ -817,10 +838,10 @@ in
     };
 
     environment.systemPackages =
-      [ piWithRuntime ]
+      [ piWithRuntime localOnlyPi ]
+      ++ lib.optional (cfg.matrixBridge.package != null) bridge.helper
       ++ lib.optional managedSessionsEnabled managedStatus
       ++ lib.optional managedSessionsEnabled managedControl
-      ++ lib.optional (cfg.package.hasAloopDriver or false) headlessAloop
-      ++ lib.optional managedSessionsEnabled localOnlyPi;
+      ++ lib.optional (cfg.package.hasAloopDriver or false) headlessAloop;
   };
 }

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { lstatSync, realpathSync, statSync } from "node:fs";
 import { dirname, isAbsolute, relative } from "node:path";
+import { homedir } from "node:os";
 import { createConnection, type Socket } from "node:net";
 
 export type ObjectValue = Record<string, unknown>;
@@ -14,6 +15,15 @@ export function string(value: unknown, max = 8192): string {
   return value;
 }
 export const FRAME_BYTES = 64 * 1024;
+export function hostPath(value: string): string {
+  let result = value.replace(/^%h(?=\/|$)/, homedir());
+  if (result.startsWith("%t/")) {
+    if (!process.env.XDG_RUNTIME_DIR) throw Error("XDG_RUNTIME_DIR is required for the bridge socket");
+    result = process.env.XDG_RUNTIME_DIR + result.slice(2);
+  }
+  if (!isAbsolute(result) || result.includes("\0")) throw Error("Bridge paths must be absolute");
+  return result;
+}
 export function allowedWorkspace(cwd: string, roots: readonly string[]): string {
   const actual = realpathSync(cwd);
   if (!statSync(actual).isDirectory()) throw Error("Workspace is not a directory");

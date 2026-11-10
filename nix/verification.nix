@@ -4,6 +4,10 @@
   source,
   piPackage,
   nativeSessionLock,
+  matrixBridge,
+  bridgePiWrapper,
+  bridgeLocalOnlyWrapper,
+  bridgeModuleReport,
   piHarnessPackage,
   piHarnessResources,
   piRPackage,
@@ -149,7 +153,7 @@ let
   unitTests = runCompiledTests {
     name = "pi-harness-unit-tests";
     nodeArgs = "--test-concurrency=2";
-    extraInputs = [ pkgs.python3 pkgs.tmux ];
+    extraInputs = [ pkgs.python3 pkgs.tmux pkgs.direnv ];
     selector = ''
       find ${testBuild}/build/tests -maxdepth 1 -type f -name '*.test.js' \
         ! -name 'eval-*.test.js' \
@@ -164,8 +168,11 @@ let
       export PI_NATIVE_LOCK_ADDON=${nativeSessionLock}/lib/session-lock.node
       export PI_BRIDGE_TEST_PI=${piPackage}/bin/pi
       export PI_BRIDGE_TEST_SDK=${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist
+      export PI_BRIDGE_TEST_STORE=${testBuild}/build/config/agent/extensions/matrix-bridge/store.js
+      export PI_BRIDGE_TEST_MAIN=${matrixBridge}/lib/matrix-bridge/main.js
       export PI_TEST_TMUX=${pkgs.tmux}/bin/tmux
       export PI_TEST_PYTHON=${pkgs.python3}/bin/python3
+      export PI_TEST_DIRENV=${lib.getExe pkgs.direnv}
     '';
   };
 
@@ -257,6 +264,8 @@ let
     test ! -e ${piHarnessPackage}/bin/pi-matrix-whoami
     test ! -e ${piHarnessPackage}/bin/pi-managed-session-relay
     test -x ${managedSessionRelay}/bin/pi-managed-session-relay
+    test -x ${matrixBridge}/bin/pi-matrix-bridge
+    test -x ${piHarnessPackage}/bin/pi-session
     test ! -e ${piHarnessPackage}/bin/tk
     test -x ${migrateTkApp}/bin/pi-migrate-tk
 
@@ -305,6 +314,8 @@ let
       PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
       PI_HARNESS_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
       PI_HARNESS_LOCAL_ONLY_PI=$(jq -r .localOnlyExecutable ${managedSessionModuleReport}) \
+      PI_HARNESS_NATIVE_PI=${bridgePiWrapper}/bin/pi \
+      PI_HARNESS_NATIVE_LOCAL_ONLY_PI=${bridgeLocalOnlyWrapper}/bin/pi-local-only \
       PI_HARNESS_EXPECTED_IMAGE_DECODER=${lib.getExe pkgs.imagemagick} \
       PI_HARNESS_WORKER_EXTENSION=${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts \
       node --test ${source}/tests/engineering-runtime.test.mjs
@@ -323,6 +334,28 @@ let
   } ''
     ${prepareSource}
     python3 -m unittest discover -s tests -p test_runtime_pin.py -v
+    jq -e '(.assertions | all) and .userLingers and .disabledHasNoBridge and .concurrentConsumersRejected
+      and .services == ["pi-matrix-bridge"]
+      and .service.wantedBy == ["default.target"]
+      and .service.after == ["network-online.target"]
+      and .service.unitConfig.ConditionUser == "operator"
+      and (.service | has("partOf") or has("bindsTo") or has("requires") or has("preStop") or has("postStop") | not)
+      and .service.serviceConfig.LoadCredential == ["matrix-token:/run/secrets/native-test.env"]
+      and (.service.serviceConfig | has("EnvironmentFile") | not)
+      and .service.serviceConfig.KillMode == "process"
+      and .service.serviceConfig.NoNewPrivileges == false
+      and .service.serviceConfig.RuntimeDirectoryMode == "0700"
+      and .service.serviceConfig.Restart == "on-failure"
+      and (.nativeScript | contains("pin-runtime.py") | not)
+      and (.pinnedScript | contains("pin-runtime.py"))
+      and (.nativeScript | contains("pi-managed-launch") or contains("native-test.env") | not)' ${bridgeModuleReport} >/dev/null
+    # The host helper is installed even when the remote bridge is disabled.
+    export HOME="$TMPDIR/native-helper-home"
+    export PI_BRIDGE_TMUX_SOCKET="$TMPDIR/native-helper-tmux.sock"
+    mkdir -m 700 "$HOME"
+    for helper in $(jq -r '.helper, .offlineHelper' ${bridgeModuleReport}); do
+      "$helper" list --all | jq -e '. == []' >/dev/null
+    done
     jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4
       and .policyOverrideAssertions == {"restrictive":true,"modelBypass":false,"unknown":false,"invalidConfirmation":false,"deleteConfirmationBypass":false,"applyConfirmationBypass":false,"destructiveDeny":true}
       and .disabledHostHasNoService and .disabledHostHasNoControlCommand

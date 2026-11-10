@@ -89,6 +89,9 @@
         managedSessionRelay = pkgs.callPackage ./nix/managed-session-relay.nix {
           inherit piPackage;
         };
+        matrixBridge = pkgs.callPackage ./nix/matrix-bridge.nix {
+          inherit piPackage nativeSessionLock;
+        };
         mattPocockSkillsResources = pkgs.callPackage ./nix/mattpocock-skills-resources.nix {
           mattPocockSkillsSrc = mattpocock-skills-src;
         };
@@ -105,6 +108,7 @@
             piRPackage
             piLspExtension
             managedSessionRelay
+            matrixBridge
             playwrightAgentCli
             ;
           harnessRevision = harnessSourceRevision;
@@ -392,15 +396,53 @@
             { services.pi-harness = { enable = true; package = piHarnessPackage; lsp.enable = false; }; }
           ];
         };
-        lspDisabledPiWrapper = builtins.elemAt lspDisabledModuleTest.config.environment.systemPackages 0;
+        modulePackage = module: name: lib.findFirst (package: lib.getName package == name)
+          (throw "Missing module executable ${name}") module.config.environment.systemPackages;
+        lspDisabledPiWrapper = modulePackage lspDisabledModuleTest "pi";
+        bridgeModuleTest = lspDisabledModuleTest.extendModules {
+          modules = [ {
+            services.pi-harness = {
+              lsp.enable = lib.mkForce true;
+              matrixBridge = {
+                enable = true;
+                retainRuntime = false; # The separate runtime-pin suite supplies a writable store double.
+                user = "operator";
+                hostId = "native-test";
+                roots = [ "%h/projects" ];
+                environmentFile = "/run/secrets/native-test.env";
+                homeserver = "https://matrix.invalid";
+                botUserId = "@host:matrix.invalid";
+                operatorUserId = "@operator:matrix.invalid";
+              };
+            };
+          } ];
+        };
+        bridgePiWrapper = modulePackage bridgeModuleTest "pi";
+        bridgeLocalOnlyWrapper = modulePackage bridgeModuleTest "pi-local-only";
+        bridgePinnedTest = bridgeModuleTest.extendModules {
+          modules = [ { services.pi-harness.matrixBridge.retainRuntime = lib.mkForce true; } ];
+        };
+        bridgeModuleReport = pkgs.writeText "pi-harness-native-bridge-module-test.json" (builtins.toJSON {
+          assertions = map (item: item.assertion) bridgeModuleTest.config.assertions;
+          services = builtins.attrNames bridgeModuleTest.config.systemd.user.services;
+          service = bridgeModuleTest.config.systemd.user.services.pi-matrix-bridge;
+          userLingers = bridgeModuleTest.config.users.users.operator.linger;
+          helper = "${modulePackage bridgeModuleTest "pi-session"}/bin/pi-session";
+          offlineHelper = "${modulePackage lspDisabledModuleTest "pi-session"}/bin/pi-session";
+          nativeScript = bridgePiWrapper.text;
+          pinnedScript = (modulePackage bridgePinnedTest "pi").text;
+          disabledHasNoBridge = !(lspDisabledModuleTest.config.systemd.user.services ? pi-matrix-bridge);
+          concurrentConsumersRejected = !(lib.all (item: item.assertion)
+            (managedSessionModuleTest.extendModules { modules = [ { services.pi-harness.matrixBridge = bridgeModuleTest.config.services.pi-harness.matrixBridge; } ]; }).config.assertions);
+        });
         managedLspDisabledModuleTest = managedSessionModuleTest.extendModules {
           modules = [ { services.pi-harness.lsp.enable = lib.mkForce false; } ];
         };
         managedLspDisabledService = managedLspDisabledModuleTest.config.systemd.user.services.pi-managed-session-relay;
         managedLspDisabledCoordinatorPi = builtins.elemAt managedLspDisabledService.path 1;
         managedSessionService = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-relay;
-        managedSessionPiWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 0;
-        managedSessionStatusWrapper = builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 1;
+        managedSessionPiWrapper = modulePackage managedSessionModuleTest "pi";
+        managedSessionStatusWrapper = modulePackage managedSessionModuleTest "pi-managed-session-status";
         managedSessionCoordinatorPi = builtins.elemAt managedSessionService.path 1;
         managedPolicyTest = overrides: managedSessionModuleTest.extendModules {
           modules = [ { services.pi-harness.managedSessions.actionPolicyOverrides = overrides; } ];
@@ -420,8 +462,8 @@
             destructiveDeny = { "conversation.delete".human = "deny"; };
           };
           restrictivePolicyFile = restrictivePolicyTest.config.systemd.user.services.pi-managed-session-relay.environment.PI_MANAGED_HOST_ACTION_POLICY;
-          hostControlExecutable = "${builtins.elemAt managedSessionModuleTest.config.environment.systemPackages 2}/bin/pi-managed-session";
-          localOnlyExecutable = "${lib.last managedSessionModuleTest.config.environment.systemPackages}/bin/pi-local-only";
+          hostControlExecutable = "${modulePackage managedSessionModuleTest "pi-managed-session"}/bin/pi-managed-session";
+          localOnlyExecutable = "${modulePackage managedSessionModuleTest "pi-local-only"}/bin/pi-local-only";
           disabledHostHasNoService = !(lspDisabledModuleTest.config.systemd.user.services ? pi-managed-session-relay);
           disabledHostHasNoControlCommand = lib.all (package: !(lib.hasPrefix "pi-managed-session" (lib.getName package))) lspDisabledModuleTest.config.environment.systemPackages;
           relayUserLingers = managedSessionModuleTest.config.users.users.operator.linger;
@@ -570,6 +612,10 @@
             lib
             piPackage
             nativeSessionLock
+            matrixBridge
+            bridgePiWrapper
+            bridgeLocalOnlyWrapper
+            bridgeModuleReport
             piHarnessPackage
             piHarnessResources
             piRPackage
@@ -598,6 +644,7 @@
         packages.pi-harness = piHarnessPackage;
         packages.pi-harness-resources = piHarnessResources;
         packages.managed-session-relay = managedSessionRelay;
+        packages.matrix-bridge = matrixBridge;
         packages.bridge-chat = import ./nix/bridge-chat-package.nix { inherit pkgs piPackage; };
         packages.chat-workspace = import ./nix/chat-workspace-package.nix { inherit pkgs; };
         packages.chat-files = import ./nix/chat-files-package.nix { inherit pkgs; };

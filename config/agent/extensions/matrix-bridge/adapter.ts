@@ -1,13 +1,15 @@
 import { readFileSync } from "node:fs";
 import { basename } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { allowedWorkspace, connect, object, Peer, remoteText, string } from "./wire.js";
+import { allowedWorkspace, connect, hostPath, object, Peer, remoteText, string } from "./wire.js";
 
 export type AdapterConfig = { socket: string; roots: string[] };
 type Scope = { ctx: ExtensionContext; file: string; nativeId: string; boundary: string; active: boolean; stopping?: boolean; peer?: Peer; timer?: NodeJS.Timeout; seen: Set<string>; inputs: Set<string>; preflight: Set<string>; settled: Set<string> };
 export function interactiveProcess(): boolean {
   const args = process.argv.slice(1);
-  return Boolean(process.stdin.isTTY && process.stdout.isTTY) && !args.some(arg => ["--print", "-p", "--no-session"].includes(arg)) && !args.includes("--mode") && !args.some(arg => arg.startsWith("--mode="));
+  if (process.env.PI_HARNESS_ENABLE_PI_R === "1" || process.env.PI_HARNESS_ENABLE_AGENTGRAPH === "1" || process.env.PI_HARNESS_AGENT_PROFILE && process.env.PI_HARNESS_AGENT_PROFILE !== "engineering-full") return false;
+  return Boolean(process.stdin.isTTY && process.stdout.isTTY) && !args.some((arg, index) =>
+    ["--print", "-p", "--no-session"].includes(arg) || arg === "--mode" && args[index + 1] !== "text" || arg.startsWith("--mode=") && arg !== "--mode=text");
 }
 /** No Matrix HTTP, credentials, subprocess control, or durable runtime registry. */
 export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConfig; interactive?: () => boolean } = {}): void {
@@ -18,7 +20,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
     const path = process.env.PI_MATRIX_BRIDGE_UI_CONFIG; if (!path) return undefined;
     const value = object(JSON.parse(readFileSync(path, "utf8")));
     if (!Array.isArray(value.roots)) throw Error("Invalid bridge workspace roots");
-    return { socket: string(value.socket), roots: value.roots.map(root => string(root)) };
+    return { socket: hostPath(string(value.socket)), roots: value.roots.map(root => hostPath(string(root))) };
   };
   const stop = () => {
     if (!current) return;
@@ -109,24 +111,25 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
   };
   const start = (ctx: ExtensionContext) => {
     stop();
-    if (!eligible()) {
+    const localOnly = process.env.PI_BRIDGE_LOCAL_ONLY === "1" || process.env.PI_HARNESS_LOCAL_ONLY === "1";
+    if ((!options.interactive && !ctx.hasUI) || !eligible() || localOnly) {
       // An explicitly resumed formerly public file must not leak a worker's
       // new output through the daemon's persisted-history reader either.
       const nativeId = ctx.sessionManager.getSessionId();
       if (ctx.sessionManager.getSessionFile() && ctx.sessionManager.getEntries().some(entry => entry.type === "custom" && entry.customType === "matrix-bridge.boundary" && (entry.data as { nativeId?: unknown })?.nativeId === nativeId)) {
         pi.appendEntry("matrix-bridge.enrollment", { nativeId, enabled: false });
       }
+      if (localOnly) ctx.ui.setStatus("matrix-bridge", "Local-only Pi");
       return;
     }
     try {
       const cfg = config(); if (!cfg) return;
       allowedWorkspace(ctx.cwd, cfg.roots);
       const file = ctx.sessionManager.getSessionFile(); if (!file) return;
-      const nativeId = ctx.sessionManager.getSessionId(), enabled = process.env.PI_BRIDGE_LOCAL_ONLY !== "1";
+      const nativeId = ctx.sessionManager.getSessionId(), enabled = true;
       const entries = ctx.sessionManager.getEntries();
       const enrollment = [...entries].reverse().find(entry => entry.type === "custom" && entry.customType === "matrix-bridge.enrollment" && (entry.data as { nativeId?: unknown })?.nativeId === nativeId);
       if (!enrollment || (enrollment.type === "custom" && (enrollment.data as { enabled?: unknown })?.enabled !== enabled)) pi.appendEntry("matrix-bridge.enrollment", { nativeId, enabled });
-      if (!enabled) { ctx.ui.setStatus("matrix-bridge", "Local-only Pi"); return; }
       let boundary = entries.find(entry => entry.type === "custom" && entry.customType === "matrix-bridge.boundary" && (entry.data as { nativeId?: unknown })?.nativeId === nativeId)?.id;
       if (!boundary) { pi.appendEntry("matrix-bridge.boundary", { nativeId }); boundary = ctx.sessionManager.getLeafId() ?? undefined; }
       if (!boundary) throw Error("Native session has no persisted boundary");

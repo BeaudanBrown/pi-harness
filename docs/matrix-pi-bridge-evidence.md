@@ -155,6 +155,104 @@ Evidence so far:
   cumulative review/gate remains #171; these fixtures are not live delivery
   receipts.
 
+### #164 local picker, launchers and Nix wiring
+
+Current boundary: native local integration, not a completed remote product or a
+cutover. Rooms/Spaces remain #165, richer interactions #166, approved workspace/
+archive actions #167/#168, migration #169, legacy deletion #170 and cumulative
+release verification #171. No service was activated, no production process was
+stopped, and no Matrix membership was changed. The unrelated downstream staged
+patch remains byte-identical with an explicit eight-character diff abbreviation
+(SHA-256 `2326317cd5691bd6b1a38eb9dc84588577e884a1425c7fec6c4bfcf08bc731be`).
+
+Downstream implementation is committed locally as nix-dotfiles
+`9f23c1bcfd607f21fc640dfa0b19d5435057893a` (parent `09b2f884`), followed by review
+remediation `0e0bd07355d8064145e255aeb7fad095b8ce3b40`. No push occurred.
+A temporary index excluded all pre-existing staged changes and the operator's
+unstaged harness URL/lock edits. Only removal of the host's `nix-ai-tools` override
+was committed in that shared flake file: substituting its newer Pi would bypass
+the harness's tested **0.84.4** native patches. The final published input/lock
+advance is still a release handoff, not implicit permission to publish or rebuild.
+
+| Acceptance | Implementation and evidence |
+| --- | --- |
+| Native saved/live picker and shared remote wake | Version-1 `pi-session list/open/status`, selected file/ID fencing; daemon wake executes the same helper under an allowlisted environment. Actual Pi opens, same-writer reuse, outside-tmux reporting and requester-only focus tested. |
+| No relay/platform admission | Five old picker host/schema/socket files deleted downstream. Real fzf fixtures use only the local CLI, with no bridge/host socket. Ordinary workspace rows remain available; native windows do not require Git. |
+| Ordinary nonblocking startup | Native module wrapper bypasses managed launch/main.mjs; central engineering profile/default settings include the adapter. Text TUI is eligible, headless/workers/experiments are excluded, and explicit local-only remains available. |
+| Tools, trust and PATH | Seventeen packaged engineering probes preserve tools/LSP, project executable precedence and lean experimental separation. Real direnv refusal/retry and allowed environment propagation tested; no trust bypass added. |
+| Independent lifetimes and retention | One optional user daemon with LoadCredential, no EnvironmentFile/stop hooks/PartOf/BindsTo/Requires coupling; independent shared server retains stop/restart suppression. Three runtime-pin tests plus native module assertions cover closure retention; no idle replacement controller. |
+| Optional archive presentation | Helper reads the real BridgeStore read-only, matches native identity, includes historical bound files and falls back on missing/corrupt/non-regular state. Archive cannot deny a direct native open. Picker reads no database. |
+
+Focused crash/race evidence:
+- Lost local-open reply/concurrent opens reuse the actual writer. Kernel locks
+  remain the only writer authority; pane options never authorize killing.
+- A slow bootstrap has a live PID/server/birth-fenced hint with a bounded lifetime.
+  Replaced/dead/expired hints cannot reserve a file. A discovered regression after
+  native `/new` was reproduced red and fixed: a prior matching native owner record
+  invalidates bootstrap presentation without claiming current ownership.
+- Listing/focusing tolerates live partial JSONL appends; actual launch still
+  validates saved history. A kernel lock observation is not completed startup:
+  the fixture now waits for actual `session_start` before injecting partial data.
+- tmux interprets trailing semicolons even in argv. Red/green real-process tests
+  prove literal cwd/session/argument handling; the downstream primitive refuses
+  tmux's one-string shell form. Read/focus/annotation probes use `-N` and cannot
+  start a replacement shared server.
+- RPC shutdown can close stdin before its exit event. The test transport now
+  rejects pending writes rather than emitting an unhandled EPIPE. Fixture cleanup
+  waits for actual pane-process exit rather than treating kill-server's response
+  as an exit receipt. These changes strengthen evidence, not delivery claims.
+
+Final verification, including review remediation:
+- **166 unit tests**, zero skips; full TypeScript build and source contracts pass.
+- Package contracts: **17 engineering probes + 17 headless cases**, zero skips.
+  Module contracts and all **3 runtime-pin tests** pass. Standalone bridge and
+  harness packages build as part of these isolated gates.
+- **9 actual-Pi helper scenarios in each of two suites** (direct tmux and the
+  production packaged downstream launcher), zero skips. Archive fixtures use the
+  real public BridgeStore API, not an invented database simulator.
+- **67 downstream Go tests** pass with `-race`, zero skips; the isolated production
+  picker package also builds and passes all 67 tests. Tests use disposable sockets.
+  Measured popup latency is fixture/environment evidence, not a live-host promise.
+- **5 downstream source/evaluation tests**, including GRILL and NAS, pass. Both
+  evaluate to native bridge enabled, legacy disabled, Pi 0.84.4, independent
+  lifetimes and no failed assertions. Privilege evaluation also passes on both.
+  Evaluations use a local `git+file:` override and `--no-write-lock-file`; no NixOS
+  system output was built. The unavailable NAS builder fell back to local builds.
+- Downstream commit hooks pass. Go LSP cannot establish a build for this external
+  folder; actual Go builds/tests provide evidence. The existing settings JSON
+  schema URL returns 404; local JSON/resource/TypeScript checks pass.
+
+Key local artifacts:
+- `2026-11-10T07-02-26-504Z-native-post-review-harness-703038280217`
+- `2026-11-10T07-04-18-980Z-native-post-review-packaged-helper-suite-9d58f377f0d1`
+- `2026-11-10T07-02-26-504Z-native-post-review-picker-race-ae934d114e0f`
+- `2026-11-10T07-02-26-504Z-native-post-review-picker-package-d48baeeb86b6`
+- `2026-11-10T07-04-18-980Z-native-post-review-host-evaluations-c186bb0dbe65`
+
+Paired review disposition:
+- Harness review `2026-11-10T06-51-12-535Z-worktree-38482d4d9c55-b24e3ee5dafa`
+  found no verified harness defects, but was explicitly incomplete for downstream:
+  the file-only review interface could not execute the requested Git reads.
+- The missing downstream/cross-repository portion was completed in
+  `2026-11-10T06-54-25-519Z-worktree-0a7dcf163fbd-8adcbfc44aea`, using read-only
+  ordinary files extracted from the exact downstream commit, not its dirty tree.
+  The frozen diff SHA-256 is
+  `d292256ef73e968737a001ff49714d1ef224d9566298b7f71f7cd648a2b2425c`.
+- **Standards: one medium, current-issue finding, accepted/fixed.** The picker now
+  rejects relative `PI_NATIVE_SESSION_HELPER` overrides before invocation. The
+  documented absolute override contract and regression test agree.
+- **Spec: one high, current-issue finding, rejected with source and executable
+  evidence.** The claim that daemon wake lacked tmux on PATH omitted the existing
+  `tmux_project.nix` wrapper, which prefixes its private tmux/runtime PATH. The
+  added actual-production `localOpen` test removes tmux from inherited PATH,
+  checks credential stripping, executes the public helper with the configured
+  packaged launcher, and waits for actual native `session_start`. Both direct and
+  packaged cases pass. No redundant service PATH dependency was added.
+
+No accepted current-scope findings remain. The cumulative review and canonical
+`nix run .#verify` remain release requirements; none of these fixtures prove
+live Matrix delivery, NAS operation or safety around existing legacy writers.
+
 ## Rebuild and migration readiness
 
 Pending implementation and cumulative verification. Do not run a host switch merely
