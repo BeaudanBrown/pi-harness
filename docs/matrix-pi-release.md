@@ -1,18 +1,20 @@
 # Native Matrix–Pi replacement release verification (#171)
 
-Status: focused/affected checks, cumulative accounting and full-epic paired
-review complete; final canonical/package/consuming gates pending. #161–#170 are locally committed and closed. #171 owns cumulative
-verification/review, deletion accounting and the publication/pin handoff, not live
-effects. #172 and epic #160 remain open. **Grill/NAS are not rebuild-ready.**
+Status: **complete deterministic verification and full-epic review**, including
+final canonical/package/consuming gates. #161–#170 are locally committed and
+closed. #171 owns cumulative verification/review, deletion accounting and the
+publication/pin handoff, not live effects. #172 and epic #160 remain open. **Grill/NAS are not rebuild-ready.**
 
 ## Scope and sources
 
 Read #171, parent #160, completed blocker #170 and dependent #172; use
 `docs/agents/implementation-workflow.md`, ADR 0003, the nine approved workflow
 fixtures, `matrix-pi-bridge-evidence.md`, `matrix-pi-removal.md` and
-`matrix-pi-migration.md`. Source implementation candidate starts at harness
-`7d56191596038cb05d4dbe915918cdf46e1689e7` and downstream
-`0315a85f75ebc6a05de3a981098a1f6d053c8646`. The full epic fixed points are harness
+`matrix-pi-migration.md`. The exact verified release source is harness
+**`d4159edecddd645a11d9fb5bb1b103a51f3c1fe7`** and downstream
+**`0315a85f75ebc6a05de3a981098a1f6d053c8646`**. Runtime implementation is unchanged
+from harness `7d56191596038cb05d4dbe915918cdf46e1689e7`, the measurement candidate
+below; #171 adds only audit tooling/evidence. The full epic fixed points are harness
 `8a96e8cfb0141ef71ffd5cc5bfd9d6e6db55495b` and downstream
 `09b2f8843d6868c52cd62c4fe217ec6a97df82b9`, not #170's dual-source baseline.
 
@@ -22,9 +24,9 @@ access the private secrets repository. Do not push, advance the published pin,
 build/switch a host system, restart a live process or perform Matrix/account or
 migration effects. Isolated packages and NixOS evaluation remain authorized.
 
-## Acceptance → evidence plan
+## Acceptance → evidence
 
-| Required scenario | Existing public-seam evidence to revalidate | Limit / owner |
+| Required scenario | Revalidated public-seam evidence | Limit / owner |
 |---|---|---|
 | 1. Offline launch/resume; native new/fork/tree; asynchronous enrollment | Actual packaged Pi and native helper tests; adapter new/resume/tree/private startup cases | No live host reboot or visual acceptance claim |
 | 2. One writer across terminal/picker/remote open; independent lifetimes; lost replies | C kernel exclusion/SIGKILL/exec inheritance, Bun/Node SessionManager, concurrent disposable tmux helper, picker requester guards, relay reconnect and runtime roots | Old writers do not honor new locks: approved quiescence is #172 |
@@ -257,10 +259,72 @@ No findings. The cumulative implementation/deletion, retained native workflows,
 offline migration boundaries and disclosed conservative budget satisfy the
 reviewed contract. No remediation or repeated review is required.
 
-Final canonical/package/consuming gates remain pending. Captured immutable
-committed downstream source/diff is at `.pi/tmp/release-171/dotfiles-cumulative/`,
+Captured immutable committed downstream source/diff is at
+`.pi/tmp/release-171/dotfiles-cumulative/`,
 from `09b2f884` to `0315a85`; patch SHA256
 `06c0d7bf726b44ea187b054a2248a27477b7a6b27e7b755bd5082a5b34f1a6aa`.
 It excludes all unrelated staged/unstaged downstream content. Historical
 #158/#159 and other deployed failures are not declared repaired by replacement
 tests. This issue must not close the deployment-only gate or the epic.
+
+### Final commands and results
+
+All checks below ran **after** the cumulative review, against clean committed
+source `d4159edecddd645a11d9fb5bb1b103a51f3c1fe7`. Only documentation recording
+these results/readiness links changed afterward; no runtime or canonical check changed, so
+only focused documentation/diff validation follows that evidence-only commit.
+There is no claim that a later documentation commit's newly hashed Nix closure was
+built. Use the verified revision below, or verify any newly chosen release pin.
+
+| Command / scope | Result | Worker artifact under `.pi/tmp/workers/` |
+|---|---|---|
+| `nix run -L .#verify` | All 11 gates; **287 unit / 85 chat**, zero failures/skips | `2026-11-10T22-46-21-449Z-release-171-canonical-final-3ea49fb2f970` |
+| `python3 /home/beau/documents/nix-dotfiles/modules/cli/pi-harness/check-native-integration.py --harness-source "$PWD" --evaluate` | **6 pass**, grill/NAS Pi 0.84.4, legacy absent, independent lifetimes/assertions; evaluation only | `2026-11-10T22-46-21-449Z-release-171-final-consuming-evaluation-bafc19a44183` |
+| `nix build .#pi .#matrix-bridge .#bridge-chat .#pi-harness --no-link -L` | Four production packages built | `2026-11-10T22-48-33-592Z-release-171-final-packages-cc774eefe9b6` |
+| `go test -race -count=1 -v ./...` in downstream Go package, then isolated `windowLauncher` Nix build with local harness override / `--no-write-lock-file` | **18 pass**, race-free, actual disposable tmux/fzf; picker package passed | `2026-11-10T22-48-33-592Z-release-171-final-picker-race-and-package-1c351a4edab3` |
+| `python3 .pi/tmp/release-171/executable-check.py` | Actual CLI inventory/export/import/check, readonly exported bundle, 26 files / 7 bindings, exact digest, untouched check and no false rollback eligibility; actual empty-environment startup refuses legacy state before credentials/HTTP without changing bytes | `2026-11-10T22-58-40-878Z-release-171-final-executables-9722c7899240` |
+
+Canonical gates: `bridge-chat`, `bridge-chat-preflight`, `chat-workspace`,
+`eval-self-test`, `module-contracts`, `package-contracts`, `pi-r-integration`,
+`schema-contracts`, `source-contracts`, `typescript-build`, `unit-tests`.
+LSP functionality was not changed by this removal/audit, so `verify-lsp-live` is
+not an added requirement. Changed audit-tool/scratch-script diagnostics were
+clean. The actual compiler/package checks passed; stale editor caches from removed
+files were not weakened or used as a substitute. NAS builder SSH remained
+unavailable; builds succeeded locally. No historical incident is thereby repaired.
+
+Exact verified source/package handoff (`.pi/tmp/release-171/packages.json`):
+
+| Attribute | Verified package |
+|---|---|
+| `pi` | `/nix/store/69hg54qwyvfhdz79bfxlc49gkic60b90-pi-0.84.4` |
+| `matrix-bridge` | `/nix/store/qbmjpks44cp6gfppc8k25c1qyfmh1giw-pi-matrix-bridge-0.1.0` |
+| `bridge-chat` | `/nix/store/yzvm91zqx2l75g9y2pj3hr512ghxzs6a-pi-bridge-chat` |
+| `pi-harness` | `/nix/store/wjmwrc3gyiblc1zmsd6r65n9czxdg7s8-pi-harness-0.1.0` |
+| Downstream `matrixBridge.windowLauncher` | `/nix/store/r9nw3jr9xi31sv9cqsls1ld3k8vyajqp-tmux_project-0.1.0` |
+
+The downstream build command was:
+
+```sh
+nix build /home/beau/documents/nix-dotfiles#nixosConfigurations.grill.config.services.pi-harness.matrixBridge.windowLauncher \
+  --override-input pi-harness "git+file://$PWD" --no-write-lock-file \
+  --out-link .pi/tmp/release-171/tmux-project -L
+```
+
+This is only the picker package, **not** a NixOS system build. The CLI probe uses
+synthetic data, fresh private destinations, empty HOME/PATH and `bwrap --bind / /
+--dev-bind /dev /dev --ro-bind SOURCE SOURCE`; the exported bundle is separately
+mounted readonly for import/check. No real native history/credential/journal was
+read or imported. Its digest remained
+`762cbb32b83a89cf15e7ab5c4f1826b56acba1470795bf253dd20ccab8ef5753`.
+
+Git preservation checks: all **six unrelated downstream staged blob/mode entries**
+and all **39 previously captured downstream worktree/reference hashes** still
+match; the immutable cumulative review capture also matches its manifest.
+`git fsck --full --no-dangling` passed after the recovered baseline and epic
+commits (worker `2026-11-10T23-05-11-542Z-release-171-git-integrity-74bd38e137f0`).
+No #171 downstream edits/commits. Harness owns the audit/evidence commits only;
+the two unrelated research files remain untracked. Nothing was pushed, no
+published pin/lock advanced, and no production process/service/Matrix/account/
+migration effect occurred. #172/epic #160 remain open awaiting explicit scope/approval and live
+acceptance; grill/NAS are **not rebuild-ready**.

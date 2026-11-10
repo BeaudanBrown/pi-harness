@@ -8,8 +8,9 @@ organization, not local launch permission. Local Pi works without the bridge,
 Matrix, NAS, or Git. See [ADR 0003](docs/architecture/decisions/0003-matrix-pi-bridge.md).
 
 **Not rebuild-ready:** [epic #160](https://github.com/BeaudanBrown/pi-harness/issues/160)
-is still completing cumulative verification and publication/pin handoff. Source
-removal is not deployment: grill/NAS cutover requires separate approval. See
+has completed cumulative deterministic verification and full-epic review, but
+publication/pinning and grill/NAS cutover still require separate approval. Source
+removal is not deployment. See the [verified candidate and cutover handoff](docs/matrix-pi-release.md),
 [acceptance evidence](docs/matrix-pi-bridge-evidence.md),
 [removal evidence](docs/matrix-pi-removal.md), and the
 [offline migration runbook](docs/matrix-pi-migration.md). No legacy conversation

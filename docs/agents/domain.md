@@ -8,4 +8,6 @@ For the Matrix–Pi bridge replacement, the approved vocabulary, native ownershi
 delivery and archive contracts are defined in
 `docs/architecture/decisions/0003-matrix-pi-bridge.md`. ADR 0002 is the historical
 managed-session implementation record, not the replacement target. Deployment
-readiness is recorded in `docs/matrix-pi-bridge-evidence.md`.
+readiness and the exact verified candidate/publication/cutover handoff are recorded
+in `docs/matrix-pi-release.md`; per-issue technical evidence remains in
+`docs/matrix-pi-bridge-evidence.md`.

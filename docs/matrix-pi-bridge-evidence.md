@@ -4,8 +4,12 @@ Authority: [epic #160](https://github.com/BeaudanBrown/pi-harness/issues/160),
 [ADR 0003](architecture/decisions/0003-matrix-pi-bridge.md).
 Baseline: harness `8a96e8c`; nix-dotfiles `09b2f884`, with unrelated staged and
 unstaged changes preserved. This document records technical evidence, not a second
-backlog. **Not rebuild-ready until the final gates and migration instructions below
-are completed. No production migration/activation has been performed.**
+backlog. Per-issue entries preserve evidence and outstanding work **at that issue's
+boundary**; current cumulative results and the exact verified candidate are in
+[release verification](matrix-pi-release.md). **Deterministic verification and
+full-epic review are complete, but grill/NAS are not rebuild-ready: publication/pin
+advance and approved migration/activation remain outstanding. No production
+migration/activation has been performed.**
 
 ## Acceptance-to-evidence matrix
 
@@ -929,10 +933,21 @@ Harness changes are in the enclosing #170 commit. No push, pin advance,
 activation, restart or production migration occurred. Historical evidence remains
 [in the diagnostic index](legacy-managed-history.md), not current commands.
 
+### #171 cumulative verification
+
+[Release verification and handoff](matrix-pi-release.md) records all nine scenario
+families, the full-epic baseline comparison, **7,990 conservative production lines**
+including mixed integration/shared moves/full patch context, immutable downstream
+capture, and mandatory full-epic Standards/Spec review: **no findings**. Final
+candidate `d4159edecddd645a11d9fb5bb1b103a51f3c1fe7` passed all 11 canonical gates
+(**287 unit / 85 chat**, zero skips), actual packages/executables, **18 Go race
+tests**, isolated picker and six consuming evaluations. The publication/pin and
+separately approved live canary/rollback sequence is documented, not executed.
+
 ## Rebuild and migration readiness
 
-Pending #171 cumulative verification/publication-pin handoff and separately
-approved #172 cutover. Do not run a host switch merely
-because this document exists. Host builds/activation and real account/room effects
+#171 deterministic verification/review and handoff are complete. Publication/pin
+advance and separately approved #172 cutover remain outstanding. Do not run a host
+switch merely because this document exists. Host builds/activation and real account/room effects
 remain operator actions. Existing old managed sessions are not compatible writers
 for a replacement kernel-lock protocol until the approved cutover has quiesced them.
