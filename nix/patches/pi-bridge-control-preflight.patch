@@ -1,0 +1,194 @@
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -1265,9 +1265,13 @@
+      * @throws Error if no auth is configured for the model
+      */
+     async setModel(model, options = {}) {
++        if (options.preflight?.() === false)
++            throw new Error("Native model selection was withdrawn");
+         if (!(await this._modelRuntime.checkAuth(model.provider))) {
+             throw new Error(`No API key for ${model.provider}/${model.id}`);
+         }
++        if (options.preflight?.() === false)
++            throw new Error("Native model selection was withdrawn");
+         const previousModel = this.model;
+         const thinkingLevel = this._getThinkingLevelForModelSwitch(model);
+         this.agent.state.model = model;
+@@ -1480,9 +1484,13 @@
+      *
+      * @param customInstructions Optional instructions for the compaction summary
+      */
+-    async compact(customInstructions) {
++    async compact(customInstructions, preflight) {
++        if (preflight?.() === false)
++            throw new Error("Compaction cancelled");
+         await this.abort();
+-        this._compactionAbortController = new AbortController();
++        if (preflight?.() === false)
++            throw new Error("Compaction cancelled");
++        const controller = this._compactionAbortController = new AbortController();
+         this._emit({ type: "compaction_start", reason: "manual" });
+         let fromExtension = false;
+         try {
+@@ -1490,6 +1498,8 @@
+                 throw new Error(formatNoModelSelectedMessage());
+             }
+             const { model: requestModel, apiKey, headers, env } = await this._getSummarizationRequestAuth(this.model);
++            if (controller.signal.aborted || preflight?.() === false)
++                throw new Error("Compaction cancelled");
+             const pathEntries = this.sessionManager.getBranch();
+             const settings = this.settingsManager.getCompactionSettings();
+             const preparation = prepareCompaction(pathEntries, settings);
+@@ -1510,7 +1520,7 @@
+                     customInstructions,
+                     reason: "manual",
+                     willRetry: false,
+-                    signal: this._compactionAbortController.signal,
++                    signal: controller.signal,
+                 }));
+                 if (result?.cancel) {
+                     throw new Error("Compaction cancelled");
+@@ -1520,6 +1530,8 @@
+                     fromExtension = true;
+                 }
+             }
++            if (controller.signal.aborted || preflight?.() === false)
++                throw new Error("Compaction cancelled");
+             let summary;
+             let firstKeptEntryId;
+             let tokensBefore;
+@@ -1535,14 +1547,14 @@
+             }
+             else {
+                 // Shared default summary generator, also used by automatic compaction.
+-                const result = await this._runDefaultCompaction(preparation, requestModel, apiKey, headers, customInstructions, this._compactionAbortController.signal, env, "manual");
++                const result = await this._runDefaultCompaction(preparation, requestModel, apiKey, headers, customInstructions, controller.signal, env, "manual");
+                 summary = result.summary;
+                 firstKeptEntryId = result.firstKeptEntryId;
+                 tokensBefore = result.tokensBefore;
+                 usage = result.usage;
+                 details = result.details;
+             }
+-            if (this._compactionAbortController.signal.aborted) {
++            if (controller.signal.aborted || preflight?.() === false) {
+                 throw new Error("Compaction cancelled");
+             }
+             this.sessionManager.appendCompaction(summary, firstKeptEntryId, tokensBefore, details, fromExtension, usage);
+@@ -1569,8 +1581,9 @@
+                 usage,
+                 details,
+             };
+-            // compaction_end listeners may submit queued prompts, so expose idle state before notifying them.
+-            this._compactionAbortController = undefined;
++            // Never clear a replacement compaction after an old callback resumes.
++            if (this._compactionAbortController === controller)
++                this._compactionAbortController = undefined;
+             this._emit({
+                 type: "compaction_end",
+                 reason: "manual",
+@@ -1584,7 +1597,8 @@
+             const message = error instanceof Error ? error.message : String(error);
+             const aborted = message === "Compaction cancelled" || (error instanceof Error && error.name === "AbortError");
+             const errorMessage = aborted ? undefined : `Compaction failed: ${message}`;
+-            this._compactionAbortController = undefined;
++            if (this._compactionAbortController === controller)
++                this._compactionAbortController = undefined;
+             this._emit({
+                 type: "compaction_end",
+                 reason: "manual",
+@@ -1603,7 +1617,8 @@
+             throw error;
+         }
+         finally {
+-            this._compactionAbortController = undefined;
++            if (this._compactionAbortController === controller)
++                this._compactionAbortController = undefined;
+         }
+     }
+     /**
+@@ -2055,10 +2070,10 @@
+             setActiveTools: (toolNames) => this.setActiveToolsByName(toolNames),
+             refreshTools: () => this._refreshToolRegistry(),
+             getCommands,
+-            setModel: async (model) => {
++            setModel: async (model, options) => {
+                 if (!this._modelRuntime.hasConfiguredAuth(model.provider))
+                     return false;
+-                await this.setModel(model);
++                await this.setModel(model, { preflight: options?.preflight });
+                 return true;
+             },
+             getThinkingLevel: () => this.thinkingLevel,
+@@ -2085,7 +2100,7 @@
+             compact: (options) => {
+                 void (async () => {
+                     try {
+-                        const result = await this.compact(options?.customInstructions);
++                        const result = await this.compact(options?.customInstructions, options?.preflight);
+                         options?.onComplete?.(result);
+                     }
+                     catch (error) {
+--- a/dist/core/agent-session.d.ts
++++ b/dist/core/agent-session.d.ts
+@@ -465,7 +465,7 @@
+      * Persists to global defaults only when options.persist is true.
+      * @throws Error if no auth is configured for the model
+      */
+-    setModel(model: Model<any>, options?: ModelMutationOptions): Promise<void>;
++    setModel(model: Model<any>, options?: ModelMutationOptions & { preflight?: () => boolean }): Promise<void>;
+     private _addPersistedDefaultToNonEmptyScope;
+     /**
+      * Cycle to next/previous model.
+@@ -526,7 +526,7 @@
+      *
+      * @param customInstructions Optional instructions for the compaction summary
+      */
+-    compact(customInstructions?: string): Promise<CompactionResult>;
++    compact(customInstructions?: string, preflight?: () => boolean): Promise<CompactionResult>;
+     /**
+      * Cancel in-progress compaction (manual or auto).
+      */
+--- a/dist/core/extensions/loader.js
++++ b/dist/core/extensions/loader.js
+@@ -337,9 +337,9 @@
+             assertActive();
+             return runtime.getCommands();
+         },
+-        setModel(model) {
+-            assertActive();
+-            return runtime.setModel(model);
++        setModel(model, options) {
++            assertActive();
++            return runtime.setModel(model, options);
+         },
+         getThinkingLevel() {
+             assertActive();
+--- a/dist/core/extensions/types.d.ts
++++ b/dist/core/extensions/types.d.ts
+@@ -198,6 +198,8 @@
+     percent: number | null;
+ }
+ export interface CompactOptions {
++    /** Recheck session scope across asynchronous native compaction boundaries. */
++    preflight?: () => boolean;
+     customInstructions?: string;
+     onComplete?: (result: CompactionResult) => void;
+     onError?: (error: Error) => void;
+@@ -1010,7 +1012,7 @@
+     /** Get available slash commands in the current session. */
+     getCommands(): SlashCommandInfo[];
+     /** Set the current model. Returns false if no API key available. */
+-    setModel(model: Model<any>): Promise<boolean>;
++    setModel(model: Model<any>, options?: { preflight?: () => boolean }): Promise<boolean>;
+     /** Get current thinking level. */
+     getThinkingLevel(): ThinkingLevel;
+     /** Set thinking level (clamped to model capabilities). */
+@@ -1211,7 +1213,7 @@
+ export type GetCommandsHandler = () => SlashCommandInfo[];
+ export type SetActiveToolsHandler = (toolNames: string[]) => void;
+ export type RefreshToolsHandler = () => void;
+-export type SetModelHandler = (model: Model<any>) => Promise<boolean>;
++export type SetModelHandler = (model: Model<any>, options?: { preflight?: () => boolean }) => Promise<boolean>;
+ export type GetThinkingLevelHandler = () => ThinkingLevel;
+ export type SetThinkingLevelHandler = (level: ThinkingLevel) => void;
+ export type SetLabelHandler = (entryId: string, label: string | undefined) => void;

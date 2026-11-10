@@ -63,6 +63,7 @@
           preInstall = ''
             patch -p1 < ${./nix/patches/pi-queued-message-removal.patch}
             patch -p1 < ${./nix/patches/pi-bridge-persistence.patch}
+            patch -p1 < ${./nix/patches/pi-bridge-control-preflight.patch}
           '' + (old.preInstall or "");
           postInstall = (old.postInstall or "") + ''
             sdk_root="$out/lib/node_modules/@earendil-works/pi-coding-agent"

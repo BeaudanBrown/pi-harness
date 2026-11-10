@@ -7,6 +7,7 @@ import { history, offerHistory } from "./history.js";
 import { allowedWorkspace, connect, object, Peer, string, type ObjectValue } from "./wire.js";
 import { BridgeMatrix, syncIntoStore } from "./matrix.js";
 import { BridgeOrganization } from "./organization.js";
+import { authorizeInput } from "./input.js";
 
 export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; operatorUserId?: string; hostSpace?: boolean };
 type Attachment = { peer: Peer; idle: boolean; key: string; stopping?: boolean };
@@ -85,6 +86,7 @@ export class BridgeRelay {
         }
         if (!key || this.attached.get(key)?.peer !== peer) throw Error("Native session registration required");
         if (method === "input.read") return this.store.inputChunk(key, string(params.id, 255), Number(params.offset));
+        if (method === "image.read") return this.store.imageChunk(key, string(params.id, 255), Number(params.offset));
         if (method === "withdrawn") { this.store.interruptInput(key, string(params.id, 255)); return {}; }
         if (method === "activity") {
           this.attached.get(key)!.idle = params.idle === true;
@@ -112,7 +114,7 @@ export class BridgeRelay {
   }
   private status(binding: Binding): ObjectValue {
     const current = this.attached.get(binding.key);
-    return { ...binding, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.stopping ? "stopping" : current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
+    return { ...binding, intakeReady: this.store.cursor() !== undefined, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.stopping ? "stopping" : current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
   }
   private async syncLoop(): Promise<void> {
     while (!this.stopSignal.signal.aborted) {
@@ -144,43 +146,36 @@ export class BridgeRelay {
         binding = this.store.binding(binding.key)!;
         if (!binding.room) return;
         const gap = this.store.progress(`gap:${binding.room}`);
-        for (const input of !gap && historyReady ? this.store.received(binding.key) : []) {
-          const event = input.event;
-          let content: ObjectValue;
-          try { content = object(event.content ?? {}); } catch { this.store.authorize(input.id, undefined); continue; }
-          const sender = typeof event.sender === "string" ? event.sender : "";
-          if (!binding.enabled || binding.archived || event.type !== "m.room.message" || content.msgtype !== "m.text" || typeof content.body !== "string" || !content.body.trim() || !/^@[^:\s]+:[^\s]+$/.test(sender) || this.matrix.ignoredSender(sender)) {
-            this.store.authorize(input.id, undefined); continue;
-          }
-          let relation: ObjectValue = {};
-          try { relation = object(content["m.relates_to"] ?? {}); } catch { /* Not a valid reply relation. */ }
-          if (relation.rel_type === "m.replace") { this.store.authorize(input.id, undefined); continue; }
-          let text = content.body;
-          if (relation["m.in_reply_to"] && text.startsWith("> ") && text.includes("\n\n")) text = text.slice(text.indexOf("\n\n") + 2);
-          if (await this.matrix.joined(binding.room, sender)) {
-            const control = text.trim() === "!abort" ? "abort" : text.trim() === "!stop" ? "stop" : undefined;
-            const followUp = text.startsWith("!follow-up ");
-            this.store.authorize(input.id, { text: followUp ? text.slice(11) : text, sender, ...(control ? { control } : {}), deliverAs: followUp ? "followUp" : "steer" });
-          } else this.store.authorize(input.id, undefined);
-        }
+        for (const input of !gap && historyReady ? this.store.received(binding.key) : []) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal);
         if (historyReady && !gap && binding.enabled && !binding.archived) {
           const input = this.store.nextInput(binding.key);
           if (input?.state === "queued" && input.prompt) {
             if (!await this.matrix.joined(binding.room, input.prompt.sender)) this.store.interruptInput(binding.key, input.id);
             else {
               const attachment = this.attached.get(binding.key);
-              if (!attachment) {
+              if (!attachment && ["status", "abort", "stop"].includes(input.prompt.control ?? "")) {
+                this.store.finishInput(binding.key, input.id, "No native adapter is connected. No stop/abort was sent and process exit is not implied. Use local Pi, or !start to open without starting a model turn.");
+              } else if (!attachment) {
                 allowedWorkspace(binding.cwd, this.config.roots);
-                await this.open(binding); // Actual native writer exclusion is in Pi, never a reservation.
+                if (input.prompt.control === "start") {
+                  const taken = this.store.takeInput(binding.key, input.id);
+                  if (taken) try {
+                    await this.open(binding);
+                    this.store.finishInput(binding.key, input.id, "Local open requested. No model turn was started; a window/helper reply is not a native startup receipt.");
+                  } catch (error) { this.store.interruptInput(binding.key, input.id); throw error; }
+                } else await this.open(binding); // Actual native writer exclusion is in Pi, never a reservation.
               }
               else if (!attachment.stopping) {
                 const taken = this.store.takeInput(binding.key, input.id);
                 if (taken) {
-                  if (taken.prompt?.control) this.store.interruptBefore(binding.key, taken.id);
+                  if (taken.prompt?.control === "abort" || taken.prompt?.control === "stop") this.store.interruptBefore(binding.key, taken.id);
                   try {
                     const receipt = object(await attachment.peer.request("input", { id: taken.id }));
                     if (receipt.stopping === true) attachment.stopping = true;
-                    if (receipt.accepted !== true) this.store.interruptInput(binding.key, taken.id);
+                    if (receipt.accepted !== true) {
+                      if (typeof receipt.message === "string") this.store.finishInput(binding.key, taken.id, string(receipt.message, 4096));
+                      else this.store.interruptInput(binding.key, taken.id);
+                    }
                   } catch (error) {
                     this.store.interruptInput(binding.key, taken.id); attachment.peer.close(); throw error;
                   }
@@ -193,6 +188,7 @@ export class BridgeRelay {
           msgtype: "m.notice", body: "Input interrupted: Pi may already have acted on this message. It will not be replayed automatically. You can send a fresh instruction.",
           "m.relates_to": { "m.in_reply_to": { event_id: input.id } }, "m.mentions": {},
         } }]);
+        this.store.closeInteractions(binding.key);
         // Archive never suppresses an already executing turn's output.
         if (binding.enabled) for (const output of this.store.outputs(binding.key)) this.store.sent(output.id, await this.matrix.send(binding.room, output));
         this.retryAt.delete(binding.key);

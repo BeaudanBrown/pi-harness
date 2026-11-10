@@ -1,6 +1,9 @@
 import { closeSync, constants, fstatSync, fsyncSync, lstatSync, openSync, readFileSync, realpathSync } from "node:fs";
 import { renderTranscript } from "../matrix-shared/transcript-renderer.js";
 import type { Binding, BridgeStore } from "./store.js";
+import { renderRemoteCheckpoint, validateRemoteCheckpoint } from "../matrix-shared/checkpoint.js";
+import { interactionSpec } from "./interaction.js";
+import { object, string } from "./wire.js";
 
 export type NativeEntry = { type: string; id: string; nativeId?: string; customType?: string; data?: Record<string, unknown>; message?: { role: string; content: unknown; stopReason?: string; metadata?: Record<string, unknown> } };
 function parseLine(line: string): unknown {
@@ -50,19 +53,36 @@ export function offerHistory(store: BridgeStore, binding: Binding): void {
   const position = last === undefined ? boundary : saved.entries.findIndex(entry => entry.id === last);
   if (position < boundary || last !== undefined && position < 0) throw Error("Persisted projection position is missing");
   let enabled = binding.enabled;
-  for (const entry of saved.entries.slice(position + 1)) {
+  const project = (entry: NativeEntry): void => {
     if (entry.type === "custom" && entry.customType === "matrix-bridge.enrollment" && entry.data?.nativeId === binding.nativeId && typeof entry.data.enabled === "boolean") {
       enabled = entry.data.enabled; store.setEnabled(binding.key, enabled);
     }
-    if (!enabled || entry.type !== "message" || !entry.message) continue;
+    if (!enabled) return;
+    if (entry.type === "custom" && entry.data?.nativeId === binding.nativeId) {
+      if (entry.customType === "matrix-bridge.question") {
+        const checkpoint = validateRemoteCheckpoint(entry.data.checkpoint);
+        store.offerInteraction(binding.key, `native:${entry.id}`, { kind: "question", nativeEntry: entry.id, question: renderRemoteCheckpoint(checkpoint), ...(checkpoint.kind === "question" && checkpoint.options ? { options: checkpoint.options } : {}) });
+      } else if (entry.customType === "matrix-bridge.answer") {
+        const active = store.activeInteraction(binding.key);
+        if (active && active.nativeEntry === entry.data.question) store.cancelInteractions(binding.key, active.id);
+      } else if (entry.customType === "matrix-bridge.control" && typeof entry.data.input === "string" && typeof entry.data.sender === "string" && store.ownsInput(binding.key, entry.data.input, entry.data.sender)) {
+        const result = object(entry.data.result), active = store.activeInteraction(binding.key);
+        store.finishInput(binding.key, entry.data.input, string(result.message, 4096), `native-control:${entry.id}`);
+        if (active && (result.selected === "model" || result.selected === "thinking") && active.kind === result.selected) store.cancelInteractions(binding.key, active.id);
+        if (result.selection) store.offerInteraction(binding.key, `native:${entry.id}`, interactionSpec(result.selection));
+      }
+    }
+    if (entry.type !== "message" || !entry.message) return;
     const { role, content, stopReason } = entry.message;
-    const text = textContent(content); if (!text) continue;
+    const text = textContent(content);
     if (role === "user") {
+      store.cancelInteractions(binding.key); // New native input supersedes old choices, without gating local Pi.
       const eventId = entry.message.metadata?.["pi.bridge.event"], sender = entry.message.metadata?.["pi.bridge.sender"];
-      if (typeof eventId === "string" && typeof sender === "string" && store.ownsInput(binding.key, eventId, sender)) continue;
+      if (typeof eventId === "string" && typeof sender === "string" && store.ownsInput(binding.key, eventId, sender)) return;
       // Never infer origin from text: locally resubmitted/restored queue text
       // is a fresh local prompt even if it retains a visible Matrix caption.
-    } else if (role !== "assistant" || !["stop", "length", "toolUse"].includes(stopReason ?? "")) continue;
+    } else if (role !== "assistant" || !["stop", "length", "toolUse"].includes(stopReason ?? "")) return;
+    if (!text) return;
     const kind = role === "user" ? "local_user" : "assistant_final";
     store.offer(binding.key, `native:${entry.id}`, () => {
       try {
@@ -76,8 +96,12 @@ export function offerHistory(store: BridgeStore, binding: Binding): void {
         return chunks;
       }
     });
+  };
+  for (const entry of saved.entries.slice(position + 1)) {
+    project(entry);
+    // Checkpoint each completed entry. Replaying an older local cancellation
+    // must not cancel a later question that was already materialized.
+    store.saveProgress(`projection:${binding.key}`, entry.id);
   }
-  const lastId = saved.entries.at(-1)?.id;
-  if (lastId) store.saveProgress(`projection:${binding.key}`, lastId);
   seen.set(binding.key, signature);
 }

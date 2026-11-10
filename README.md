@@ -18,6 +18,23 @@ still provides the interactive agent UI, session storage, branching,
 compaction, tools, extensions, skills, prompt templates, and themes. Session
 layout remains external and uses regular tmux through fixed host-owned actions.
 
+## Staged native bridge interactions
+
+The replacement is not yet approved for cutover. Its room interface retains
+`!help`, `!status`, idle `!start`, `!abort`, `!stop`, `!model [FILTER|provider/model]`,
+`!thinking [LEVEL]`, `!compact [INSTRUCTIONS]`, `!steer` and `!follow-up`.
+Ordinary messages use native prompting/steering; extension commands, templates
+and skills expand before remote attribution. Controls are not shell commands or
+model prompts. A start/stop acknowledgement does not prove startup/process exit.
+
+Native questions become choice polls or replyable notices. The first authorized
+answer wins; stale votes/replies do not start another turn. Current joined,
+non-ignored room members can collaborate. JPEG/PNG/WebP input retains original
+bytes and captions through authenticated media fetch and private chunked IPC;
+unsupported media/models are explained rather than silently dropping the image
+or switching models. See the [implementation evidence](docs/matrix-pi-bridge-evidence.md)
+for tested boundaries and outstanding release work.
+
 ## What This Flake Provides
 
 - the upstream `pi` CLI from `llm-agents.nix`
@@ -93,10 +110,13 @@ Implementation and patch profiles admit project-owned worker extensions and tool
 only through the registry's `aloop-opt-in` policy; `.aloop.json` supplies that
 explicit opt-in when the worker launcher consumes the policy.
 
-Capabilities tied to live state are not ambient. `remote_checkpoint` is active
-only while a connected ordinary adapter has unfinished Matrix input, and aloop's
-supervisor tools are active only from `/aloop` startup until that supervisor
-turn settles. The managed coordinator exposes only its typed lifecycle tools.
+Capabilities tied to live state are not ambient. The legacy `remote_checkpoint`
+is active only while a connected ordinary adapter has unfinished Matrix input.
+The staged native adapter instead requires an enrolled interactive session and
+checks its registered binding/live intake before recording a checkpoint and
+aborting the turn. Aloop's supervisor tools are active only from `/aloop` startup
+until that supervisor turn settles. The managed coordinator exposes only its
+typed lifecycle tools.
 
 ## Lean local Pi with pi-r
 

@@ -15,6 +15,7 @@ export function string(value: unknown, max = 8192): string {
   return value;
 }
 export const FRAME_BYTES = 64 * 1024;
+export const IMAGE_CHUNK_BYTES = 24 * 1024;
 export function hostPath(value: string): string {
   let result = value.replace(/^%h(?=\/|$)/, homedir());
   if (result.startsWith("%t/")) {

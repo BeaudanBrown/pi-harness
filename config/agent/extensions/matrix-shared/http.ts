@@ -46,6 +46,31 @@ export class MatrixHttp {
 	request(method: string, path: string, body?: Record<string, unknown>, signal?: AbortSignal): Promise<unknown> {
 		return this.perform(method, path, body ? { data: JSON.stringify(body), contentType: "application/json" } : undefined, signal);
 	}
+	/** Original inbound bytes, one attempt. No redirect, anonymous fallback,
+	 * metadata-derived size/pixel policy or image transformation. */
+	async downloadMedia(mxc: string, signal?: AbortSignal): Promise<Buffer> {
+		let media: URL;
+		try { media = new URL(mxc); } catch { throw new MatrixError("invalid_response", "Invalid Matrix media reference"); }
+		const id = media.pathname.slice(1);
+		if (media.protocol !== "mxc:" || !media.host || media.username || media.password || media.search || media.hash || !id || id.includes("/")) throw new MatrixError("invalid_response", "Invalid Matrix media reference");
+		const bounded = signal ? AbortSignal.any([signal, AbortSignal.timeout(45000)]) : AbortSignal.timeout(45000);
+		try {
+			bounded.throwIfAborted();
+			const response = await this.fetchImplementation(new URL(`/_matrix/client/v1/media/download/${encodeURIComponent(media.host)}/${encodeURIComponent(id)}`, this.homeserver), {
+				method: "GET", redirect: "error", headers: { Authorization: `Bearer ${this.#token}` }, signal: bounded,
+			});
+			if (!response.ok) {
+				await response.body?.cancel().catch(() => {});
+				throw new MatrixError("http", `Matrix media returned HTTP ${response.status}`, response.status, response.status === 429 || response.status >= 500);
+			}
+			if (!response.body) throw new MatrixError("invalid_response", "Matrix media response had no body");
+			return Buffer.from(await response.arrayBuffer());
+		} catch (error) {
+			if (error instanceof MatrixError) throw error;
+			if (signal?.aborted) throw new MatrixError("cancelled", "Matrix media fetch was cancelled");
+			throw new MatrixError("network", "Matrix media fetch failed", undefined, true);
+		}
+	}
 	/** Upload is POST and therefore never automatically retried. */
 	upload(filename: string, mimeType: string, data: Buffer, signal?: AbortSignal): Promise<unknown> {
 		if (!data.length || data.length > 25 * 1024 * 1024 || filename.length > 255 || !/^[a-z0-9.+-]+\/[a-z0-9.+-]+$/.test(mimeType)) throw Error("Invalid media upload");

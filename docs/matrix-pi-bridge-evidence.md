@@ -362,6 +362,137 @@ accepted: live acceptance remains #172, not evidence supplied by these fixtures.
 Only this evidence text changed after the gate. Cumulative review/fresh
 verification remain #171 requirements; no push, deployment or migration occurred.
 
+### #166 preflight: polls, native controls and inbound images
+
+Current scope is rich interaction only. #167/#168 own independently approved
+workspace/archive effects; #169 migration; #170 legacy removal. Do not restore
+an execution supervisor, general host controls, export spool or notification
+repair. Production Matrix actions remain forbidden.
+
+| Acceptance | Implementation seam | Required evidence |
+| --- | --- | --- |
+| Durable native questions/choice polls | Persist a native custom question before aborting; project it into frozen outputs plus a small interaction row | Real Pi question/idle, restart/lost publish/end ACK, obsolete question after local input/tree/switch, native history identity |
+| One answer, joined-member collaboration | Atomically claim interaction and authorize its input; capture active-question association at intake; explicit stale replies/votes ignored | Concurrent votes/text, duplicate IDs, departed/ignored sender, restart before/after handoff, no automatic retry of uncertain execution |
+| Native help/status/start/stop/abort/model/thinking/compact | Direct native APIs, durable result entries, selection polls for native available choices | Actual Pi preference/history changes, busy rejection/abort, no shell/TUI command synthesis or silent model switching |
+| Original JPEG/PNG/WebP and captions | Authenticated same-homeserver media fetch; indexed private SQLite chunks; bounded digest-checked handoff to Pi | Original bytes persisted by actual Pi; captionless/default caption, repeat event IDs, malformed/encrypted/unsupported media and model-local explanation; no new size/pixel caps |
+| Independent bounded failures | Existing per-room work/output identity, no additional daemon or process authority | Bad poll/media/control in one room cannot block another, interrupted transfer/abort, definitive rejection versus uncertain receipt |
+| Native command/skill/template semantics | Existing patched preflight and post-expansion attribution remain the dispatch seam | Real extension command consumption and template/skill expansion with provenance; do not delete patches based on assumed SDK behavior |
+
+Crash boundaries: intake/association/cursor together; interaction claim/input
+queue together; freeze poll bodies/transaction IDs before send; publish/end retries
+reuse them. Persist original image and its authorization together before handoff;
+chunks never become execution receipts. Persist handed before native dispatch;
+unknown receipt remains interrupted. Native question/result markers are fsynced
+before projection, not inferred from tool events. Use branch/session identity and
+abort epochs at the adapter, without gating ordinary local Pi on bridge state.
+The additive delivery schema upgrade must preserve existing bindings, inputs,
+outputs and cursors and reject an older daemon against the upgraded ledger.
+
+Implementation now uses native `matrix-bridge.question`, `matrix-bridge.answer`
+and `matrix-bridge.control` entries. Poll starts/ends retain frozen IDs and bodies;
+first authorized input wins in the same transaction as its interaction claim.
+Plain-text fallback follows recovered room order, not sender clocks. The adapter
+also checks the original native question on the current branch before dispatch.
+History projection checkpoints every processed entry so replay cannot cancel a
+later question. No room/input identity is inferred from visible attribution.
+
+Controls use only authenticated, session-scoped native choices. `!start` requests
+an idle local open; its acknowledgement is not a startup receipt. Compaction has
+separate requested/completed/failed results. A newly tested native API gap required
+`pi-bridge-control-preflight.patch`: the loader forwards optional guards, model
+selection checks again after authentication, and compaction checks across awaited
+boundaries and before native history mutation. Each manual compaction retains its
+own abort controller so a late callback cannot clear a replacement. The adapter
+fences file/session, abort epoch, native branch and busy state as appropriate.
+Existing expansion/provenance/persistence patches remain necessary and retained.
+The SDK's ESM-only thinking helper is imported lazily, not eagerly through the
+CommonJS headless enrollment-policy path.
+
+Images use the authenticated v1 media-download endpoint with redirects rejected.
+Untrusted MIME/size/pixel hints do not replace the original bytes. SQLite schema 2
+atomically adds interaction association and indexed 24-KiB image chunks, advances
+the version fence, and preserves existing delivery facts. There is no secondary
+export spool or new payload/pixel cap. Full/chunk digests and live native scope are
+checked before an image becomes a native user message. Unsupported media/model
+requests never silently become caption-only prompts or select another model.
+
+Focused and affected evidence:
+
+- Ten HTTP-boundary/real-SQLite/private-IPC interaction cases cover competing
+  votes/text, chronological fallback, stale/foreign/ignored senders, lost poll
+  start/end receipts across reopen, per-entry projection replay, original image
+  formats/captions/deduplication, unsupported input, corrupt chunks, room isolation
+  and detached controls.
+- Five store cases include the prior intake/output/restart contracts, schema-one
+  upgrade preserving cursor/binding/queued input/frozen output, and a synthetic
+  PNG-signature payload over 25 MiB exercising durable storage and bounded frames
+  (not a codec-validity claim). Indexed chunk reads avoid repeatedly scanning a
+  whole large blob.
+- Four actual packaged-Pi cases include persisted text/daemon outage/new-session
+  isolation, native extension/template/skill behavior, choice tool abort/idle,
+  first-answer wins, local-tree obsolete-question rejection, real model/thinking
+  and completed compaction, original JPEG/PNG/WebP bytes in native history,
+  unsupported-model/busy rejection, and abort during an interrupted image read.
+  Native API guard tests revoke scope while authentication awaits and inside a
+  compaction hook; neither withdrawn mutation commits. RPC worker exclusion
+  remains enforced. These use disposable homes and fake model/HTTP transports,
+  not live Matrix/model receipts.
+- Actual native compaction first failed in the tiny fixture under the native
+  20,000-token keep-recent default. The fixture alone now has a one-token recent
+  window and requires the completed callback/history entry. No production check
+  was weakened. The model-scope test then deliberately failed against the old
+  API (`false !== true`) and passed with the new native guard patch.
+- Logs: `2026-11-10T10-11-38-725Z-native-166-boundary-regressions-60ad2524eae0`
+  (19 passing, zero skips),
+  `2026-11-10T10-35-43-629Z-native-166-control-scope-red-6994150f905a`, and
+  `2026-11-10T10-41-37-102Z-native-166-control-scope-green-de99d8b4213a`
+  (four actual-Pi cases passing, zero skips). The first broader gate exposed the
+  eager CommonJS/ESM import mismatch. Its corrected recheck,
+  `2026-11-10T10-54-32-517Z-native-166-affected-recheck-dffa25cdf823`, passed
+  production Pi/bridge compilation, TypeScript, source/module/package contracts,
+  **191 unit and 127 chat tests**, zero skips. Cached LSP resolution against the
+  earlier SDK still reports stale types in the worktree; fresh local `tsc` and
+  the isolated Nix compiler both pass against the patched declarations.
+
+Pinned paired review:
+`2026-11-10T10-58-23-599Z-worktree-026d7b96bc68-1d0d6a83540f`.
+
+- **Standards:** one high/current-issue finding, accepted and fixed. Controls had
+  received a session-only predicate rather than the captured live abort epoch.
+  Both native preflight and result publication now use that captured scope;
+  pending control/compaction flags carry their epoch so a revoked callback cannot
+  clear or indefinitely hold a replacement. Disconnect/checkpoint/abort revokes
+  only ephemeral preflight ownership, not local process authority.
+- **Spec:** one medium/current-issue finding, accepted and fixed. A nonempty image
+  body without optional `filename` was lost. It is now retained; blank bodies and
+  known filename-equal bodies retain the captionless default.
+- Both regressions failed first in
+  `2026-11-10T11-03-45-191Z-native-166-review-regressions-red-1d7ba1b7a2bd`.
+  The batched correction passed all 19 focused/native/store cases, zero skips,
+  in `2026-11-10T11-08-01-877Z-native-166-review-regressions-green-acf1770d633e`.
+  Actual Pi rejects a deliberately delayed control after abort, emits no late
+  success and accepts a fresh control. Original caption bytes without `filename`
+  also reach actual native history. No accepted current-scope finding remains;
+  this remediation preserves the reviewed design and does not need a routine
+  second subjective review.
+
+Final **`nix run -L .#verify` passed all 12 gates** at
+`2026-11-10T11-15-33-682Z-native-166-canonical-recheck-3ca7cce64edf`, including
+191 unit, 127 chat and 856 legacy tests, zero skips. The initial canonical attempt
+(`2026-11-10T11-09-19-146Z-native-166-canonical-boundary-997777a0b4ba`) passed the
+new/affected suites but failed two existing legacy timing-boundary cases: reconnect
+projection and abort-during-wake notice delivery. Both passed three focused repeats
+using the exact failed derivation's immutable source, compiled tests, Node 24 and
+Pi/resource artifacts (`2026-11-10T11-14-47-251Z-native-166-legacy-failure-isolation-3a2c26d4c45f`),
+then the unchanged canonical recheck passed. No test assertions, timeouts,
+concurrency or production code were weakened. The initial failure's root cause
+is not proven; cumulative #171 verification must still run afresh. Only evidence
+text changed after the passing gate. Final isolated production packages (`pi`,
+`matrix-bridge`, `bridge-chat`, `pi-harness`) also passed:
+`2026-11-10T11-19-29-050Z-native-166-final-packages-9d04f61b0f99`.
+
+No production mutation, migration, restart, push or rollout evidence is implied.
+
 ## Rebuild and migration readiness
 
 Pending implementation and cumulative verification. Do not run a host switch merely

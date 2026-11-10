@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { BridgeStore } from "../config/agent/extensions/matrix-bridge/store.js";
+import { DatabaseSync } from "node:sqlite";
+import { imageInfo } from "../config/agent/extensions/matrix-bridge/media.js";
 
 test("durable intake deduplicates and restart uncertainty never blocks a fresh request", () => {
   const root = mkdtempSync(join(tmpdir(), "bridge-store-"));
@@ -64,5 +66,51 @@ test("intake failure commits neither a partial batch nor its cursor; queued inpu
     assert.equal(store.status(binding.key).queued, 1);
     assert.equal(store.takeInput(binding.key)?.id, "$valid");
     assert.throws(() => store.register({ file: "/p/session.jsonl", nativeId: "different", cwd: "/p", title: "Replacement", boundary: null }));
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("schema-one upgrade preserves durable delivery facts and advances the version fence", () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-upgrade-")), file = join(root, "bridge.sqlite");
+  let store = new BridgeStore(file, "host");
+  try {
+    const binding = store.register({ file: "/p/session.jsonl", nativeId: "native", cwd: "/p", title: "Task", boundary: "boundary" });
+    store.setRoom(binding.key, "!room:example.test"); store.intake("saved-cursor", [{ id: "$queued", room: "!room:example.test", event: {} }]);
+    store.authorize("$queued", { text: "preserved", sender: "@friend:example.test" });
+    const output = store.offer(binding.key, "native:original", () => [{ type: "m.room.message", content: { body: "immutable" } }])[0]!;
+    store.close();
+    // Reconstitute the exact prior additive schema, not a production downgrade.
+    const prior = new DatabaseSync(file);
+    prior.exec("DROP TABLE images; DROP TABLE interactions; DROP INDEX output_receipt; ALTER TABLE inputs DROP COLUMN interaction; UPDATE meta SET value='1' WHERE key='version'"); prior.close();
+    store = new BridgeStore(file, "host");
+    assert.equal(store.cursor(), "saved-cursor"); assert.equal(store.binding(binding.key)?.boundary, "boundary");
+    assert.equal(store.nextInput(binding.key)?.prompt?.text, "preserved"); assert.deepEqual(store.outputs(binding.key)[0], output);
+    const inspect = new DatabaseSync(file, { readOnly: true });
+    assert.equal(inspect.prepare("SELECT value FROM meta WHERE key='version'").get()!.value, "2"); inspect.close();
+    assert.throws(() => new BridgeStore(file, "wrong-host"), /another host/);
+  } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("large original media authorization is atomic, chunk-scoped and durable without export caps", () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-image-store-")), filename = join(root, "bridge.sqlite");
+  let store = new BridgeStore(filename, "host");
+  try {
+    const binding = store.register({ file: "/p/native.jsonl", nativeId: "native", cwd: "/p", title: "Task", boundary: null });
+    store.setRoom(binding.key, "!room:example.test"); store.intake("cursor", [{ id: "$image", room: "!room:example.test", event: { content: "original" } }]);
+    // Synthetic signature payload: exercise size/storage, not image codec validity.
+    const bytes = Buffer.alloc(25 * 1024 * 1024 + 1); Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]).copy(bytes);
+    const info = imageInfo(bytes), prompt = { text: "caption", sender: "@friend:example.test", image: info };
+    assert.throws(() => store.authorize("$image", { ...prompt, image: { ...info, sha256: "0".repeat(64) } }, { image: bytes }), /integrity/);
+    assert.equal(store.status(binding.key).received, 1);
+    store.authorize("$image", prompt, { image: bytes }); store.close(); store = new BridgeStore(filename, "host");
+    assert.deepEqual(store.takeInput(binding.key)?.prompt?.image, info);
+    assert.throws(() => store.imageChunk("another-binding", "$image", 0), /unavailable/);
+    const chunks: Buffer[] = [];
+    for (let offset = 0; offset < bytes.length;) {
+      const chunk = store.imageChunk(binding.key, "$image", offset), part = Buffer.from(chunk.data, "base64");
+      assert.ok(Buffer.byteLength(JSON.stringify(chunk)) < 65536); chunks.push(part); offset += part.length;
+      assert.equal(chunk.done, offset === bytes.length);
+    }
+    assert.deepEqual(Buffer.concat(chunks), bytes);
+    store.settle(binding.key, "$image"); assert.throws(() => store.imageChunk(binding.key, "$image", 0), /unavailable/);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

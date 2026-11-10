@@ -1,0 +1,198 @@
+import { Type } from "typebox";
+export const MAX_CHECKPOINT_BODY_LENGTH = 6_000;
+export const MAX_CHECKPOINT_UTF8_BYTES = 8_000;
+
+const prose = (description: string, maxLength: number) =>
+	Type.String({ description, minLength: 1, maxLength });
+const requestedCodeFields = {
+	codeOrDiffRequested: Type.Optional(
+		Type.Literal(true, { description: "Set only when the operator explicitly requested code or a diff." }),
+	),
+	requestedCodeOrDiff: Type.Optional(prose("Code or diff explicitly requested by the operator.", 1_000)),
+};
+
+// llama.cpp's constrained tool grammar emits an empty object for a root anyOf.
+// Advertise one flat shape and retain the stricter kind-specific validation below.
+export const RemoteCheckpointSchema = Type.Object(
+	{
+		kind: Type.String({ description: "Checkpoint kind: question, blocked, or issue_complete.", pattern: "^(question|blocked|issue_complete)$" }),
+		decision: Type.Optional(prose("Required for question: the specific decision or answer required from the operator.", 1_200)),
+		context: Type.Optional(prose("Optional for question: concise context needed to make the decision.", 1_200)),
+		options: Type.Optional(Type.Array(prose("Optional question answer choice.", 300), { minItems: 1, maxItems: 8 })),
+		blockerEvidence: Type.Optional(prose("Required for blocked: observed evidence showing why work cannot continue.", 2_200)),
+		requiredIntervention: Type.Optional(prose("Required for blocked: the exact operator action or information required.", 1_200)),
+		issueOrObjective: Type.Optional(prose("Required for issue_complete: completed issue number, title, or objective.", 500)),
+		implementationSummary: Type.Optional(prose("Required for issue_complete: concise implementation summary without code or diffs.", 1_200)),
+		verificationEvidence: Type.Optional(prose("Required for issue_complete: tests, checks, and live evidence that passed.", 1_200)),
+		caveats: Type.Optional(prose("Required for issue_complete: remaining caveats, deferred work, or 'None'.", 800)),
+		gitCommitState: Type.Optional(prose("Required for issue_complete: commit, push, and working-tree state.", 800)),
+		approvalRequest: Type.Optional(prose("Required for issue_complete: exact closure or continuation approval requested from the operator.", 600)),
+		...requestedCodeFields,
+	},
+	{ additionalProperties: false },
+);
+
+interface RequestedCodeOrDiff {
+	codeOrDiffRequested?: true;
+	requestedCodeOrDiff?: string;
+}
+
+export type RemoteCheckpointInput =
+	| ({ kind: "question"; decision: string; context?: string; options?: string[] } & RequestedCodeOrDiff)
+	| ({ kind: "blocked"; blockerEvidence: string; requiredIntervention: string } & RequestedCodeOrDiff)
+	| ({
+			kind: "issue_complete";
+			issueOrObjective: string;
+			implementationSummary: string;
+			verificationEvidence: string;
+			caveats: string;
+			gitCommitState: string;
+			approvalRequest: string;
+	  } & RequestedCodeOrDiff);
+
+const CONTROL_CHARACTER = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/;
+
+// Code/diff omission is agent guidance, not a punctuation-based content classifier.
+// Keep structural bounds here and the explicit requested-code declaration below.
+function normalizedText(value: unknown, field: string, maxLength: number): string {
+	if (typeof value !== "string") throw new Error(`${field} must be a string`);
+	const normalized = value.replace(/\r\n?/g, "\n").trim();
+	if (!normalized) throw new Error(`${field} must not be empty`);
+	if (normalized.length > maxLength) throw new Error(`${field} must be at most ${maxLength} characters`);
+	if (CONTROL_CHARACTER.test(normalized)) throw new Error(`${field} contains control characters`);
+	return normalized;
+}
+
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
+	const unexpected = Object.keys(value).filter((key) => !allowed.includes(key));
+	if (unexpected.length > 0) throw new Error(`Unexpected checkpoint field: ${unexpected[0]}`);
+}
+
+const CODE_REQUEST_KEYS = ["codeOrDiffRequested", "requestedCodeOrDiff"] as const;
+
+function validatedCodeRequest(input: Record<string, unknown>): RequestedCodeOrDiff {
+	if (input.codeOrDiffRequested === undefined && input.requestedCodeOrDiff === undefined) return {};
+	if (input.codeOrDiffRequested !== true || input.requestedCodeOrDiff === undefined) {
+		throw new Error("requestedCodeOrDiff requires codeOrDiffRequested: true after an explicit operator request");
+	}
+	return {
+		codeOrDiffRequested: true,
+		requestedCodeOrDiff: normalizedText(input.requestedCodeOrDiff, "requestedCodeOrDiff", 1_000),
+	};
+}
+
+export function validateRemoteCheckpoint(value: unknown): RemoteCheckpointInput {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) {
+		throw new Error("Checkpoint input must be an object");
+	}
+	const input = value as Record<string, unknown>;
+	if (input.kind === "question") {
+		exactKeys(input, ["kind", "decision", "context", "options", ...CODE_REQUEST_KEYS]);
+		const options = input.options;
+		if (options !== undefined && (!Array.isArray(options) || options.length < 1 || options.length > 8)) {
+			throw new Error("options must contain 1-8 items");
+		}
+		return {
+			kind: "question",
+			decision: normalizedText(input.decision, "decision", 1_200),
+			...(input.context === undefined
+				? {}
+				: { context: normalizedText(input.context, "context", 1_200) }),
+			...(options === undefined
+				? {}
+				: { options: options.map((option, index) => normalizedText(option, `options[${index}]`, 300)) }),
+			...validatedCodeRequest(input),
+		};
+	}
+	if (input.kind === "blocked") {
+		exactKeys(input, ["kind", "blockerEvidence", "requiredIntervention", ...CODE_REQUEST_KEYS]);
+		return {
+			kind: "blocked",
+			blockerEvidence: normalizedText(input.blockerEvidence, "blockerEvidence", 2_200),
+			requiredIntervention: normalizedText(input.requiredIntervention, "requiredIntervention", 1_200),
+			...validatedCodeRequest(input),
+		};
+	}
+	if (input.kind === "issue_complete") {
+		exactKeys(input, [
+			"kind",
+			"issueOrObjective",
+			"implementationSummary",
+			"verificationEvidence",
+			"caveats",
+			"gitCommitState",
+			"approvalRequest",
+			...CODE_REQUEST_KEYS,
+		]);
+		return {
+			kind: "issue_complete",
+			issueOrObjective: normalizedText(input.issueOrObjective, "issueOrObjective", 500),
+			implementationSummary: normalizedText(input.implementationSummary, "implementationSummary", 1_200),
+			verificationEvidence: normalizedText(input.verificationEvidence, "verificationEvidence", 1_200),
+			caveats: normalizedText(input.caveats, "caveats", 800),
+			gitCommitState: normalizedText(input.gitCommitState, "gitCommitState", 800),
+			approvalRequest: normalizedText(input.approvalRequest, "approvalRequest", 600),
+			...validatedCodeRequest(input),
+		};
+	}
+	throw new Error("kind must be question, blocked, or issue_complete");
+}
+
+function checkpointFormattedBytes(body: string): number {
+	const escaped = (value: string) => value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
+		.replaceAll('"', "&quot;").replaceAll("'", "&#39;");
+	const formatted = body.split(/\n{2,}/).map((paragraph) => `<p>${paragraph.split("\n").map(escaped).join("<br>")}</p>`).join("");
+	return Buffer.byteLength(formatted, "utf8");
+}
+
+function assertCheckpointEventBounds(body: string): void {
+	if (body.length > MAX_CHECKPOINT_BODY_LENGTH || Buffer.byteLength(body, "utf8") > MAX_CHECKPOINT_UTF8_BYTES ||
+		checkpointFormattedBytes(body) > MAX_CHECKPOINT_UTF8_BYTES) {
+		throw new Error("Rendered checkpoint exceeds the single Matrix event limit");
+	}
+}
+
+export function renderRemoteCheckpointPollQuestion(input: Extract<RemoteCheckpointInput, { kind: "question" }>): string {
+	if (!input.options?.length) throw new Error("Checkpoint poll requires declared options");
+	const question = `❓ ${input.decision}`;
+	const fallback = [question, ...input.options.map((option, index) => `${index + 1}. ${option}`)].join("\n");
+	assertCheckpointEventBounds(fallback);
+	return question;
+}
+
+export function renderRemoteCheckpoint(input: RemoteCheckpointInput): string {
+	let body: string;
+	if (input.kind === "question") {
+		body = [
+			"❓ Question",
+			`Decision required: ${input.decision}`,
+			input.context ? `Context: ${input.context}` : undefined,
+			input.options ? `Options:\n${input.options.map((option) => `- ${option}`).join("\n")}` : undefined,
+			"Reply in this room to continue.",
+		]
+			.filter((line): line is string => line !== undefined)
+			.join("\n\n");
+	} else if (input.kind === "blocked") {
+		body = [
+			"⛔ Blocked",
+			`Evidence: ${input.blockerEvidence}`,
+			`Required intervention: ${input.requiredIntervention}`,
+			"Reply in this room to continue.",
+		].join("\n\n");
+	} else {
+		body = [
+			"✅ Issue complete",
+			`Issue/objective: ${input.issueOrObjective}`,
+			`Implementation: ${input.implementationSummary}`,
+			`Verification: ${input.verificationEvidence}`,
+			`Caveats: ${input.caveats}`,
+			`Git/commit state: ${input.gitCommitState}`,
+			`Approval requested: ${input.approvalRequest}`,
+		].join("\n\n");
+	}
+	if (input.codeOrDiffRequested && input.requestedCodeOrDiff) {
+		body += `\n\nRequested code/diff:\n${input.requestedCodeOrDiff}`;
+	}
+	assertCheckpointEventBounds(body);
+	return body;
+}
