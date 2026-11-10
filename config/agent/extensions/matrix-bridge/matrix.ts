@@ -39,7 +39,9 @@ export async function syncIntoStore(matrix: BridgeMatrix, store: BridgeStore, si
   const joined = object(object(object(response).rooms ?? {}).join ?? {});
   const errors: Array<{ room: string; error: string }> = [];
   let complete = true;
-  await Promise.all(bindings.filter(binding => binding.room).map(async binding => {
+  // Historical disabled/retired imports are not live consumers. In particular,
+  // a room the old bot left cannot pin the host's new global sync cursor.
+  await Promise.all(bindings.filter(binding => binding.room && !store.enrollmentBlocked(binding.file, binding.nativeId)).map(async binding => {
     const room = binding.room!, checkpoint = `room-cursor:${room}`, gapKey = `gap:${room}`;
     try {
       const timeline = object(object(joined[room] ?? {}).timeline ?? { events: [] });

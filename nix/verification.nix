@@ -129,6 +129,7 @@ let
     extraInputs ? [ ],
     environment ? "",
     nodeArgs ? "",
+    commandPrefix ? "",
   }: pkgs.runCommand name {
     nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.git pkgs.nodejs pkgs.jq pkgs.gnugrep ] ++ extraInputs;
   } ''
@@ -146,13 +147,17 @@ let
       exit 1
     fi
     ${environment}
-    node --test ${nodeArgs} "''${test_files[@]}"
+    ${commandPrefix} node --test ${nodeArgs} "''${test_files[@]}"
     touch "$out"
   '';
 
   unitTests = runCompiledTests {
     name = "pi-harness-unit-tests";
     nodeArgs = "--test-concurrency=2";
+    # Nix sandbox input binds can have rw VFS flags despite immutable ownership.
+    # Give the synthetic snapshot a real private read-only mount; never weaken
+    # the production migrator's kernel check or skip it in the canonical gate.
+    commandPrefix = ''${lib.getExe pkgs.bubblewrap} --bind / / --dev-bind /dev /dev --ro-bind "$PI_BRIDGE_MIGRATION_FIXTURE" "$PI_BRIDGE_MIGRATION_FIXTURE" --'';
     extraInputs = [ pkgs.python3 pkgs.tmux pkgs.direnv ];
     selector = ''
       find ${testBuild}/build/tests -maxdepth 1 -type f -name '*.test.js' \
@@ -168,6 +173,9 @@ let
       export PI_NATIVE_LOCK_ADDON=${nativeSessionLock}/lib/session-lock.node
       export PI_BRIDGE_TEST_PI=${piPackage}/bin/pi
       export PI_BRIDGE_TEST_SDK=${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/dist
+      export PI_BRIDGE_MIGRATION_FIXTURE=${source}/tests/fixtures/matrix-migration
+      export PI_BRIDGE_MIGRATION_MAIN=${matrixBridge}/lib/matrix-bridge/migration-main.js
+      export PI_BRIDGE_MIGRATION_BWRAP=${lib.getExe pkgs.bubblewrap}
       export PI_BRIDGE_TEST_STORE=${testBuild}/build/config/agent/extensions/matrix-bridge/store.js
       export PI_BRIDGE_TEST_MAIN=${matrixBridge}/lib/matrix-bridge/main.js
       export PI_TASK_TEST_HELPER=${matrixBridge}/bin/pi-task-workspace

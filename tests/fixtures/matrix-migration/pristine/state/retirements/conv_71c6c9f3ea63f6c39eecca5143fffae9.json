@@ -1,0 +1,1 @@
+{"cleanup":[{"effectId":"cleanup_dddddddddddddddddddddddddddddddd","kind":"bot_leave","phase":"pending","roomId":"!retired:example.org","userId":"@bot:example.org"}],"conversationId":"conv_71c6c9f3ea63f6c39eecca5143fffae9","creationKey":"retired","hostId":"fixture","retiredAt":1,"retirementId":"retirement_dddddddddddddddddddddddddddddddd","version":1}

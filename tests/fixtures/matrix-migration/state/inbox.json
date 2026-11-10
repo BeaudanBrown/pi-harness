@@ -1,0 +1,1 @@
+{"jobs":[{"conversationId":"conv_0736983a219b3326999c583314e3604b","id":"inbox-job","response":{"rooms":{"join":{"!live:example.org":{"timeline":{"events":[{"content":{"body":"original pending inbox text","msgtype":"m.text"},"event_id":"$inbox-unattempted","sender":"@operator:example.org","type":"m.room.message"}]}}}}}}],"lastBatch":"original-sync-cutoff","version":1}

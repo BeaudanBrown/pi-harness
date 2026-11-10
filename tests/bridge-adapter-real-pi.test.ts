@@ -415,6 +415,8 @@ test("the production enrollment policy excludes an RPC worker even when configur
     assert.equal((await live.send("prompt", { message: "ordinary worker prompt" })).success, true);
     await until(() => readFileSync(file, "utf8").includes("probe answer"));
     assert.ok(!readFileSync(file, "utf8").includes("matrix-bridge.boundary"));
+    const firstEntries = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line) as { customType?: string; data?: { enabled?: boolean } });
+    assert.equal(firstEntries.find(entry => entry.customType === "matrix-bridge.enrollment")?.data?.enabled, false, "an imported public file may have no new boundary marker; worker/local-only startup must still disable projection before work");
     await live.stop();
     appendFileSync(file, JSON.stringify({ type: "custom", id: "old-boundary", customType: "matrix-bridge.boundary", data: { nativeId: "worker" } }) + "\n");
     live = piProcess(root, file, extension);

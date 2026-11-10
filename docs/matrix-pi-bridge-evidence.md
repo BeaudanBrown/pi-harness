@@ -746,6 +746,154 @@ Evidence uses real disposable Pi/RPC, SQLite and local discovery with
 fake model/Matrix HTTP, not a visual picker exercise, live Matrix/NAS receipt,
 operator-account repair, deployment or safe coexistence with legacy writers.
 
+### #169 offline migration
+
+The [operator runbook](matrix-pi-migration.md) records the acceptance mapping,
+source descriptor, exact CLI sequence, scope ownership and boundary-by-boundary
+crash matrix. Four one-shot modules decode frozen raw evidence, export a private
+byte inventory and import a distinct schema-four ledger. There is no old loader,
+startup migration, credential/Git/network use or terminal/account executor.
+Original native bytes/paths/IDs, room IDs, grouping, generations, archive/private
+choices, frozen sends, held input/media and inactive polls survive. Unknown,
+unfrozen or inaccessible evidence is reported rather than guessed or replaced.
+
+The imported ledger has negative native identity/path enrollment policy and
+original-room receipts. A matching historical native marker cannot enroll into
+an empty/wrong ledger. An imported unstamped room requires current immutable
+sole-creator/policy verification before remote effects; its grouping can fail
+independently. Bot/operator identities are fixed to the migration. Old departed
+and disabled rooms are not sync consumers. No old invitation, cleanup, artifact,
+control or task approval is revived. The first runtime ledger writer permanently
+fences the automatic pre-start rollback shortcut, without claiming execution or
+an external receipt.
+
+Format checks were compared with the legacy contracts, raw registry/generation,
+archive/retirement, inbox/outbox, media, live/archive hierarchy, native marker,
+text-projection, transcript/event projector and Matrix sender implementations.
+The converter never calls their live loaders (which create directories and filter
+retired rows). Frozen wire tests cover the legacy text-versus-notice distinction,
+default/first-chunk notification semantics, HTML bytes, the actual transaction
+character set and unknown/unfrozen records. Synthetic fixtures are not a
+validation receipt for the deployed stores; full source inventory/accessibility
+and independently approved coherent capture remain #172 work.
+
+Development evidence (logs under `.pi/tmp/workers/`):
+- `2026-11-10T19-03-18-102Z-migration-169-first-fixtures-e0169b8e5e06` passed the
+  first 13 migration cases plus existing store/organization checks; later source
+  descriptor/cursor/ownership hardening supersedes that early result.
+- `2026-11-10T19-06-45-716Z-migration-169-imported-private-start-red-c55feae6602f`
+  reproduced actual packaged Pi missing its private enrollment marker when a
+  persisted headless session had no new boundary. Expected false, got undefined.
+  The adapter now records private choice before work regardless of a new marker.
+  The unchanged assertion passed in both the subsequent actual-Pi suite and the
+  final affected unit gate below.
+- `2026-11-10T19-23-28-444Z-migration-169-focused-native-and-crashes-f31f8dbba211`
+  passed 59/60 cases, including all real Pi and SIGKILL cases. Repeated post-runtime
+  check exposed ordinary SQLite readOnly creating WAL sidecars. The fix rejects
+  existing journal evidence, uses an immutable URI and rechecks concurrent change;
+  it does not checkpoint, modify or restore the destination.
+- `2026-11-10T20-07-43-742Z-migration-169-focused-green-11b1d2690304` passed all
+  **65** then-current focused migration/process/actual-Pi/store/organization/
+  archive/relay/sync cases, zero skips, and the isolated bridge package build.
+- The first Nix affected run refused the fixture because sandbox input binds had
+  writable kernel flags despite Nix ownership. A test-only private read-only bind
+  fixed that without changing production checks. Its first wrapper omitted
+  device-preserving mounts: `/dev/null` permission failures caused Git errors and
+  Bun crashes. Preserving `/dev` corrected the harness; no assertion, timeout or
+  concurrency change was made. Failure logs are `20-07-43...broader-affected-
+  56b255e243e4` and `20-13-32...broader-readonly-mount-0388e08c4b59`.
+- `2026-11-10T20-22-32-750Z-migration-169-affected-device-preserving-namespa-
+  bb2a1eaf44a6` passed the latest **35 focused** cases (27 migration/process,
+  seven store, one sync), then **264 unit / 128 chat**, zero skips, and all source,
+  module and package contracts. This includes the positive pre-start rollback
+  case, new/changed native-root detection, foreign account refusal/resource
+  release, and actual packaged Pi/native helpers. The pristine fixture creates
+  its declared `/tmp` directory exclusively and never adopts/removes an existing
+  path. All other roots/homes/sockets/processes are disposable as before.
+
+Executed command sequences:
+
+```sh
+# Synthetic fixtures only: fresh compile/seal, then an immutable local test input.
+tsc --project tsconfig.test.json --outDir .pi/tmp/bridge-build
+node .pi/tmp/migration-169/seal.cjs tests/fixtures/matrix-migration/pristine
+node .pi/tmp/migration-169/seal.cjs
+nix store add-path "$PWD/tests/fixtures/matrix-migration" --name migration-169-fixture \
+  > .pi/tmp/migration-169/fixture-path.txt
+nix build .#matrix-bridge --out-link .pi/tmp/migration-169/package -L
+
+export PI_BRIDGE_MIGRATION_FIXTURE="$(< .pi/tmp/migration-169/fixture-path.txt)"
+export PI_BRIDGE_MIGRATION_MAIN="$PWD/.pi/tmp/migration-169/package/lib/matrix-bridge/migration-main.js"
+export PI_BRIDGE_MIGRATION_BWRAP="$(command -v bwrap)"
+export PI_BRIDGE_TEST_PI="$PWD/.pi/tmp/archive-168/pi/bin/pi"
+export PI_BRIDGE_TEST_SDK="$PWD/.pi/tmp/archive-168/pi/lib/node_modules/@earendil-works/pi-coding-agent/dist"
+# The existing focused driver recompiles, isolates HOME/XDG/locks, and runs node --test.
+bash .pi/tmp/task-167/check.sh \
+  .pi/tmp/bridge-build/tests/bridge-migration.test.js \
+  .pi/tmp/bridge-build/tests/bridge-migration-process.test.js \
+  .pi/tmp/bridge-build/tests/bridge-store.test.js \
+  .pi/tmp/bridge-build/tests/bridge-matrix.test.js
+# The earlier 65-case command additionally selected adapter-real-pi, organization,
+# archive and relay suites; it is retained verbatim in the worker command log.
+nix build .#checks.x86_64-linux.unit-tests .#checks.x86_64-linux.bridge-chat \
+  .#checks.x86_64-linux.source-contracts .#checks.x86_64-linux.module-contracts \
+  .#checks.x86_64-linux.package-contracts --no-link --keep-going -L
+```
+
+Pinned paired review `.pi/tmp/reviews/2026-11-10T20-26-31-090Z-worktree-60d217fda86f-e872049d0b8a/`
+against `12fe80a7d009232df780f8e27cf6ba685ff612f9`:
+- **Standards:** no findings.
+- **Spec:** two high/current-issue findings: unknown/malformed room cursor states
+  could lose a cutoff, and transaction uniqueness excluded historical sent chunks.
+  Both were reproduced as missing-exception failures (0 pass / 2 fail / 0 skip)
+  by `2026-11-10T20-29-17-630Z-migration-169-review-regressions-red-d403822225f3`,
+  using the focused driver with `--test-name-pattern='malformed or future legacy
+  room cursor|sent or cancelled projection'` and `bridge-migration.test.js`.
+- Remediation validates the exact legacy cursor union/2,048-character bound before
+  conversion, rejects established room cutoffs without a global inbox cutoff,
+  and reserves every projection transaction, including sent/cancelled/unresolved
+  chunks in disabled or unavailable records. No new authority or runtime recovery
+  mechanism was added. Additional actual packaged-CLI tests use independently
+  sealed malformed copies under private read-only mounts and prove that neither
+  destination nor partial state is created.
+- `2026-11-10T20-38-17-177Z-migration-169-review-remediation-green-45310322669a`
+  passed the package build and the command sequence above: **38 focused cases**
+  (30 migration/process + seven store + one sync), then **267 unit / 128 chat**
+  and all affected source/module/package contracts, zero skips. Both findings
+  are resolved. No assertion, timeout or concurrency was weakened; remediation
+  does not materially change the reviewed design, so no routine re-review.
+
+Final verification:
+- `nix run -L .#verify` passed all **12 gates / 267 unit / 128 chat / 856 legacy**,
+  zero skips (`2026-11-10T20-44-05-298Z-migration-169-canonical-final-14458e3ec70a`).
+  No old timing/cleanup intermittency reproduced in this final run.
+- `nix build .#pi .#matrix-bridge .#bridge-chat .#pi-harness --no-link -L` passed
+  (`2026-11-10T20-47-13-282Z-migration-169-final-packages-2c03d8e4807c`). Nix used
+  local builds when the configured NAS builder was unavailable.
+- `python3 /home/beau/documents/nix-dotfiles/modules/cli/pi-harness/check-native-integration.py
+  --harness-source /home/beau/documents/projects/pi-harness-managed-live-workspaces
+  --evaluate` passed all six checks: grill/NAS Pi 0.84.4, native-only configuration,
+  independent lifetimes and assertions (`2026-11-10T20-44-05-298Z-migration-169-consuming-evaluation-769bfb4c991c`).
+  This is evaluation, not a system build, switch, service restart or live proof.
+- The actual final `bin/pi-bridge-migrate` wrapper also passed all four verbs
+  under `env -i HOME="$root" TMPDIR="$root"`, using the synthetic read-only fixture
+  and an exclusively created `mktemp -d -t pi-migration-executable-XXXXXX` root:
+  `inventory "$fixture"`, `export "$fixture" "$root/backup"`,
+  `import "$fixture" "$root/state"`, `check "$fixture" "$root/state"`.
+  Package selection was `nix build .#matrix-bridge --no-link --print-out-paths`;
+  only that owned temporary root was removed afterward
+  (`2026-11-10T20-48-49-045Z-migration-169-final-executable-ca82e36a859f`).
+  The synthetic main fixture correctly reports original native files unavailable;
+  that does not become a rollback/readiness claim. The separate pristine fixture
+  tests genuine pre-start eligibility and its withdrawal after added/changed work.
+- Only final evidence text changed after these gates; no production/test change
+  required a repeated canonical run. LSP/scoped diagnostics and diff checks passed.
+
+No downstream changes, push, activation, production capture/migration,
+Matrix/account effects or live canary have occurred. #170 removal, #171 cumulative
+review/reduction/publication-pin handoff and separately approved #172 cutover
+remain open. Grill/NAS are **not rebuild-ready**.
+
 ## Rebuild and migration readiness
 
 Pending implementation and cumulative verification. Do not run a host switch merely

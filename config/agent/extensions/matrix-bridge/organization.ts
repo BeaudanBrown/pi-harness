@@ -5,12 +5,13 @@ import { isDeepStrictEqual, promisify } from "node:util";
 import { BRIDGE_ROOM_STAMP, ownedBridgeRoom, roomStamp, type BridgeRoomKind, type BridgeRoomStamp } from "../matrix-shared/bridge-room.js";
 import { MatrixError, type MatrixHttp } from "../matrix-shared/http.js";
 import { isMatrixRoomId } from "../matrix-shared/room-id.js";
+import { isSoleRoomCreator } from "../matrix-shared/room-creator.js";
 import { BridgeStore, identity, type Binding } from "./store.js";
 import { object, string } from "./wire.js";
 
 export type Grouping = { project: string; checkout: string; projectName: string; checkoutName: string };
 export type SetupStatus = { stage: "room" | "grouping" | "invitation" | "ready"; error?: string; grouping?: Grouping; archived?: boolean; archiveRevision?: number };
-type RoomNode = { stamp: BridgeRoomStamp; name: string; operator: string; attempted: boolean; room?: string; inviteAttempted?: boolean };
+export type RoomNode = { stamp: BridgeRoomStamp; name: string; operator: string; attempted: boolean; room?: string; inviteAttempted?: boolean; imported?: string };
 export type OrganizationConfig = { hostId: string; botUserId: string; operatorUserId: string; hostSpace?: boolean };
 const execute = promisify(execFile);
 
@@ -69,6 +70,18 @@ export class BridgeOrganization {
     if (!Array.isArray(value) || value.length > 4096) throw Error("Invalid bridge room state");
     return value;
   }
+  private owned(node: RoomNode, events: unknown[]): void {
+    if (!node.imported) { ownedBridgeRoom(events, this.config.botUserId, node.stamp); return; }
+    // Only exact receipts from the one-shot offline import have this exception.
+    // Old rooms lack the new creation stamp. The immutable sole creator and
+    // room policy must still match; no mutable provenance grants ownership.
+    if (node.imported !== this.store.progress("migration-source") || !node.room) throw Error("Invalid imported room receipt");
+    const creates = events.map(object).filter(event => event.type === "m.room.create" && event.state_key === "");
+    if (creates.length !== 1 || !isSoleRoomCreator(creates[0], this.config.botUserId)) throw Error("Imported room has a foreign or ambiguous creator; original ID retained");
+    const content = object(creates[0]!.content);
+    if ((node.stamp.kind === "conversation" ? content.type !== undefined : content.type !== "m.space") || content["m.federate"] !== false || events.some(event => object(event).type === "m.room.encryption")) throw Error("Unsupported imported room policy; original ID retained");
+    if (node.stamp.kind === "conversation" && this.store.progress(`migration-room-verified:${node.room}`) !== node.imported) this.store.saveProgress(`migration-room-verified:${node.room}`, node.imported);
+  }
   private async lookup(alias: string): Promise<string | undefined> {
     try {
       const value = object(await this.request("GET", `/_matrix/client/v3/directory/room/${encodeURIComponent(alias)}`));
@@ -112,7 +125,7 @@ export class BridgeOrganization {
       }
       node.room = room; this.saveNode(node); // Saved ID wins over mutable alias/name.
     }
-    ownedBridgeRoom(await this.state(node.room), this.config.botUserId, stamp);
+    this.owned(node, await this.state(node.room));
     return node;
   }
   private invite(node: RoomNode): Promise<string | undefined> {
@@ -123,13 +136,14 @@ export class BridgeOrganization {
   private async ensureInvitation(node: RoomNode): Promise<string | undefined> {
     node = this.store.progress<RoomNode>(this.nodeKey(node.stamp))!;
     const events = await this.state(node.room!);
-    ownedBridgeRoom(events, this.config.botUserId, node.stamp);
+    this.owned(node, events);
     const member = events.map(object).find(event => event.type === "m.room.member" && event.state_key === this.config.operatorUserId);
     const membership = member ? object(member.content).membership : undefined;
     if (membership === "join") return;
     if (membership === "leave" || membership === "ban") return "Operator departed or is banned; automatic invitation suppressed";
     if (membership === "invite") return "Operator invitation pending; account helper is optional";
     if (membership !== undefined) throw Error("Unrecognized operator membership; no invitation sent");
+    if (node.imported) return "Imported invitation history is held; no automatic reinvitation or account replay";
     if (node.inviteAttempted) return "Invitation outcome is uncertain; automatic reinvitation suppressed";
     node.inviteAttempted = true; this.saveNode(node);
     try { await this.request("POST", `/_matrix/client/v3/rooms/${encodeURIComponent(node.room!)}/invite`, { user_id: this.config.operatorUserId }); }
@@ -195,6 +209,10 @@ export class BridgeOrganization {
     const save = (value: SetupStatus) => this.saveStatus(binding.key, { ...value, archived: binding.archived, archiveRevision: binding.archiveRevision ?? 0 });
     save({ stage: "grouping", ...(grouping ? { grouping } : {}) });
     try {
+      if (conversation.imported) {
+        const hold = this.store.progress<string>(`migration-grouping-hold:${binding.key}`);
+        if (hold || !grouping || this.config.hostSpace !== false && !this.store.progress(`setup-node:${identity("room", this.config.hostId, this.config.botUserId, "host", this.config.hostId)}`)) throw Error(hold ?? "Original grouping evidence is incomplete; no replacement Spaces will be created");
+      }
       if (!grouping && !binding.archived) { grouping = await this.grouping(binding.cwd); save({ stage: "grouping", grouping }); }
       await this.inGroup(grouping?.checkout ?? binding.key, async () => {
         if ((this.store.binding(binding.key)?.archiveRevision ?? 0) !== (binding.archiveRevision ?? 0)) throw Error("Archive policy changed; presentation will reconcile");
@@ -222,6 +240,12 @@ export class BridgeOrganization {
           await this.link(project, checkout); await this.link(checkout, conversation);
           const archive = await this.existing("archive", this.config.hostId);
           if (archive) await this.link(archive, conversation, false);
+        }
+        // Old archives had nested presentation. Destination now exists; unlink
+        // only the exact imported conversation edges, never Spaces/membership.
+        for (const saved of this.store.progress<RoomNode[]>(`migration-archive-parents:${binding.key}`) ?? []) {
+          const parent = await this.node("checkout", `migration-archive:${saved.room!}`, saved.name, saved.room);
+          await this.link(parent, conversation, false);
         }
       });
     } catch (error) { failure = error instanceof Error ? error.message.slice(0, 500) : "Grouping setup pending"; }

@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"native-retired","cwd":"/migration-fixture/work","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"custom","id":"boundary-retired","parentId":null,"customType":"managed-session.binding-boundary","data":{"version":"1.0.0","creationKey":"retired","concept":"retired","sessionId":"native-retired"}}
+{"type":"custom","id":"bind-native-retired","parentId":"boundary-retired","customType":"managed-session.binding","data":{"version":"1.0.0","conversationId":"conv_71c6c9f3ea63f6c39eecca5143fffae9","concept":"retired","sessionId":"native-retired","bindingBoundaryEntryId":"entry_e10f40c0cb5eb7d3952e4c80702cd119","role":"ordinary_adapter"}}

@@ -43,6 +43,12 @@ Space asynchronously. Rooms may still appear in All Rooms. Check `!status` after
 a fresh Matrix sync before another remote policy change or new restored input:
 held messages, old commands and polls never replay. There is no model archive tool.
 
+The `matrix-bridge` package includes the one-shot `pi-bridge-migrate` offline
+inventory/export/import/check command. It requires independent read-only snapshots
+and a distinct destination; it never stops services or migrates on startup.
+See the [migration runbook](docs/matrix-pi-migration.md). Production quiescence,
+activation and any post-start receipt reconciliation require separate approval.
+
 ## What This Flake Provides
 
 - the upstream `pi` CLI from `llm-agents.nix`

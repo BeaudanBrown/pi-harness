@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"native-previous","cwd":"/migration-fixture/work","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"custom","id":"boundary-previous","parentId":null,"customType":"managed-session.binding-boundary","data":{"version":"1.0.0","creationKey":"live","concept":"live","sessionId":"native-previous"}}
+{"type":"custom","id":"bind-native-previous","parentId":"boundary-previous","customType":"managed-session.binding","data":{"version":"1.0.0","conversationId":"conv_0736983a219b3326999c583314e3604b","concept":"live","sessionId":"native-previous","bindingBoundaryEntryId":"entry_0410be731238332c2ea27de43397fbe8","role":"ordinary_adapter"}}

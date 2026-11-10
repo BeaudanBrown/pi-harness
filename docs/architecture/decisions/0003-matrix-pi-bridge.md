@@ -119,8 +119,17 @@ primitives. Preserve the independent stateless `!pi` assistant.
 The replacement may coexist in SOURCE while slices land, but only one runtime is
 shipped at completion. Offline migration preserves original IDs/history and all
 uncertain input/output identities. No old/new consumer or native writer overlap.
-Backups are not a second authority. After new work, rollback may not restore stale
-queues; reconcile receipts or continue locally. Production deployment is separate
+Backups are not a second authority. The one-shot converter uses independent,
+coherent read-only snapshots and a distinct no-replace destination, never a live
+legacy loader. Original rooms without the new creation stamp require an exact
+imported receipt and current immutable sole-creator/policy verification before
+remote delivery; this does not grant invitation repair or terminal effects.
+Historical native identities are negative enrollment policy, including when an
+old matching marker is opened against an empty/wrong ledger. Imported native
+histories need not acquire new markers during conversion; private/headless
+startup must therefore record its private choice even without a new boundary.
+After new work, rollback may not restore stale queues; reconcile receipts or
+continue locally. Production deployment is separate
 from source implementation and requires an approved maintenance scope.
 
 ## Acceptance and cost

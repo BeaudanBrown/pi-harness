@@ -55,7 +55,7 @@ export function offerHistory(store: BridgeStore, binding: Binding): void {
   let enabled = binding.enabled;
   const project = (entry: NativeEntry): void => {
     if (entry.type === "custom" && entry.customType === "matrix-bridge.enrollment" && entry.data?.nativeId === binding.nativeId && typeof entry.data.enabled === "boolean") {
-      enabled = entry.data.enabled; store.setEnabled(binding.key, enabled);
+      enabled = store.setEnabled(binding.key, entry.data.enabled);
     }
     if (!enabled) return;
     if (entry.type === "custom" && entry.data?.nativeId === binding.nativeId) {

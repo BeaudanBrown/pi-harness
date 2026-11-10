@@ -45,6 +45,8 @@ export class BridgeRelay {
     try { this.store = new BridgeStore(this.dispatchLedger, config.hostId); }
     catch (error) { this.release(); throw error; }
     try {
+      const account = this.store.progress<{ bot: string; operator: string }>("migration-account");
+      if (account && (account.bot !== matrix.userId || account.operator !== config.operatorUserId)) throw Error("Migrated bot/operator identity changed; original delivery transactions must not use another account");
       if (config.operatorUserId) this.organization = new BridgeOrganization(this.store, matrix.http, { hostId: config.hostId, botUserId: matrix.userId, operatorUserId: config.operatorUserId, hostSpace: config.hostSpace });
       if (taskRunner) this.tasks = new TaskWorkspaces(this.store, taskRunner, config, key => this.organization?.status(key).stage !== "ready");
     } catch (error) { this.store.close(); this.release(); throw error; }
@@ -76,6 +78,11 @@ export class BridgeRelay {
           if (!metadata.isFile() || metadata.nlink !== 1 || metadata.uid !== process.getuid!()) throw Error("Native session must be a user-owned regular file");
           const saved = history(file), nativeId = string(params.nativeId, 128);
           if (saved.id !== nativeId) throw Error("Native session identity mismatch");
+          // A historical native file is not permission to invent a replacement
+          // room in an empty/wrong ledger. Ignore copied markers in a genuine
+          // new native fork (their sessionId still names the old identity).
+          const historical = saved.entries.some(entry => entry.type === "custom" && ["managed-session.binding", "managed-session.binding-boundary", "managed-session.binding-attempt", "managed-session.unbound"].includes(entry.customType ?? "") && entry.data?.sessionId === nativeId);
+          if (historical && !this.store.progress(`migration-native:${nativeId}`)) throw Error("Historical managed native identity requires explicit offline migration; local Pi remains available and no replacement room was created");
           const cwd = allowedWorkspace(saved.cwd, this.config.roots);
           const boundary = string(params.boundary, 128);
           if (!saved.entries.some(entry => entry.id === boundary && entry.type === "custom" && entry.customType === "matrix-bridge.boundary" && entry.data?.nativeId === nativeId)) throw Error("Missing persisted native enrollment boundary");
@@ -168,6 +175,7 @@ export class BridgeRelay {
     if (this.stopSignal.signal.aborted) return;
     await this.tasks?.pump();
     await Promise.all(this.store.bindings().map(async binding => {
+      if (this.store.enrollmentBlocked(binding.file, binding.nativeId)) return;
       if (this.roomWork.has(binding.key) || (this.retryAt.get(binding.key) ?? 0) > Date.now()) return;
       this.roomWork.add(binding.key);
       try {
@@ -177,6 +185,10 @@ export class BridgeRelay {
         catch (error) { historyReady = false; this.failures.set(binding.key, error instanceof Error ? error.message : "Native history unavailable"); }
         binding = this.store.binding(binding.key)!;
         if (!binding.room) return;
+        const imported = this.store.progress<{ source: string }>(`migration-binding:${binding.key}`);
+        if (imported && this.store.progress(`migration-room-verified:${binding.room}`) !== imported.source) {
+          this.failures.set(binding.key, "Original imported room identity is not yet verified; local Pi remains available"); return;
+        }
         const room = binding.room, gap = this.store.progress(`gap:${room}`);
         for (const input of !gap ? this.store.received(binding.key) : []) if (historyReady || archiveCommand(input.event) !== undefined) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
           this.tasks ? (interaction, accepted) => this.tasks!.answer(binding, input, interaction, accepted) : undefined,
@@ -225,7 +237,9 @@ export class BridgeRelay {
           }
         }
         for (const input of this.store.unreportedInputs(binding.key)) this.store.offer(binding.key, `uncertain:${input.id}`, () => [{ type: "m.room.message", content: {
-          msgtype: "m.notice", body: "Input interrupted: Pi may already have acted on this message. It will not be replayed automatically. You can send a fresh instruction.",
+          msgtype: "m.notice", body: this.store.progress<{ unattempted: boolean }>(`migration-input:${input.id}`)?.unattempted ?
+            "Historical input was never dispatched and remains held. It will not replay automatically. Send a fresh instruction when ready." :
+            "Input interrupted: Pi may already have acted on this message. It will not be replayed automatically. You can send a fresh instruction.",
           "m.relates_to": { "m.in_reply_to": { event_id: input.id } }, "m.mentions": {},
         } }]);
         this.store.closeInteractions(binding.key);

@@ -1,0 +1,5 @@
+{"type":"session","version":3,"id":"native-live","cwd":"/migration-fixture/work","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"custom","id":"boundary-live","parentId":null,"customType":"managed-session.binding-boundary","data":{"version":"1.0.0","creationKey":"live","concept":"live","sessionId":"native-live"}}
+{"type":"custom","id":"bind-native-live","parentId":"boundary-live","customType":"managed-session.binding","data":{"version":"1.0.0","conversationId":"conv_0736983a219b3326999c583314e3604b","concept":"live","sessionId":"native-live","bindingBoundaryEntryId":"entry_c3fa1d3b734a0160f282365cfc170f32","role":"ordinary_adapter"}}
+{"type":"message","id":"assistant-old","parentId":"bind-native-live","message":{"role":"assistant","content":[{"type":"text","text":"old assistant"}],"stopReason":"stop"}}
+{"type":"custom","id":"projection-receipt","parentId":"assistant-old","customType":"managed-session.projection","data":{"version":"1.0.0","piEntryKey":"assistant-old","entryId":"entry_c49af3fcffe3db05e4b6f1133d76159d","kind":"assistant_final","status":"offered"}}

@@ -63,6 +63,9 @@ export class BridgeStore {
           CREATE TABLE IF NOT EXISTS tasks(key TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), phase TEXT NOT NULL, value TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS task_phase ON tasks(phase);`);
         this.setMeta("host", hostId); this.setMeta("version", "4");
+        // A runtime writer opening an imported ledger conservatively closes the
+        // pre-cutover rollback window. Read-only migration checks do not use us.
+        if (this.getMeta("migration")) this.setMeta("migration_started", "true");
         this.db.exec("UPDATE inputs SET state='interrupted' WHERE state='handed'");
       });
     } catch (error) { this.db.close(); throw error; }
@@ -85,7 +88,13 @@ export class BridgeStore {
     return row ? JSON.parse(String(row.value)) as Binding : undefined;
   }
   bindings(): Binding[] { return this.db.prepare("SELECT value FROM bindings ORDER BY key").all().map(row => JSON.parse(String(row.value)) as Binding); }
+  enrollmentBlocked(file: string, nativeId: string): boolean {
+    const native = this.progress<{ file?: string; disabled: boolean }>(`migration-native:${nativeId}`);
+    const path = this.progress<{ nativeId?: string; disabled: boolean }>(`migration-file:${identity("file", file)}`);
+    return Boolean(native && (native.disabled || native.file !== file) || path && (path.disabled || path.nativeId !== nativeId));
+  }
   register(session: SessionRegistration): Binding {
+    if (this.enrollmentBlocked(session.file, session.nativeId)) throw Error("Historical migration identity is disabled or moved; original room retained and local Pi remains available");
     const key = identity("binding", session.file, session.nativeId);
     const previous = this.binding(key);
     if (previous) {
@@ -102,11 +111,13 @@ export class BridgeStore {
     if (!old || old.file !== binding.file || old.nativeId !== binding.nativeId || old.cwd !== binding.cwd) throw Error("Binding identity is immutable");
     this.db.prepare("UPDATE bindings SET room=?,value=? WHERE key=?").run(binding.room ?? null, JSON.stringify(binding), binding.key);
   }
-  setEnabled(key: string, enabled: boolean): void {
-    this.atomic(() => {
+  setEnabled(key: string, enabled: boolean): boolean {
+    return this.atomic(() => {
       const binding = this.binding(key); if (!binding) throw Error("Unknown binding");
+      enabled = enabled && !this.enrollmentBlocked(binding.file, binding.nativeId);
       this.saveBinding({ ...binding, enabled });
       if (!enabled) this.db.prepare("UPDATE inputs SET state='ignored' WHERE binding=? AND state IN ('received','queued')").run(key);
+      return enabled;
     });
   }
   setArchived(key: string, archived: boolean, expectedRevision: number): Binding {

@@ -24,7 +24,7 @@ stdenvNoCC.mkDerivation {
         },
         "rootDir": "source", "outDir": "lib"
       },
-      "include": ["source/matrix-bridge/main.ts", "source/matrix-bridge/task-worker.ts"]
+      "include": ["source/matrix-bridge/main.ts", "source/matrix-bridge/task-worker.ts", "source/matrix-bridge/migration-main.ts"]
     }
     EOF
     tsc --project tsconfig.json
@@ -52,6 +52,10 @@ stdenvNoCC.mkDerivation {
     cat > "$out/bin/pi-session" <<EOF
     #!${runtimeShell}
     exec ${lib.getExe python3} "$out/lib/matrix-bridge/local.py" "\$@"
+    EOF
+    cat > "$out/bin/pi-bridge-migrate" <<EOF
+    #!${runtimeShell}
+    exec ${lib.getExe nodejs} "$out/lib/matrix-bridge/migration-main.js" "\$@"
     EOF
     cat > "$out/bin/pi-task-workspace" <<EOF
     #!${runtimeShell}

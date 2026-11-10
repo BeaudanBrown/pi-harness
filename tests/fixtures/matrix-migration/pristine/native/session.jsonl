@@ -1,0 +1,3 @@
+{"type": "session", "version": 3, "id": "native-pristine", "cwd": "/tmp/pi-bridge-migration-pristine-169-native", "timestamp": "2026-01-01T00:00:00.000Z"}
+{"type": "custom", "id": "boundary", "parentId": null, "customType": "managed-session.binding-boundary", "data": {"version": "1.0.0", "sessionId": "native-pristine", "creationKey": "pristine", "concept": "pristine"}}
+{"type": "custom", "id": "binding", "parentId": "boundary", "customType": "managed-session.binding", "data": {"version": "1.0.0", "sessionId": "native-pristine", "conversationId": "conv_99999999999999999999999999999999", "role": "ordinary_adapter", "concept": "pristine", "bindingBoundaryEntryId": "entry_3cdb35ac4c26594e74da83b7cbf6f099"}}

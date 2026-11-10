@@ -1,0 +1,4 @@
+{"type":"session","version":3,"id":"native-disabled","cwd":"/migration-fixture/work","timestamp":"2026-01-01T00:00:00.000Z"}
+{"type":"custom","id":"boundary-disabled","parentId":null,"customType":"managed-session.binding-boundary","data":{"version":"1.0.0","creationKey":"disabled","concept":"disabled","sessionId":"native-disabled"}}
+{"type":"custom","id":"bind-native-disabled","parentId":"boundary-disabled","customType":"managed-session.binding","data":{"version":"1.0.0","conversationId":"conv_f0887c623990e04b1e6d6330667bdbda","concept":"disabled","sessionId":"native-disabled","bindingBoundaryEntryId":"entry_bab8ff491ee65e35956e1dd02920483f","role":"ordinary_adapter"}}
+{"type":"custom","id":"unbound","parentId":"bind-native-disabled","customType":"managed-session.unbound","data":{"version":"1.0.0","sessionId":"native-disabled"}}

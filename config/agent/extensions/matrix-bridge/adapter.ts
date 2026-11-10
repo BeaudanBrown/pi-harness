@@ -176,10 +176,11 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
     stop();
     const localOnly = process.env.PI_BRIDGE_LOCAL_ONLY === "1" || process.env.PI_HARNESS_LOCAL_ONLY === "1";
     if ((!options.interactive && !ctx.hasUI) || !eligible() || localOnly) {
-      // An explicitly resumed formerly public file must not leak a worker's
-      // new output through the daemon's persisted-history reader either.
+      // An imported public file need not have a new bridge boundary marker.
+      // Persist the private choice before any worker/local-only work, without
+      // requiring the bridge or interpreting old managed custom entries.
       const nativeId = ctx.sessionManager.getSessionId();
-      if (ctx.sessionManager.getSessionFile() && ctx.sessionManager.getEntries().some(entry => entry.type === "custom" && entry.customType === "matrix-bridge.boundary" && (entry.data as { nativeId?: unknown })?.nativeId === nativeId)) {
+      if (ctx.sessionManager.getSessionFile()) {
         pi.appendEntry("matrix-bridge.enrollment", { nativeId, enabled: false });
       }
       if (localOnly) ctx.ui.setStatus("matrix-bridge", "Local-only Pi");
