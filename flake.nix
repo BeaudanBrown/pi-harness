@@ -88,9 +88,6 @@
         piHarnessResources = pkgs.callPackage ./nix/pi-harness-resources.nix {
           inherit piPackage;
         };
-        managedSessionRelay = pkgs.callPackage ./nix/managed-session-relay.nix {
-          inherit piPackage;
-        };
         matrixBridge = pkgs.callPackage ./nix/matrix-bridge.nix {
           inherit piPackage nativeSessionLock;
         };
@@ -109,7 +106,6 @@
             agentgraphPiResources
             piRPackage
             piLspExtension
-            managedSessionRelay
             matrixBridge
             playwrightAgentCli
             ;
@@ -121,264 +117,6 @@
           graphviz = pkgs.graphviz;
           xdgUtils = pkgs.xdg-utils;
           jq = pkgs.jq;
-        };
-        managedSessionLauncherBase = pkgs.writeShellApplication {
-          name = "tmux_project";
-          runtimeInputs = [ pkgs.coreutils pkgs.direnv pkgs.findutils pkgs.gawk pkgs.git pkgs.jq pkgs.tmux ];
-          text = ''
-            set -euo pipefail
-            [[ "''${1-}" == managed ]]
-            operation="''${2-}"
-            request=$(cat)
-            : "''${PI_MANAGED_TEST_TMUX_SOCKET:?}"
-            format='#{window_id}|#{pane_id}'
-            derive_project_key() {
-              local domain="$1" first="$2" second="$3"
-              { printf 'pi-managed-sessions:%s:v1\0' "$domain"
-                for part in "$first" "$second"; do printf '%s:' "$(printf '%s' "$part" | wc -c)"; printf '%s' "$part"; done
-              } | sha256sum | cut -c1-32
-            }
-            resolve_project_identity() {
-              checkout_display="$workspace"
-              local marker="$workspace_path/.git" common_raw common main_raw main output
-              if [[ -e "$marker" || -L "$marker" ]]; then
-                [[ ! -L "$marker" && ( -d "$marker" || -f "$marker" ) && $(stat -c %u "$marker") == $(id -u) ]]
-                [[ $(git -C "$workspace_path" rev-parse --is-inside-work-tree 2>/dev/null) == true ]]
-                [[ $(realpath -e "$(git -C "$workspace_path" rev-parse --show-toplevel 2>/dev/null)") == "$workspace_path" ]]
-                common_raw=$(git -C "$workspace_path" rev-parse --path-format=absolute --git-common-dir 2>/dev/null)
-                [[ -n "$common_raw" && ''${#common_raw} -le 4096 && "$common_raw" != *$'\n'* ]]
-                common=$(realpath -e "$common_raw")
-                [[ -d "$common" && ! -L "$common" && $(stat -c %u "$common") == $(id -u) ]]
-                output=$(git --git-dir="$common" worktree list --porcelain 2>/dev/null)
-                [[ -n "$output" && ''${#output} -le 65536 ]]
-                main_raw=$(awk '/^worktree / { print substr($0, 10); exit }' <<<"$output")
-                [[ -n "$main_raw" && "$main_raw" != *$'\n'* ]]
-                main=$(realpath -e "$main_raw")
-                [[ -d "$main" && ! -L "$main" && $(stat -c %u "$main") == $(id -u) && $(dirname "$main") == "$configured_root" ]]
-                [[ $(realpath -e "$main/.git") == "$common" && -d "$main/.git" && ! -L "$main/.git" && $(stat -c %u "$main/.git") == $(id -u) ]]
-                project_key="project_$(derive_project_key project-git "$root_key" "$common")"
-                project_display=$(basename "$main")
-              else
-                if git -C "$workspace_path" rev-parse --is-inside-work-tree >/dev/null 2>&1; then return 1; fi
-                project_key="project_$(derive_project_key project-workspace "$root_key" "$workspace")"
-                project_display="$workspace"
-              fi
-              [[ "$project_key" =~ ^project_[a-f0-9]{32}$ ]]
-              jq -en --arg project "$project_display" --arg checkout "$checkout_display" '
-                [$project,$checkout] | all(type == "string" and length >= 1 and length <= 128 and (test("[\u0000-\u001f\u007f/]") | not))' >/dev/null
-            }
-            case "$operation" in
-              workspace-list)
-                : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
-                find "$PI_MANAGED_TEST_WORKSPACE_ROOT" -mindepth 1 -maxdepth 1 -type d -printf '%f\n' | sort | \
-                  jq -Rsc 'split("\n") | map(select(length > 0) | {rootKey:"projects",workspace:.}) | {workspaces:.}'
-                ;;
-              project-create)
-                : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
-                root_key=$(jq -er 'if (keys == ["creationKey","resumeExisting","rootKey","workspace"]) and (.rootKey == "projects") and (.creationKey | test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")) and (.workspace | test("^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")) and (.resumeExisting | type == "boolean") then .rootKey else error("invalid request") end' <<<"$request")
-                creation_key=$(jq -er '.creationKey' <<<"$request")
-                workspace=$(jq -er '.workspace' <<<"$request")
-                resume_existing=$(jq -r '.resumeExisting' <<<"$request")
-                configured_root=$(realpath "$PI_MANAGED_TEST_WORKSPACE_ROOT")
-                [[ -d "$configured_root" && ! -L "$PI_MANAGED_TEST_WORKSPACE_ROOT" ]]
-                workspace_path="$configured_root/$workspace"
-                staging="$configured_root/.pi-managed-create-$(printf '%s' "$creation_key" | sha256sum | cut -c1-32)"
-                marker="$staging/.pi-managed-project-creation"
-                if [[ -e "$workspace_path" || -L "$workspace_path" ]]; then
-                  [[ "$resume_existing" == true && -d "$workspace_path" && ! -L "$workspace_path" && $(stat -c %u "$workspace_path") == $(id -u) ]]
-                  [[ -d "$workspace_path/.git" && ! -L "$workspace_path/.git" && $(stat -c %u "$workspace_path/.git") == $(id -u) ]]
-                  [[ $(git -C "$workspace_path" config --local --get pi-managed.creationKey 2>/dev/null || true) == "$creation_key" ]]
-                else
-                  if [[ ! -e "$staging" && ! -L "$staging" ]]; then
-                    mkdir --mode=700 "$staging"
-                    printf '%s\n' "$creation_key" > "$marker"; chmod 600 "$marker"
-                  else
-                    [[ "$resume_existing" == true && -d "$staging" && ! -L "$staging" && $(stat -c %u "$staging") == $(id -u) ]]
-                    if [[ -f "$marker" && ! -L "$marker" && $(stat -c %u "$marker") == $(id -u) && $(cat "$marker") == "$creation_key" ]]; then :
-                    elif [[ -d "$staging/.git" && ! -L "$staging/.git" && $(stat -c %u "$staging/.git") == $(id -u) && $(git -C "$staging" config --local --get pi-managed.creationKey 2>/dev/null || true) == "$creation_key" ]]; then :
-                    elif [[ -z $(find "$staging" -mindepth 1 -maxdepth 1 -print -quit) ]]; then
-                      printf '%s\n' "$creation_key" > "$marker"; chmod 600 "$marker"
-                    else exit 1; fi
-                  fi
-                  [[ ! -e "$staging/.git" || ( -d "$staging/.git" && ! -L "$staging/.git" && $(stat -c %u "$staging/.git") == $(id -u) ) ]]
-                  git -C "$staging" init -b main >/dev/null
-                  [[ -d "$staging/.git" && ! -L "$staging/.git" && $(stat -c %u "$staging/.git") == $(id -u) ]]
-                  [[ $(realpath "$(git -C "$staging" rev-parse --show-toplevel)") == "$staging" ]]
-                  [[ $(git -C "$staging" symbolic-ref --short HEAD) == main ]]
-                  git -C "$staging" config --local pi-managed.creationKey "$creation_key"
-                  rm -f "$marker"
-                  [[ ! -e "$workspace_path" && ! -L "$workspace_path" ]]
-                  mv -T "$staging" "$workspace_path"
-                fi
-                [[ $(realpath "$(git -C "$workspace_path" rev-parse --show-toplevel)") == "$workspace_path" ]]
-                [[ $(git -C "$workspace_path" symbolic-ref --short HEAD) == main ]]
-                resolve_project_identity
-                jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg workspacePath "$workspace_path" \
-                  '{rootKey:$rootKey,workspace:$workspace,relativeCwd:"",workspacePath:$workspacePath,cwd:$workspacePath,projectKey:null,projectDisplayName:null,checkoutDisplayName:null}'
-                ;;
-              workspace-resolve|root-ensure|root-resolve)
-                : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}"
-                root_key=$(jq -er '.rootKey' <<<"$request")
-                workspace=$(jq -er '.workspace' <<<"$request")
-                relative_cwd=$(jq -er '.relativeCwd' <<<"$request")
-                [[ "$root_key" == projects && "$workspace" != */* && "$workspace" != .* && "$relative_cwd" != /* && "$relative_cwd" != *..* ]]
-                configured_root=$(realpath "$PI_MANAGED_TEST_WORKSPACE_ROOT")
-                [[ -d "$configured_root" && ! -L "$PI_MANAGED_TEST_WORKSPACE_ROOT" ]]
-                workspace_path=$(realpath "$configured_root/$workspace")
-                [[ -d "$workspace_path" && ! -L "$configured_root/$workspace" && $(dirname "$workspace_path") == "$configured_root" && $(stat -c %u "$workspace_path") == $(id -u) ]]
-                cwd=$(realpath "$workspace_path/''${relative_cwd:-.}")
-                [[ "$cwd" == "$workspace_path" || "$cwd" == "$workspace_path/"* ]]
-                if [[ "$operation" == root-ensure || "$operation" == root-resolve ]]; then
-                  if [[ "$operation" == root-ensure ]] && ! tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" has-session -t "=$workspace" 2>/dev/null; then
-                    tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" new-session -d -s "$workspace" -n shell -c "$workspace_path"
-                  fi
-                  jq -cn --arg sessionName "$workspace" --arg workspacePath "$workspace_path" '{sessionName:$sessionName,workspacePath:$workspacePath}'
-                else
-                  resolve_project_identity
-                  jq -cn --arg rootKey "$root_key" --arg workspace "$workspace" --arg relativeCwd "$relative_cwd" \
-                    --arg workspacePath "$workspace_path" --arg cwd "$cwd" \
-                    '{rootKey:$rootKey,workspace:$workspace,relativeCwd:$relativeCwd,workspacePath:$workspacePath,cwd:$cwd,projectKey:null,projectDisplayName:null,checkoutDisplayName:null}'
-                fi
-                ;;
-              window-inspect|window-inspect-exact)
-                conversation_id=$(jq -er 'if (keys == ["conversationId"]) and (.conversationId | test("^conv_[a-f0-9]{32}$")) then .conversationId else error("invalid request") end' <<<"$request")
-                matches=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F "$format|#{session_name}|#{@managed_pi_conversation_id}" 2>/dev/null | awk -F '|' -v id="$conversation_id" '$4 == id { print $1 "|" $2 "|" $3 }' || true)
-                [[ $(awk 'NF { count++ } END { print count + 0 }' <<<"$matches") -le 1 ]]
-                existing=$(awk 'NF { print; exit }' <<<"$matches")
-                if [[ -n "$existing" ]]; then
-                  IFS='|' read -r window_id pane_id session_name <<<"$existing"
-                  if [[ "$operation" == window-inspect-exact ]]; then
-                    ownership=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" show-option -w -v -t "$window_id" @managed_test_ownership)
-                    jq -cn --arg conversationId "$conversation_id" --argjson ownership "$ownership" '{conversationId:$conversationId,exists:true,ownership:$ownership}'
-                  else
-                    jq -cn --arg conversationId "$conversation_id" --arg sessionName "$session_name" --arg windowId "$window_id" --arg paneId "$pane_id" '{conversationId:$conversationId,exists:true,sessionName:$sessionName,windowId:$windowId,paneId:$paneId}'
-                  fi
-                else
-                  jq -cn --arg conversationId "$conversation_id" '{conversationId:$conversationId,exists:false}'
-                fi
-                ;;
-              coordinator-ensure-exact)
-                conversation_id=$(jq -er 'if (keys == ["conversationId","launchId"]) and (.conversationId | test("^conv_[a-f0-9]{32}$")) then .conversationId else error("invalid request") end' <<<"$request")
-                launch_id=$(jq -er '.launchId | select(test("^launch_[a-f0-9]{32}$"))' <<<"$request")
-                : "''${PI_MANAGED_TEST_COORDINATOR_PI:?}" "''${PI_MANAGED_TEST_PROVIDER:?}"
-                command="$PI_MANAGED_TEST_COORDINATOR_PI --mode rpc --model coordinator-probe/fake --extension $PI_MANAGED_TEST_PROVIDER"
-                ! tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F '#{@managed_pi_conversation_id}' 2>/dev/null | grep -Fx "$conversation_id" >/dev/null
-                if tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" has-session -t '=default' 2>/dev/null; then
-                  created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" new-window -d -P -F "$format" -t '=default:' -n coordinator -c "$PI_MANAGED_COORDINATOR_CWD" "$command")
-                else
-                  created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" new-session -d -P -F "$format" -s default -n coordinator -c "$PI_MANAGED_COORDINATOR_CWD" "$command")
-                fi
-                IFS='|' read -r window_id pane_id <<<"$created"
-                tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_pi_conversation_id "$conversation_id"
-                # Fake ABI only: production birth/marker verification is covered by the Go suite.
-                pane_pid=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" display-message -p -t "$pane_id" '#{pane_pid}')
-                ownership=$(jq -cn --arg conversationId "$conversation_id" --arg launchId "$launch_id" --arg windowId "$window_id" --arg paneId "$pane_id" --arg panePid "$pane_pid" \
-                  '{conversationId:$conversationId,launchId:$launchId,sessionName:"default",windowId:$windowId,paneId:$paneId,panePid:$panePid,serverId:"123:456:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",processBootId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",processStartTicks:"123"}')
-                tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_test_ownership "$ownership"
-                jq -cn --arg conversationId "$conversation_id" --arg windowId "$window_id" --arg paneId "$pane_id" --argjson ownership "$ownership" '{conversationId:$conversationId,sessionName:"default",windowId:$windowId,paneId:$paneId,role:"coordinator",ownership:$ownership}'
-                ;;
-              window-create|window-create-exact)
-                : "''${PI_MANAGED_TEST_WORKSPACE_ROOT:?}" "''${PI_MANAGED_TEST_PROVIDER:?}"
-                conversation_id=$(jq -er '.conversationId | select(test("^conv_[a-f0-9]{32}$"))' <<<"$request")
-                workspace=$(jq -er '.placement.workspace' <<<"$request")
-                relative_cwd=$(jq -er '.placement.relativeCwd' <<<"$request")
-                cwd=$(realpath "$PI_MANAGED_TEST_WORKSPACE_ROOT/$workspace/''${relative_cwd:-.}")
-                existing=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F "$format|#{@managed_pi_conversation_id}" 2>/dev/null | awk -F '|' -v id="$conversation_id" '$3 == id { print $1 "|" $2; exit }' || true)
-                [[ -z "$existing" ]]
-                create_args=(new-window -t "=$workspace:")
-                if ! tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" has-session -t "=$workspace" 2>/dev/null; then
-                  create_args=(new-session -s "$workspace")
-                fi
-                created=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" "''${create_args[@]}" -d -P -F "$format" \
-                    -e "PATH=$PATH" -e "HOME=$HOME" -e "DIRENV_CONFIG=''${DIRENV_CONFIG:-}" -e "PI_CODING_AGENT_DIR=''${PI_CODING_AGENT_DIR:-}" \
-                    -e "PI_MANAGED_SESSION_LAUNCH_ROLE=$PI_MANAGED_SESSION_LAUNCH_ROLE" -e "PI_MANAGED_SESSIONS_SOCKET=$PI_MANAGED_SESSIONS_SOCKET" \
-                    -e "PI_MANAGED_SESSION_CONVERSATION_ID=$PI_MANAGED_SESSION_CONVERSATION_ID" -e "PI_MANAGED_SESSION_CONCEPT=$PI_MANAGED_SESSION_CONCEPT" \
-                    -e "PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID=$PI_MANAGED_SESSION_BINDING_BOUNDARY_ENTRY_ID" \
-                    -e "PI_MANAGED_SESSION_ATTACHMENT_NONCE=$PI_MANAGED_SESSION_ATTACHMENT_NONCE" -e "PI_MANAGED_PROJECT_SESSION_FILE=$PI_MANAGED_PROJECT_SESSION_FILE" \
-                    -e "PI_MANAGED_TEST_PROVIDER=$PI_MANAGED_TEST_PROVIDER" -e "PI_MANAGED_TEST_PROJECT_LOG=''${PI_MANAGED_TEST_PROJECT_LOG:-/dev/null}" \
-                    -n "pi-''${conversation_id: -8}" -c "$cwd" \
-                    "exec direnv exec '$cwd' '$PI_MANAGED_TEST_MANAGED_PI' --mode rpc --model coordinator-probe/fake --extension '$PI_MANAGED_TEST_PROVIDER' >>''${PI_MANAGED_TEST_PROJECT_LOG:-/dev/null} 2>&1")
-                IFS='|' read -r window_id pane_id <<<"$created"
-                tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_pi_conversation_id "$conversation_id"
-                # Fake-launcher ABI evidence only; kernel stopping is tested in the Go launcher.
-                ownership=null
-                if [[ "$operation" == window-create-exact ]]; then
-                  launch_id=$(jq -er '.launchId | select(test("^launch_[a-f0-9]{32}$"))' <<<"$request")
-                  pane_pid=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" display-message -p -t "$pane_id" '#{pane_pid}')
-                  ownership=$(jq -cn --arg conversationId "$conversation_id" --arg launchId "$launch_id" --arg sessionName "$workspace" --arg windowId "$window_id" --arg paneId "$pane_id" --arg panePid "$pane_pid" \
-                    '{conversationId:$conversationId,launchId:$launchId,sessionName:$sessionName,windowId:$windowId,paneId:$paneId,panePid:$panePid,serverId:"123:456:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",processBootId:"aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",processStartTicks:"123"}')
-                  tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -t "$window_id" @managed_test_ownership "$ownership"
-                fi
-                jq -cn --arg conversationId "$conversation_id" --arg sessionName "$workspace" --arg windowId "$window_id" --arg paneId "$pane_id" --argjson ownership "$ownership" \
-                  --arg workspace "$workspace" --arg relativeCwd "$relative_cwd" '{conversationId:$conversationId,sessionName:$sessionName,windowId:$windowId,paneId:$paneId,rootKey:"projects",workspace:$workspace,relativeCwd:$relativeCwd,role:"conversation"} + (if $ownership == null then {} else {ownership:$ownership} end)'
-                ;;
-              window-check-exact)
-                window_id=$(jq -er '.windowId | select(test("^@[0-9]+$"))' <<<"$request")
-                ownership=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" show-option -w -v -t "$window_id" @managed_test_ownership)
-                dead=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" display-message -p -t "$window_id" '#{pane_dead}')
-                if [[ "$dead" == 0 && $(jq -cS . <<<"$ownership") == $(jq -cS . <<<"$request") ]]; then
-                  jq -cn '{state:"match"}'
-                else jq -cn '{state:"changed"}'; fi
-                ;;
-              window-terminate|bridge-clear)
-                conversation_id=$(jq -er '.conversationId | select(test("^conv_[a-f0-9]{32}$"))' <<<"$request")
-                expected_window=$(jq -er '.windowId // ""' <<<"$request")
-                expected_pane=$(jq -er '.paneId // ""' <<<"$request")
-                matches=$(tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" list-windows -a -F '#{window_id}|#{pane_id}|#{@managed_pi_conversation_id}' | awk -F '|' -v id="$conversation_id" '$3 == id { print $1 "|" $2 }')
-                [[ $(awk 'NF { count++ } END { print count + 0 }' <<<"$matches") -le 1 ]]
-                IFS='|' read -r window_id pane_id <<<"$matches"
-                if [[ -n "$window_id" && -n "$expected_window" ]]; then [[ "$window_id" == "$expected_window" && "$pane_id" == "$expected_pane" ]]; fi
-                if [[ "$operation" == window-terminate ]]; then
-                  [[ -n "$window_id" ]]; tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" kill-window -t "$window_id"; jq -cn '{terminated:true}'
-                elif [[ -n "$window_id" ]]; then
-                  tmux -L "$PI_MANAGED_TEST_TMUX_SOCKET" set-option -w -u -t "$window_id" @managed_pi_conversation_id; jq -cn '{cleared:true}'
-                else jq -cn '{cleared:false}'; fi
-                ;;
-              *) exit 2 ;;
-            esac
-          '';
-        };
-        managedSessionLauncher = pkgs.callPackage ./nix/managed-session-launcher-wrapper.nix {
-          launcherPackage = managedSessionLauncherBase;
-        };
-        managedSessionModuleTest = lib.evalModules {
-          specialArgs = { inherit pkgs; };
-          modules = [
-            { options.systemd.tmpfiles.rules = lib.mkOption { type = lib.types.listOf lib.types.str; default = [ ]; }; }
-            {
-              options = {
-                users.groups = lib.mkOption { type = lib.types.attrs; default = { }; };
-                systemd.services = lib.mkOption { type = lib.types.attrs; default = { }; };
-                assertions = lib.mkOption { type = lib.types.listOf lib.types.attrs; default = [ ]; };
-                environment.systemPackages = lib.mkOption { type = lib.types.listOf lib.types.package; default = [ ]; };
-                users.users = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
-                systemd.user.services = lib.mkOption { type = lib.types.attrsOf lib.types.anything; default = { }; };
-              };
-            }
-            ./nix/module.nix
-            {
-              services.pi-harness = {
-                enable = true;
-                package = piHarnessPackage;
-                lsp.enable = true;
-                managedSessions = {
-                  enable = true;
-                  # Nix build sandboxes have immutable inputs but no writable
-                  # daemon store. The runtime-pin suite tests rooting separately.
-                  retainRuntime = false;
-                  user = "operator";
-                  environmentFile = "/run/secrets/pi-managed-session.env";
-                  homeserver = "https://matrix.example.com";
-                  botUserId = "@pi-test:example.com";
-                  operatorUserId = "@operator:example.com";
-                  ignoredSenderUserIds = [ "@signalbot:example.com" "@facebookbot:example.com" ];
-                  hostId = "test-host";
-                  workspaceRoots.projects = "/home/operator/projects";
-                  launcherPackage = managedSessionLauncherBase;
-                };
-              };
-            }
-          ];
         };
         lspDisabledModuleTest = lib.evalModules {
           specialArgs = { inherit pkgs; };
@@ -434,50 +172,9 @@
           nativeScript = bridgePiWrapper.text;
           pinnedScript = (modulePackage bridgePinnedTest "pi").text;
           disabledHasNoBridge = !(lspDisabledModuleTest.config.systemd.user.services ? pi-matrix-bridge);
-          concurrentConsumersRejected = !(lib.all (item: item.assertion)
-            (managedSessionModuleTest.extendModules { modules = [ { services.pi-harness.matrixBridge = bridgeModuleTest.config.services.pi-harness.matrixBridge; } ]; }).config.assertions);
-        });
-        managedLspDisabledModuleTest = managedSessionModuleTest.extendModules {
-          modules = [ { services.pi-harness.lsp.enable = lib.mkForce false; } ];
-        };
-        managedLspDisabledService = managedLspDisabledModuleTest.config.systemd.user.services.pi-managed-session-relay;
-        managedLspDisabledCoordinatorPi = builtins.elemAt managedLspDisabledService.path 1;
-        managedSessionService = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-relay;
-        managedSessionPiWrapper = modulePackage managedSessionModuleTest "pi";
-        managedSessionStatusWrapper = modulePackage managedSessionModuleTest "pi-managed-session-status";
-        managedSessionCoordinatorPi = builtins.elemAt managedSessionService.path 1;
-        managedPolicyTest = overrides: managedSessionModuleTest.extendModules {
-          modules = [ { services.pi-harness.managedSessions.actionPolicyOverrides = overrides; } ];
-        };
-        restrictivePolicyTest = managedPolicyTest { "conversation.stop" = { human = "deny"; model = "deny"; }; };
-        managedSessionModuleReport = pkgs.writeText "pi-harness-managed-session-module-test.json" (builtins.toJSON {
-          assertions = map (item: item.assertion) managedSessionModuleTest.config.assertions;
-          policyOverrideAssertions = lib.mapAttrs (_: overrides:
-            lib.all (item: item.assertion) (managedPolicyTest overrides).config.assertions
-          ) {
-            restrictive = { "conversation.stop" = { human = "deny"; model = "deny"; }; };
-            modelBypass = { "conversation.open".model = "direct"; };
-            unknown = { "unknown.action".human = "deny"; };
-            invalidConfirmation = { "host.status".human = "confirmed"; };
-            deleteConfirmationBypass = { "conversation.delete".human = "direct"; };
-            applyConfirmationBypass = { "space.reconcile.apply".human = "direct"; };
-            destructiveDeny = { "conversation.delete".human = "deny"; };
-          };
-          restrictivePolicyFile = restrictivePolicyTest.config.systemd.user.services.pi-managed-session-relay.environment.PI_MANAGED_HOST_ACTION_POLICY;
-          hostControlExecutable = "${modulePackage managedSessionModuleTest "pi-managed-session"}/bin/pi-managed-session";
-          localOnlyExecutable = "${modulePackage managedSessionModuleTest "pi-local-only"}/bin/pi-local-only";
-          disabledHostHasNoService = !(lspDisabledModuleTest.config.systemd.user.services ? pi-managed-session-relay);
-          disabledHostHasNoControlCommand = lib.all (package: !(lib.hasPrefix "pi-managed-session" (lib.getName package))) lspDisabledModuleTest.config.environment.systemPackages;
-          relayUserLingers = managedSessionModuleTest.config.users.users.operator.linger;
-          relayRestartIfChanged = managedSessionService.restartIfChanged;
-          relayStopIfChanged = managedSessionService.stopIfChanged;
-          rolloutAfter = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-rollout.after;
-          rolloutScript = managedSessionModuleTest.config.systemd.user.services.pi-managed-session-rollout.script;
-          serviceEnvironment = managedSessionService.environment;
-          servicePathCount = builtins.length managedSessionService.path;
-          execStart = managedSessionService.serviceConfig.ExecStart;
-          hasGeneralEnvironmentFile = managedSessionService.serviceConfig ? EnvironmentFile;
-          hasPrivateTmp = managedSessionService.serviceConfig ? PrivateTmp;
+          legacyOptionAbsent = !(bridgeModuleTest.options.services.pi-harness ? managedSessions);
+          legacyOptionRejected = !(builtins.tryEval (builtins.deepSeq
+            (bridgeModuleTest.extendModules { modules = [ { services.pi-harness.managedSessions.enable = true; } ]; }).config.environment.systemPackages true)).success;
         });
         lspPackages = with pkgs; [
           nodejs
@@ -589,10 +286,7 @@
         };
         migrateTkApp = pkgs.writeShellApplication {
           name = "pi-migrate-tk";
-          runtimeInputs = [
-            ticketPackage
-            pkgs.gh
-          ];
+          runtimeInputs = [ ticketPackage pkgs.gh ];
           text = ''
             set -euo pipefail
             if [ ! -d .tickets ]; then
@@ -609,34 +303,9 @@
           '';
         };
         verification = import ./nix/verification.nix {
-          inherit
-            pkgs
-            lib
-            piPackage
-            nativeSessionLock
-            matrixBridge
-            bridgePiWrapper
-            bridgeLocalOnlyWrapper
-            bridgeModuleReport
-            piHarnessPackage
-            piHarnessResources
-            piRPackage
-            agentgraphPiResources
-            managedSessionRelay
-            managedSessionLauncher
-            managedSessionPiWrapper
-            managedSessionStatusWrapper
-            managedSessionCoordinatorPi
-            managedLspDisabledCoordinatorPi
-            lspDisabledPiWrapper
-            managedSessionModuleReport
-            mattPocockSkillsResources
-            migrateTkApp
-            playwrightAgentCli
-            piLspExtension
-            typeSetup
-            lspPackages
-            ;
+          inherit pkgs lib piPackage nativeSessionLock matrixBridge bridgePiWrapper bridgeLocalOnlyWrapper bridgeModuleReport
+            piHarnessPackage piHarnessResources piRPackage agentgraphPiResources lspDisabledPiWrapper
+            mattPocockSkillsResources migrateTkApp playwrightAgentCli piLspExtension typeSetup lspPackages;
           source = ./.;
         };
         verifyApp = verification.verifyApp;
@@ -645,7 +314,6 @@
       {
         packages.pi-harness = piHarnessPackage;
         packages.pi-harness-resources = piHarnessResources;
-        packages.managed-session-relay = managedSessionRelay;
         packages.matrix-bridge = matrixBridge;
         packages.bridge-chat = import ./nix/bridge-chat-package.nix { inherit pkgs piPackage; };
         packages.chat-workspace = import ./nix/chat-workspace-package.nix { inherit pkgs; };
@@ -656,12 +324,7 @@
         packages.migrate-tk = migrateTkApp;
         packages.pi = piPackage;
         packages.default = piHarnessPackage;
-
-        checks = verification.checks // {
-          managed-session-test-launcher = managedSessionLauncher;
-          managed-session-test-coordinator-pi = managedSessionCoordinatorPi;
-        };
-
+        checks = verification.checks;
         apps.migrate-tk = flake-utils.lib.mkApp { drv = migrateTkApp; };
         apps.eval = flake-utils.lib.mkApp { drv = evalApp; };
         apps.eval-self-test = flake-utils.lib.mkApp { drv = evalSelfTestApp; };
@@ -669,29 +332,13 @@
         apps.verify-lsp-live = flake-utils.lib.mkApp { drv = verifyLspLiveApp; };
         apps.verify-chat-workspace-live = flake-utils.lib.mkApp { drv = verification.verifyWorkspaceLiveApp; };
         apps.verify-chat-files-live = flake-utils.lib.mkApp { drv = verification.verifyFilesLiveApp; };
-        apps.default = flake-utils.lib.mkApp {
-          drv = piHarnessPackage;
-          exePath = "/bin/pi";
-        };
-        apps.pi = flake-utils.lib.mkApp {
-          drv = piHarnessPackage;
-          exePath = "/bin/pi";
-        };
-
+        apps.default = flake-utils.lib.mkApp { drv = piHarnessPackage; exePath = "/bin/pi"; };
+        apps.pi = flake-utils.lib.mkApp { drv = piHarnessPackage; exePath = "/bin/pi"; };
         devShells.default = pkgs.mkShell {
           packages = [
-            agentgraphPackage
-            agentgraphPostgresPackage
-            playwrightAgentCli
-            pkgs.jq
-            pkgs.tmux
-            pkgs.d2
-            pkgs.graphviz
-            pkgs.xdg-utils
-          ]
-          ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ]
-          ++ lspPackages;
-
+            agentgraphPackage agentgraphPostgresPackage playwrightAgentCli
+            pkgs.jq pkgs.tmux pkgs.d2 pkgs.graphviz pkgs.xdg-utils
+          ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ] ++ lspPackages;
           shellHook = ''
             ${typeSetup}
           '';

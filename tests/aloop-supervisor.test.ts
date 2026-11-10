@@ -14,7 +14,7 @@ const verificationPolicyDocument = JSON.stringify({
 });
 import type { EpicIssueContext, GitHubEpicContext, IssueHandoff } from "../config/agent/extensions/github-issues/github-context.js";
 import { registerAloopExtension, scanAttemptArtifacts } from "../config/agent/extensions/aloop/index.js";
-import { ALOOP_LIFECYCLE_ENTRY_TYPE, cancelManagedAloop, createAloopLifecycleEvent, delegateManagedAloopCheckpoint, parseAloopLifecycleEvent, registerManagedAloopAbortDelegate, registerManagedAloopCheckpointDelegate, sanitizeAloopCheckpointText } from "../config/agent/extensions/managed-sessions/aloop-lifecycle.js";
+import { ALOOP_LIFECYCLE_ENTRY_TYPE, cancelAloop, createAloopLifecycleEvent, delegateAloopCheckpoint, parseAloopLifecycleEvent, registerAloopAbortDelegate, registerAloopCheckpointDelegate, sanitizeAloopCheckpointText } from "../config/agent/extensions/aloop/lifecycle.js";
 import {
 	acceptedOpenAloopIssues,
 	assessAloopRunBudget,
@@ -103,17 +103,18 @@ test("phone-safe aloop lifecycle summaries redact plumbing while preserving comm
 	assert.equal(sanitizeAloopCheckpointText("Inspect src/private/incident.md before choosing."), "Inspect • before choosing.");
 });
 
-test("managed aloop delegates are isolated by Pi session identity", async () => {
+test("aloop delegates are isolated by native Pi session identity", async () => {
 	const calls: string[] = [];
-	const removeAbortA = registerManagedAloopAbortDelegate("session-a", () => calls.push("abort-a"));
-	const removeAbortB = registerManagedAloopAbortDelegate("session-b", () => calls.push("abort-b"));
-	const removeCheckpointA = registerManagedAloopCheckpointDelegate("session-a", async () => { calls.push("checkpoint-a"); });
-	const removeCheckpointB = registerManagedAloopCheckpointDelegate("session-b", async () => { calls.push("checkpoint-b"); });
-	assert.equal(cancelManagedAloop("session-a"), true);
-	assert.equal(await delegateManagedAloopCheckpoint("session-b", "call", { kind: "question" }), true);
+	const removeAbortA = registerAloopAbortDelegate("session-a", () => calls.push("abort-a"));
+	const removeAbortB = registerAloopAbortDelegate("session-b", () => calls.push("abort-b"));
+	const removeCheckpointA = registerAloopCheckpointDelegate("session-a", async () => { calls.push("checkpoint-a"); });
+	const removeCheckpointB = registerAloopCheckpointDelegate("session-b", async () => { calls.push("checkpoint-b"); });
+	assert.equal(cancelAloop("session-a"), true);
+	assert.equal(await delegateAloopCheckpoint("session-b", "call", { kind: "question" }), true);
 	assert.deepEqual(calls, ["abort-a", "checkpoint-b"]);
 	removeAbortA(); removeAbortB(); removeCheckpointA(); removeCheckpointB();
-	assert.equal(cancelManagedAloop("session-a"), false);
+	assert.equal(cancelAloop("session-a"), false);
+	assert.equal(await delegateAloopCheckpoint("session-b", "late", {}), false);
 });
 
 test("aloop invocations separate worker-launch resource bounds from issue retries", () => {
@@ -406,7 +407,7 @@ test("aloop recovery requires GitHub-recorded authorization and evidence bound t
 		assert.equal(closes, 1);
 		for (const handler of events.get("agent_settled") ?? []) handler({}, ctx);
 		assert.deepEqual(activeTools, ["read"], "successful authorized recovery clears its pending human boundary");
-		assert.equal(cancelManagedAloop("test-session"), true, "managed !abort reaches aloop even after earlier human-boundary settlement");
+		assert.equal(cancelAloop("test-session"), true, "native !abort reaches aloop even after earlier human-boundary settlement");
 		ctx.abort();
 		assert.equal(aborts, 1);
 		assert.ok(lifecycleEvents.map(parseAloopLifecycleEvent).some((event) => event?.kind === "cancelled"));

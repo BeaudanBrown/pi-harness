@@ -8,9 +8,10 @@ import { nativeControl, type NativeControl } from "./interaction.js";
 import { readImage } from "./media.js";
 import { dispatchAllowed, type DispatchFence } from "./dispatch-fence.js";
 import { TaskWorkspaceSchema, taskKey } from "./task-contract.js";
+import { cancelAloop, registerAloopCheckpointDelegate } from "../aloop/lifecycle.js";
 
 export type AdapterConfig = { socket: string; roots: string[] };
-type Scope = { ctx: ExtensionContext; file: string; nativeId: string; boundary: string; active: boolean; epoch: number; archiveRevision?: number; remoteBlocked?: boolean; dispatchFence?: DispatchFence; registered?: boolean; intakeReady?: boolean; compactionEpoch?: number; controlEpoch?: number; stopping?: boolean; peer?: Peer; timer?: NodeJS.Timeout; seen: Set<string>; inputs: Set<string>; preflight: Set<string>; settled: Set<string> };
+type Scope = { ctx: ExtensionContext; file: string; nativeId: string; boundary: string; active: boolean; epoch: number; archiveRevision?: number; remoteBlocked?: boolean; dispatchFence?: DispatchFence; registered?: boolean; intakeReady?: boolean; compactionEpoch?: number; controlEpoch?: number; stopping?: boolean; removeCheckpointDelegate?: () => void; peer?: Peer; timer?: NodeJS.Timeout; seen: Set<string>; inputs: Set<string>; preflight: Set<string>; settled: Set<string> };
 export function interactiveProcess(): boolean {
   const args = process.argv.slice(1);
   if (process.env.PI_HARNESS_ENABLE_PI_R === "1" || process.env.PI_HARNESS_ENABLE_AGENTGRAPH === "1" || process.env.PI_HARNESS_AGENT_PROFILE && process.env.PI_HARNESS_AGENT_PROFILE !== "engineering-full") return false;
@@ -30,7 +31,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
   };
   const stop = () => {
     if (!current) return;
-    current.active = false; clearTimeout(current.timer); current.peer?.close(); current = undefined;
+    current.active = false; current.removeCheckpointDelegate?.(); clearTimeout(current.timer); current.peer?.close(); current = undefined;
   };
   const valid = (scope: Scope, peer?: Peer): boolean => current === scope && scope.active && (!peer || scope.peer === peer && !peer.socket.destroyed) &&
     scope.ctx.sessionManager.getSessionId() === scope.nativeId && scope.ctx.sessionManager.getSessionFile() === scope.file;
@@ -91,7 +92,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
           if (!live()) return { accepted: false, message: "Control withdrawn by native abort or session change." };
           if (command === "abort" || command === "stop") {
             publishControl({ message: `${command === "stop" ? "Stop" : "Abort"} requested. This does not undo or prove completion of earlier effects.` });
-            revoke(scope); scope.ctx.abort();
+            revoke(scope); cancelAloop(scope.nativeId); scope.ctx.abort();
             if (command === "stop") {
               scope.stopping = true;
               setTimeout(() => { if (valid(scope)) scope.ctx.shutdown(); }, 0);
@@ -198,7 +199,12 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
       if (!boundary) { pi.appendEntry("matrix-bridge.boundary", { nativeId }); boundary = ctx.sessionManager.getLeafId() ?? undefined; }
       if (!boundary) throw Error("Native session has no persisted boundary");
       const scope: Scope = { ctx, file, nativeId, boundary, active: true, epoch: 0, seen: new Set(), inputs: new Set(), preflight: new Set(), settled: new Set() };
-      current = scope; void attach(scope, cfg);
+      current = scope;
+      scope.removeCheckpointDelegate = registerAloopCheckpointDelegate(nativeId, async (_call, params) => {
+        if (!valid(scope)) throw Error("Native session changed before aloop checkpoint");
+        recordCheckpoint(scope.ctx, params);
+      });
+      void attach(scope, cfg);
     } catch { ctx.ui.setStatus("matrix-bridge", "Matrix offline · local Pi available"); }
   };
   const toolsAvailable = (options.config || process.env.PI_MATRIX_BRIDGE_UI_CONFIG) && eligible() && process.env.PI_BRIDGE_LOCAL_ONLY !== "1" && process.env.PI_HARNESS_LOCAL_ONLY !== "1";
@@ -215,18 +221,19 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
       remoteStatus(scope, object(await peer.request("archive.set", { archived, revision: Number(view.archiveRevision ?? 0) })));
     },
   });
+  function recordCheckpoint(ctx: ExtensionContext, params: unknown) {
+    const scope = current; if (!scope || !scope.registered || !scope.intakeReady || !valid(scope) || ctx.sessionManager.getSessionId() !== scope.nativeId) throw Error("No registered native Matrix binding yet; local Pi remains available");
+    const checkpoint = validateRemoteCheckpoint(params); renderRemoteCheckpoint(checkpoint);
+    pi.appendEntry("matrix-bridge.question", { nativeId: scope.nativeId, checkpoint });
+    const entry = ctx.sessionManager.getLeafId(); revoke(scope); ctx.abort();
+    return { content: [{ type: "text" as const, text: "Checkpoint recorded in native history. Matrix publication is asynchronous; the run is stopped pending fresh input." }], details: { entry, waiting: true } };
+  }
   if (toolsAvailable) pi.registerTool({
     name: "remote_checkpoint", label: "Remote Checkpoint", description: "Record a durable question, blocker or completion boundary for this native session's Matrix room, then stop the current run pending fresh input.",
     promptSnippet: "Use only for an intentional question, blocker or issue-completion approval boundary, not routine progress.",
     promptGuidelines: ["Do not mirror routine progress, thinking, tool activity or ordinary terminal answers to Matrix.", "Issue completion needs implementation, verification, caveats, Git state and an exact approval request.", "Omit code and diffs unless explicitly requested by the operator."],
     parameters: RemoteCheckpointSchema,
-    execute: async (_callId, params, _signal, _onUpdate, ctx) => {
-      const scope = current; if (!scope || !scope.registered || !scope.intakeReady || !valid(scope) || ctx.sessionManager.getSessionId() !== scope.nativeId) throw Error("No registered native Matrix binding yet; local Pi remains available");
-      const checkpoint = validateRemoteCheckpoint(params); renderRemoteCheckpoint(checkpoint);
-      pi.appendEntry("matrix-bridge.question", { nativeId: scope.nativeId, checkpoint });
-      const entry = ctx.sessionManager.getLeafId(); revoke(scope); ctx.abort();
-      return { content: [{ type: "text", text: "Checkpoint recorded in native history. Matrix publication is asynchronous; the run is stopped pending fresh input." }], details: { entry, waiting: true } };
-    },
+    execute: async (_callId, params, _signal, _onUpdate, ctx) => recordCheckpoint(ctx, params),
   });
   if (toolsAvailable) pi.registerTool({
     name: "create_task_workspace", label: "Create Task Workspace",

@@ -1,5 +1,9 @@
 # Production-baseline compatibility repair (#120 / #121)
 
+> Historical deployed-baseline evidence. Old runtime/test/command references
+> describe that baseline, not the current package or rollout permission.
+> See [historical context](legacy-managed-history.md); no incident closure is implied.
+
 ## Incident and scope
 
 GRILL's deployed baseline was `c65509a`, not the older merge base of the managed

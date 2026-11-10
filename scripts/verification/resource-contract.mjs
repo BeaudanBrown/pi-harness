@@ -6,7 +6,7 @@ import path from "node:path";
 const root = path.resolve(process.argv[2] ?? ".");
 const settings = JSON.parse(await readFile(path.join(root, "config/agent/settings.json"), "utf8"));
 const profiles = JSON.parse(await readFile(path.join(root, "config/agent/profiles.json"), "utf8"));
-const externalExtensions = new Set(["agentgraph", "lsp", "managed-coordinator", "pi-r"]);
+const externalExtensions = new Set(["agentgraph", "lsp", "pi-r"]);
 
 assert.equal(settings.enableSkillCommands, true, "skill commands must remain enabled");
 assert.ok(Array.isArray(settings.extensions), "settings.extensions must be an array");
@@ -43,10 +43,11 @@ for (const directory of settings.themes ?? []) await access(path.join(root, "con
 // These startup paths cannot be exercised in this check without activating a
 // user service. Keep the persistent/volatile split explicit at the Nix boundary.
 const moduleSource = await readFile(path.join(root, "nix/module.nix"), "utf8");
-assert.match(moduleSource, /default = "%h\/\.local\/state\/pi-managed-sessions\/relay";/);
-assert.match(moduleSource, /export PI_MANAGED_SESSIONS_STATE_DIR="\$\(expand_home \$\{lib\.escapeShellArg cfg\.managedSessions\.stateDirectory\}\)"/);
-assert.match(moduleSource, /registry="\$state_dir\/registry\.json"/);
-assert.doesNotMatch(moduleSource, /registry="\$runtime\/registry\.json"/);
-await access(path.join(root, "scripts/managed-session-status.jq"));
+const bridgeSource = await readFile(path.join(root, "nix/matrix-bridge-service.nix"), "utf8");
+assert.doesNotMatch(moduleSource, /cfg\.managedSessions|managedSessionExtensions|pi-managed-session-relay/);
+assert.match(bridgeSource, /%h\/\.local\/state\/pi-matrix-bridge/);
+assert.match(bridgeSource, /%t\/pi-matrix-bridge\/bridge\.sock/);
+assert.equal(profiles.profiles["managed-coordinator"], undefined);
+assert.equal(profiles.variants["managed-project"], undefined);
 
 console.log(`resource contract: ${configured.size} default extensions and ${Object.keys(profiles.profiles).length} profiles`);

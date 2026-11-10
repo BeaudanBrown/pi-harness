@@ -5,7 +5,10 @@
 The replacement target keeps native Pi independent of bridge health, one room per
 native file, reversible archive, polls/images/automatic organization and narrow
 approved task-workspace creation. The implementation below remains historical
-and deployed until an explicitly approved migration; it is not the new target.
+and may remain deployed until an explicitly approved migration; it is not the
+new target. #170 removed its source and public commands. References below to
+removed files resolve against baseline `67ceb087805e3e24b6cf13adffc86e5e7f23c928`,
+not a shipped fallback; see [historical diagnostics](../../legacy-managed-history.md).
 - **Date:** 2026-08-31
 - **Issue:** [#38](https://github.com/BeaudanBrown/pi-harness/issues/38)
 - **Epic:** [#37](https://github.com/BeaudanBrown/pi-harness/issues/37)
@@ -13,7 +16,7 @@ and deployed until an explicitly approved migration; it is not the new target.
 ## Live-workspace target amendment (#103/#104)
 
 The approved target is now pinned in
-[Live-workspace contract v1](../../managed-live-workspaces-contract.md), with
+[Live-workspace contract v1](https://github.com/BeaudanBrown/pi-harness/blob/67ceb087805e3e24b6cf13adffc86e5e7f23c928/docs/managed-live-workspaces-contract.md), with
 executable syntax/policy fixtures in `live-workspace-contracts.ts`. It supersedes
 conflicting **target** statements below: the target hierarchy adds checkout
 Spaces; titles are mutable and non-authoritative; multiple independent
@@ -67,7 +70,7 @@ Reactivation and implicit membership restoration are excluded.
 
 This supersedes the baseline's "no archived state" target, not its deployed
 implementation history. The staged evidence and remaining work are tracked in
-[readable archives](../../managed-readable-archives.md); do not infer that the
+[readable archives](https://github.com/BeaudanBrown/pi-harness/blob/67ceb087805e3e24b6cf13adffc86e5e7f23c928/docs/managed-readable-archives.md); do not infer that the
 public archive workflow is available until that document records completion.
 
 ## Context
@@ -134,7 +137,7 @@ sending; lifecycle success depends on accepting the notice locally, not displayi
 it remotely. Conflicting historical projections remain blocked records, isolated
 from later work. Both stores belong to the persistent host backup boundary; an
 older relay that ignores them is not a supported downgrade. Existing adapter wire
-messages remain supported. See [reliability operations](../../managed-matrix-reliability.md)
+messages remain supported. See [reliability operations](https://github.com/BeaudanBrown/pi-harness/blob/67ceb087805e3e24b6cf13adffc86e5e7f23c928/docs/managed-matrix-reliability.md)
 for bounds, evidence, rate-limit behavior and deployment acceptance.
 
 ### Protocol contract
@@ -245,7 +248,7 @@ The `ae957fa` adapter wire subset is the initial supported rolling baseline for
 this update. State schema, wire contract and executable revision are distinct;
 unknown versions remain errors. Later incompatible updates require an explicit
 maintenance/migration decision, never automatic busy-session refresh. See
-[update operations](../../managed-session-updates.md) for retention, migration,
+[update operations](https://github.com/BeaudanBrown/pi-harness/blob/67ceb087805e3e24b6cf13adffc86e5e7f23c928/docs/managed-session-updates.md) for retention, migration,
 crash boundaries and acceptance evidence.
 
 ## Delivery and idle-runtime update amendment (#95)
@@ -265,7 +268,7 @@ refreshes the lifecycle-only coordinator. This is a maintenance cutover for the
 new optional fields: deploy the new relay before new adapters, preserve stores,
 and do not downgrade to strict older readers. The operator has approved a final
 manual tmux ownership migration, not automatic termination of the old server.
-See [input/runtime operations](../../managed-input-runtime-updates.md) for
+See [input/runtime operations](https://github.com/BeaudanBrown/pi-harness/blob/67ceb087805e3e24b6cf13adffc86e5e7f23c928/docs/managed-input-runtime-updates.md) for
 acceptance and crash-boundary evidence.
 
 ## Selective input recovery amendment (#124)
@@ -284,7 +287,7 @@ read-only, never applying a stale approval; completed local cancellation retries
 only its receipt. History
 and newer queued inputs are preserved; historical completion is not inferred.
 Deployment and live recovery remain separately approved operations. See
-[selective recovery operations](../../managed-input-recovery.md).
+[selective recovery operations](https://github.com/BeaudanBrown/pi-harness/blob/67ceb087805e3e24b6cf13adffc86e5e7f23c928/docs/managed-input-recovery.md).
 
 ## Matrix v12 provisioning amendment (#126)
 

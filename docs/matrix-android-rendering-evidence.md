@@ -1,5 +1,11 @@
 # Android-first rendering implementation evidence (#122)
 
+> Historical #122 implementation/verification record, not current package or
+> deployment instructions. #170 removed the managed relay and its suites;
+> the shared renderer now lives in `matrix-shared/transcript-renderer.ts`, with
+> canonical `matrix-*` tests and native bridge coverage. Old registry/recovery
+> claims below do not describe the new ledger. See [removal evidence](matrix-pi-removal.md).
+
 Issue: https://github.com/BeaudanBrown/pi-harness/issues/122
 
 ## Scope ownership

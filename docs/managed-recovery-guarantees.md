@@ -1,5 +1,10 @@
 # Recovery guarantees (#158)
 
+> Historical diagnostic record. The runtime and commands below were removed by
+> #170; they are not current operating instructions or activation permission.
+> Replacement tests do not establish that the deployed incident is repaired.
+> See [historical context](legacy-managed-history.md) and the approved migration runbook.
+
 Status: harness implementation verified; **fleet activation pending**. This is an
 explicit, consent-gated recovery path, not automatic resurrection of uncertain
 processes. See deployment prerequisites below.

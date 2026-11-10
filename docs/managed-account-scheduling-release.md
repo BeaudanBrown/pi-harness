@@ -1,5 +1,9 @@
 # Account scheduling release verification (#157 / epic #153)
 
+> Historical compatibility and incident evidence. The runtime, tests and commands
+> below were removed by #170. Their old release instructions are not permission
+> to activate the replacement or discard journals. See [historical context](legacy-managed-history.md).
+
 Scope: cumulative deterministic acceptance, compatibility evidence and final
 Standards/Spec review from `fab6dee7979e2f30c7aeecb7a73328c3de7c6056` through
 #154–157. #152's deadline correction is a separate unpublished prerequisite.

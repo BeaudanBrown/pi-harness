@@ -1,5 +1,9 @@
 # Account scheduling diagnosis and proposed refactor
 
+> Historical incident/proposal, not current account authority or a task list.
+> #170 removed this scheduler; preserve its real journals and unresolved receipts.
+> See [historical context](legacy-managed-history.md); no live repair is claimed.
+
 Status: operator-approved implementation plan, tracked by epic #153 and children
 #154–157. Publication, deployment and live effects remain separately gated.
 Separate from #152's implemented, unpublished repair wait correction.

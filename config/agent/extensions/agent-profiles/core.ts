@@ -7,7 +7,6 @@ export const AGENT_PROFILE_NAMES = [
 	"aloop-patch",
 	"review-worker",
 	"diagnostic-worker",
-	"managed-coordinator",
 	"pi-local",
 ] as const;
 

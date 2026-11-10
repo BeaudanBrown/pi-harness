@@ -1,8 +1,12 @@
 # Isolated real-Matrix smoke — initial bootstrap failure (#121)
 
+> Historical live failure evidence, not native replacement acceptance. The old
+> runtime is removed; retained real resources must not be cleaned up implicitly.
+> See [historical context](legacy-managed-history.md).
+
 **Follow-up:** the approved room-v12 fix and same-state recovery now pass the
 bounded native-launch/hierarchy/account smoke. See
-[remediation and retest evidence](managed-room-v12-evidence.md). This document
+[remediation and retest evidence](https://github.com/BeaudanBrown/pi-harness/blob/67ceb087805e3e24b6cf13adffc86e5e7f23c928/docs/managed-room-v12-evidence.md). This document
 preserves the initial failed attempt; it is not the current remediation status.
 
 ## Authorization and scope

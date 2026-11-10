@@ -1,5 +1,8 @@
 # Matrix v12 provisioning compatibility and recovery (#126)
 
+> Historical live diagnosis. The managed runtime and recovery operations below
+> are removed, not silently replaced or deployed. See [historical context](legacy-managed-history.md).
+
 ## Approved scope
 
 Implement/test only; pause before push, consuming pin update, host rebuild or live

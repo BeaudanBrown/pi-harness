@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { MatrixHttp, MatrixError, MAX_MATRIX_RESPONSE_BYTES } from "../config/agent/extensions/matrix-shared/http.js";
 import { OwnerMatrix } from "../config/agent/extensions/bridge-chat/transport.js";
-import { ManagedMatrixClient } from "../config/agent/extensions/managed-sessions/relay/matrix-client.js";
+import { BridgeMatrix } from "../config/agent/extensions/matrix-bridge/matrix.js";
 const config = { homeserver: "https://matrix.example.com", accessToken: "fixture-token", botUserId: "@bot:example.com", operatorUserId: "@owner:example.com" };
 
 test("shared JSON transport keeps credentials in headers, rejects redirects and foreign paths", async () => {
@@ -25,12 +25,12 @@ test("streaming byte bound applies before buffering unbounded JSON", async () =>
 	})), { maxAttempts: 1 });
 	await assert.rejects(http.request("GET", "/_matrix/x"), /size limit/); assert.equal(cancelled, true);
 });
-test("managed retries stay enabled; chat deliberately never retries uncertain PUT", async () => {
-	let managedCalls = 0, chatCalls = 0;
-	const managed = new ManagedMatrixClient(config, async () => {
-		managedCalls++; return managedCalls === 1 ? new Response('{}', { status: 503 }) : new Response('{"user_id":"@bot:example.com"}');
-	}, [], { sleep: async () => {} });
-	assert.equal(await managed.whoami(), config.botUserId); assert.equal(managedCalls, 2);
+test("native bridge retries stay enabled; stateless chat deliberately never retries uncertain PUT", async () => {
+	let nativeCalls = 0, chatCalls = 0;
+	const native = new BridgeMatrix(new MatrixHttp(config, async () => {
+		nativeCalls++; return nativeCalls === 1 ? new Response('{}', { status: 503 }) : new Response('{"user_id":"@bot:example.com"}');
+	}, { sleep: async () => {} }), config.botUserId);
+	assert.deepEqual(await native.http.request("GET", "/_matrix/client/v3/account/whoami"), { user_id: config.botUserId }); assert.equal(nativeCalls, 2);
 	const chat = new OwnerMatrix(config, async (_url, init) => {
 		chatCalls++; assert.deepEqual(JSON.parse(String(init?.body)), { msgtype: "m.text", body: "Pi: answer", "m.mentions": {} });
 		return new Response('{"error":"private sentinel"}', { status: 503 });
@@ -41,10 +41,10 @@ test("managed retries stay enabled; chat deliberately never retries uncertain PU
 test("shared sync mechanics preserve separate account filters and cursors", async () => {
 	const observed: URL[] = [];
 	const fetcher: typeof fetch = async url => { observed.push(new URL(String(url))); return new Response('{"next_batch":"new"}'); };
-	const managed = new ManagedMatrixClient(config, fetcher);
+	const native = new BridgeMatrix(new MatrixHttp(config, fetcher), config.botUserId);
 	const chat = new OwnerMatrix({ ...config, accessToken: "other-token" }, fetcher);
-	await managed.sync("managed-cursor"); await chat.sync("chat-cursor", [config.operatorUserId], 0);
-	assert.equal(observed[0].searchParams.get("since"), "managed-cursor"); assert.equal(observed[0].searchParams.get("filter"), null);
+	await native.http.sync(new URLSearchParams({ since: "native-cursor" })); await chat.sync("chat-cursor", [config.operatorUserId], 0);
+	assert.equal(observed[0].searchParams.get("since"), "native-cursor"); assert.equal(observed[0].searchParams.get("filter"), null);
 	assert.equal(observed[1].searchParams.get("since"), "chat-cursor");
 	assert.deepEqual(JSON.parse(observed[1].searchParams.get("filter")!).room.timeline.senders, [config.operatorUserId]);
 });

@@ -3,6 +3,7 @@ import { MatrixHttp } from "../matrix-shared/http.js";
 import { BridgeMatrix } from "./matrix.js";
 import { BridgeRelay, type RelayConfig } from "./relay.js";
 import { localOpen, localTasks } from "./local-process.js";
+import { refuseLegacyStore } from "./store.js";
 export { localEnvironment, localOpen } from "./local-process.js";
 import { hostPath, object, string } from "./wire.js";
 export function credential(source: string): string {
@@ -21,6 +22,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (!Array.isArray(raw.roots) || !raw.roots.length || !Array.isArray(raw.ignoredSenderUserIds)) throw Error("Invalid bridge roots or ignored users");
   if (raw.hostSpace !== undefined && typeof raw.hostSpace !== "boolean") throw Error("Invalid host Space preference");
   const config: RelayConfig = { hostId: string(raw.hostId, 128), stateDirectory: hostPath(string(raw.stateDirectory)), socket: hostPath(string(raw.socket)), roots: raw.roots.map(root => hostPath(string(root))), operatorUserId: string(raw.operatorUserId, 255), hostSpace: raw.hostSpace !== false };
+  refuseLegacyStore(config.stateDirectory);
   const client = new BridgeMatrix(new MatrixHttp({ homeserver: string(raw.homeserver), accessToken: credential(readFileSync(args[3]!, "utf8")) }, fetch, { maxAttempts: 1 }),
     string(raw.botUserId, 255), new Set(raw.ignoredSenderUserIds.map(sender => string(sender, 255))));
   const account = object(await client.http.request("GET", "/_matrix/client/v3/account/whoami", undefined, AbortSignal.timeout(8000)));

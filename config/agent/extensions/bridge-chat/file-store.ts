@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { randomBytes, createHash } from "node:crypto";
-import { inspectArtifactBytes } from "../managed-sessions/adapter/artifact-export.js";
+import { inspectFileBytes } from "./file-validation.js";
 import { fileRefs, MAX_FILE_BYTES, type FileRef } from "./file-types.js";
 
 const TTL = 24 * 60 * 60 * 1000;
@@ -23,7 +23,7 @@ export function sweepFiles(directory: string, now = Date.now(), reserveEntries =
 	return total;
 }
 export async function stageFile(directory: string, filename: string, data: Buffer): Promise<FileRef> {
-	const descriptor = await inspectArtifactBytes(filename, data);
+	const descriptor = await inspectFileBytes(filename, data);
 	if (sweepFiles(directory, Date.now(), 1) + data.length > MAX_STAGING_BYTES) throw Error("File staging byte limit reached");
 	const id = randomBytes(16).toString("hex");
 	const filenameOnDisk = path.join(directory, id), fd = fs.openSync(filenameOnDisk, "wx", 0o640);

@@ -6,21 +6,6 @@ in pkgs.runCommand "pi-bridge-chat" { nativeBuildInputs = [ pkgs.typescript ]; }
   cp -R ${../config/agent/extensions/bridge-chat} source/bridge-chat
   cp -R ${../config/agent/extensions/matrix-shared} source/matrix-shared
   cp -R ${../config/agent/extensions/web-search} source/web-search
-  mkdir -p source/managed-sessions/adapter
-  cp ${../config/agent/extensions/managed-sessions/adapter/artifact-export.ts} source/managed-sessions/adapter/artifact-export.ts
-  cp ${../config/agent/extensions/managed-sessions/contracts.ts} source/managed-sessions/contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/conversation-repair-contracts.ts} source/managed-sessions/conversation-repair-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/runtime-repair-contracts.ts} source/managed-sessions/runtime-repair-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/title-contracts.ts} source/managed-sessions/title-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/live-workspace-contracts.ts} source/managed-sessions/live-workspace-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/fork-context.ts} source/managed-sessions/fork-context.ts
-  cp ${../config/agent/extensions/managed-sessions/managed-provenance.ts} source/managed-sessions/managed-provenance.ts
-  cp ${../config/agent/extensions/managed-sessions/exact-window-contracts.ts} source/managed-sessions/exact-window-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/host-run-contracts.ts} source/managed-sessions/host-run-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/identity-contracts.ts} source/managed-sessions/identity-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/room-identity.ts} source/managed-sessions/room-identity.ts
-  cp ${../config/agent/extensions/managed-sessions/v2-contracts.ts} source/managed-sessions/v2-contracts.ts
-  cp ${../config/agent/extensions/managed-sessions/image-validation.ts} source/managed-sessions/image-validation.ts
   cat > tsconfig.json <<EOF
   {
     "compilerOptions": {

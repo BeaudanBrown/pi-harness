@@ -23,7 +23,7 @@ test("the declarative registry contains exactly the supported personas", () => {
 });
 
 test("normal and inherited profiles advertise no experimental resources", () => {
-	for (const name of [...AGENT_PROFILE_NAMES.filter((name) => name !== "pi-local"), "managed-project"] as const) {
+	for (const name of AGENT_PROFILE_NAMES.filter((name) => name !== "pi-local")) {
 		const profile = resolveAgentProfile(name);
 		for (const resources of [profile.extensions, profile.skills, profile.prompts]) {
 			assert.equal(resources.some((name) => /^(pi-r|agentgraph)/.test(name)), false);
@@ -47,7 +47,7 @@ test("narrow worker profiles enforce explicit capability allowlists", () => {
 	assert.equal(patch.tools.some((tool) => tool.startsWith("remote_")), false);
 });
 
-test("implementation, coordinator, local, and managed variants preserve their role boundaries", () => {
+test("implementation, local, and ordinary engineering preserve their role boundaries", () => {
 	const implementation = resolveAgentProfile("aloop-implementation");
 	assert.ok(implementation.tools.includes("review_agents"));
 	assert.ok(implementation.tools.includes("aloop_issue_context"));
@@ -61,13 +61,6 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 	assert.ok(projectEnabled.tools.includes("project_lookup"));
 	assert.throws(() => withProjectWorkerOptIn(implementation, { tools: ["github_issue_mutate"] }), /reserved/);
 
-	const coordinator = resolveAgentProfile("managed-coordinator");
-	assert.equal(coordinator.builtinTools, false);
-	assert.deepEqual(coordinator.tools, ["managed_host", "remote_session_delete"]);
-	assert.deepEqual(coordinator.skills, ["managed-host"]);
-	assert.equal(coordinator.tools.includes("remote_checkpoint"), false);
-	assert.equal(coordinator.extensions.includes("lsp"), false);
-
 	const local = resolveAgentProfile("pi-local");
 	assert.equal(local.contextFiles, false);
 	assert.throws(() => withProjectWorkerOptIn(local, { tools: ["project_lookup"] }), /does not permit/);
@@ -75,16 +68,13 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 	assert.deepEqual(local.tools, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
 
 	const full = resolveAgentProfile("engineering-full");
-	const managed = resolveAgentProfile("managed-project");
-	assert.equal(managed.toolPolicy, full.toolPolicy);
-	assert.ok(full.extensions.includes("lsp"));
-	assert.deepEqual(managed.extensions, full.extensions.filter((name) => !["pi-r", "agentgraph", "tmux-cursor-focus", "sesh"].includes(name)));
-	for (const extension of ["web-search", "github-issues", "aloop", "diagram-tools", "worker-runner", "review-agents", "nix-runtime", "lsp"]) {
-		assert.ok(managed.extensions.includes(extension), `managed project retains ${extension}`);
+	assert.equal(full.toolPolicy, "extension-defaults");
+	for (const extension of ["web-search", "github-issues", "aloop", "diagram-tools", "worker-runner", "review-agents", "nix-runtime", "lsp", "matrix-bridge"]) {
+		assert.ok(full.extensions.includes(extension), `engineering retains ${extension}`);
 	}
-	assert.deepEqual(managed.skills, ["harness", "matt-pocock"]);
-	assert.deepEqual(managed.prompts, ["harness"]);
-	assert.deepEqual(managed.inactiveTools, ["diagram_show"]);
+	assert.deepEqual(full.skills, ["harness", "matt-pocock"]);
+	assert.deepEqual(full.prompts, ["harness"]);
+	assert.deepEqual(full.inactiveTools, []);
 });
 
 test("profile extension applies the selected allowlist at session start", () => {
@@ -113,20 +103,13 @@ test("profile extension applies the selected allowlist at session start", () => 
 	}
 });
 
-test("managed project activation keeps engineering tools while removing the local viewer", () => {
+test("removed managed personas fail closed rather than selecting a fallback runtime", () => {
 	const previous = process.env.PI_HARNESS_AGENT_PROFILE;
-	process.env.PI_HARNESS_AGENT_PROFILE = "managed-project";
 	try {
-		let active = ["read", "web_search", "github_issue_mutate", "run_worker", "review_agents", "diagram_render", "diagram_show", "architecture_query"];
-		let start: (() => void) | undefined;
-		const pi = {
-			getActiveTools: () => active,
-			setActiveTools: (tools: string[]) => { active = tools; },
-			on: (event: string, handler: any) => { if (event === "session_start") start = handler; },
-		} as unknown as ExtensionAPI;
-		agentProfilesExtension(pi);
-		start!();
-		assert.deepEqual(active, ["read", "web_search", "github_issue_mutate", "run_worker", "review_agents", "diagram_render", "architecture_query"]);
+		for (const name of ["managed-project", "managed-coordinator"]) {
+			process.env.PI_HARNESS_AGENT_PROFILE = name;
+			assert.throws(() => agentProfilesExtension({} as ExtensionAPI), /Unknown agent profile/);
+		}
 	} finally {
 		if (previous === undefined) delete process.env.PI_HARNESS_AGENT_PROFILE;
 		else process.env.PI_HARNESS_AGENT_PROFILE = previous;

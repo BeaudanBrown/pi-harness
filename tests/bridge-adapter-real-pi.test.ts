@@ -58,6 +58,41 @@ function piProcess(root: string, file: string, extension: string, extra: string[
   return { child, send, ui, queues, confirm: (id: unknown, confirmed: boolean) => child.stdin.write(JSON.stringify({ type: "extension_ui_response", id, confirmed }) + "\n"), stop: async () => { if (child.exitCode === null && child.signalCode === null) { const exited = once(child, "exit"); child.kill("SIGKILL"); await exited; } } };
 }
 
+test("actual native aloop hooks use persisted questions and native abort, never a managed lifecycle channel", { timeout: 30000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-aloop-native-")), socket = join(root, "bridge.sock"), file = join(root, "native.jsonl"), extension = join(root, "bridge.ts");
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "aloop-native", timestamp: new Date().toISOString(), cwd: root }) + "\n");
+  writeFileSync(extension, `import {installAdapter} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/adapter.ts"))};
+    import {delegateAloopCheckpoint,registerAloopAbortDelegate} from ${JSON.stringify(resolve("config/agent/extensions/aloop/lifecycle.ts"))};
+    export default pi=>{installAdapter(pi,{config:${JSON.stringify({ socket, roots: [root] })},interactive:()=>true});
+      pi.registerCommand("probe-aloop",{handler:async(_args,ctx)=>{
+        const id=ctx.sessionManager.getSessionId(); registerAloopAbortDelegate(id,()=>pi.appendEntry("probe.aloop-abort",{id}));
+        await delegateAloopCheckpoint(id,"aloop-call",{kind:"question",decision:"Aloop decision",options:["First","Second"]});
+      }});
+      pi.registerCommand("probe-old-checkpoint",{handler:async()=>pi.appendEntry("probe.old-delegate",{delegated:await delegateAloopCheckpoint("aloop-native","late",{kind:"question",decision:"MUST_NOT_PUBLISH"})})});
+    };`);
+  const http = new InteractionHttp(), relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] }, http.matrix, async () => { throw Error("No replacement launch"); });
+  const live = piProcess(root, file, extension);
+  try {
+    await relay.start(false); assert.equal((await live.send("get_state")).success, true);
+    await until(() => relay.store.bindings().length === 1);
+    const binding = relay.store.bindings()[0]!; relay.store.setRoom(binding.key, ROOM);
+    relay.store.intake("aloop-question", [{ id: "$aloop-question", room: ROOM, event: textEvent("$aloop-question", "/probe-aloop") }]);
+    await until(async () => { await relay.pump(); return relay.store.activeInteraction(binding.key) !== undefined; });
+    assert.ok(readFileSync(file, "utf8").includes('"matrix-bridge.question"'));
+    assert.ok(!existsSync(join(root, "modelcalls.jsonl")), "checkpoint command does not begin model execution");
+    relay.store.intake("aloop-abort", [{ id: "$aloop-abort", room: ROOM, event: textEvent("$aloop-abort", "!abort") }]);
+    await until(async () => { await relay.pump(); return readFileSync(file, "utf8").includes('"probe.aloop-abort"'); });
+    assert.equal((await live.send("new_session")).success, true);
+    await until(() => relay.store.bindings().length === 2);
+    const next = relay.store.bindings().find(item => item.key !== binding.key)!;
+    assert.equal((await live.send("prompt", { message: "/probe-old-checkpoint" })).success, true);
+    await until(() => readFileSync(next.file, "utf8").includes('"probe.old-delegate"'));
+    const entries = readFileSync(next.file, "utf8").trim().split("\n").map(line => JSON.parse(line));
+    assert.equal(entries.find(entry => entry.customType === "probe.old-delegate").data.delegated, false);
+    assert.ok(!readFileSync(next.file, "utf8").includes("MUST_NOT_PUBLISH"));
+  } finally { await live.stop(); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("real native Pi bridges persisted text, survives daemon loss, and uses a fresh binding for native new", { timeout: 30000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "bridge-native-adapter-")), socket = join(root, "bridge.sock"), file = join(root, "native.jsonl");
   const config = { hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] };

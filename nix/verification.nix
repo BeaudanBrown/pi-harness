@@ -12,14 +12,7 @@
   piHarnessResources,
   piRPackage,
   agentgraphPiResources,
-  managedSessionRelay,
-  managedSessionLauncher,
-  managedSessionPiWrapper,
-  managedSessionStatusWrapper,
-  managedSessionCoordinatorPi,
-  managedLspDisabledCoordinatorPi,
   lspDisabledPiWrapper,
-  managedSessionModuleReport,
   mattPocockSkillsResources,
   migrateTkApp,
   playwrightAgentCli,
@@ -41,9 +34,9 @@ let
   } ''
     ${prepareSource}
     node scripts/verification/resource-contract.mjs .
-    if grep -R -n -E 'from "node:(child_process|http|https)"|PI_MATRIX|MATRIX_ACCESS_TOKEN|send-keys' \
-      config/agent/extensions/managed-sessions/adapter; then
-      echo "managed-session adapter crossed the relay authority seam" >&2
+    if grep -n -E 'from "node:(child_process|http|https)"|MATRIX_ACCESS_TOKEN|send-keys' \
+      config/agent/extensions/matrix-bridge/adapter.ts; then
+      echo "native adapter crossed the bridge authority seam" >&2
       exit 1
     fi
     if grep -R -n -F 'node:readline' eval/rpc; then
@@ -51,6 +44,10 @@ let
       exit 1
     fi
     test ! -e config/agent/extensions/remote-session
+    test ! -e config/agent/extensions/managed-sessions
+    test ! -e config/agent/skills/managed-host
+    test ! -e config/agent/managed-host-policy.json
+    test ! -e nix/managed-session-relay.nix
     test ! -e bin/pi-matrix-whoami
     touch "$out"
   '';
@@ -163,7 +160,6 @@ let
       find ${testBuild}/build/tests -maxdepth 1 -type f -name '*.test.js' \
         ! -name 'eval-*.test.js' \
         ! -name 'lsp-live.test.js' \
-        ! -name 'managed-session-*.test.js' \
         ! -name 'bridge-chat-*.test.js' | sort
       find tests -maxdepth 1 -type f -name 'bridge-*.test.mjs' ! -name 'bridge-chat-*' | sort
     '';
@@ -188,33 +184,6 @@ let
       export PI_TEST_TMUX=${pkgs.tmux}/bin/tmux
       export PI_TEST_PYTHON=${pkgs.python3}/bin/python3
       export PI_TEST_DIRENV=${lib.getExe pkgs.direnv}
-    '';
-  };
-
-  managedSessionTests = runCompiledTests {
-    name = "pi-harness-managed-session-tests";
-    selector = ''find ${testBuild}/build/tests -maxdepth 1 -type f -name 'managed-session-*.test.js' | sort'';
-    extraInputs = [ pkgs.direnv pkgs.tmux pkgs.imagemagick pkgs.python3 ];
-    nodeArgs = "--test-concurrency=6";
-    environment = ''
-      export PI_HARNESS_JQ=${lib.getExe pkgs.jq}
-      export PI_TEST_SHELL=${lib.getExe pkgs.bash}
-      export PI_TEST_FZF=${lib.getExe pkgs.fzf}
-      export PI_MANAGED_ADAPTER_TEST_PI=${piPackage}/bin/pi
-      export PI_MANAGED_ADAPTER_ORDINARY_EXTENSION=${piHarnessResources.managedSessionExtensions.ordinary}
-      export PI_MANAGED_ADAPTER_COORDINATOR_EXTENSION=${piHarnessResources.managedSessionExtensions.coordinator}
-      export PI_MANAGED_ADAPTER_MODEL_POLICY_EXTENSION=${piHarnessResources.managedSessionExtensions.modelPolicy}
-      export PI_MANAGED_SESSIONS_TEST_HOST_CLI=${managedSessionRelay}/bin/pi-managed-session
-      export PI_MANAGED_SESSIONS_TEST_PEER_UID_HELPER=${managedSessionRelay}/libexec/pi-managed-session-peer-uid
-      export PI_MANAGED_SESSIONS_TEST_RELAY_LOCK_HELPER=${managedSessionRelay}/libexec/pi-managed-session-relay-lock
-      export PI_MANAGED_SESSIONS_TEST_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}
-      export PI_MANAGED_SESSIONS_IMAGE_NORMALIZER=${lib.getExe pkgs.imagemagick}
-      export PI_MANAGED_SESSIONS_TEST_TMUX=${pkgs.tmux}/bin/tmux
-      export PI_MANAGED_TEST_LAUNCHER=${managedSessionLauncher}/bin/tmux_project
-      export PI_MANAGED_SESSIONS_WORKSPACE_ROOTS="{\"projects\":\"$TMPDIR/workspaces\"}"
-      export PI_MANAGED_TEST_COORDINATOR_PI=${managedSessionCoordinatorPi}/bin/pi
-      export PI_MANAGED_TEST_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi
-      export PI_MANAGED_TEST_DIRENV=${pkgs.direnv}/bin/direnv
     '';
   };
 
@@ -261,9 +230,9 @@ let
     for extension in ${lib.concatMapStringsSep " " lib.escapeShellArg piHarnessResources.piResources.extensions}; do
       test -f "$extension" || { echo "missing packaged extension: $extension" >&2; exit 1; }
     done
-    test -f ${piHarnessResources.managedSessionExtensions.ordinary}
-    test -f ${piHarnessResources.managedSessionExtensions.coordinator}
-    test -f ${piHarnessResources.managedSessionExtensions.modelPolicy}
+    test ! -e "$agent_root/extensions/managed-sessions"
+    test ! -e "$agent_root/skills/managed-host"
+    test ! -e "$agent_root/managed-host-policy.json"
     test -d "$agent_root/extensions/node_modules/typebox"
     test -f "$agent_root/migration-skills/migrate-tk-to-github/SKILL.md"
     test ! -e "$agent_root/skills/migrate-tk-to-github"
@@ -278,7 +247,9 @@ let
     test -x ${piHarnessPackage}/bin/pi-r-local
     test ! -e ${piHarnessPackage}/bin/pi-matrix-whoami
     test ! -e ${piHarnessPackage}/bin/pi-managed-session-relay
-    test -x ${managedSessionRelay}/bin/pi-managed-session-relay
+    test ! -e ${piHarnessPackage}/bin/pi-managed-session
+    test -x ${matrixBridge}/bin/pi-bridge-migrate
+    test ! -e ${matrixBridge}/lib/managed-sessions
     test -x ${matrixBridge}/bin/pi-matrix-bridge
     test -x ${piHarnessPackage}/bin/pi-session
     test ! -e ${piHarnessPackage}/bin/tk
@@ -327,11 +298,8 @@ let
 
     PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
       PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
-      PI_HARNESS_MANAGED_PI=${managedSessionCoordinatorPi}/bin/pi \
-      PI_HARNESS_LOCAL_ONLY_PI=$(jq -r .localOnlyExecutable ${managedSessionModuleReport}) \
       PI_HARNESS_NATIVE_PI=${bridgePiWrapper}/bin/pi \
       PI_HARNESS_NATIVE_LOCAL_ONLY_PI=${bridgeLocalOnlyWrapper}/bin/pi-local-only \
-      PI_HARNESS_EXPECTED_IMAGE_DECODER=${lib.getExe pkgs.imagemagick} \
       PI_HARNESS_WORKER_EXTENSION=${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts \
       node --test ${source}/tests/engineering-runtime.test.mjs
     PI_HARNESS_HEADLESS_PI=${piHarnessPackage}/bin/pi-aloop \
@@ -340,7 +308,7 @@ let
     # High-value negative package assertions remain explicit security contracts.
     ! grep -F 'extensions/remote-session/' ${piHarnessPackage}/bin/pi
     ! grep -F 'managed-sessions/adapter/' ${piHarnessPackage}/bin/pi
-    ! grep -F '/run/secrets/pi-managed-session.env' ${managedSessionPiWrapper}/bin/pi
+    ! grep -F 'native-test.env' ${bridgePiWrapper}/bin/pi
     touch "$out"
   '';
 
@@ -349,7 +317,7 @@ let
   } ''
     ${prepareSource}
     python3 -m unittest discover -s tests -p test_runtime_pin.py -v
-    jq -e '(.assertions | all) and .userLingers and .disabledHasNoBridge and .concurrentConsumersRejected
+    jq -e '(.assertions | all) and .userLingers and .disabledHasNoBridge and .legacyOptionAbsent and .legacyOptionRejected
       and .services == ["pi-matrix-bridge"]
       and .service.wantedBy == ["default.target"]
       and .service.after == ["network-online.target"]
@@ -371,56 +339,9 @@ let
     for helper in $(jq -r '.helper, .offlineHelper' ${bridgeModuleReport}); do
       "$helper" list --all | jq -e '. == []' >/dev/null
     done
-    jq -e '(.assertions | all) and .relayUserLingers and .servicePathCount == 4
-      and .policyOverrideAssertions == {"restrictive":true,"modelBypass":false,"unknown":false,"invalidConfirmation":false,"deleteConfirmationBypass":false,"applyConfirmationBypass":false,"destructiveDeny":true}
-      and .disabledHostHasNoService and .disabledHostHasNoControlCommand
-      and (.hasGeneralEnvironmentFile | not) and (.hasPrivateTmp | not)
-      and (.relayRestartIfChanged | not) and (.relayStopIfChanged | not)
-      and (.rolloutAfter | index("pi-managed-session-relay.service") != null)
-      and (.rolloutScript | contains("rollout blocked"))
-      and .serviceEnvironment.PI_MANAGED_SESSIONS_HOST_ID == "test-host"
-      and (.serviceEnvironment.PI_MATRIX_IGNORED_SENDER_USER_IDS | fromjson) == ["@signalbot:example.com", "@facebookbot:example.com"]' \
-      ${managedSessionModuleReport} >/dev/null
-    host_control=$(jq -r .hostControlExecutable ${managedSessionModuleReport})
-    test -x "$host_control"
-    env -u XDG_RUNTIME_DIR PI_MANAGED_SESSIONS_RUNTIME_DIR=/stale-runtime "$host_control" --help | grep -F 'Usage: pi-managed-session' >/dev/null
-    set +e
-    env -u XDG_RUNTIME_DIR PI_MANAGED_SESSIONS_RUNTIME_DIR=/stale-runtime "$host_control" host status --json > host-control-disabled.json 2> host-control-disabled.stderr
-    control_status=$?
-    set -e
-    test "$control_status" -eq 3
-    jq -e '.version == "1.0.0" and .ok == false and .error.code == "unavailable"' host-control-disabled.json >/dev/null
-    policy_file=$(jq -r .restrictivePolicyFile ${managedSessionModuleReport})
-    jq -e '.version == "1.0.0" and .actions["conversation.stop"] == {"human":"deny","model":"deny"}
-      and .actions["conversation.open"].model == "approval" and .actions["host.status"].human == "direct"' "$policy_file" >/dev/null
-    test -x ${managedSessionPiWrapper}/bin/pi
-    test -x ${managedSessionStatusWrapper}/bin/pi-managed-session-status
-    test -x ${managedSessionCoordinatorPi}/bin/pi
-    test -x ${managedLspDisabledCoordinatorPi}/bin/pi
+    test -x ${bridgePiWrapper}/bin/pi
+    test -x ${bridgeLocalOnlyWrapper}/bin/pi-local-only
     test -x ${lspDisabledPiWrapper}/bin/pi
-    relay_launch=$(jq -r .execStart ${managedSessionModuleReport})
-    test -x "$relay_launch"
-    grep -F 'unset TMUX TMUX_PANE' "$relay_launch" >/dev/null
-    grep -F 'export TMUX_TMPDIR="$XDG_RUNTIME_DIR"' "$relay_launch" >/dev/null
-
-    # Generated wrappers are shell interfaces. Keep only capability and secret
-    # assertions that cannot be observed without starting a long-lived Pi RPC process.
-    coordinator=$(grep -Eo '/nix/store/[^ ]+-pi-managed-coordinator/bin/pi-managed-coordinator' ${managedSessionCoordinatorPi}/bin/pi | head -1)
-    test -x "$coordinator"
-    for flag in --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-builtin-tools; do
-      grep -F -- "$flag" "$coordinator" >/dev/null
-    done
-    grep -F 'unset PI_HARNESS_LSP_ENABLED PI_HARNESS_LSP_EXTENSION PI_HARNESS_LSP_FALLBACK_PATH' "$coordinator" >/dev/null
-    grep -F 'coordinator_model_args+=(--model "$PI_MANAGED_SESSION_MODEL")' "$coordinator" >/dev/null
-    grep -F 'coordinator_model_args+=(--thinking "$PI_MANAGED_SESSION_THINKING")' "$coordinator" >/dev/null
-    grep -F 'export PI_MANAGED_LOCAL_MODEL_TOOLS=' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-    grep -F '${pkgs.bash}/bin' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-    grep -F '${pkgs.which}/bin' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-    managed_runtime_path=${lib.makeBinPath [ pkgs.bash pkgs.which pkgs.coreutils ]}
-    test "$(${pkgs.coreutils}/bin/env -i PATH="$managed_runtime_path" which bash)" = '${lib.getExe pkgs.bash}'
-    ${pkgs.coreutils}/bin/env -i PATH="$managed_runtime_path" sh -c 'date +%F >/dev/null'
-    grep -F -- '--extension "${piHarnessResources.managedSessionExtensions.modelPolicy}"' ${managedSessionCoordinatorPi}/bin/pi >/dev/null
-    ! grep -F '${piHarnessResources.managedSessionExtensions.modelPolicy}' "$coordinator" >/dev/null
     ! grep -F '${piLspExtension}/share/pi-lsp-extension/src/index.ts' ${lspDisabledPiWrapper}/bin/pi >/dev/null
     touch "$out"
   '';
@@ -509,12 +430,7 @@ let
     nativeInvitations = (bridgeChatModule.extendModules {
       modules = [ { services.pi-harness.bridgeChat.assistant.trustedBridgeBots.fixture = "@bot:example.com"; } ];
     }).config.services.pi-harness.bridgeChat.assistant.trustedBridgeBots;
-    rejectsMixedInvitations = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
-      modules = [ { services.pi-harness.bridgeChat.assistant = {
-        trustedBridgeBots.fixture = "@bot:example.com";
-        managedAccountHosts = [ { hostId = "fixture"; botUserId = "@bot:example.com"; deviceId = "fixture"; } ];
-      }; } ];
-    }).config.assertions);
+    legacyAccountOptionAbsent = !(bridgeChatModule.options.services.pi-harness.bridgeChat.assistant ? managedAccountHosts);
     rejectsEmptyScope = !(lib.all (a: a.assertion) (bridgeChatModule.extendModules {
       modules = [ { services.pi-harness.bridgeChat.assistant.roomIds = lib.mkForce [ ]; } ];
     }).config.assertions);
@@ -529,6 +445,11 @@ let
     mkdir -p "$HOME"
     export NODE_PATH=${piPackage}/lib/node_modules:${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules
     export BRIDGE_CHAT_PACKAGE=${import ./bridge-chat-package.nix { inherit pkgs piPackage; }}
+    export PI_CHAT_IMAGE_DECODER=${lib.getExe pkgs.imagemagick}
+    test ! -e "$BRIDGE_CHAT_PACKAGE/lib/managed-sessions"
+    for old in account-store account-worker account-matrix account-notifications account-proof; do
+      test ! -e "$BRIDGE_CHAT_PACKAGE/lib/bridge-chat/$old.js"
+    done
     cp -R ${testBuild}/build "$TMPDIR/chat-tests"
     chmod -R u+w "$TMPDIR/chat-tests"
     mkdir -p "$TMPDIR/chat-tests/node_modules/@earendil-works"
@@ -537,7 +458,7 @@ let
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$TMPDIR/chat-tests/node_modules/typebox"
     node --test --test-concurrency=1 "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
     jq -e '(.assertions | all) and .rejectsEmptyScope and .rejectsStoreSecret
-      and .rejectsMixedInvitations and .nativeInvitations == {"fixture":"@bot:example.com"}
+      and .legacyAccountOptionAbsent and .nativeInvitations == {"fixture":"@bot:example.com"}
       and (.services["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
       and .services["pi-chat-model"].serviceConfig.User == "operator"
       and .services["pi-chat-model"].serviceConfig.DynamicUser == false
@@ -557,6 +478,8 @@ let
       and .filesServices["pi-chat-transport"].serviceConfig.ProtectKernelTunables == false
       and .filesServices["pi-chat-transport"].serviceConfig.ProtectKernelLogs == false
       and (.filesServices["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
+      and (.filesServices["pi-chat-model"].environment.PI_CHAT_IMAGE_DECODER | endswith("/bin/pi-chat-image"))
+      and .filesServices["pi-chat-transport"].environment.PI_CHAT_IMAGE_DECODER == .filesServices["pi-chat-model"].environment.PI_CHAT_IMAGE_DECODER
       and (.services | all(.serviceConfig.ProtectSystem == "strict" and .serviceConfig.StateDirectoryMode == "0700"
         and (.serviceConfig.InaccessiblePaths | index("-/run/postgresql")) != null
         and (.serviceConfig | has("EnvironmentFile") | not)))' ${bridgeChatReport}
@@ -618,7 +541,6 @@ let
     schema-contracts = schemaContracts;
     typescript-build = testBuild;
     unit-tests = unitTests;
-    managed-session-tests = managedSessionTests;
     pi-r-integration = piRIntegration;
     eval-self-test = evalTests;
     package-contracts = packageContracts;

@@ -2,21 +2,22 @@
 
 ## Shared implementation, separate policies and accounts
 
-The managed engineering relay and chat assistant share `matrix-shared/http.ts`:
+The native Matrix bridge and chat assistant share `matrix-shared/http.ts`:
 HTTPS authentication, bounded JSON streaming, cancellation, deadlines, safe
 retry mechanics and sync requests. They keep separate account credentials,
 sync cursors, room authorization, message selection and delivery state.
-The managed relay retains its room guards, media handling and bounded history
-recovery; chat never imports that history recovery or engineering lifecycle.
+The native bridge retains its room guards, original inbound media and gap
+recovery; chat never imports that history recovery or native execution authority.
 
 Chat's TypeScript `OwnerMatrix` uses one attempt for every request, including
-PUT sends. The managed relay retains its existing retry policy. An uncertain
+PUT sends. The native bridge retains its separate retry policy. An uncertain
 bridge send must not accidentally inherit the engineering relay's retry behavior.
 The old standalone Python client and direct-Codex model worker are removed.
 
 A dedicated Matrix login session for the configured owner observes rooms the
 account already joins and sends through its existing linked bridge accounts.
-It does not join rooms, provision chats or change participants/bridge settings.
+The assistant does not join rooms, provision chats or change participants/bridge
+settings. A separate explicitly trusted first-invitation consumer is described below.
 The default deployment requires a room allowlist; `allJoinedRooms` is an explicit
 expansion, not server-wide access. Encrypted rooms and Spaces are unsupported.
 
@@ -92,8 +93,8 @@ directory, selected immutable runtime closures and DNS/CA data—not the model l
 Matrix token, project or other chats' downloads. Image decoding uses a separate
 network-isolated invocation of the same packaged sandbox.
 
-Files reuse the managed artifact byte/type validator, not managed conversation
-state. Supported types are PDF, text/Markdown/CSV/JSON, ZIP, WAV, PNG/JPEG/WebP;
+Files use chat-local byte/type validation and bounded decoding, with no native
+workspace-export capability or managed conversation dependency. Supported types are PDF, text/Markdown/CSV/JSON, ZIP, WAV, PNG/JPEG/WebP;
 executables, HTML/SVG, credentials and malformed media are rejected. These checks
 are not antivirus or a guarantee that a PDF/ZIP is safe to open: files remain
 untrusted, and archives are not extracted or executed.
@@ -154,36 +155,32 @@ establish a new discard-only watermark and discard pending work. The TypeScript
 upgrade does so once too, retaining compatible SQLite state/tombstones without
 replaying the old Python client's events.
 
-## Optional managed-account automation
+## Optional trusted native-room invitations
 
-The existing transport can also consume narrow managed-room account requests.
-`services.pi-harness.bridgeChat.assistant.managedAccountHosts` defaults to `[]`;
-entries pin one-to-one `{ hostId, botUserId, deviceId }` identities. The host's
-`managedSessions.accountDeviceId` must identify this transport's dedicated owner
-login device. Both mappings are explicit; wildcards and arbitrary endpoints are
-not supported. This is configuration support, not authorization to activate it.
+`services.pi-harness.bridgeChat.assistant.trustedBridgeBots` defaults to `[]`;
+entries pin exact one-to-one `{ hostId, botUserId }` identities distinct from the
+owner. This is configuration support, not activation approval. The old
+`managedAccountHosts` option and to-device account protocol are removed; even an
+explicit empty legacy JSON field is rejected rather than silently trusted.
 
-The separate `managed-account.sqlite` journal owns verified membership,
-leave/forget, departure suppression and once-only silent underride rules. Account
-configuration changes do not reset `!pi` watermarks or replay assistant requests.
-Owner credentials stay in this transport; the host only uses its existing bot
-credential. Account HTTP work is independent of model execution. Durable account
-intake precedes the shared sync cursor; an account integrity/storage failure holds
-that cursor rather than dropping uncommitted account messages. Existing local Pi
-execution and the separate file service do not depend on NAS account readiness.
+A separate `bridge-invites.sqlite` journal and independent sync cursor consume
+only first invitations from configured native host bots. Immutable sole-creator,
+host/node provenance and current room-scoped membership checks precede a
+pre-effect attempt record. Lost join replies are observed, not blindly replayed.
+Departure and revocation stay suppressed. There is no arbitrary join, unban,
+leave/forget, notification repair or generic account-action scheduler. Matrix
+provides no membership CAS against concurrent human clients.
 
-Existing rooms and reservations retain their notification policy. New rules never
-overwrite manual room rules. Lost rule PUT replies remain uncertain and are only
-checked by reads. Pre-revision acknowledgement journals and experimental silent
-*override* rule journals require explicit recovery, not automatic rule deletion,
-rewrites, or counter reset. See [account evidence](managed-account-evidence.md)
-and [the protocol contract](managed-live-workspaces-contract.md).
+Owner credentials remain here, never in the native bridge/model worker. Trust
+changes do not reset stateless `!pi` watermarks or pending requests. Old account
+journals remain untouched; approved offline capture preserves them as inert
+historical evidence, not new execution authority. Local Pi never depends on NAS.
 
 ## Acceptance-to-evidence matrix
 
 | Requirement | Deterministic proof | Live gate |
 |---|---|---|
-| shared Matrix mechanics, distinct policies | shared-client account/filter/retry tests and managed regressions | engineering relay remains healthy |
+| shared Matrix mechanics, distinct policies | shared-client filter/retry and native/stateless suites | native bridge remains healthy |
 | owner-only question selection | forged sender, relation/media, age, Unicode and echo tests | Signal self echo identity |
 | no ambient capabilities/history | real SDK fake-provider tests, poisoned context/models/extension fixtures, exact registered tools | actual Pi login/model/search |
 | shared auth, no credential copying | two-process Pi auth-store locking test preserving unrelated providers; packaged worker startup | original NAS Pi login still works |
@@ -279,8 +276,8 @@ Project/file capabilities are the separate #97 opt-in rollout, initially Note to
 
 `nix build .#checks.x86_64-linux.bridge-chat --no-link` exercises the actual SDK,
 chat store, private socket, shared login locking and packaged worker using only
-fake credentials/model output. Shared Matrix tests belong to unit-tests; managed
-regressions cover existing consumers. All are included in `nix run .#verify`.
+fake credentials/model output. Shared Matrix and native bridge tests belong to
+unit-tests; trusted-invitation cases stay in the chat suite. All are included in `nix run .#verify`.
 `nix build .#bridge-chat .#chat-files --no-link` builds the production pair and
 helpers without activation. `nix run .#verify-chat-files-live` exercises real
 sandbox launch/denial and image decoding, and fetches one public W3C sample PDF;

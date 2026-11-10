@@ -1,5 +1,9 @@
 # Managed relay performance and reliability proposal
 
+> Historical measurements and proposal, superseded by the native replacement.
+> The runtime/commands below are no longer shipped. No deployment repair is
+> inferred from replacement tests. See [historical context](legacy-managed-history.md).
+
 Status: proposed, not an implementation or deployment authorization. GitHub #132
 is the investigation/evidence record; follow-up implementation issues should be
 created from the approved scope, not tracked as a second task list here.

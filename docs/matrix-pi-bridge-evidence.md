@@ -894,9 +894,45 @@ Matrix/account effects or live canary have occurred. #170 removal, #171 cumulati
 review/reduction/publication-pin handoff and separately approved #172 cutover
 remain open. Grill/NAS are **not rebuild-ready**.
 
+### #170 legacy platform removal
+
+The native bridge is now the only shipped conversation runtime. See
+[removal evidence](matrix-pi-removal.md) for full acceptance/effect matrices,
+retained-test disposition, before/after scopes, operation/store/worker/dependency
+counts, exact commands, review and Git preservation evidence.
+
+The old 124-file runtime, coordinator/profile/45-action catalogue, repair,
+retirement/generation/auto-refresh/admission wrappers, account scheduler and
+arbitrary native exporter are removed, not moved into nix-dotfiles. Shared
+renderer/checkpoint/HTTP, independent Aloop, stateless attachment validation,
+native images/polls/tasks/archive/invitations and runtime retention remain.
+Old-state startup fails before credentials/HTTP and leaves old bytes untouched;
+unsupported old account configuration is rejected without changing stateless
+request identity. Only the offline one-shot converter remains for transition.
+
+Fixed #170 scopes across both repositories: **230 files / 34,804 lines → 83 /
+9,571**; an additional 74-line shared Aloop helper outside those scopes is disclosed.
+This is the pre-removal dual-source baseline, not a retroactive epic reduction
+claim. The 27 native files include migration/lock shims; cumulative budget and
+mixed integration accounting remain #171's explicit responsibility.
+
+Pinned paired review at `67ceb087805e3e24b6cf13adffc86e5e7f23c928`: Standards no
+findings; Spec one low/current-issue historical-doc framing finding, fixed.
+Final `nix run -L .#verify`: **all 11 gates, 287 unit / 85 chat, zero skips**.
+Four actual packages, actual empty-environment old-store refusal, **18 downstream
+Go race tests**, isolated picker build and six final consuming evaluations pass.
+No system build, live Matrix/NAS/visual acceptance or incident closure is inferred.
+
+Downstream commit `0315a85f75ebc6a05de3a981098a1f6d053c8646` contains only the 26
+owned paths; unrelated staged/unstaged/index state was preserved and verified.
+Harness changes are in the enclosing #170 commit. No push, pin advance,
+activation, restart or production migration occurred. Historical evidence remains
+[in the diagnostic index](legacy-managed-history.md), not current commands.
+
 ## Rebuild and migration readiness
 
-Pending implementation and cumulative verification. Do not run a host switch merely
+Pending #171 cumulative verification/publication-pin handoff and separately
+approved #172 cutover. Do not run a host switch merely
 because this document exists. Host builds/activation and real account/room effects
 remain operator actions. Existing old managed sessions are not compatible writers
 for a replacement kernel-lock protocol until the approved cutover has quiesced them.

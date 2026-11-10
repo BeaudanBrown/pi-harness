@@ -6,7 +6,8 @@ import path from 'node:path';
 import { once } from 'node:events';
 import { FileSession } from '../config/agent/extensions/bridge-chat/file-tools.mjs';
 import { stageFile, readStagedFile, sweepFiles } from '../config/agent/extensions/bridge-chat/file-store.js';
-import { fileRefs } from '../config/agent/extensions/bridge-chat/file-types.js';
+import { fileRefs, MAX_FILE_BYTES } from '../config/agent/extensions/bridge-chat/file-types.js';
+import { inspectFileBytes } from '../config/agent/extensions/bridge-chat/file-validation.js';
 import { Store, OwnerMatrix, type ChatConfig } from '../config/agent/extensions/bridge-chat/transport.js';
 import { createQuestionServer, modelAnswer } from '../config/agent/extensions/bridge-chat/socket.js';
 
@@ -30,6 +31,29 @@ test('private spool rejects unsafe content/paths, survives umask, detects mutati
 	fs.writeFileSync(path.join(f.directory, ref.id), 'other'); assert.throws(() => readStagedFile(f.directory, ref), /changed/);
 	const old = new Date(Date.now() - 25 * 3600000); fs.utimesSync(path.join(f.directory, ref.id), old, old);
 	assert.equal(sweepFiles(f.directory), 0); assert.equal(fs.readdirSync(f.directory).length, 0);
+});
+
+test('stateless attachment byte policy retains bounded validation without a managed workspace exporter', async () => {
+	for (const [name, bytes] of [
+		['program.txt', Buffer.from('7f454c4602010100', 'hex')], ['script.txt', Buffer.from('#!/bin/sh')],
+		['bad.txt', Buffer.from([255])], ['controls.txt', Buffer.from('unsafe\u0000text')], ['bad.json', Buffer.from('{')],
+		['secret.pem', Buffer.from('private')], ['auth.json', Buffer.from('{}')], ['unknown.bin', Buffer.from('bytes')],
+	] as const) await assert.rejects(inspectFileBytes(name, bytes));
+	await assert.rejects(inspectFileBytes('empty.txt', Buffer.alloc(0)), /25 MiB/);
+	await assert.rejects(inspectFileBytes('large.txt', Buffer.alloc(MAX_FILE_BYTES + 1)), /25 MiB/);
+	const json = await inspectFileBytes('report.json', Buffer.from('{"ok":true}'));
+	assert.equal(json.mediaType, 'file'); assert.equal(json.mimeType, 'application/json');
+});
+
+test('stateless image validation decodes original bytes and rejects truncated or corrupt containers', async t => {
+	const f = fixture(t);
+	const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+	const image = await stageFile(f.directory, 'pixel.png', png);
+	assert.equal(image.mediaType, 'image'); assert.equal(image.width, 1); assert.equal(image.height, 1);
+	assert.equal(image.byteLength, png.length); assert.deepEqual(readStagedFile(f.directory, image), png);
+	await assert.rejects(stageFile(f.directory, 'truncated.png', png.subarray(0, 24)), /decode validation/);
+	const corrupt = Buffer.from(png); corrupt.fill(0, 41, 52);
+	await assert.rejects(stageFile(f.directory, 'corrupt.png', corrupt), /decoding failed/);
 });
 
 test('chat-only tools download without environment credentials, queue only current-request handles, and never publish', async t => {

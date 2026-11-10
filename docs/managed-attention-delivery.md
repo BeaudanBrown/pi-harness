@@ -1,5 +1,9 @@
 # Managed attention delivery and diagnostics (#159)
 
+> Historical incident/design record. #170 removed this recovery scheduler rather
+> than deploying its proposed fix. Repeated legacy attention notices are not
+> claimed repaired. See [historical context](legacy-managed-history.md).
+
 ## Scope and invariants
 
 Transport availability, outstanding attention and delivery are independent.

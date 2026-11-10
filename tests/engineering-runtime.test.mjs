@@ -6,14 +6,11 @@ import { join } from "node:path";
 import test from "node:test";
 
 const normal = process.env.PI_HARNESS_NORMAL_PI;
-const managed = process.env.PI_HARNESS_MANAGED_PI;
 const local = process.env.PI_HARNESS_LOCAL_PI;
-const localOnly = process.env.PI_HARNESS_LOCAL_ONLY_PI;
 const native = process.env.PI_HARNESS_NATIVE_PI;
 const nativeLocalOnly = process.env.PI_HARNESS_NATIVE_LOCAL_ONLY_PI;
 if (!native || !nativeLocalOnly) throw new Error("Packaged native bridge launchers are required");
-if (!localOnly) throw new Error("Packaged pi-local-only launcher is required");
-if (!normal || !managed || !local || !process.env.PI_HARNESS_WORKER_EXTENSION) throw new Error("Packaged engineering launchers are required");
+if (!normal || !local || !process.env.PI_HARNESS_WORKER_EXTENSION) throw new Error("Packaged engineering launchers are required");
 
 async function probe(t, launcher, role, projectPath, nested = false) {
   const cwd = await mkdtemp(join(tmpdir(), "engineering-runtime-"));
@@ -61,16 +58,14 @@ export default function(pi) {
       if (child.status !== 0) throw new Error("Nested probe failed: " + child.stderr);
       nestedResult = JSON.parse(readFileSync(nestedPath, "utf8"));
     }
-    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ nestedResult, managedTransport, publicBridge: process.env.PI_MATRIX_BRIDGE_UI_CONFIG ? JSON.parse(readFileSync(process.env.PI_MATRIX_BRIDGE_UI_CONFIG, "utf8")) : null, secretKeys: ["MATRIX_ACCESS_TOKEN", "MATRIX_OPERATOR_TOKEN", "CREDENTIALS_DIRECTORY"].filter(key => process.env[key]), lspEnabled: process.env.PI_HARNESS_LSP_ENABLED, registeredTools: pi.getAllTools().map(tool => tool.name), argv: process.argv.slice(2), pathEntries: (process.env.PATH ?? "").split(":"), hostProbe: spawnSync("pi-host-profile-probe", [], { encoding: "utf8" }).stdout ?? null, decoder: process.env.PI_MANAGED_SESSIONS_IMAGE_NORMALIZER, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
+    writeFileSync(process.env.ENGINEERING_PROBE_RESULT, JSON.stringify({ nestedResult, managedTransport, publicBridge: process.env.PI_MATRIX_BRIDGE_UI_CONFIG ? JSON.parse(readFileSync(process.env.PI_MATRIX_BRIDGE_UI_CONFIG, "utf8")) : null, secretKeys: ["MATRIX_ACCESS_TOKEN", "MATRIX_OPERATOR_TOKEN", "CREDENTIALS_DIRECTORY"].filter(key => process.env[key]), lspEnabled: process.env.PI_HARNESS_LSP_ENABLED, registeredTools: pi.getAllTools().map(tool => tool.name), argv: process.argv.slice(2), pathEntries: (process.env.PATH ?? "").split(":"), hostProbe: spawnSync("pi-host-profile-probe", [], { encoding: "utf8" }).stdout ?? null, injected: !!process.env.PI_HARNESS_ENGINEERING_RUNTIME_PATH, tools, diagnosisAborted: /abort/i.test(diagnosis.error ?? ""), managedEnvironment }));
   });
 }
 `);
   const env = { HOME: join(cwd, "home"), PATH: projectPath ? join(cwd, "bin") : "", XDG_RUNTIME_DIR: cwd, ENGINEERING_PROBE_RESULT: resultPath,
-    ...(nested ? { ENGINEERING_NESTED_LAUNCHER: managed } : {}) };
-  if (role === "project") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "project", PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "session.jsonl"), PI_MANAGED_SESSIONS_IMAGE_NORMALIZER: "/untrusted/project-decoder" });
-  if (role === "coordinator") Object.assign(env, { PI_MANAGED_SESSION_LAUNCH_ROLE: "coordinator", PI_MANAGED_COORDINATOR_CWD: cwd, PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "coordinator.jsonl") });
-  if (["local-only", "native", "native-local-only"].includes(role)) Object.assign(env, { PI_MATRIX_ACCESS_TOKEN: "fixture-only", PI_BRIDGE_CHAT_SOCKET: "/must-not-connect", PI_MANAGED_SESSIONS_STATE_DIR: "/must-not-use", MATRIX_ACCESS_TOKEN: "fixture-only", MATRIX_OPERATOR_TOKEN: "fixture-only", CREDENTIALS_DIRECTORY: "/must-not-read" });
-  if (["fallback", "local-only", "native", "native-local-only"].includes(role)) Object.assign(env, {
+    ...(nested ? { ENGINEERING_NESTED_LAUNCHER: native } : {}) };
+  if (["native", "native-local-only"].includes(role)) Object.assign(env, { PI_MATRIX_ACCESS_TOKEN: "fixture-only", PI_BRIDGE_CHAT_SOCKET: "/must-not-connect", PI_MANAGED_SESSIONS_STATE_DIR: "/must-not-use", MATRIX_ACCESS_TOKEN: "fixture-only", MATRIX_OPERATOR_TOKEN: "fixture-only", CREDENTIALS_DIRECTORY: "/must-not-read" });
+  if (["native", "native-local-only"].includes(role)) Object.assign(env, {
     PI_MANAGED_PROJECT_SESSION_FILE: join(cwd, "stale-project.jsonl"), PI_MANAGED_COORDINATOR_CWD: cwd,
     PI_MANAGED_COORDINATOR_SESSION_FILE: join(cwd, "stale-coordinator.jsonl"), PI_MANAGED_SESSION_ATTACHMENT_NONCE: "a".repeat(32),
     PI_MANAGED_SESSION_CONVERSATION_ID: "conv_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", PI_MANAGED_SESSION_CONCEPT: "stale",
@@ -98,18 +93,15 @@ export default function(pi) {
   return { result: JSON.parse(await readFile(resultPath, "utf8")), cwd };
 }
 
-for (const [name, launcher, role] of [["normal", normal, undefined], ["managed project", managed, "project"], ["managed ordinary fallback", managed, "fallback"], ["explicit local-only", localOnly, "local-only"], ["native bridge", native, "native"], ["native local-only", nativeLocalOnly, "native-local-only"]]) {
+for (const [name, launcher, role] of [["normal", normal, undefined], ["native bridge", native, "native"], ["native local-only", nativeLocalOnly, "native-local-only"]]) {
   test(`${name} packaged launcher supplies the engineering baseline from empty PATH`, async (t) => {
     const { result } = await probe(t, launcher, role, false);
     assert.equal(result.injected, true);
-    if (role === "project") {
-      assert.equal(result.decoder, process.env.PI_HARNESS_EXPECTED_IMAGE_DECODER, "post-direnv dispatch resets an inherited decoder override");
-      assert.equal(result.hostProbe, "host", "restricted service PATH gains host profile executables");
-      for (const path of ["/run/wrappers/bin", "/nix/profile/bin", "/nix/var/nix/profiles/default/bin", "/run/current-system/sw/bin"]) assert.ok(result.pathEntries.includes(path));
-    } else assert.equal(result.hostProbe, null, "ordinary launchers do not gain managed host fallbacks");
+    assert.equal(result.hostProbe, null, "ordinary launchers do not gain shell-profile fallbacks");
+    for (const tool of ["managed_host", "remote_session_delete", "remote_artifact_export"]) assert.ok(!result.registeredTools.includes(tool), `removed tool ${tool}`);
     assert.equal(result.diagnosisAborted, true, "already-aborted diagnosis must not select or start a model");
-    if (["fallback", "local-only", "native", "native-local-only"].includes(role)) assert.deepEqual(result.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
-    if (role === "local-only" || role === "native-local-only") assert.deepEqual(result.managedTransport, {}, "local-only removes inherited managed and Matrix transport configuration");
+    if (["native", "native-local-only"].includes(role)) assert.deepEqual(result.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
+    if (role === "native-local-only") assert.deepEqual(result.managedTransport, {}, "local-only removes inherited managed and Matrix transport configuration");
     if (role === "native" || role === "native-local-only") {
       assert.deepEqual(result.secretKeys, []);
       assert.equal(result.lspEnabled, "1");
@@ -127,31 +119,14 @@ for (const [name, launcher, role] of [["normal", normal, undefined], ["managed p
     assert.equal(result.hostProbe, "project", "project executable shadows the host profile");
   });
 }
-for (const role of ["project", "coordinator"]) {
-  test(`managed ${role} consumes dispatch authority before a nested Pi can inherit it`, async t => {
-    const { result } = await probe(t, managed, role, false, true);
-    assert.equal(result.managedEnvironment.PI_MANAGED_SESSION_LAUNCH_ROLE, undefined);
-    assert.deepEqual(result.nestedResult.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
-    assert.equal(result.nestedResult.argv.includes("--session"), false, "child never receives its parent's fixed session argument");
-  });
-}
-
-test("managed launcher rejects an unsupported non-empty role", async () => {
-  const result = await new Promise((resolve, reject) => {
-    const child = spawn(managed, [], { env: { PI_MANAGED_SESSION_LAUNCH_ROLE: "untrusted" }, stdio: ["ignore", "ignore", "pipe"] });
-    let stderr = "";
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
-    child.on("error", reject);
-    child.on("close", (code) => resolve({ code, stderr }));
-  });
-  assert.equal(result.code, 1);
-  assert.equal(result.stderr, "pi-managed-session: trusted launch role is invalid\n");
+test("nested native Pi does not inherit an obsolete role or a fixed parent session argument", async t => {
+  const { result } = await probe(t, native, "native", false, true);
+  assert.deepEqual(result.nestedResult.managedEnvironment, { PI_HARNESS_AGENT_PROFILE: "engineering-full" });
+  assert.equal(result.nestedResult.argv.includes("--session"), false);
 });
 
-for (const [name, launcher, role] of [["local", local, undefined], ["coordinator", managed, "coordinator"]]) {
-  test(`${name} launcher does not explicitly inject the engineering baseline`, async (t) => {
-    const { result } = await probe(t, launcher, role, false);
-    assert.equal(result.injected, false);
-    assert.equal(result.hostProbe, null, "lean launchers do not gain managed host fallbacks");
-  });
-}
+test("lean local launcher does not explicitly inject the engineering baseline", async t => {
+  const { result } = await probe(t, local, undefined, false);
+  assert.equal(result.injected, false);
+  assert.equal(result.hostProbe, null, "lean launcher does not gain shell-profile fallbacks");
+});

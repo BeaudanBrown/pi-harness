@@ -1,5 +1,11 @@
 # NAS chat implementation evidence (#97)
 
+> Historical #97 evidence, not a current production-package inventory or rollout
+> permission. #170 removed `managed-session-relay` and its tests; the independent
+> stateless chat/workspace/file behavior remains. Byte/decode validation is now
+> chat-local, not imported from a managed workspace exporter. The dated commands
+> and counts below describe their original snapshots. See [removal evidence](matrix-pi-removal.md).
+
 ## Final verification
 
 Post-review `nix run .#verify` passed all 12 checks; workspace/file live probes, all five production packages and all 15 downstream publisher tests passed. Log: `.pi/tmp/workers/2026-09-25T05-22-43-289Z-epic97-final-gate-8a3c9b88e39b/command.log`. Full GRILL toplevel dry evaluation also passed with chat, workspace and file capabilities all disabled there: `.pi/tmp/workers/2026-09-25T05-22-43-289Z-grill-chat-cli-dry-evaluation-042c121697e9/command.log`. Only documentation/evidence updates followed this gate; no runtime code changed. NAS full toplevel evaluation and disposable publisher evidence are recorded below.

@@ -2,10 +2,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { matrixDelay } from "../matrix-shared/http.js";
 import { OwnerMatrix, Store, object, validateConfig, assistantPolicyFingerprint } from "./transport.js";
-import { AccountStore } from "./account-store.js";
-import { AccountWorker } from "./account-worker.js";
-import { AccountMatrix } from "./account-matrix.js";
-import { AccountRules } from "./account-notifications.js";
 import { TrustedInvitations } from "./trusted-invites.js";
 import { modelAnswer } from "./socket.js";
 import { transportFailure, type TransportStage } from "./diagnostics.js";
@@ -46,21 +42,16 @@ async function main(): Promise<void> {
 	if (identity.user_id !== config.ownerUserId || identity.is_guest === true || typeof identity.device_id !== "string" || !identity.device_id) throw Error("Dedicated owner login required");
 	enterStage("database_open");
 	const store = new Store(path.join(process.env.STATE_DIRECTORY!, "requests.sqlite"));
-	let accountStore: AccountStore | undefined; let accountTask: Promise<void> | undefined; let invitationTask: Promise<void> | undefined;
+	let invitationTask: Promise<void> | undefined;
 	try {
-		const hosts = config.managedAccountHosts ?? [];
-		if (hosts.length) accountStore = new AccountStore(path.join(process.env.STATE_DIRECTORY!, "managed-account.sqlite"), config.ownerUserId);
-		const accounts = accountStore ? new AccountWorker(accountStore, hosts, config.ownerUserId, new AccountMatrix(matrix.http), new AccountRules(matrix.http)) : undefined;
 		enterStage("policy_initialization");
 		// Versioned policy also discards pre-TypeScript pending work without replaying history.
 		const fingerprint = assistantPolicyFingerprint(config, token);
 		let fresh = store.get("identity") !== fingerprint || !store.get("cursor");
 		if (fresh) store.resetPolicy();
 		enterStage("running");
-		// Separate bounded work: NAS/account outages do not occupy model requests or
-		// delay the shared sync cursor while waiting for account HTTP effects.
-		if (accounts) accountTask = accounts.run(stop.signal, () => console.log('{"event":"managed_account_unavailable"}'),
-			snapshot => console.log(JSON.stringify({ event: "managed_account_schedule", ...snapshot })));
+		// Invitation work has its own journal/cursor; failures never occupy model
+		// requests or delay the assistant's sync cursor.
 		if (Object.keys(config.trustedBridgeBots ?? {}).length) invitationTask = (async () => {
 			while (!stop.signal.aborted) {
 				let invitations: TrustedInvitations | undefined;
@@ -74,21 +65,19 @@ async function main(): Promise<void> {
 		})();
 		while (!stop.signal.aborted) {
 			try {
-				const batch = await matrix.sync(fresh ? "" : store.get("cursor"), [config.ownerUserId, ...config.remoteOwnerUserIds], store.pending(), stop.signal, !!accounts);
-				accounts?.ingest(batch, fresh);
+				const batch = await matrix.sync(fresh ? "" : store.get("cursor"), [config.ownerUserId, ...config.remoteOwnerUserIds], store.pending(), stop.signal);
 				const dropped = store.ingest(batch, config, Date.now(), fresh);
 				store.atomic(() => store.put("identity", fingerprint));
 				if (fresh) console.log('{"event":"watermark_initialized"}');
 				fresh = false;
 				if (dropped) console.log(JSON.stringify({ event: "queue_saturated", dropped }));
 			} catch {
-				accounts?.suspend();
 				if (stop.signal.aborted) break;
 				console.log('{"event":"sync_unavailable"}');
 				await matrixDelay(5000, stop.signal).catch(() => {}); continue;
 			}
 			await store.step(matrix, (q, workspace) => modelAnswer(config.modelSocket, q, stop.signal, workspace, !!config.filesDirectory), config, Date.now, stop.signal);
 		}
-	} finally { stop.abort(); await Promise.all([accountTask, invitationTask]); accountStore?.close(); store.close(); }
+	} finally { stop.abort(); await invitationTask; store.close(); }
 }
 void main().catch(error => { console.error(transportFailure(stage, error)); process.exitCode = 1; });

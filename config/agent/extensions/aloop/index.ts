@@ -9,7 +9,7 @@ import { DEFAULT_ALOOP_PATCH_MODEL, runAloopPatchWorker, runAloopWorker, selectA
 import { balancedLogExcerpt, runDurableCommand, writeDurableResult } from "../worker-runner/command-execution.js";
 import { DEFAULT_REVIEW_MODEL } from "../review-agents/core.js";
 import { snapshotAloopPolicy, type AloopCommandDefinition, type AloopPolicySnapshot } from "./policy.js";
-import { ALOOP_LIFECYCLE_ENTRY_TYPE, clearAloopLifecycle, createAloopLifecycleEvent, delegateManagedAloopCheckpoint, publishAloopLifecycleEvent, registerManagedAloopAbortDelegate, sanitizeAloopCheckpointText, type AloopLifecycleKind } from "../managed-sessions/aloop-lifecycle.js";
+import { ALOOP_LIFECYCLE_ENTRY_TYPE, createAloopLifecycleEvent, delegateAloopCheckpoint, registerAloopAbortDelegate, sanitizeAloopCheckpointText, type AloopLifecycleKind } from "./lifecycle.js";
 import {
 	ALOOP_HANDOFF_LIMITS,
 	acceptedOpenAloopIssues,
@@ -192,12 +192,11 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		} });
 	};
 	let removeAbortListener: (() => void) | null = null;
-	let removeManagedAbortDelegate: (() => void) | null = null;
+	let removeAloopAbortDelegate: (() => void) | null = null;
 
 	function projectLifecycle(kind: AloopLifecycleKind, epic: number, body: string, issue?: number): void {
 		const event = createAloopLifecycleEvent(kind, epic, body, issue, activeSessionId ?? "standalone");
 		pi.appendEntry(ALOOP_LIFECYCLE_ENTRY_TYPE, event);
-		publishAloopLifecycleEvent(event);
 		if (kind === "cancelled") { invocationReason = settlementAbort.signal.aborted ? "budget-exhausted" : "cancelled"; terminalOutcome(invocationReason); }
 		if (kind === "startup-failure") { invocationReason = "startup-failed"; if (!workerRunning) terminalOutcome(invocationReason); }
 	}
@@ -213,8 +212,8 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		clearDeadlineTimer();
 		removeAbortListener?.();
 		removeAbortListener = null;
-		removeManagedAbortDelegate?.();
-		removeManagedAbortDelegate = null;
+		removeAloopAbortDelegate?.();
+		removeAloopAbortDelegate = null;
 		activeEpic = null;
 		activeSessionId = null;
 		pendingHandoffs = [];
@@ -251,12 +250,12 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 		settlementTimer.unref?.();
 		const abort = () => {
 			if (activeEpic !== epic || pendingHumanBoundaries.size > 0) return;
-			projectLifecycle("cancelled", epic, `Aloop #${epic} was cancelled from the managed session. Active subprocesses were terminated and durable recovery state was preserved.`);
+			projectLifecycle("cancelled", epic, `Aloop #${epic} cancellation was requested from the native session. Durable recovery state was preserved; this is not process-exit evidence.`);
 			deactivate();
 		};
-		removeManagedAbortDelegate = registerManagedAloopAbortDelegate(activeSessionId, () => {
+		removeAloopAbortDelegate = registerAloopAbortDelegate(activeSessionId, () => {
 			if (activeEpic !== epic) return;
-			projectLifecycle("cancelled", epic, `Aloop #${epic} was cancelled from the managed session. Active subprocesses were terminated and durable recovery state was preserved.`);
+			projectLifecycle("cancelled", epic, `Aloop #${epic} cancellation was requested from the native session. Durable recovery state was preserved; this is not process-exit evidence.`);
 			deactivate();
 		});
 		const runSignal = ctx.signal;
@@ -356,12 +355,10 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 
 	pi.on("session_start", (_event, ctx) => {
 		deactivate();
-		clearAloopLifecycle(ctx.sessionManager.getSessionId());
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("session_shutdown", (_event, ctx) => {
 		deactivate();
-		clearAloopLifecycle(ctx.sessionManager.getSessionId());
 		if (ctx.hasUI) ctx.ui.setStatus(STATUS_KEY, undefined);
 	});
 	pi.on("agent_settled", (_event, ctx) => {
@@ -1069,7 +1066,7 @@ export function registerAloopExtension(pi: ExtensionAPI, overrides: Partial<Aloo
 				issue.recentHandoffs.push({ id: Date.now(), author, body, createdAt: new Date().toISOString(), url: null });
 			}
 			pendingHumanBoundaries.add(`decision:${marker}`);
-			const delegated = await delegateManagedAloopCheckpoint(activeSessionId!, `aloop-${marker}`, {
+			const delegated = await delegateAloopCheckpoint(activeSessionId!, `aloop-${marker}`, {
 				kind: "question", decision: sanitizeAloopCheckpointText(`Aloop decision for child #${params.issue}: ${params.decision}`),
 				context: `The decision is recorded on GitHub before a fresh worker continues. Reply with /aloop-decision ${params.issue} followed by the chosen decision.`,
 				...(params.options.length ? { options: params.options.map(sanitizeAloopCheckpointText) } : {}),

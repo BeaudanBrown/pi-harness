@@ -2,21 +2,18 @@
 
 Thin shared configuration for the Pi coding agent.
 
-**Replacement in progress:** [epic #160](https://github.com/BeaudanBrown/pi-harness/issues/160)
-and [ADR 0003](docs/architecture/decisions/0003-matrix-pi-bridge.md) supersede the
-managed-platform target described below. Native Pi will work independently of
-bridge availability, retaining polls, inbound images, automatic Spaces/invitations,
-reversible archive and approved task-worktree handoffs. See
-[replacement acceptance evidence](docs/matrix-pi-bridge-evidence.md) for release
-status. This notice is not a claim that the replacement is shipped or deployed.
+Native Pi owns history, execution and navigation; tmux owns window presentation.
+The optional Matrix bridge owns routing, durable delivery and background room
+organization, not local launch permission. Local Pi works without the bridge,
+Matrix, NAS, or Git. See [ADR 0003](docs/architecture/decisions/0003-matrix-pi-bridge.md).
 
-This repository is intentionally small. It does not implement a general
-workstream manager, tmux switcher, TUI, or arbitrary context attachment model.
-It does provide the narrowly scoped managed-session host relay defined by ADR
-0002: a deterministic Matrix/IPC registry for host-owned Pi conversations. Pi
-still provides the interactive agent UI, session storage, branching,
-compaction, tools, extensions, skills, prompt templates, and themes. Session
-layout remains external and uses regular tmux through fixed host-owned actions.
+**Not rebuild-ready:** [epic #160](https://github.com/BeaudanBrown/pi-harness/issues/160)
+is still completing cumulative verification and publication/pin handoff. Source
+removal is not deployment: grill/NAS cutover requires separate approval. See
+[acceptance evidence](docs/matrix-pi-bridge-evidence.md),
+[removal evidence](docs/matrix-pi-removal.md), and the
+[offline migration runbook](docs/matrix-pi-migration.md). No legacy conversation
+runtime or automatic live conversion is packaged.
 
 ## Staged native bridge interactions
 
@@ -55,7 +52,7 @@ activation and any post-start receipt reconciliation require separate approval.
 - a Nix package named `pi-harness`
 - a Nix resource package named `pi-harness-resources`
 - a NixOS module named `nixosModules.pi-harness`
-- a packaged `pi-managed-session-relay` host-runtime executable
+- an optional `matrix-bridge` package: `pi-matrix-bridge`, relay-independent `pi-session`, narrow approved task helper, and offline `pi-bridge-migrate`
 - an opt-in [read-only bridge preflight](docs/bridge-chat-preflight.md) NixOS service
 - a separately isolated [stateless `!pi` chat assistant](docs/bridge-chat-assistant.md), sharing Matrix infrastructure and the existing Pi login, with web-search-only SDK sessions; disabled by default and awaiting per-bridge live acceptance
 - shared Pi resources under `config/agent/`
@@ -101,36 +98,23 @@ shadowing only the packaged AgentGraph runtime and resources for that process.
 
 ## Agent capability profiles
 
-`config/agent/profiles.json` is the declarative source of truth for the seven
-agent personas: `engineering-full`, `aloop-implementation`, `aloop-patch`,
-`review-worker`, `diagnostic-worker`, `managed-coordinator`, and `pi-local`.
-It declares extensions, skills, prompt and theme resources, context-file and
-builtin-tool access, and either an exact tool allowlist or the ordinary
-extension-default surface. The `managed-project` launch variant derives from
-`engineering-full` and removes only local interaction, pi-r, and AgentGraph
-capabilities.
+`config/agent/profiles.json` is the declarative source of truth for six personas:
+`engineering-full`, `aloop-implementation`, `aloop-patch`, `review-worker`,
+`diagnostic-worker`, and `pi-local`. It declares resources, context/builtin-tool
+access and exact allowlists or the ordinary extension-default surface. Nix
+launchers and SDK workers consume the same registry. Removed coordinator/project
+personas are errors, not fallback profiles.
 
-Nix launchers consume the packaged registry rather than maintaining independent
-extension lists. SDK review and diagnostic sessions resolve their prompts and
-tool surfaces from the same registry. Narrow personas use explicit allowlists.
-Both ordinary and managed project engineering sessions retain project
-extension, skill, and prompt resources. Managed launchers disable ambient user
-resource discovery, then explicitly add conventional resources from the trusted
-project while filtering the declared local-interaction, Pi-R, and AgentGraph
-extension names. The managed
-coordinator instead disables every discovered resource, context file, and
-built-in tool before loading its lifecycle-only profile.
-Implementation and patch profiles admit project-owned worker extensions and tools
-only through the registry's `aloop-opt-in` policy; `.aloop.json` supplies that
-explicit opt-in when the worker launcher consumes the policy.
+Ordinary engineering sessions retain Pi's project resource discovery and trust
+policy. Implementation/patch workers admit project extensions only through the
+registry's explicit `aloop-opt-in` policy in `.aloop.json`.
 
-Capabilities tied to live state are not ambient. The legacy `remote_checkpoint`
-is active only while a connected ordinary adapter has unfinished Matrix input.
-The staged native adapter instead requires an enrolled interactive session and
-checks its registered binding/live intake before recording a checkpoint and
-aborting the turn. Aloop's supervisor tools are active only from `/aloop` startup
-until that supervisor turn settles. The managed coordinator exposes only its
-typed lifecycle tools.
+Live capabilities are not ambient. The native `remote_checkpoint` requires an
+enrolled interactive session and registered live intake before recording its
+question and aborting the turn. `create_task_workspace` requires a separate
+human decision for each frozen intent. Aloop's supervisor tools are active only
+from `/aloop` startup until that supervisor turn settles; its native checkpoint
+and abort hooks do not restore a managed host-control catalogue.
 
 ## Lean local Pi with pi-r
 
@@ -224,265 +208,68 @@ takes effect without requiring the desktop user to log out and back in. This
 option does not configure the parent of Pi's native per-project session tree;
 use a filesystem mount when that complete tree must live elsewhere.
 
-## Managed-session relay foundation
+## Optional native Matrix bridge
 
-The separate `managed-session-relay` package exposes
-`pi-managed-session-relay`. The default harness package intentionally does not
-expose it while managed sessions are disabled. The relay owns a private bounded NDJSON Unix socket,
-strict adapter attachment authorization, atomically replaced host-local
-registry state, synchronized logical manifest access, restart reconciliation,
-a bounded private content-addressed image spool, and the relay-only Matrix HTTPS and authenticated media client. Matrix credentials remain private
-fields of that process and are never accepted by or emitted over IPC.
-
-The executable requires `PI_MANAGED_SESSIONS_RUNTIME_DIR`,
-`PI_MANAGED_SESSIONS_STATE_DIR`, `PI_MANAGED_SESSIONS_MANIFEST_DIR`,
-`PI_MANAGED_SESSIONS_HOST_ID`, and the
-existing `PI_MATRIX_*` identity/credential variables. Packaging the executable does not enable it. The NixOS module's atomic
-`managedSessions.enable` switch installs the managed-aware interactive Pi wrapper
-and offline native-history guard, starts one lingered systemd user relay for the selected
-Unix user, and strictly parses the SOPS Matrix token file for the relay without
-sourcing arbitrary environment assignments. `managedSessions.stateDirectory`
-defaults to `%h/.local/state/pi-managed-sessions/relay`: registry, activity and
-media state survive reboot there; only the socket and sync-health observation
-live under `XDG_RUNTIME_DIR`. First startup atomically copies existing legacy
-runtime state under the host lock without merging or deleting the old store.
-The coordinator uses a separate raw-Pi profile and never inherits
-`PI_MATRIX_*` credentials.
-
-On enabled hosts, bare interactive `pi` in a host-validated Git checkout or linked
-worktree creates a relay-owned conversation and opens its exact tmux window.
-Explicit resume reuses an existing owned binding; ordinary saved history is copied
-to a fresh native identity without changing the original or projecting old history.
-Retired history requires positive host retirement proof. Non-Git/out-of-root
-launches remain local; workers, headless jobs and dedicated experiments do not
-auto-enroll. Eligible startup overrides are refused rather than discarded.
-Use `pi-local-only` for normal engineering resources without managed/Matrix
-transport, or for startup overrides; it refuses bound-history resume. This is
-separate from the existing `pi-local`/`pi-r-local` model profile. Matrix setup may
-remain pending while local work runs; an unavailable local relay instead refuses
-admission with explicit local-only guidance. Linux, tmux 3.6+, and the matching
-launcher UI capabilities are required. See [default-launch evidence](docs/managed-default-launch-evidence.md)
-for ownership, recovery and verification boundaries. Installing these sources is
-not authorization to activate or migrate a live host.
-
-Enabled hosts also install `pi-managed-session`, backed by a separate private
-`$XDG_RUNTIME_DIR/pi-managed-sessions/control.sock`:
-
-```sh
-pi-managed-session host status --json
-pi-managed-session conversation list --json
-pi-managed-session workspace list --json
-pi-managed-session --help
-```
-
-Use exact conversation IDs from inventory, never titles or abbreviated IDs.
-Inventory is bounded and paginated; `--request-id ID` supports explicit retries.
-`--json` emits one versioned result, with diagnostics on stderr and distinct
-[documented exit categories](docs/managed-live-workspaces-contract.md).
-Metadata includes roomless local work and explicit unresolved legacy identities,
-without reading saved Pi transcripts or waking sessions. It is last-known display
-metadata, not proof of filesystem authority or Matrix/account/phone readiness.
-Workspace/worktree discovery is cached for 30 seconds; conversation metadata is
-projected directly from the relay's in-memory registration/attachment state.
-
-The new API supports reads and policy-authorized local-human open/resume.
-Open returns the exact marked window without waiting for Pi attachment; resume
-waits for bounded attachment readiness. Both join one persisted launch, including
-the protected coordinator's original session. Failed panes remain for manual
-inspection/closure; no automatic replacement or client switching occurs. Model
-mutation approval and other mutation frontends remain staged work and return
-typed errors rather than invoking legacy bypasses. `managedSessions.actionPolicyOverrides` is a validated Nix-only
-startup policy; model mutation approval and coordinator protection cannot be
-removed. Changes require a guarded relay rollout, not a runtime policy editor.
-For direct relay development, `PI_MANAGED_HOST_ACTION_POLICY` explicitly selects
-the policy file and enables this surface; without it no control socket is created.
-The status compatibility wrapper retains its legacy health report during guarded
-rollout and consults host status when the new endpoint is present.
-
-The resource package also exposes separate ordinary and coordinator adapter
-entry points through `passthru.managedSessionExtensions`. They speak only the
-private relay protocol, persist binding/delivery provenance in Pi session
-history, and preserve Pi's normal prompt-template, skill, and extension-command
-expansion. They are deliberately absent from default settings and the default
-Pi wrapper; an enabled managed-session host must select exactly one profile.
-The ordinary profile provides `/remote on <concept>` and `/remote status`.
-Legacy `/remote delete` is disabled until approved retirement controls are
-available; it never unbinds a live process. Leaving an individual conversation's
-Matrix room as the configured operator triggers canonical retirement. There is
-no `/remote off` operation. Project and coordinator conversations share the typed
-`managed_host` tool; every model mutation requires independent per-call consent. `/remote on` locally enrolls a persisted, idle
-ordinary Pi session: the relay verifies its canonical placement and durable Pi
-identity without waiting for Matrix authentication or provisioning. The same Pi
-continues running while a private pending registration survives relay restarts.
-Background hierarchy completion never triggers a process handoff; the adapter
-shows pending binding separately from local attachment. Pre-binding history is
-not projected, and post-binding outage catch-up is silent. A stored room binding
-is not proof of account membership or phone delivery. Legacy clients retain the
-explicit promotion protocol; managed relaunches receive their private socket and
-one-time attachment nonce from the host-owned launcher.
-
-After binding, adapters classify persisted Pi branch entries and offer only
-terminal-origin text turns, completed assistant commentary, and final answers. Matrix-origin users are
-mapped to their existing Matrix events rather than echoed; their relay-verified
-sender MXIDs are persisted and included in ordinary model-visible attribution; leading-slash commands retain native Pi dispatch. The relay records
-each offer before sending deterministic, sanitized Markdown chunks with stable
-Matrix transaction IDs; reconnect and restart retry the same transactions.
-Thinking, tool activity, compaction/internal entries, pre-binding history, and
-oversized or excessive backfills are excluded or fail closed with diagnostics.
-
-An enabled host requires explicit Matrix identity, host identity, named
-workspace roots, a strict host launcher package, and a credential file that
-contains only `PI_MATRIX_ACCESS_TOKEN`:
+Enable only after the separately approved release/cutover procedure:
 
 ```nix
-services.pi-harness.managedSessions = {
+services.pi-harness.matrixBridge = {
   enable = true;
   user = "operator";
-  environmentFile = config.sops.templates."pi-managed-session.env".path;
+  environmentFile = config.sops.templates."pi-matrix-token.env".path;
   homeserver = "https://matrix.example.com";
   botUserId = "@pi-host:example.com";
   operatorUserId = "@operator:example.com";
-  ignoredSenderUserIds = [ "@signalbot:example.com" "@facebookbot:example.com" ];
+  ignoredSenderUserIds = [ "@signalbot:example.com" ];
   hostId = "workstation";
-  workspaceRoots.projects = "/home/operator/documents/projects";
-  launcherPackage = pkgs.tmux_project;
+  roots = [ "/home/operator/documents/projects" ];
+  # Optional host-owned native-window launcher; never the old managed protocol.
+  windowLauncher = pkgs.tmux_project;
 };
 ```
 
-The relay atomically creates the private neutral coordinator workspace and Pi
-session before creating the host Space and coordinator room. Authorized room
-text is persisted before the trusted `tmux_project managed
-coordinator-ensure` hook recreates `default/coordinator`. The coordinator
-session, room and host Space IDs survive restart. Startup never replaces an
-inaccessible identity or repairs existing Space links. Fresh bootstrap uses
-atomic ownership metadata and durable provisioning phases; uncertain creation
-without a recoverable alias stays pending for explicit reconciliation.
+The daemon receives the credential as a file containing only
+`PI_MATRIX_ACCESS_TOKEN`, parsed as data, never sourced or exported to Pi/tmux/Git.
+Its single ledger defaults to `%h/.local/state/pi-matrix-bridge/bridge.sqlite`;
+private IPC defaults to `%t/pi-matrix-bridge/bridge.sock`. No coordinator, launch
+reservation, automatic runtime refresh or general account/repair API exists.
+Recognizable old state fails before credential/HTTP access; use the offline
+migration tool with a distinct destination instead of repointing a live store.
 
-The neutral coordinator and managed project profiles expose compact `managed_host`
-controls and the `managed-host` skill. Use `operation: "help"` for the flat typed
-schema. Direct operators use `/host`, `!host`, or `pi-managed-session` with the same
-noun/action grammar; room-local `!start` launches without a prompt and
-`!close --confirm` permanently retires the conversation. Destructive/apply actions
-retain confirmation. Matrix `/host` is routed as Matrix authority, never executed
-as a local slash command. The coordinator stays protected from stop/delete and
-has no engineering tools. See [frontend evidence and migration](docs/managed-host-frontends-evidence.md)
-and the [tooling module map and adding-operation checklist](docs/managed-host-tooling-map.md).
-Read-only `conversation.repair.inspect` reports advisory runtime/queue state,
-original-room operator membership and actionable findings for both projects and
-the coordinator. It performs no repair and never asserts process exit or overall
-readiness. See the [unified repair implementation plan](docs/managed-conversation-repair.md)
-for scope and remaining execution work.
-Stale queues can be explicitly abandoned through
-`conversation.queue.cancel.preview/apply`: one dormant project conversation,
-exact frozen IDs, and independent approval. This prevents future dispatch/retries,
-not prior effects; saved history remains intact. See
-[queue cancellation safety](docs/managed-queue-cancellation.md).
+Ordinary interactive Pi enrolls asynchronously in configured roots. Headless,
+worker and private sessions stay private. `pi-local-only` retains engineering
+resources without bridge enrollment; it is distinct from the lean model-specific
+`pi-local` / `pi-r-local` profile. Real writer conflicts and missing/corrupt saved
+history remain errors, not excuses to create replacement history.
 
-Readable archival uses `conversation.archive.preview/apply` and a separate
-`conversation.archive.list`; ancestor cleanup has its own preview/apply. It preserves
-original rooms/history/membership under Archive and disables managed execution,
-without restoring deleted checkouts. Exact exit evidence is preferred; an explicitly
-approved `legacyClosure` attestation requires fresh conflict screening and is not
-verified exit. Unreadable environments block unless the operator additionally accepts
-the disclosed uncertainty via `acceptIncompleteInspection=true`; known conflicts
-still block and changed visibility gaps require fresh consent. See [archive safety and release status](docs/managed-readable-archives.md)
-before deployment; these controls require updated host/agent code and archive account
-support for automatic NAS joins. Project creation
-accepts only a configured root, safe absent immediate-child name, and creation
-label. The trusted launcher creates no
-scaffold or remote: it initializes local Git on `main`, records a durable retry
-identity, and preserves partial repositories for explicit retry. Stable private
-Matrix aliases and durable provisioning phases prevent uncertain retries from
-duplicating project Spaces or rooms. Starting a
-project conversation accepts only a named root, immediate-child workspace, safe
-relative cwd, and creation label. Labels may duplicate; identities do not depend on them. A harness-owned authority wrapper enriches the configured tmux launcher’s canonical workspace result and resolves Git common-directory
-identity so a main checkout and its linked worktrees share one deterministic private
-project Space on that host. New conversations live beneath a distinct checkout
-Space (shared by conversations in that checkout); relative cwd does not create a
-new checkout identity. Non-Git workspaces use a stable immediate-child fallback.
-Host-scoped aliases require exact bot-authored ownership proof before adoption.
-Local hierarchy reservations remain pending during provisioning failures; completed
-hierarchy provisioning alone does not establish operator-account or phone readiness. Existing Space bindings and
-checkpointed provisioning IDs are preserved; see [shared-workspace recovery](docs/managed-matrix-sessions.md#shared-workspaces-across-hosts). Existing compatibility rooms remain untouched on startup, which reports only an aggregate pending count. Host controls can explicitly preview/apply existing-room migration into checkout Spaces and repair saved hierarchy links without replacing rooms, sessions or processes. Migration reuses #68's durable phases, preserves notification policies and requires fresh consent after interruption. Exact empty-Space cleanup is separately confirmed through NAS leave/forget, never a kick fallback; unmarked legacy Spaces remain retained. Cleanup refuses referenced, non-empty, inaccessible or foreign Spaces. See [migration operations and evidence](docs/managed-hierarchy-migration-evidence.md). The relay resolves placement
-through the fixed launcher, durably creates the Pi session and binding boundary
-before Matrix rooms, and launches the ordinary adapter through the trusted
-`direnv exec`/Pi dispatch. No objective or orientation is lifecycle metadata:
-the first Matrix text is the first task. New-project results include a bounded
-Element X-compatible room link. Managed Pi uses run-scoped project approval and
-never persists trust for unrelated interactive launches. Project room text routes directly
-without host addressing; dormant input resumes the same persisted session.
-Stop terminates only the exact managed window and leaves the conversation dormant.
-Legacy windows without exact ownership require explicit, two-step
-`conversation migrate <id> --confirmed` recovery: capture exit evidence before
-manual window closure, then verify exit before clearing stale metadata. It does
-not restart tmux, adopt a live legacy process, or replace saved history. See
-[legacy window migration](docs/managed-legacy-window-migration.md).
-Already-closed legacy windows instead support individually previewed and confirmed
-[manual recovery](docs/managed-manual-recovery.md): operator attestation is recorded
-separately from verified exit, with incomplete inspection disclosed and detected
-conflicts blocking. The same preview identifies retired targets explicitly and
-resolves only their process-cleanup obligation, never resurrecting them.
-Confirmed deletion permanently retires the identity, stops only proven owned
-processes, and retries exact room/Space cleanup. Saved Pi/Matrix histories,
-workspaces and project files are preserved; this is not unbind-only deletion. The relay pins managed tmux operations to `XDG_RUNTIME_DIR`, matching the existing interactive `tmux_project` server. Marked live conversation windows appear as additional candidates in that same launcher and switch the requesting client to the existing Pi process; selection never creates or resumes work, and dormant conversations remain lifecycle-only. A confirmation-gated host operation previews and removes only marked windows from the obsolete `/tmp` tmux socket during the one-time deployment cutover.
+The host's `pi-session` CLI exposes `list`, `status` and `open` (use `--help` for
+exact options). The native file/header is authoritative. The optional ledger
+adds presentation metadata only; a dead socket or absent NAS cannot prevent
+local open. The downstream picker passes the expected native ID, preserves
+literal argv and focuses only its requesting client. Resuming reuses the file
+and room; genuine native new/fork creates a new identity; `/tree` remains native.
+Do not treat tmux hints or a successful open reply as execution completion.
 
-To split work from a Matrix project conversation, ask its agent to use
-`managed_host` operation `worktree.conversation.fork` with a concise summary,
-explicit committed base ref and new branch/title. Independent approval freezes
-the summary and Git/source identities. This creates a new worktree and room,
-posts the summary as visible initial context, and leaves the new Pi idle until
-another message. Source files/conversation stay untouched; uncommitted changes,
-raw session history and pending execution are not copied. Direct operators can
-also use `pi-managed-session worktree conversation fork` with the same explicit
-fields. This is not native room-preserving `/fork`. See
-[split-fork evidence](docs/managed-split-fork-evidence.md).
+Persisted local user text, completed assistant commentary and final output are
+projected with frozen transaction IDs. Remote input retains verified sender
+provenance after normal Pi command/template/skill expansion, without echoing its
+Matrix event. Thinking, tools, internal entries and pre-enrollment history stay
+private. Interrupted input is held and explained, never automatically rerun.
+Setup failures do not block local Pi or independent rooms.
 
-Managed room controls retain Pi's established control semantics while using
-host-owned room routing: ordinary text is an idle prompt or steering input for the active run; typed help, status, authenticated scoped model selection, thinking selection, measured compaction, stop, abort, and steer operations never become model prompts. Status combines a typed live adapter snapshot with relay-authoritative conversation, generation, saved/requested model and thinking, queue, checkpoint, connection, redacted launch-failure, and reconciliation state; it explicitly flags a runtime/requested-model mismatch without exposing paths, credentials, prompts, arguments, output, or reasoning. Only live agent activity starts Matrix typing; control handling and slash-command dispatch do not. Durable per-room inboxes and frozen notice delivery isolate rate-limit failures from other rooms and generation completion; see [Matrix reliability](docs/managed-matrix-reliability.md). State-changing controls reject busy runs, model catalogues narrow through bounded polls, and `!new --confirm` creates a fresh generation while preserving the room and prior Pi session files. Valid replies to bot events use their unquoted fallback text. Dormant steer/abort never wake Pi and receive one stable notice; an abort
-queued during wake cancels that wake input. The `remote_checkpoint` tool emits
-one durable structured question, blocker, or issue-completion boundary to Matrix
-and records the rendered checkpoint visibly in Pi's persisted chat history,
-then hard-aborts the run until a new currently joined participant reply. Declared question options become
-single-select polls with durable opaque answer mappings and deterministic room-mention notification requests; the first valid vote or
-an ordinary text fallback atomically retires the poll and resumes exactly once.
-Authorized unencrypted Element X JPEG, PNG, and WebP events pass original downloaded bytes to the model without harness inbound size caps, declared-size comparisons, dimension checks, or normalization. Matrix, model and available machine resources impose their own limits. Authenticated downloads, durable spooling and digest-verified bounded IPC chunks remain; outbound artifact restrictions are unchanged. Captions and images enter Pi as one ordered user turn; captionless images use a neutral prompt. Models without image input support reject the whole delivery with a Matrix notice and cleanup, without a silent model switch or caption-only fallback. A connected ordinary adapter also activates `remote_artifact_export`, which validates one workspace-relative regular file before streaming digest-verified bounded chunks to the relay. The relay durably reserves and uploads bounded images, audio, or generic files and sends one stable Matrix media event without exposing contents or host paths in activity. Accepted input and media, persisted
-unfinished work, checkpoint/final projection, launch failure, explicit
-cancellation, generation transition, and restart recovery all reuse stable identities so retries do
-not lose or duplicate participant turns. Generation changes durably create the new session and binding boundary before activation, invalidate the old attachment, carry forward selected model/thinking and placement metadata, and leave historical generations terminal-only.
+For a split task, `create_task_workspace` accepts only `branch`, `base_ref`,
+`title` and `handoff_summary`. A separate native-human decision or operator-only
+poll approves that frozen intent. The child receives the visible summary only,
+not private source history or uncommitted changes, and remains idle until fresh
+human input. Failed/lost replies do not prove cancellation: preserve partial
+resources and retry only the exact approved intent.
 
-## Managed Matrix operations
-
-[Scoped Space reconciliation](docs/managed-scoped-reconciliation.md) accepts
-`space reconcile preview --conversation-ids <exact-ids>`. A separately approved
-apply migrates only the selected conversations and their ancestor links. Missing
-workspaces are reported as blockers, not recreated. New migration Spaces grant
-the configured operator admin; existing rooms, histories and permissions remain.
-
-Existing host-owned rooms can explicitly preview/apply an
-[operator-admin migration](docs/managed-operator-admin.md) using
-`conversation admin preview --conversation-ids <exact-ids>` (optionally
-`--include-spaces`) followed by a separately confirmed apply. It grants only the
-configured operator normal admin power, preserving other users and room history.
-It does not remove participants or restart Pi. Matrix has no conditional state
-writes: avoid concurrent permission changes and inspect uncertain outcomes rather
-than replaying them. Future provisioning's automatic admin grant remains a separate
-planned slice; existing room creation still uses the current invitation policy.
-
-The legacy per-Pi `remote-session` bridge and `services.pi-harness.remoteSession`
-option are not loaded or exposed. Legacy rooms, bindings, and sidecar state are
-not imported. Enabled hosts use only the relay-owned managed-session path above.
-Compatible updates keep tmux and Pi processes alive while a guarded user-unit
-rollout replaces the relay. Hosts must provide `managedSessions.updateGuard`;
-a missing or failed guard leaves the old relay running and reports a blocked
-rollout. See [restart-safe updates](docs/managed-session-updates.md) for the
-initial ownership migration, runtime retention and compatibility policy.
-[Input recovery and runtime updates](docs/managed-input-runtime-updates.md)
-define durable stop/reset cancellation, held ambiguous historical input, and
-automatic idle-only refresh of changed managed project launchers.
-
-See [`docs/managed-matrix-sessions.md`](docs/managed-matrix-sessions.md) for the
-operator runbook, health checks, token rotation, restart recovery, controls,
-transcript policy, troubleshooting, and deferred scope.
+Pi/tmux/bridge lifetimes are independent. Running native/task launchers retain
+their required closures; upgrades never replace busy or idle Pi automatically.
+Old installed closures/backups remain possible separately approved **pre-start**
+rollback artifacts, not a shipped legacy fallback. See the
+[historical diagnostic index](docs/legacy-managed-history.md) for unresolved old
+incidents, not current operating commands.
 
 ## AgentGraph Mode
 
@@ -495,8 +282,8 @@ optional credential environment file.
 
 For the standalone package, opt in with `PI_HARNESS_ENABLE_AGENTGRAPH=1` or
 `PI_HARNESS_ENABLE_PI_R=1`; only `0` and `1` are valid. Development resource-path
-overrides alone never enable either experiment. Managed sessions and workers
-remain experiment-free even when ordinary launches opt in. Dedicated
+overrides alone never enable either experiment. Worker profiles remain
+experiment-free even when ordinary launches opt in. Dedicated
 `pi-r-local` remains unchanged; it is not the local-only engineering launcher.
 These switches govern harness-provided resources, not a sandbox preventing a
 user from explicitly loading their own extension through Pi discovery or `-e`.
@@ -588,7 +375,7 @@ project PATH: shell, Git/GitHub tools, core file/text utilities, ripgrep, flock,
 and Nix. Aloop checks required executable availability before consuming a worker
 launch and records only bounded private executable-resolution evidence. Python,
 compilers, and project dependencies still belong to the repository environment.
-The lean local and coordinator launchers do not explicitly inject this baseline.
+The lean local launcher does not explicitly inject this baseline.
 
 ## Tmux Cursor Focus
 
@@ -854,7 +641,7 @@ nix run .#verify
 ```
 
 The gate is also exported through `nix flake check`, with independently cached
-schema, type, unit, package, module, managed-session, Pi-R, and evaluation
+schema, type, unit, package, module, native bridge, Pi-R, and evaluation
 checks. See [`docs/verification.md`](docs/verification.md) for focused commands,
 test classification, and maintenance guidance.
 
@@ -891,8 +678,8 @@ Use Pi's built-in session commands for conversation state:
   or tree-sitter when semantic setup is unavailable.
 - Project-local language servers shadow harness fallbacks because the NixOS
   wrapper appends fallback LSP packages after the caller's existing `PATH`.
-  The same ordering is preserved for managed project launches and inherited by
-  full aloop implementation workers. Coordinator, review, and diagnostic
+  The same ordering is preserved for native launches and inherited by
+  full aloop implementation workers. Review and diagnostic
   profiles have no LSP extension or process-execution tool surface; `pi-local`
   additionally strips inherited fallback entries from `PATH`. Dependencies,
   SDKs, generated files, and project configs remain owned by the repository

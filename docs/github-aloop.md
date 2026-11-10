@@ -236,11 +236,11 @@ records the gap and stops rather than inventing a passing check.
 
 ## Worker environment preflight
 
-Normal and managed-project engineering launchers append the same Nix-owned
+Normal and native-bridge engineering launchers append the same Nix-owned
 baseline after the project PATH: Bash, coreutils, findutils, grep/sed, Git,
 GitHub CLI, jq, ripgrep, flock, which, and Nix. Worker launches retain the inherited
-project environment and append missing LSP/runtime fallback entries. The local
-and coordinator launchers do not explicitly inject this engineering baseline;
+project environment and append missing LSP/runtime fallback entries. The lean
+local launcher does not explicitly inject this engineering baseline;
 this is capability configuration, not an operating-system sandbox.
 
 Before charging a full-worker launch, the supervisor checks the launcher, Bash,

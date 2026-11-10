@@ -1,59 +1,49 @@
-# Managed Matrix host-bot provisioning
+# Native Matrix bridge identity
 
-Managed sessions use one non-admin Matrix bot account per enabled host. The bot is a relay identity, not a human account. It owns that host's private Space and rooms. Every currently joined room member has equal conversation, control, checkpoint, and session-management authority except the relay bot itself and exact service-account MXIDs configured as ignored senders.
+One non-admin bot account per host owns that host's private native rooms/Spaces.
+Pi history and execution remain local and independent of that account's health.
+The configured operator approves task creation and archive/restore; other current
+joined, non-ignored participants may converse and answer ordinary questions.
+A room name, alias, display name or power level is not ownership proof.
 
-The legacy `pi-matrix-whoami` command, per-Pi `remote-session` extension, `/remote on|off`, and `services.pi-harness.remoteSession` option have been removed. Legacy rooms and sidecar state are not imported.
+**Not rebuild-ready:** source and package checks are not activation permission.
+Existing deployments must preserve bot/operator/room/native identities and follow
+[offline migration](matrix-pi-migration.md), not create new replacement accounts.
+Publication, pin advance, quiescence and cutover are separately approved work.
 
-## Provision the account
+## Configuration for a separately approved fresh host
 
-1. Create one normal, non-admin Matrix account for the host.
-2. Record its full MXID as `managedSessions.botUserId` and the initial invited human MXID as `managedSessions.operatorUserId`. Configure exact non-human bridge management accounts in `managedSessions.ignoredSenderUserIds`; never use display names or wildcard “bot” matching.
-3. Create a dedicated Matrix login/device and obtain its access token through the homeserver's supported login flow. Do not paste the token into Pi, Git, issues, command arguments, Nix expressions, or tmux.
-4. Render a private SOPS-managed file containing exactly:
+- Obtain a normal non-admin host account and dedicated login through the
+  homeserver's supported flow. Never put its token in Pi, Git, issues, argv or
+  Nix expressions.
+- Configure `services.pi-harness.matrixBridge` with exact `hostId`, `botUserId`,
+  `operatorUserId`, `homeserver`, `roots`, Unix `user` and `environmentFile`.
+  Use exact `ignoredSenderUserIds`, not wildcard or display-name matching.
+- The SOPS-rendered file contains only `PI_MATRIX_ACCESS_TOKEN=<opaque-token>`.
+  Keep the existing module-local SOPS reference policy. Never inspect the
+  private secrets repository. Systemd passes this file as `LoadCredential`;
+  the daemon parses it as data and does not export it to Pi/tmux/Git.
+- Configure shared tmux/native launcher ownership in the consuming host, not in
+  the generic bridge. See the [README](../README.md#optional-native-matrix-bridge).
 
-   ```text
-   PI_MATRIX_ACCESS_TOKEN=<opaque-token>
-   ```
+Startup verifies `/account/whoami` and rejects a different/guest account before
+opening runtime state. Recognizable legacy state is refused even earlier, before
+credential access or HTTP. Background setup uses immutable create-event proof,
+frozen receipts and deterministic aliases. Uncertain creation is observed, never
+replaced by another room. Setup or NAS absence cannot gate local Pi.
 
-   The file must be a regular non-symlink owned by the relay user, mode `0400` or `0600`. The token is preserved as opaque bounded single-line data.
-5. Configure the host:
+## Acceptance and rotation boundaries
 
-   ```nix
-   services.pi-harness.managedSessions = {
-     enable = true;
-     user = "operator";
-     environmentFile = config.sops.templates."pi-managed-session.env".path;
-     homeserver = "https://matrix.example.com";
-     botUserId = "@pi-host:example.com";
-     operatorUserId = "@operator:example.com";
-     ignoredSenderUserIds = [
-       "@signalbot:example.com"
-       "@facebookbot:example.com"
-     ];
-     hostId = "workstation";
-     workspaceRoots.projects = "/home/operator/documents/projects";
-     launcherPackage = pkgs.tmux_project;
-   };
-   ```
+After separately approved cutover, verify the exact running package, original
+room identities, native/local launch and Matrix round trips. A service/socket ACK
+is not execution completion, process exit, membership or phone-delivery proof.
 
-The homeserver must be a credential-free HTTPS origin. The bot must remain non-admin. Use separate accounts/tokens for separate hosts.
+A separately approved token rotation must keep the same bot identity and frozen
+send transactions. Inspect the original room after rotation before revoking the
+old login. Do not clear cursors, discard uncertain sends or recreate rooms to
+repair access. Imported bot/operator identity changes are rejected. Broader
+membership/account repair and automatic notification changes are not provided.
 
-## Activate and verify
-
-After switching the host configuration, run as the relay user:
-
-```sh
-pi-managed-session-status
-systemctl --user status pi-managed-session-relay.service
-journalctl --user -u pi-managed-session-relay.service -n 50
-```
-
-The first successful relay start verifies `/account/whoami` against the configured bot MXID, creates or recovers the private host Space and coordinator room, and performs a cursor bootstrap without executing retained historical commands. Send ordinary text to the coordinator room and confirm one normal response. Then use coordinator lifecycle tools to create a disposable project conversation and verify its first Matrix message reaches the persisted Pi session.
-
-Invite another human only when they should receive full authority over that conversation. Before each acceptance batch, the relay obtains one bounded current joined-member snapshot for the room; invited-but-not-joined and departed users cannot act. Accepted operations remain durable if their sender later leaves. Exact ignored service accounts cannot act even while joined. Other joined application-service puppet accounts are treated as human participants with full authority. Matrix invitations, bans, and power levels remain operator-managed and are not changed by the relay. The relay also ignores foreign rooms, malformed relations, unsupported event/media types, stale bootstrap events, and oversized/limited timelines until safe cursor recovery is possible.
-
-## Rotation and recovery
-
-Token rotation does not recreate rooms, manifests, Pi sessions, queues, or projections. Create a replacement login for the same bot MXID, atomically replace the SOPS-rendered token file, restart the user service, run `pi-managed-session-status`, verify an existing room round trip, and only then revoke the old device.
-
-For outage, rate-limit, cursor, registry, lifecycle, transcript, checkpoint, stop/delete, troubleshooting, and deferred-scope details, use the complete [managed Matrix sessions runbook](managed-matrix-sessions.md).
+See [replacement evidence](matrix-pi-bridge-evidence.md) and
+[historical incidents](legacy-managed-history.md); replacement tests do not
+retroactively resolve deployment failures.

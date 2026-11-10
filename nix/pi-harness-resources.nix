@@ -43,11 +43,6 @@ let
 
     passthru.agentProfileExtension = "${drv}/share/pi-harness/agent/extensions/agent-profiles/index.ts";
 
-    passthru.managedSessionExtensions = {
-      ordinary = "${drv}/share/pi-harness/agent/extensions/managed-sessions/adapter/ordinary.ts";
-      coordinator = "${drv}/share/pi-harness/agent/extensions/managed-sessions/adapter/coordinator.ts";
-      modelPolicy = "${drv}/share/pi-harness/agent/extensions/managed-sessions/adapter/model-tool-policy.ts";
-    };
 
     passthru.piResources = {
       extensions = map

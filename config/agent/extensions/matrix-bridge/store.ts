@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstatSync, mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { IMAGE_CHUNK_BYTES } from "./wire.js";
 import { interactionSpec, pollStart, pollEnd, POLL_START, type Interaction, type InteractionSpec, type NativeControl } from "./interaction.js";
@@ -16,7 +16,17 @@ export type Input = { id: string; binding: string; position: number; event: Reco
 export type Output = { id: string; binding: string; source: string; type: string; content: Record<string, unknown>; eventId?: string };
 export const identity = (domain: string, ...values: string[]): string => createHash("sha256").update(JSON.stringify(["pi-bridge-v1", domain, ...values])).digest("hex");
 
+export function refuseLegacyStore(directory: string): void {
+  // Read-only startup preflight, repeated at writer open. Presence is negative
+  // evidence, including dangling links. Never load or convert an old store.
+  for (const marker of ["registry.json", "v1-to-v2-migration.json", "archives.json", "archives.json.initialized", "retirements"]) {
+    try { lstatSync(join(directory, marker)); }
+    catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") continue; throw error; }
+    throw Error("Legacy managed store refused; use approved offline migration into a distinct state directory");
+  }
+}
 function privatePath(filename: string): void {
+  refuseLegacyStore(dirname(filename));
   mkdirSync(dirname(filename), { recursive: true, mode: 0o700 });
   const directory = lstatSync(dirname(filename));
   if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid!() || (directory.mode & 0o077)) throw Error("Bridge state directory must be private and user-owned");

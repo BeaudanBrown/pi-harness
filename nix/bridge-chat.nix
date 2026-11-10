@@ -6,10 +6,10 @@ let
   filePackage = import ./chat-files-package.nix { inherit pkgs; };
   filesDirectory = "/var/lib/pi-chat-files";
   fileEnvironment = lib.optionalAttrs cfg.files.enable {
-    PI_MANAGED_SESSIONS_IMAGE_NORMALIZER = "${filePackage}/bin/pi-chat-image";
+    PI_CHAT_IMAGE_DECODER = "${filePackage}/bin/pi-chat-image";
   };
   settings = pkgs.writeText "pi-chat-transport.json" (builtins.toJSON ({
-    inherit (cfg) homeserver ownerUserId remoteOwnerUserIds roomIds allJoinedRooms workspaceRoomIds managedAccountHosts trustedBridgeBots;
+    inherit (cfg) homeserver ownerUserId remoteOwnerUserIds roomIds allJoinedRooms workspaceRoomIds trustedBridgeBots;
     modelSocket = socket;
   } // lib.optionalAttrs cfg.files.enable { inherit filesDirectory; }));
   workspacePolicy = pkgs.writeText "pi-chat-workspace-policy.json" (builtins.toJSON ({
@@ -72,15 +72,6 @@ in {
       default = { };
       description = "Exact host-ID to bot-MXID map for first invitation acceptance into verified native bridge rooms/Spaces. Independent journal and cursor; never changes notification rules or rejoins departures.";
     };
-    managedAccountHosts = lib.mkOption {
-      type = lib.types.listOf (lib.types.submodule { options = {
-        hostId = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}"; };
-        botUserId = lib.mkOption { type = lib.types.strMatching "@[^[:space:]:]+:[^[:space:]]+"; };
-        deviceId = lib.mkOption { type = lib.types.strMatching "[A-Za-z0-9._:-]{1,128}"; };
-      }; });
-      default = [ ];
-      description = "Explicit trusted host bot/device pairs for the separate deterministic account consumer. Empty disables account effects. Does not grant model access to owner credentials.";
-    };
     allJoinedRooms = lib.mkOption { type = lib.types.bool; default = false; description = "Explicitly accept commands in all eligible rooms this owner account joins, not just roomIds. Does not grant server-wide access."; };
     remoteOwnerUserIds = lib.mkOption { type = lib.types.listOf (lib.types.strMatching "@[^[:space:]:]+:[^[:space:]]+"); default = [ ]; description = "Exact bridge-controlled puppet MXIDs independently verified to represent this owner. Never derive authority from display names or message metadata."; };
   };
@@ -89,14 +80,8 @@ in {
       { assertion = builtins.length (builtins.attrNames cfg.trustedBridgeBots) <= 64
           && lib.all (host: builtins.match "[A-Za-z0-9][A-Za-z0-9._:-]{0,127}" host != null) (builtins.attrNames cfg.trustedBridgeBots)
           && builtins.length (lib.unique (builtins.attrValues cfg.trustedBridgeBots)) == builtins.length (builtins.attrNames cfg.trustedBridgeBots)
-          && !(builtins.elem cfg.ownerUserId (builtins.attrValues cfg.trustedBridgeBots))
-          && (cfg.trustedBridgeBots == { } || cfg.managedAccountHosts == [ ]);
-        message = "Native invitation hosts require unique exact bot identities, distinct from the owner, and cannot run with the legacy account consumer."; }
-      { assertion = builtins.length cfg.managedAccountHosts <= 64
-          && builtins.length (lib.unique (map (h: h.hostId) cfg.managedAccountHosts)) == builtins.length cfg.managedAccountHosts
-          && builtins.length (lib.unique (map (h: h.botUserId) cfg.managedAccountHosts)) == builtins.length cfg.managedAccountHosts
-          && lib.all (h: h.botUserId != cfg.ownerUserId) cfg.managedAccountHosts;
-        message = "Managed account hosts require at most 64 one-to-one host/bot identities, distinct from the owner."; }
+          && !(builtins.elem cfg.ownerUserId (builtins.attrValues cfg.trustedBridgeBots));
+        message = "Native invitation hosts require at most 64 unique exact bot identities, distinct from the owner."; }
       { assertion = privatePath cfg.matrixTokenFile && privatePath cfg.piAgentDirectory && cfg.piAgentDirectory != "/"; message = "Chat credentials and existing Pi auth directory must be absolute runtime paths, never Nix store paths."; }
       { assertion = lib.hasPrefix "https://" cfg.homeserver; message = "Chat transport requires an HTTPS homeserver origin."; }
       { assertion = cfg.allJoinedRooms || cfg.roomIds != [ ]; message = "Chat assistant requires an explicit test-room allowlist or allJoinedRooms approval."; }
