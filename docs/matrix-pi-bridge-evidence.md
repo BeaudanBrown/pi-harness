@@ -249,9 +249,21 @@ Paired review disposition:
   packaged launcher, and waits for actual native `session_start`. Both direct and
   packaged cases pass. No redundant service PATH dependency was added.
 
-No accepted current-scope findings remain. The cumulative review and canonical
-`nix run .#verify` remain release requirements; none of these fixtures prove
-live Matrix delivery, NAS operation or safety around existing legacy writers.
+No accepted current-scope findings remain. The subsequent canonical gate exposed
+an additional packaging regression: the preserved stateless `!pi` package's
+wildcard TypeScript roots compiled the newly shared renderer despite not using
+it. Its package now compiles the two real entrypoints and their transitive imports,
+without adding an unused Markdown dependency. The focused `bridge-chat` gate
+passes all **115 tests**, zero skips. This isolated compile-root correction does
+not change the reviewed runtime design.
+
+**`nix run .#verify` passes at the #164 boundary**, including all 12 constituent
+gates, 166 unit tests and 856 legacy regression tests (zero skips), plus the
+previously recorded chat/package/module checks. Final log:
+`2026-11-10T07-11-41-840Z-native-164-canonical-recheck-55c485c0fb5f`.
+Only this evidence text was changed afterward. The cumulative epic review and a
+fresh canonical gate remain #171 release requirements; none of these fixtures
+prove live Matrix delivery, NAS operation or safety around existing legacy writers.
 
 ## Rebuild and migration readiness
 

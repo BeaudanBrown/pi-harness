@@ -35,7 +35,7 @@ in pkgs.runCommand "pi-bridge-chat" { nativeBuildInputs = [ pkgs.typescript ]; }
       },
       "rootDir": "source", "outDir": "lib"
     },
-    "include": ["source/**/*.ts", "source/**/*.mts"]
+    "include": ["source/bridge-chat/main.ts", "source/bridge-chat/model-main.mts"]
   }
 EOF
   tsc --project tsconfig.json
