@@ -1,0 +1,205 @@
+--- a/dist/core/session-manager.js
++++ b/dist/core/session-manager.js
+@@ -1,9 +1,9 @@
+ import nativeSessionLock from "./session-lock.cjs";
+ import { uuidv7 } from "@earendil-works/pi-ai";
+ import { randomUUID } from "crypto";
+-import { appendFileSync, closeSync, createReadStream, existsSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";
++import { appendFileSync, closeSync, createReadStream, existsSync, fsyncSync, mkdirSync, openSync, readdirSync, readSync, statSync, writeFileSync, } from "fs";
+ import { readdir, stat } from "fs/promises";
+-import { join, resolve } from "path";
++import { dirname, join, resolve } from "path";
+ import { createInterface } from "readline";
+ import { StringDecoder } from "string_decoder";
+ import { getAgentDir as getDefaultAgentDir, getSessionsDir } from "../config.js";
+@@ -734,6 +734,22 @@
+             closeSync(fd);
+         }
+     }
++    /** Persist buffered native entries without triggering a model turn. */
++    flush() {
++        if (!this.persist || !this.sessionFile) return;
++        this._holdSessionFile(this.sessionFile);
++        const creating = !this.flushed;
++        const fd = openSync(this.sessionFile, creating ? "wx" : "r");
++        try {
++            if (creating) for (const entry of this.fileEntries) writeFileSync(fd, `${JSON.stringify(entry)}\n`);
++            fsyncSync(fd);
++        } finally { closeSync(fd); }
++        this.flushed = true;
++        if (creating) {
++            const directory = openSync(dirname(this.sessionFile), "r");
++            try { fsyncSync(directory); } finally { closeSync(directory); }
++        }
++    }
+     isPersisted() {
+         return this.persist;
+     }
+@@ -859,6 +875,7 @@
+             timestamp: new Date().toISOString(),
+         };
+         this._appendEntry(entry);
++        this.flush();
+         return entry.id;
+     }
+     /** Append a session info entry (e.g., display name). Returns entry id. */
+--- a/dist/core/session-manager.d.ts
++++ b/dist/core/session-manager.d.ts
+@@ -184,6 +184,8 @@
+ export declare class SessionManager {
+     /** Release native writer ownership when the manager is no longer used. */
+     dispose(): void;
++    /** Persist buffered native entries without triggering a model turn. */
++    flush(): void;
+     private sessionId;
+     private sessionFile;
+     private sessionDir;
+--- a/dist/core/agent-session.js
++++ b/dist/core/agent-session.js
+@@ -859,17 +859,18 @@
+                 expandedText = this._expandSkillCommand(expandedText);
+                 expandedText = expandPromptTemplate(expandedText, [...this.promptTemplates]);
+             }
+-            options?.onPromptExpanded?.(expandedText);
++            const attributedText = options?.onPromptExpanded?.(expandedText);
++            if (typeof attributedText === "string") expandedText = attributedText;
+             // If streaming, queue via steer() or followUp() based on option
+             if (this.isStreaming) {
+                 if (!options?.streamingBehavior) {
+                     throw new Error("Agent is already processing. Specify streamingBehavior ('steer' or 'followUp') to queue the message.");
+                 }
+                 if (options.streamingBehavior === "followUp") {
+-                    await this._queueFollowUp(expandedText, currentImages, options?.onQueuedMessageRemoved);
++                    await this._queueFollowUp(expandedText, currentImages, options?.onQueuedMessageRemoved, options?.userMessageMetadata);
+                 }
+                 else {
+-                    await this._queueSteer(expandedText, currentImages, options?.onQueuedMessageRemoved);
++                    await this._queueSteer(expandedText, currentImages, options?.onQueuedMessageRemoved, options?.userMessageMetadata);
+                 }
+                 preflightResult?.(true);
+                 return;
+@@ -909,6 +910,7 @@
+                 role: "user",
+                 content: userContent,
+                 timestamp: Date.now(),
++                ...(options?.userMessageMetadata ? { metadata: structuredClone(options.userMessageMetadata) } : {}),
+             });
+             // Inject any pending "nextTurn" messages as context alongside the user message
+             for (const msg of this._pendingNextTurnMessages) {
+@@ -1047,7 +1049,7 @@
+     /**
+      * Internal: Queue a steering message (already expanded, no extension command check).
+      */
+-    async _queueSteer(text, images, onQueuedMessageRemoved) {
++    async _queueSteer(text, images, onQueuedMessageRemoved, metadata) {
+         this._steeringMessages.push(text);
+         this._emitQueueUpdate();
+         const content = [{ type: "text", text }];
+@@ -1055,13 +1057,14 @@
+             content.push(...images);
+         }
+         const message = { role: "user", content, timestamp: Date.now() };
++        if (metadata) message.metadata = structuredClone(metadata);
+         if (onQueuedMessageRemoved) this._queuedMessageRemovalCallbacks.set(message, onQueuedMessageRemoved);
+         this.agent.steer(message);
+     }
+     /**
+      * Internal: Queue a follow-up message (already expanded, no extension command check).
+      */
+-    async _queueFollowUp(text, images, onQueuedMessageRemoved) {
++    async _queueFollowUp(text, images, onQueuedMessageRemoved, metadata) {
+         this._followUpMessages.push(text);
+         this._emitQueueUpdate();
+         const content = [{ type: "text", text }];
+@@ -1069,6 +1072,7 @@
+             content.push(...images);
+         }
+         const message = { role: "user", content, timestamp: Date.now() };
++        if (metadata) message.metadata = structuredClone(metadata);
+         if (onQueuedMessageRemoved) this._queuedMessageRemovalCallbacks.set(message, onQueuedMessageRemoved);
+         this.agent.followUp(message);
+     }
+@@ -1183,6 +1187,8 @@
+         await this.prompt(text, {
+             expandPromptTemplates: options?.expandPromptTemplates ?? false,
+             onPromptExpanded: options?.onPromptExpanded,
++            preflightResult: options?.preflightResult,
++            userMessageMetadata: options?.userMessageMetadata,
+             onQueuedMessageRemoved: options?.onQueuedMessageRemoved,
+             streamingBehavior: options?.deliverAs,
+             images,
+@@ -2068,6 +2074,7 @@
+                     this._extensionAbortHandler();
+                     return;
+                 }
++                this.clearQueue();
+                 void this.abort();
+             },
+             hasPendingMessages: () => this.pendingMessageCount > 0,
+--- a/dist/core/agent-session.d.ts
++++ b/dist/core/agent-session.d.ts
+@@ -154,8 +154,8 @@
+ export interface PromptOptions {
+     /** Whether to dispatch extension commands and expand skill commands and prompt templates (default: true) */
+     expandPromptTemplates?: boolean;
+-    /** Called after command, skill, and prompt expansion, before delivery. */
+-    onPromptExpanded?: (text: string) => void;
++    /** Called after command, skill, and prompt expansion; may return attributed text. */
++    onPromptExpanded?: (text: string) => string | void;
+     /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
+     onQueuedMessageRemoved?: () => void;
+     /** Image attachments */
+@@ -166,6 +166,7 @@
+     source?: InputSource;
+     /** Internal hook used by RPC mode to observe prompt preflight acceptance or rejection. */
+     preflightResult?: (success: boolean) => void;
++    userMessageMetadata?: Readonly<Record<string, string>>;
+ }
+ /** Options for model/thinking mutations. */
+ export interface ModelMutationOptions {
+@@ -430,7 +431,9 @@
+     sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
+         deliverAs?: "steer" | "followUp";
+         expandPromptTemplates?: boolean;
+-        onPromptExpanded?: (text: string) => void;
++        onPromptExpanded?: (text: string) => string | void;
++        preflightResult?: (success: boolean) => void;
++        userMessageMetadata?: Readonly<Record<string, string>>;
+         /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
+         onQueuedMessageRemoved?: () => void;
+     }): Promise<void>;
+--- a/dist/core/extensions/types.d.ts
++++ b/dist/core/extensions/types.d.ts
+@@ -302,7 +302,9 @@
+     sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
+         deliverAs?: "steer" | "followUp";
+         expandPromptTemplates?: boolean;
+-        onPromptExpanded?: (text: string) => void;
++        onPromptExpanded?: (text: string) => string | void;
++        preflightResult?: (success: boolean) => void;
++        userMessageMetadata?: Readonly<Record<string, string>>;
+         /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
+         onQueuedMessageRemoved?: () => void;
+     }): Promise<void>;
+@@ -983,7 +985,9 @@
+     sendUserMessage(content: string | (TextContent | ImageContent)[], options?: {
+         deliverAs?: "steer" | "followUp";
+         expandPromptTemplates?: boolean;
+-        onPromptExpanded?: (text: string) => void;
++        onPromptExpanded?: (text: string) => string | void;
++        preflightResult?: (success: boolean) => void;
++        userMessageMetadata?: Readonly<Record<string, string>>;
+         /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
+         onQueuedMessageRemoved?: () => void;
+     }): void;
+@@ -1189,7 +1193,9 @@
+ export type SendUserMessageHandler = (content: string | (TextContent | ImageContent)[], options?: {
+     deliverAs?: "steer" | "followUp";
+     expandPromptTemplates?: boolean;
+-    onPromptExpanded?: (text: string) => void;
++    onPromptExpanded?: (text: string) => string | void;
++    preflightResult?: (success: boolean) => void;
++    userMessageMetadata?: Readonly<Record<string, string>>;
+     /** Called synchronously when this queued input is withdrawn by clearQueue(), never on consumption. */
+     onQueuedMessageRemoved?: () => void;
+ }) => void;

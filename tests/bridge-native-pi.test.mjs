@@ -23,10 +23,10 @@ function fixture() {
   const script = (code) => spawnSync(process.execPath, ["--input-type=module", "-e", `import { SessionManager } from ${JSON.stringify(pathToFileURL(join(sdk, "core/session-manager.js")).href)}; ${code}`], { env, encoding: "utf8" });
   return { root, file, env, script };
 }
-function rpc(f) {
+function rpc(f, extra = []) {
   const probe = join(f.root, "reload-probe.ts");
   writeFileSync(probe, 'export default function(pi) { pi.registerCommand("reload-check", {handler: async (_args, ctx) => { await ctx.reload(); }}); }');
-  const child = spawn(pi, ["--mode", "rpc", "--session", f.file, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--extension", probe], { cwd: f.root, env: f.env });
+  const child = spawn(pi, ["--mode", "rpc", "--session", f.file, "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--extension", probe, ...extra], { cwd: f.root, env: f.env });
   let next = 0, buffer = "", stderr = "";
   const pending = new Map();
   child.stderr.on("data", c => { stderr += c; });
@@ -82,6 +82,41 @@ test("missing/empty/corrupt resume is rejected unchanged and failed switching ke
       if (value !== null) assert.equal(readFileSync(bad, "utf8"), value);
       else assert.equal(existsSync(bad), false);
     }
+  } finally { rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("native expansion permits explicit remote attribution and reports preflight separately", { timeout: 20000 }, async () => {
+  const f = fixture();
+  const template = join(f.root, "probe-template.md"); writeFileSync(template, "expanded $1");
+  const receipts = join(f.root, "receipts"); f.env.BRIDGE_PROBE_RECEIPTS = receipts;
+  const live = rpc(f, ["--extension", new URL("./fixtures/matrix-bridge/native-probe.mjs", import.meta.url).pathname, "--provider", "bridge-probe", "--model", "fake", "--prompt-template", template]);
+  try {
+    const response = await live.send("prompt", { message: "/probe-submit" }); assert.equal(response.success, true, JSON.stringify(response));
+    let entries;
+    const deadline = Date.now() + 5000;
+    do {
+      entries = readFileSync(f.file, "utf8").trim().split("\n").map(line => JSON.parse(line));
+      if (entries.some(entry => entry.message?.role === "assistant")) break;
+      await new Promise(resolve => setTimeout(resolve, 20));
+    } while (Date.now() < deadline);
+    assert.equal(readFileSync(receipts, "utf8"), "true\n");
+    assert.equal(entries.find(entry => entry.message?.role === "user")?.message.content[0].text, "Attributed remote input:\nexpanded raw");
+    assert.equal(entries.find(entry => entry.message?.role === "assistant")?.message.content[0].text, "probe answer");
+  } finally { const exited = once(live.child, "exit"); live.child.kill("SIGKILL"); await exited; rmSync(f.root, { recursive: true, force: true }); }
+});
+
+test("the first custom entry durably creates an idle native session without a model turn", () => {
+  const f = fixture();
+  try {
+    const result = f.script(`import assert from 'node:assert/strict'; import {readFileSync,existsSync} from 'node:fs';
+      const sm=SessionManager.create(${JSON.stringify(f.root)},${JSON.stringify(join(f.root, "sessions"))});
+      const file=sm.getSessionFile(); assert.equal(existsSync(file),false);
+      const id=sm.appendCustomEntry('matrix-bridge.boundary',{nativeId:sm.getSessionId()});
+      assert.equal(existsSync(file),true);
+      assert.equal(JSON.parse(readFileSync(file,'utf8').trim().split('\\n').at(-1)).id,id);
+      sm.flush(); sm.dispose(); const reopened=SessionManager.open(file);
+      assert.equal(reopened.getEntries().filter(e=>e.type==='message').length,0); reopened.dispose();`);
+    assert.equal(result.status, 0, result.stderr);
   } finally { rmSync(f.root, { recursive: true, force: true }); }
 });
 

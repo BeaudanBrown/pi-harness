@@ -62,6 +62,7 @@
           # Apply after npm dependencies exist, before Bun embeds the CLI modules.
           preInstall = ''
             patch -p1 < ${./nix/patches/pi-queued-message-removal.patch}
+            patch -p1 < ${./nix/patches/pi-bridge-persistence.patch}
           '' + (old.preInstall or "");
           postInstall = (old.postInstall or "") + ''
             sdk_root="$out/lib/node_modules/@earendil-works/pi-coding-agent"
