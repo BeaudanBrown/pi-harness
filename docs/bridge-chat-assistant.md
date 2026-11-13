@@ -124,6 +124,13 @@ or arbitrary-tool option, and no model tool reads the auth directory.
 ## Process and persistence isolation
 
 The transport remains a systemd DynamicUser with only its Matrix LoadCredential.
+At bootstrap it resolves the trusted service-declared `STATE_DIRECTORY` to its
+canonical target and verifies that target is a private directory owned by the
+service UID **before either SQLite store opens**. This supports systemd's normal
+`/var/lib/NAME -> private/NAME` alias without weakening invitation journal checks:
+arbitrary constructor-supplied directory aliases, symlink/hardlinked journals,
+foreign owners and unsafe permissions remain rejected. Existing directory aliases,
+file ownership, journal inodes and cursors are not repaired, moved or reset.
 The Pi worker runs as the configured existing user, without Matrix credentials.
 A shared group permits the bounded Unix socket and, when explicitly enabled, the
 private attachment spool. Both have private state,

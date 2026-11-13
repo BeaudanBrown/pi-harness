@@ -90,6 +90,33 @@ Do not add a hand-maintained test list. Give a specialized test the established
 prefix, or let it run as an ordinary unit test. The TypeScript build includes all
 test files before any suite runs.
 
+## Supplemental chat systemd integration
+
+`tests/bridge-chat-state-directory.test.ts` runs automatically in `bridge-chat`.
+It exercises the actual transport entrypoint through a declared state alias,
+retained independent cursors/inodes, rejected canonical target privacy/ownership,
+and unchanged strict invitation filename checks.
+
+The slower `tests/bridge-chat-systemd.nix` check boots a disposable NixOS VM with
+real DynamicUser/StateDirectory aliasing and the packaged transport. It uses only
+synthetic credentials and a loopback TLS Matrix fixture, never a real model or
+account. It verifies healthy invitation sync, retained journal inodes/cursors on a
+VM-only restart and refusal of a symlink journal. Run explicitly when service
+storage integration changes; it is not part of the fast deterministic aggregate:
+
+```sh
+nix build --impure --no-link --expr '
+  let h = builtins.getFlake ("git+file://" + toString ./.);
+  in import (h.outPath + "/tests/bridge-chat-systemd.nix") {
+    nixpkgs = h.inputs.nixpkgs;
+    piPackage = h.packages.x86_64-linux.pi;
+  }'
+```
+
+Both `nixpkgs` and `piPackage` may instead be supplied from the exact consuming
+host inputs to check that deployment toolchain. VM service restarts affect only
+the disposable fixture and are not production restart or invitation acceptance.
+
 ## Live LSP verification
 
 LSP changes additionally require:

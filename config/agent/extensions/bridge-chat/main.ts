@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { matrixDelay } from "../matrix-shared/http.js";
-import { OwnerMatrix, Store, object, validateConfig, assistantPolicyFingerprint } from "./transport.js";
+import { OwnerMatrix, Store, object, validateConfig, assistantPolicyFingerprint, serviceStateDirectory } from "./transport.js";
 import { TrustedInvitations } from "./trusted-invites.js";
 import { modelAnswer } from "./socket.js";
 import { transportFailure, type TransportStage } from "./diagnostics.js";
@@ -41,7 +41,8 @@ async function main(): Promise<void> {
 	enterStage("identity_validation");
 	if (identity.user_id !== config.ownerUserId || identity.is_guest === true || typeof identity.device_id !== "string" || !identity.device_id) throw Error("Dedicated owner login required");
 	enterStage("database_open");
-	const store = new Store(path.join(process.env.STATE_DIRECTORY!, "requests.sqlite"));
+	const stateDirectory = serviceStateDirectory(process.env.STATE_DIRECTORY!);
+	const store = new Store(path.join(stateDirectory, "requests.sqlite"));
 	let invitationTask: Promise<void> | undefined;
 	try {
 		enterStage("policy_initialization");
@@ -56,7 +57,7 @@ async function main(): Promise<void> {
 			while (!stop.signal.aborted) {
 				let invitations: TrustedInvitations | undefined;
 				try {
-					invitations = new TrustedInvitations(path.join(process.env.STATE_DIRECTORY!, "bridge-invites.sqlite"), matrix.http, config.ownerUserId, config.trustedBridgeBots!);
+					invitations = new TrustedInvitations(path.join(stateDirectory, "bridge-invites.sqlite"), matrix.http, config.ownerUserId, config.trustedBridgeBots!);
 					await invitations.run(stop.signal, (status, unavailable) => console.log(JSON.stringify({ event: "bridge_invitations", unavailable, ...status })));
 				} catch { console.log('{"event":"bridge_invitations_unavailable"}'); }
 				finally { invitations?.close(); }

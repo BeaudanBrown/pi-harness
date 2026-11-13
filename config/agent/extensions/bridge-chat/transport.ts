@@ -1,5 +1,6 @@
 import { trustedBridgeBots, type TrustedBridgeBots } from "./trusted-invites.js";
 import { createHash } from "node:crypto";
+import { lstatSync, realpathSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 import { MatrixHttp, MatrixError } from "../matrix-shared/http.js";
 import { fileRefs, type FileRef, type ChatReply } from "./file-types.js";
@@ -94,6 +95,15 @@ export class OwnerMatrix implements ChatMatrix {
 		return this.http.request("PUT", `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.room.message/${encodeURIComponent(txn)}`,
 			{ msgtype: "m.text", body: "Pi: " + text, "m.mentions": {} }, signal);
 	}
+}
+
+// STATE_DIRECTORY is declared by the trusted service environment. systemd may
+// expose its DynamicUser directory through an alias; validate the canonical
+// private target before either store opens. Journal constructors stay strict.
+export function serviceStateDirectory(directory: string): string {
+	const canonical = realpathSync(directory), info = lstatSync(canonical);
+	if (!info.isDirectory() || info.uid !== process.getuid!() || (info.mode & 0o077)) throw Error("Chat state directory must be private");
+	return canonical;
 }
 
 type Row = { id: string; room: string; created: number; phase: string; question: string; answer: string; files: string };
