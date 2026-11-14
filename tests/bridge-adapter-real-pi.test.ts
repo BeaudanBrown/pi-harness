@@ -439,6 +439,44 @@ test("committed archive fences native queue consumption before any policy notifi
   } finally { hold = false; release(); writeFileSync(releaseModel, ""); await live.stop(); for (const peer of peers) peer.close(); await new Promise<void>(resolve => server.close(() => resolve())); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
 });
 
+test("actual Pi create_project uses independent local and Matrix approvals and saves idle children without source Git", { timeout: 60000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-native-project-")), cwd = join(root, "non-git"), file = join(root, "source.jsonl"), socket = join(root, "bridge.sock"), history = join(root, "children");
+  mkdirSync(cwd);
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "project-source", cwd, timestamp: new Date().toISOString() }) + "\n");
+  const extension = join(root, "bridge.ts"), wrapper = join(root, "helper.mjs");
+  writeFileSync(extension, `import {installAdapter} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/adapter.ts"))}; export default pi => installAdapter(pi,{config:${JSON.stringify({ socket, roots: [root] })},interactive:()=>true});`);
+  assert.ok(process.env.PI_TASK_TEST_HELPER);
+  writeFileSync(wrapper, `#!${process.execPath}\nimport {spawn} from 'node:child_process'; const child=spawn(${JSON.stringify(process.env.PI_TASK_TEST_HELPER)},process.argv.slice(2),{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(root)},PI_TASK_SESSION_DIRECTORY:${JSON.stringify(history)}}});child.on('error',()=>process.exit(1));child.on('close',code=>process.exit(code??1));\n`, { mode: 0o700 });
+  const http = new InteractionHttp(); let opens = 0;
+  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root], operatorUserId: USER }, http.matrix, async () => { opens++; throw Error("Project creation must never launch Pi"); }, localTasks(wrapper));
+  await relay.start(false); relay.store.intake("ready", []);
+  const live = piProcess(root, file, extension, [], { cwd });
+  const idle = () => until(async () => !((await live.send("get_state")).data as { isStreaming: boolean }).isStreaming);
+  try {
+    await live.send("get_state"); await until(() => relay.store.bindings().length === 1);
+    const source = relay.store.bindings()[0]!; relay.store.setRoom(source.key, ROOM);
+    const cancelled = live.send("prompt", { message: "create project fixture" }); await until(() => live.ui.length === 1);
+    assert.equal(live.ui[0]!.title, "Create fresh project?"); assert.match(String(live.ui[0]!.message), /No Pi process/);
+    assert.equal(existsSync(join(root, "local-project")), false);
+    live.confirm(live.ui[0]!.id, false); await cancelled; await idle(); assert.equal(existsSync(join(root, "local-project")), false);
+    const approved = live.send("prompt", { message: "create project fixture" }); await until(() => live.ui.length === 2);
+    live.confirm(live.ui[1]!.id, true); await approved; await idle();
+    const child = relay.store.bindings().find(b => b.cwd === join(root, "local-project"))!;
+    assert.ok(child); assert.equal(opens, 0); assert.equal(existsSync(join(cwd, ".git")), false);
+    assert.equal(readFileSync(child.file, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(e => e.type === "message").length, 0);
+    relay.store.intake("remote-project", [{ id: "$remote-project", room: ROOM, event: textEvent("$remote-project", "remote create project fixture", "@second:example.test") }]); await relay.pump();
+    await until(() => relay.store.tasks(["approval"]).some(record => record.plan.intent.project?.name === "remote-project")); await idle(); await relay.pump();
+    const draft = relay.store.tasks(["approval"]).find(record => record.plan.intent.project?.name === "remote-project")!;
+    assert.equal(draft.request.surface, "matrix"); assert.equal(live.ui.length, 2);
+    const interaction = draft.request.interaction!, poll = relay.store.outputs(source.key, `interaction:${interaction}`)[0]!.eventId!;
+    const vote = async (id: string, sender: string) => { relay.store.intake(id, [{ id, room: ROOM, event: { event_id: id, sender, type: POLL_RESPONSE, content: { "m.relates_to": { rel_type: "m.reference", event_id: poll }, [POLL_RESPONSE]: { answers: ["answer-0"] } } } }]); await relay.pump(); };
+    await vote("$not-owner", "@second:example.test"); assert.equal(existsSync(join(root, "remote-project")), false);
+    await vote("$owner", USER); await relay.tasks!.run(draft.plan.key);
+    assert.equal(relay.tasks!.status(source, draft.plan.key).localReady, true);
+    assert.equal(opens, 0); assert.equal(relay.store.bindings().length, 3);
+  } finally { await live.stop(); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
 test("the production enrollment policy excludes an RPC worker even when configured", { timeout: 15000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "bridge-unbridged-worker-")), file = join(root, "worker.jsonl"), socket = join(root, "bridge.sock");
   writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "worker", cwd: root, timestamp: new Date().toISOString() }) + "\n");

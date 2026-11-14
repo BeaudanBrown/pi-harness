@@ -5,7 +5,7 @@ import { history, offerHistory } from "./history.js";
 import type { Interaction } from "./interaction.js";
 import { BridgeStore, identity, type Binding, type Input } from "./store.js";
 import { allowedWorkspace, string } from "./wire.js";
-import { TaskFailure, taskApprovalText, taskIntent, taskPlan, type TaskIntent, type TaskLocalResult, type TaskPlan, type TaskRecord, type TaskSource, type TaskStatus } from "./task-contract.js";
+import { TaskFailure, projectIntent, taskApprovalText, taskIntent, taskPlan, type TaskIntent, type TaskLocalResult, type TaskPlan, type TaskRecord, type TaskSource, type TaskStatus } from "./task-contract.js";
 
 export interface TaskRunner {
   prepare(source: TaskSource, intent: TaskIntent, key: string, nativeId: string): Promise<TaskPlan>;
@@ -45,15 +45,20 @@ export class TaskWorkspaces {
       localReady, remotePending: !child?.room || this.setupPending(child.key),
       file: record.plan.nativeFile, cwd: record.plan.worktree, ...(child?.room ? { room: child.room } : {}), ...(error ? { error } : {}) };
   }
-  async prepare(binding: Binding, value: unknown, call: string, surface: "local" | "matrix"): Promise<TaskStatus> {
+  async prepare(binding: Binding, value: unknown, call: string, surface: "local" | "matrix", kind: "task" | "project" = "task"): Promise<TaskStatus> {
     if (this.stopped || !binding.enabled || surface === "matrix" && binding.archived) throw Error("Task proposal is unavailable for this binding");
     if (surface === "matrix" && !this.policy.operatorUserId) throw Error("Remote task approval requires a configured operator");
-    const source = this.source(binding), intent = taskIntent(value), key = identity("task", source.key, JSON.stringify(intent));
+    if (kind === "project" && this.policy.roots.length !== 1) throw new TaskFailure("Fresh project creation requires exactly one configured projects root");
+    const source = this.source(binding), intent = kind === "project" ? projectIntent(value, realpathSync(this.policy.roots[0]!)) : taskIntent(value);
+    if (kind === "task" && intent.project) throw new TaskFailure("Use create_project for fresh repositories");
+    const key = identity("task", source.key, JSON.stringify(intent));
     const old = this.store.task(key), nativeId = randomUUID();
     const plan = old?.plan ?? taskPlan(await this.runner.prepare(source, intent, key, nativeId));
     if (plan.key !== key || plan.source.key !== source.key || plan.source.file !== source.file || plan.source.nativeId !== source.nativeId || plan.source.cwd !== source.cwd ||
         JSON.stringify(plan.intent) !== JSON.stringify(intent) || !old && plan.nativeId !== nativeId) throw Error("Task helper returned a different frozen intent");
     this.source(binding); allowedWorkspace(dirname(plan.container), this.policy.roots);
+    if (intent.project && (plan.container !== plan.worktree || dirname(plan.container) !== intent.project.root)) throw Error("Project helper changed destination policy");
+    if (taskApprovalText(plan).length > 7500) throw new TaskFailure("Approval exceeds the visible decision limit; shorten the description/handoff before proposing again");
     if (old?.approval?.via === "matrix" && old.approval.sender !== this.policy.operatorUserId && !["ready", "complete"].includes(old.phase)) {
       // A changed operator cannot inherit an uncompleted mutation grant. Its
       // original input receipt remains in the ledger; fresh UI/vote is needed.
@@ -102,6 +107,7 @@ export class TaskWorkspaces {
       try {
         const binding = this.store.binding(current.plan.source.key); if (!binding) throw Error("Missing source");
         this.source(binding); allowedWorkspace(dirname(current.plan.container), this.policy.roots);
+        if (current.plan.intent.project && (this.policy.roots.length !== 1 || realpathSync(this.policy.roots[0]!) !== current.plan.intent.project.root)) throw Error("Project root policy changed");
         if (current.approval?.via === "matrix" && current.approval.sender !== this.policy.operatorUserId) throw Error("Operator authority changed");
         this.store.saveTask({ ...current, phase: "creating", error: undefined });
         const result = await this.runner.create(current.plan, stage => {
@@ -114,8 +120,8 @@ export class TaskWorkspaces {
         if (saved.id !== result.nativeId || saved.cwd !== result.cwd || !saved.entries.some(entry => entry.id === result.boundary && entry.type === "custom" && entry.customType === "matrix-bridge.boundary" && entry.data?.nativeId === result.nativeId)) throw Error("Task native boundary is missing");
         const childKey = identity("binding", result.file, result.nativeId);
         const child = this.store.binding(childKey) ?? this.store.register({ ...result, title: current.plan.intent.title, boundary: saved.entries.at(-1)?.id ?? result.boundary });
-        this.store.offer(child.key, `task-handoff:${key}`, () => notice(`Task handoff: ${current.plan.intent.title}\n\n${current.plan.intent.handoff_summary}\n\nNo model turn was started. Send a separate fresh instruction when ready.`));
-        this.store.offer(binding.key, `task-local:${key}`, () => notice(`Task workspace and native session ready: ${current.plan.intent.title}\nBranch: ${current.plan.intent.branch}\nThe child was created without a model turn. Matrix organization runs independently; its room link will follow.`));
+        this.store.offer(child.key, `task-handoff:${key}`, () => notice(`${current.plan.intent.project ? "Project" : "Task"} handoff: ${current.plan.intent.title}\n\n${current.plan.intent.handoff_summary}\n\nNo model turn was started. Send a separate fresh instruction when ready.`));
+        this.store.offer(binding.key, `task-local:${key}`, () => notice(`${current.plan.intent.project ? "Project repository" : "Task workspace"} and native session ready: ${current.plan.intent.title}\nBranch: ${current.plan.intent.branch}\nThe child was created without a model turn. Matrix organization runs independently; its room link will follow.`));
         this.store.saveTask({ ...this.store.task(key)!, phase: "ready", child: child.key, error: undefined });
       } catch (error) {
         const failed = this.store.task(key)!, reason = error instanceof TaskFailure ? error.message : "Local task creation was not confirmed.";
@@ -134,7 +140,7 @@ export class TaskWorkspaces {
     for (const record of this.store.tasks(["approved", "creating"])) { if (this.jobs.size >= 8) break; void this.run(record.plan.key); }
     for (const record of this.store.tasks(["ready"])) {
       const room = record.child ? this.store.binding(record.child)?.room : undefined; if (!room) continue;
-      this.store.offer(record.plan.source.key, `task-room:${record.plan.key}`, () => notice(`Task conversation: ${record.plan.intent.title}\nhttps://matrix.to/#/${encodeURIComponent(room)}\nRoom creation is confirmed; grouping/invitation setup may still be pending. Opening the session does not start a model turn.`));
+      this.store.offer(record.plan.source.key, `task-room:${record.plan.key}`, () => notice(`${record.plan.intent.project ? "Project" : "Task"} conversation: ${record.plan.intent.title}\nhttps://matrix.to/#/${encodeURIComponent(room)}\nRoom creation is confirmed; grouping/invitation setup may still be pending. Opening the session does not start a model turn.`));
       this.store.saveTask({ ...record, phase: "complete" });
     }
   }

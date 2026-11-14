@@ -265,6 +265,25 @@ not private source history or uncommitted changes, and remains idle until fresh
 human input. Failed/lost replies do not prove cancellation: preserve partial
 resources and retry only the exact approved intent.
 
+For a new standalone repository, `create_project` accepts only `name`,
+`description` and `handoff_summary`. It uses the current bridge host's single
+configured workspace root (multiple roots are refused, not guessed), and works
+from a registered conversation even when its source directory is not Git.
+Independent local-human or configured Matrix-operator approval shows the exact
+host, destination, README, initial `main` commit and saved native history.
+The repository-local author is `Pi Project <pi-project@localhost>`; global Git
+configuration is unchanged. Creation runs without inherited templates/hooks,
+signing, dependency installation, remotes or pushes.
+
+The result is a repository, saved **idle** native session and asynchronous Matrix
+room/Space setup. It does **not** launch Pi, a terminal, tmux or a model turn.
+Open it later through the normal picker or `!start`. Only the explicit handoff is
+copied. Existing/foreign paths are never adopted, overwritten or removed. Exact
+approved retries reuse owned resources; uncertain unpublished staging is retained
+for inspection, not automatically cleaned up. These are workflow approvals, not
+sandboxing against an unrestricted same-UID shell. See the
+[fresh-project contract and evidence](docs/create-project.md).
+
 Pi/tmux/bridge lifetimes are independent. Running native/task launchers retain
 their required closures; upgrades never replace busy or idle Pi automatically.
 Old installed closures/backups remain possible separately approved **pre-start**

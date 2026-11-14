@@ -19,19 +19,20 @@ export default function (pi) {
       const last = context.messages.filter(message => message.role === "user").at(-1);
       const slow = JSON.stringify(last?.content).includes("hold for abort");
       const question = JSON.stringify(last?.content).includes("ask choice");
+      const project = JSON.stringify(last?.content).includes("create project fixture"), remoteProject = JSON.stringify(last?.content).includes("remote create project fixture");
       const task = JSON.stringify(last?.content).includes("create task fixture"), remoteTask = JSON.stringify(last?.content).includes("remote create task fixture");
       if (process.env.BRIDGE_PROBE_MODEL_LOG) appendFileSync(process.env.BRIDGE_PROBE_MODEL_LOG, JSON.stringify({ model: model.id, messages: context.messages }) + "\n");
       let timer;
       const abort = () => emit(true);
       const emit = (aborted = false) => {
         clearTimeout(timer); options?.signal?.removeEventListener("abort", abort);
-        const message = { role: "assistant", content: task ? [{ type: "toolCall", id: "task-fixed", name: "create_task_workspace", arguments: { branch: remoteTask ? "task/remote" : "task/local", base_ref: "HEAD", title: "Task fixture", handoff_summary: "Only the explicit visible handoff. Wait for fresh human intent before execution." } }] : question ? [{ type: "toolCall", id: `question-${++sequence}`, name: "remote_checkpoint", arguments: { kind: "question", decision: "Choose one", options: ["First", "Second"] } }] : [{ type: "text", text: "probe answer" }], api: model.api, provider: model.provider, model: model.id,
+        const message = { role: "assistant", content: project ? [{ type: "toolCall", id: "project-fixed", name: "create_project", arguments: { name: remoteProject ? "remote-project" : "local-project", description: "Fresh acceptance repository", handoff_summary: "Only this visible project handoff. Wait for human instructions." } }] : task ? [{ type: "toolCall", id: "task-fixed", name: "create_task_workspace", arguments: { branch: remoteTask ? "task/remote" : "task/local", base_ref: "HEAD", title: "Task fixture", handoff_summary: "Only the explicit visible handoff. Wait for fresh human intent before execution." } }] : question ? [{ type: "toolCall", id: `question-${++sequence}`, name: "remote_checkpoint", arguments: { kind: "question", decision: "Choose one", options: ["First", "Second"] } }] : [{ type: "text", text: "probe answer" }], api: model.api, provider: model.provider, model: model.id,
           usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
-          stopReason: question || task ? "toolUse" : "stop", timestamp: Date.now() + ++sequence };
+          stopReason: question || task || project ? "toolUse" : "stop", timestamp: Date.now() + ++sequence };
         if (aborted) stream.push({ type: "error", reason: "aborted", error: { ...message, content: [], stopReason: "aborted" } });
         else {
           stream.push({ type: "start", partial: { ...message, content: [] } });
-          stream.push({ type: "done", reason: question || task ? "toolUse" : "stop", message });
+          stream.push({ type: "done", reason: question || task || project ? "toolUse" : "stop", message });
         }
         stream.end();
       };

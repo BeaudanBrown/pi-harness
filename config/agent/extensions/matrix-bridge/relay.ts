@@ -104,12 +104,12 @@ export class BridgeRelay {
           if (typeof params.archived !== "boolean" || !Number.isSafeInteger(params.revision)) throw Error("A current native UI archive decision is required");
           return this.archive(key, params.archived, Number(params.revision));
         }
-        if (["task.prepare", "task.publish-approval", "task.confirm-local", "task.status"].includes(method)) {
+        if (["task.prepare", "project.prepare", "task.publish-approval", "task.confirm-local", "task.status"].includes(method)) {
           if (!this.tasks || this.attached.get(key)?.stopping) throw Error("Task workspace creation is unavailable; local Pi remains available");
           const binding = this.store.binding(key)!;
-          if (method === "task.prepare") {
+          if (method === "task.prepare" || method === "project.prepare") {
             if (params.surface !== "local" && params.surface !== "matrix") throw Error("Invalid independent approval surface");
-            return this.tasks.prepare(binding, params.intent, string(params.call, 512), params.surface);
+            return this.tasks.prepare(binding, params.intent, string(params.call, 512), params.surface, method === "project.prepare" ? "project" : "task");
           }
           if (method === "task.publish-approval") return this.tasks.publishApproval(binding, taskKey(params.key), taskKey(params.request));
           if (method === "task.confirm-local") {

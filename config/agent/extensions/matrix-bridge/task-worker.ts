@@ -9,7 +9,7 @@ import { hostPath, object } from "./wire.js";
 import { TaskFailure, taskIntent, taskKey, taskPlan, taskSource, type TaskIntent, type TaskLocalResult, type TaskPlan, type TaskSource } from "./task-contract.js";
 
 // Fixed package paths; overrides exist only for disposable integration fixtures.
-const git = () => process.env.PI_TASK_TEST_GIT ?? "@taskGit@";
+export const git = () => process.env.PI_TASK_TEST_GIT ?? "@taskGit@";
 const python = () => process.env.PI_TASK_TEST_PYTHON ?? "@taskPython@";
 const gitWaiter = () => process.env.PI_TASK_TEST_GIT_WAITER ?? "@taskGitWaiter@";
 const sdk = () => process.env.PI_TASK_TEST_SESSION_MANAGER ?? "@taskSessionManager@";
@@ -36,7 +36,7 @@ async function refExists(cwd: string, ref: string, env: NodeJS.ProcessEnv): Prom
   try { await readGit(cwd, ["show-ref", "--exists", ref], env); return true; }
   catch (error) { if ((error as { code?: unknown }).code === 2) return false; throw error; }
 }
-async function taskLock(common: string, purpose: "setup" | "git") {
+export async function taskLock(common: string, purpose: "setup" | "git") {
   let lock; while (!(lock = locks.tryTaskLock(common, purpose))) await new Promise(resolve => setTimeout(resolve, 50)); return lock;
 }
 async function mutateGit(plan: TaskPlan, args: string[], env: NodeJS.ProcessEnv, input?: string): Promise<void> {
@@ -55,13 +55,13 @@ async function mutateGit(plan: TaskPlan, args: string[], env: NodeJS.ProcessEnv,
     });
   } finally { lock.release(); }
 }
-function syncDirectory(path: string): void { const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { fsyncSync(fd); } finally { closeSync(fd); } }
-function durableFile(path: string, content: string): void {
+export function syncDirectory(path: string): void { const fd = openSync(path, constants.O_RDONLY | constants.O_DIRECTORY | constants.O_NOFOLLOW); try { fsyncSync(fd); } finally { closeSync(fd); } }
+export function durableFile(path: string, content: string): void {
   const fd = openSync(path, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY | constants.O_NOFOLLOW, 0o600);
   try { writeFileSync(fd, content); fsyncSync(fd); } finally { closeSync(fd); }
   syncDirectory(dirname(path));
 }
-function ownedDirectory(path: string): void {
+export function ownedDirectory(path: string): void {
   const stat = lstatSync(path); if (!stat.isDirectory() || stat.isSymbolicLink() || stat.uid !== process.getuid!()) throw new TaskFailure(("Task directory is foreign or unsafe"));
 }
 function prefix(path: string, durable = false): Array<Record<string, unknown>> {
@@ -73,13 +73,13 @@ function prefix(path: string, durable = false): Array<Record<string, unknown>> {
     return text.slice(0, text.lastIndexOf("\n") + 1).split("\n").filter(Boolean).map(line => object(JSON.parse(line)));
   } finally { closeSync(fd); }
 }
-function sourceExists(source: TaskSource): void {
+export function sourceExists(source: TaskSource): void {
   const header = prefix(source.file)[0];
   if (header?.type !== "session" || header.version !== 3 || header.id !== source.nativeId || header.cwd !== source.cwd || realpathSync(source.cwd) !== source.cwd) throw new TaskFailure(("Source native session changed or is missing"));
 }
-const proof = (plan: TaskPlan) => createHash("sha256").update(JSON.stringify(plan)).digest("hex");
-const marker = (plan: TaskPlan) => JSON.stringify({ version: 1, key: plan.key, proof: proof(plan) }) + "\n";
-function ownsMarker(path: string, plan: TaskPlan): boolean {
+export const proof = (plan: TaskPlan) => createHash("sha256").update(JSON.stringify(plan)).digest("hex");
+export const marker = (plan: TaskPlan) => JSON.stringify({ version: 1, key: plan.key, proof: proof(plan) }) + "\n";
+export function ownsMarker(path: string, plan: TaskPlan): boolean {
   try { const stat = lstatSync(path); return stat.isFile() && !stat.isSymbolicLink() && stat.nlink === 1 && stat.uid === process.getuid!() && readFileSync(path, "utf8") === marker(plan); }
   catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
@@ -96,7 +96,7 @@ function canonicalDestination(path: string): string {
   while (!existsSync(parent)) { missing.unshift(basename(parent)); const next = dirname(parent); if (next === parent) throw new TaskFailure(("No native history parent")); parent = next; }
   return join(realpathSync(parent), ...missing);
 }
-function nativeFile(cwd: string, id: string): string {
+export function nativeFile(cwd: string, id: string): string {
   // Pi's pinned, tested default session-directory spelling; no mkdir occurs
   // during approval preparation. Explicit central sessionDirectory wins.
   const directory = process.env.PI_TASK_SESSION_DIRECTORY ? hostPath(process.env.PI_TASK_SESSION_DIRECTORY) :
@@ -105,6 +105,7 @@ function nativeFile(cwd: string, id: string): string {
 }
 export async function prepareTask(sourceValue: TaskSource, intentValue: TaskIntent, keyValue: string, nativeId: string): Promise<TaskPlan> {
   const source = taskSource(sourceValue), intent = taskIntent(intentValue), key = taskKey(keyValue); sourceExists(source);
+  if (intent.project) return (await import("./project-worker.js")).prepareProject(source, intent, key, nativeId);
   const env = await projectEnvironment(source.cwd), project = await sourceProject(source, env);
   if (await readGit(source.cwd, ["check-ref-format", "--branch", intent.branch], env) !== intent.branch) throw new TaskFailure(("Task branch must be an explicit new branch name"));
   const base = await readGit(source.cwd, ["rev-parse", "--verify", "--end-of-options", `${intent.base_ref}^{commit}`], env);
@@ -116,7 +117,7 @@ export async function prepareTask(sourceValue: TaskSource, intentValue: TaskInte
   if (await refExists(source.cwd, `refs/heads/${intent.branch}`, env)) throw new TaskFailure(("Task branch already exists; it will not be adopted"));
   return plan;
 }
-function localResult(plan: TaskPlan): TaskLocalResult {
+export function localResult(plan: TaskPlan): TaskLocalResult {
   const entries = prefix(plan.nativeFile, true), header = entries[0];
   const ownership = entries.find(entry => entry.type === "custom" && entry.customType === "matrix-bridge.task" && object(entry.data).proof === proof(plan));
   const boundary = entries.find(entry => entry.type === "custom" && entry.customType === "matrix-bridge.boundary" && object(entry.data).nativeId === plan.nativeId);
@@ -132,7 +133,9 @@ async function linkedAdmin(plan: TaskPlan, env: NodeJS.ProcessEnv): Promise<stri
   return admin;
 }
 export async function createTask(value: TaskPlan, afterEffect: (stage: string) => void = () => {}): Promise<TaskLocalResult> {
-  const plan = taskPlan(value), lock = await taskLock(plan.common, "setup");
+  const plan = taskPlan(value);
+  if (plan.intent.project) return (await import("./project-worker.js")).createProject(plan, afterEffect);
+  const lock = await taskLock(plan.common, "setup");
   try { return await createOwnedTask(plan, afterEffect); } finally { lock.release(); }
 }
 async function createOwnedTask(plan: TaskPlan, afterEffect: (stage: string) => void): Promise<TaskLocalResult> {
@@ -179,6 +182,9 @@ async function createOwnedTask(plan: TaskPlan, afterEffect: (stage: string) => v
     await mutateGit(plan, ["worktree", "unlock", "--", plan.worktree], env);
   }
   afterEffect("worktree"); sourceExists(plan.source);
+  return publishNativeHandoff(plan, afterEffect);
+}
+export async function publishNativeHandoff(plan: TaskPlan, afterEffect: (stage: string) => void): Promise<TaskLocalResult> {
   const sessionDir = dirname(plan.nativeFile);
   if (canonicalDestination(sessionDir) !== sessionDir) throw new TaskFailure("Frozen native history directory changed");
   if (!existsSync(sessionDir)) mkdirSync(sessionDir, { recursive: true, mode: 0o700 }); ownedDirectory(sessionDir);

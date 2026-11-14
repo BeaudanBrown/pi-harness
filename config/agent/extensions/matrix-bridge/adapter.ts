@@ -7,7 +7,7 @@ import { nativeControlResult, type ControlResult } from "./native-controls.js";
 import { nativeControl, type NativeControl } from "./interaction.js";
 import { readImage } from "./media.js";
 import { dispatchAllowed, type DispatchFence } from "./dispatch-fence.js";
-import { TaskWorkspaceSchema, taskKey } from "./task-contract.js";
+import { CreateProjectSchema, TaskWorkspaceSchema, taskKey } from "./task-contract.js";
 import { cancelAloop, registerAloopCheckpointDelegate } from "../aloop/lifecycle.js";
 
 export type AdapterConfig = { socket: string; roots: string[] };
@@ -235,14 +235,14 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
     parameters: RemoteCheckpointSchema,
     execute: async (_callId, params, _signal, _onUpdate, ctx) => recordCheckpoint(ctx, params),
   });
-  if (toolsAvailable) pi.registerTool({
-    name: "create_task_workspace", label: "Create Task Workspace",
-    description: "Request a separately approved new Git branch/linked worktree and saved native Pi conversation containing only the explicit handoff. The child remains idle; exact-intent retries reuse the frozen base and owned resources.",
-    promptSnippet: "Use for an independently approved task-workspace handoff, never to start task execution.",
+  if (toolsAvailable) for (const fresh of [false, true]) pi.registerTool({
+    name: fresh ? "create_project" : "create_task_workspace", label: fresh ? "Create Project" : "Create Task Workspace",
+    description: fresh ? "Request an independently approved fresh standalone Git repository under this host's configured projects root, README and initial main commit, saved idle native session and asynchronous Matrix room. No Pi process, terminal or model turn is launched. No remote, push or dependencies." : "Request a separately approved new Git branch/linked worktree and saved native Pi conversation containing only the explicit handoff. The child remains idle; exact-intent retries reuse the frozen base and owned resources.",
+    promptSnippet: fresh ? "Use to propose an approved fresh project with a saved idle session and Matrix room, never to launch Pi or start work." : "Use for an independently approved task-workspace handoff, never to start task execution.",
     promptGuidelines: ["Use this narrow operation, not a shell or a general host dispatcher, for a model-requested task workspace.",
       "The natural-language request, model claims and ordinary question votes are not approval. Each distinct intent needs a separate local human confirmation or the original configured-operator approval poll.",
       "Do not copy raw history, hidden output, credentials, pending approvals or uncommitted files into the summary. Do not begin work in the child; a later human instruction is separate intent."],
-    parameters: TaskWorkspaceSchema,
+    parameters: fresh ? CreateProjectSchema : TaskWorkspaceSchema,
     execute: async (callId, intent, signal, _onUpdate, ctx) => {
       const scope = current, peer = scope?.peer;
       if (!scope || !peer || !scope.registered || !valid(scope, peer) || ctx.sessionManager.getSessionId() !== scope.nativeId) throw Error("No registered native binding for task creation; local Pi remains available");
@@ -253,7 +253,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
       const origin = user?.type === "message" ? user.message as unknown as Record<string, unknown> : {};
       const metadata = object(origin.metadata ?? {});
       const surface = ctx.hasUI && typeof metadata["pi.bridge.event"] !== "string" ? "local" : "matrix";
-      let view = object(await peer.request("task.prepare", { intent, call: `${leaf ?? "root"}:${callId}`, surface }, 30000));
+      let view = object(await peer.request(fresh ? "project.prepare" : "task.prepare", { intent, call: `${leaf ?? "root"}:${callId}`, surface }, 30000));
       if (!live()) throw Error("Task proposal became stale before local confirmation; no local approval was submitted");
       const key = taskKey(view.key), request = taskKey(view.request);
       pi.appendEntry("matrix-bridge.task-request", { nativeId: scope.nativeId, key, request });
@@ -262,15 +262,15 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
         if (!live()) throw Error("Native context changed after approval publication. Inspect the original poll rather than assuming cancellation.");
       }
       if (surface === "local" && view.phase === "approval") {
-        const accepted = await ctx.ui.confirm("Create task workspace?", `${string(view.approvalText, 8000)}\n\nWorkspace: ${string(view.cwd)}\nNative history: ${string(view.file)}`, { signal });
+        const accepted = await ctx.ui.confirm(fresh ? "Create fresh project?" : "Create task workspace?", `${string(view.approvalText, 8000)}\n\nWorkspace: ${string(view.cwd)}\nNative history: ${string(view.file)}`, { signal });
         if (!live()) throw Error("Local task confirmation was withdrawn before submission");
         // The boolean comes from this native UI callback, never model arguments.
         view = object(await peer.request("task.confirm-local", { key, request, accepted }, 60000));
         if (!live()) throw Error("Native context changed after the decision; an approved creation may still complete. Inspect the original conversation rather than assuming cancellation.");
       }
-      const message = view.localReady === true ? `Task workspace and saved native session are ready. No child model turn was started. ${view.remotePending === true ? "Remote setup is pending." : "Remote setup has completed."} Use a separate fresh human instruction in the child when ready.` :
-        view.phase === "approval" ? "Task proposal recorded. The configured operator must independently approve the original poll (or reply directly with Approve/Cancel). No task execution was started." :
-        view.phase === "declined" ? "Task proposal declined or expired. No creation was dispatched by this decision." :
+      const message = view.localReady === true ? `${fresh ? "Fresh project" : "Task workspace"} and saved native session are ready. No child model turn was started. ${view.remotePending === true ? "Remote setup is pending." : "Remote setup has completed."} Use a separate fresh human instruction in the child when ready.` :
+        view.phase === "approval" ? `${fresh ? "Project" : "Task"} proposal recorded. The configured operator must independently approve the original poll (or reply directly with Approve/Cancel). No task execution was started.` :
+        view.phase === "declined" ? `${fresh ? "Project" : "Task"} proposal declined or expired. No creation was dispatched by this decision.` :
         typeof view.error === "string" ? string(view.error, 1000) : "Approved creation is still pending; partial resources are preserved. No child model turn was started.";
       revoke(scope); ctx.abort();
       return { content: [{ type: "text", text: message }], details: { ...view, waiting: true } };
