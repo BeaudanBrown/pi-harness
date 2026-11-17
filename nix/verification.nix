@@ -332,6 +332,9 @@ let
       and (.nativeScript | contains("pin-runtime.py") | not)
       and (.pinnedScript | contains("pin-runtime.py"))
       and (.nativeScript | contains("pi-managed-launch") or contains("native-test.env") | not)' ${bridgeModuleReport} >/dev/null
+    jq -e '(.projectRootAssertions | all) and .relativeProjectRootRejected' ${bridgeModuleReport} >/dev/null
+    project_config=$(jq -r '.projectRootService.serviceConfig.ExecStart | split(" --config ")[1] | split(" --credential-file ")[0]' ${bridgeModuleReport})
+    jq -e '.projectRoot == "/home/operator/projects" and .roots == ["%h/projects", "%h/collab"]' "$project_config" >/dev/null
     # The host helper is installed even when the remote bridge is disabled.
     export HOME="$TMPDIR/native-helper-home"
     export PI_BRIDGE_TMUX_SOCKET="$TMPDIR/native-helper-tmux.sock"

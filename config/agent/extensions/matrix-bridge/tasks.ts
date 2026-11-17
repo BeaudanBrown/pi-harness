@@ -19,8 +19,16 @@ export class TaskWorkspaces {
   private readonly common = new Map<string, Promise<void>>();
   private stopped = false;
   constructor(private readonly store: BridgeStore, private readonly runner: TaskRunner,
-    private readonly policy: { roots: string[]; operatorUserId?: string }, private readonly setupPending: (key: string) => boolean = () => true,
+    private readonly policy: { roots: string[]; projectRoot?: string; operatorUserId?: string }, private readonly setupPending: (key: string) => boolean = () => true,
     private readonly now: () => number = Date.now) {}
+  private projectRoot(): string {
+    const root = this.policy.projectRoot ?? (this.policy.roots.length === 1 ? this.policy.roots[0] : undefined);
+    if (!root) throw new TaskFailure("Fresh project creation requires projectRoot when multiple enrollment roots are configured");
+    const canonical = realpathSync(root);
+    if (canonical !== root) throw new TaskFailure("Configured projectRoot must be canonical");
+    allowedWorkspace(canonical, this.policy.roots);
+    return canonical;
+  }
   private source(binding: Binding): TaskSource {
     try {
       const saved = history(binding.file);
@@ -48,8 +56,7 @@ export class TaskWorkspaces {
   async prepare(binding: Binding, value: unknown, call: string, surface: "local" | "matrix", kind: "task" | "project" = "task"): Promise<TaskStatus> {
     if (this.stopped || !binding.enabled || surface === "matrix" && binding.archived) throw Error("Task proposal is unavailable for this binding");
     if (surface === "matrix" && !this.policy.operatorUserId) throw Error("Remote task approval requires a configured operator");
-    if (kind === "project" && this.policy.roots.length !== 1) throw new TaskFailure("Fresh project creation requires exactly one configured projects root");
-    const source = this.source(binding), intent = kind === "project" ? projectIntent(value, realpathSync(this.policy.roots[0]!)) : taskIntent(value);
+    const source = this.source(binding), intent = kind === "project" ? projectIntent(value, this.projectRoot()) : taskIntent(value);
     if (kind === "task" && intent.project) throw new TaskFailure("Use create_project for fresh repositories");
     const key = identity("task", source.key, JSON.stringify(intent));
     const old = this.store.task(key), nativeId = randomUUID();
@@ -107,7 +114,7 @@ export class TaskWorkspaces {
       try {
         const binding = this.store.binding(current.plan.source.key); if (!binding) throw Error("Missing source");
         this.source(binding); allowedWorkspace(dirname(current.plan.container), this.policy.roots);
-        if (current.plan.intent.project && (this.policy.roots.length !== 1 || realpathSync(this.policy.roots[0]!) !== current.plan.intent.project.root)) throw Error("Project root policy changed");
+        if (current.plan.intent.project && this.projectRoot() !== current.plan.intent.project.root) throw Error("Project root policy changed");
         if (current.approval?.via === "matrix" && current.approval.sender !== this.policy.operatorUserId) throw Error("Operator authority changed");
         this.store.saveTask({ ...current, phase: "creating", error: undefined });
         const result = await this.runner.create(current.plan, stage => {

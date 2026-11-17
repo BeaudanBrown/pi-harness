@@ -162,8 +162,19 @@
         bridgePinnedTest = bridgeModuleTest.extendModules {
           modules = [ { services.pi-harness.matrixBridge.retainRuntime = lib.mkForce true; } ];
         };
+        projectRootModuleTest = bridgeModuleTest.extendModules {
+          modules = [ { services.pi-harness.matrixBridge = {
+            roots = lib.mkForce [ "%h/projects" "%h/collab" ];
+            projectRoot = "/home/operator/projects";
+          }; } ];
+        };
         bridgeModuleReport = pkgs.writeText "pi-harness-native-bridge-module-test.json" (builtins.toJSON {
           assertions = map (item: item.assertion) bridgeModuleTest.config.assertions;
+          projectRootAssertions = map (item: item.assertion) projectRootModuleTest.config.assertions;
+          projectRootService = projectRootModuleTest.config.systemd.user.services.pi-matrix-bridge;
+          relativeProjectRootRejected = lib.any (item: !item.assertion) (projectRootModuleTest.extendModules {
+            modules = [ { services.pi-harness.matrixBridge.projectRoot = lib.mkForce "relative/projects"; } ];
+          }).config.assertions;
           services = builtins.attrNames bridgeModuleTest.config.systemd.user.services;
           service = bridgeModuleTest.config.systemd.user.services.pi-matrix-bridge;
           userLingers = bridgeModuleTest.config.users.users.operator.linger;

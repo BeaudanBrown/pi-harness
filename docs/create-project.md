@@ -22,10 +22,18 @@ The isolated owner `!pi` assistant does not acquire this tool.
 The name is a single 1–64-character ASCII component: first character alphanumeric,
 remaining characters alphanumeric, `_` or `-`. No caller-supplied host, arbitrary
 root, shell script, approval flag, base, remote, template or dependency command.
-This first version requires exactly one configured bridge workspace root. With
-multiple roots it refuses and reports the ambiguity rather than selecting a
-parent/source directory implicitly. The root must exist, be canonical and owned
-by the executing user. Creation is current-host only.
+The destination parent is `services.pi-harness.matrixBridge.projectRoot`, separate
+from the enrollment `roots`. Set it to an absolute canonical directory, such as
+`/home/operator/documents/projects`, within an enrollment root. Sessions under
+other enrollment roots can still use Matrix and propose a fresh project; creation
+goes only to the configured destination. This does not move or disable existing
+projects, sessions or rooms. The root must exist and be owned by the executing
+user. A changed root invalidates an approved creation's frozen destination.
+
+The option defaults to null: a sole enrollment root remains the compatibility
+fallback; multiple roots without an explicit destination refuse creation rather
+than guessing. No caller-supplied root is added to the tool. Creation is
+current-host only.
 
 ## Independent approval and effects
 
@@ -94,7 +102,10 @@ non-Git source, absent-path preparation, clean initial repository, explicit-only
 idle handoff, foreign/symlink/name refusal, duplicate and conflicting intents,
 lost receipts, actual helper SIGKILL at publication boundaries, changed partial
 work refusal, inherited Git config/hook isolation, local decline/stale decision,
-ambiguous root refusal and independent Matrix setup.
+ambiguous root refusal and independent Matrix setup. Multi-root tests cover an
+explicit destination with a source in another enrolled folder, unchanged enrollment
+roots, changed-policy refusal, foreign/symlink destinations, actual Pi local and
+Matrix approvals, and evaluated Nix daemon config/assertion wiring.
 
 `tests/bridge-adapter-real-pi.test.ts` exercises the actual packaged Pi tool with
 a fake provider: local UI cancel/approve, Matrix-origin proposal with no stranded

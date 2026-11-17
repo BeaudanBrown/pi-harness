@@ -266,9 +266,13 @@ human input. Failed/lost replies do not prove cancellation: preserve partial
 resources and retry only the exact approved intent.
 
 For a new standalone repository, `create_project` accepts only `name`,
-`description` and `handoff_summary`. It uses the current bridge host's single
-configured workspace root (multiple roots are refused, not guessed), and works
+`description` and `handoff_summary`. It uses the current bridge host's configured
+`matrixBridge.projectRoot` destination, independently of its enrollment `roots`, and works
 from a registered conversation even when its source directory is not Git.
+Set `services.pi-harness.matrixBridge.projectRoot` to an absolute canonical path
+within an enrollment root (for example `/home/operator/documents/projects`).
+When omitted, a sole enrollment root is used; multiple roots remain ambiguous
+and creation is refused. Existing enrollment locations are not narrowed.
 Independent local-human or configured Matrix-operator approval shows the exact
 host, destination, README, initial `main` commit and saved native history.
 The repository-local author is `Pi Project <pi-project@localhost>`; global Git

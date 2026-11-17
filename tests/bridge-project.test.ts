@@ -106,6 +106,33 @@ for (const stage of ["before-repo", "container", "before-session", "session"]) t
   const result = await createTask(plan); assert.equal(result.nativeId, f.nativeId); assert.equal(git(result.cwd, "rev-list", "--count", "HEAD"), "1");
   assert.equal(readdirSync(f.projects).filter(name => name === "new-project").length, 1);
 });
+test("explicit project root is independent of enrollment and frozen approvals cannot follow policy changes", async () => {
+  const f = fixture(), destination = join(f.projects, "creation-root"), changed = join(f.projects, "other-root");
+  mkdirSync(destination); mkdirSync(changed);
+  const store = new BridgeStore(join(f.projects, "policy.sqlite"), "host");
+  const policy = { roots: [f.source.cwd, destination, changed], projectRoot: destination };
+  const tasks = new TaskWorkspaces(store, { prepare: prepareTask, create: createTask }, policy);
+  try {
+    const binding = store.register({ ...f.source, title: "Other enrolled folder", boundary: null });
+    const proposal = await tasks.prepare(binding, f.input, "root-change", "local", "project");
+    assert.equal(proposal.cwd, join(destination, "new-project"));
+    assert.deepEqual(policy.roots, [f.source.cwd, destination, changed]);
+    policy.projectRoot = changed;
+    const refused = await tasks.confirmLocal(binding, proposal.key, proposal.request, true);
+    assert.equal(refused.localReady, false); assert.equal(refused.phase, "failed");
+    assert.equal(existsSync(join(destination, "new-project")), false); assert.equal(existsSync(join(changed, "new-project")), false);
+    policy.projectRoot = destination;
+    const next = await tasks.prepare(binding, { ...f.input, name: "approved-project" }, "valid-root", "local", "project");
+    const created = await tasks.confirmLocal(binding, next.key, next.request, true);
+    assert.equal(created.cwd, join(destination, "approved-project")); assert.equal(created.localReady, true);
+    const outside = new TaskWorkspaces(store, { prepare: prepareTask, create: createTask }, { roots: [f.source.cwd], projectRoot: destination });
+    await assert.rejects(outside.prepare(binding, f.input, "outside", "local", "project")); await outside.stop();
+    const alias = join(f.projects, "root-alias"); symlinkSync(destination, alias);
+    const unsafe = new TaskWorkspaces(store, { prepare: prepareTask, create: createTask }, { roots: [f.projects], projectRoot: alias });
+    await assert.rejects(unsafe.prepare(binding, f.input, "alias", "local", "project"), /canonical/); await unsafe.stop();
+  } finally { await tasks.stop(); store.close(); }
+});
+
 test("project uses existing independent approval and async organization without requiring source Git or launching a child", async t => {
   let now = Date.now(); t.mock.method(Date, "now", () => now);
   const f = fixture(), store = new BridgeStore(join(f.projects, "bridge.sqlite"), "host"), http = new SetupHttp();
@@ -129,7 +156,7 @@ test("project uses existing independent approval and async organization without 
     assert.equal(store.bindings().length, 2);
     assert.equal(readFileSync(child.file, "utf8").includes('"role":"user"'), false);
     const ambiguous = new TaskWorkspaces(store, { prepare: prepareTask, create: createTask }, { roots: [f.projects, f.source.cwd] });
-    await assert.rejects(ambiguous.prepare(binding, f.input, "third", "local", "project"), /exactly one/); await ambiguous.stop();
+    await assert.rejects(ambiguous.prepare(binding, f.input, "third", "local", "project"), /requires projectRoot/); await ambiguous.stop();
     assert.deepEqual(taskPlan(store.task(fresh.key)!.plan), store.task(fresh.key)!.plan);
   } finally { await tasks.stop(); await organization.stop(); store.close(); }
 });

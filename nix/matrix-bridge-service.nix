@@ -25,7 +25,7 @@ let
     exec ${cfg.package}/bin/pi-task-workspace "$@"
   '';
   daemonConfig = pkgs.writeText "pi-matrix-bridge.json" (builtins.toJSON {
-    inherit (cfg) hostId stateDirectory socket roots homeserver botUserId operatorUserId ignoredSenderUserIds hostSpace;
+    inherit (cfg) hostId stateDirectory socket roots projectRoot homeserver botUserId operatorUserId ignoredSenderUserIds hostSpace;
     localHelper = "${helper}/bin/pi-session";
     taskHelper = "${taskHelper}/bin/pi-task-workspace";
   });
@@ -46,6 +46,11 @@ in {
     user = mkOption { type = types.nullOr types.str; default = null; };
     hostId = mkOption { type = types.str; default = hostName; description = "Stable host identity, preserved across updates."; };
     roots = mkOption { type = types.listOf types.str; default = [ ]; description = "Interactive workspaces eligible for asynchronous enrollment; unrelated local Pi remains available."; };
+    projectRoot = mkOption {
+      type = types.nullOr types.str;
+      default = null;
+      description = "Absolute canonical destination parent for create_project, within an enrollment root. Does not change enrollment roots. Null uses the sole enrollment root; multiple roots without this setting refuse creation.";
+    };
     sessionRoots = mkOption {
       type = types.listOf types.str;
       default = if sessionDirectory == null then [ "%h/.pi/agent/sessions" ] else [ sessionDirectory ];
@@ -67,6 +72,12 @@ in {
     retainRuntime = mkOption { type = types.bool; default = true; description = "Root ordinary Pi and finite task-helper closures for their running lifetimes; upgrades never replace live Pi."; };
   };
   assertions = [
+    {
+      # Enrollment roots may contain %h; their runtime expansion/canonical
+      # containment check cannot be reproduced with raw option strings here.
+      assertion = !cfg.enable || cfg.projectRoot == null || lib.hasPrefix "/" cfg.projectRoot;
+      message = "Matrix bridge projectRoot must be absolute; canonical enrollment containment is checked at runtime.";
+    }
     {
       assertion = !cfg.enable || (cfg.package != null && cfg.user != null && cfg.environmentFile != null && cfg.homeserver != null && cfg.botUserId != null && cfg.operatorUserId != null && cfg.roots != [ ]);
       message = "services.pi-harness.matrixBridge requires a packaged bridge, user, credential file, Matrix identities, and workspace roots.";

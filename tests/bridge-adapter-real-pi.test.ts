@@ -448,7 +448,7 @@ test("actual Pi create_project uses independent local and Matrix approvals and s
   assert.ok(process.env.PI_TASK_TEST_HELPER);
   writeFileSync(wrapper, `#!${process.execPath}\nimport {spawn} from 'node:child_process'; const child=spawn(${JSON.stringify(process.env.PI_TASK_TEST_HELPER)},process.argv.slice(2),{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(root)},PI_TASK_SESSION_DIRECTORY:${JSON.stringify(history)}}});child.on('error',()=>process.exit(1));child.on('close',code=>process.exit(code??1));\n`, { mode: 0o700 });
   const http = new InteractionHttp(); let opens = 0;
-  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root], operatorUserId: USER }, http.matrix, async () => { opens++; throw Error("Project creation must never launch Pi"); }, localTasks(wrapper));
+  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [cwd, root], projectRoot: root, operatorUserId: USER }, http.matrix, async () => { opens++; throw Error("Project creation must never launch Pi"); }, localTasks(wrapper));
   await relay.start(false); relay.store.intake("ready", []);
   const live = piProcess(root, file, extension, [], { cwd });
   const idle = () => until(async () => !((await live.send("get_state")).data as { isStreaming: boolean }).isStreaming);

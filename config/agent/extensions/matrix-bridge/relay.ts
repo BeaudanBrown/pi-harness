@@ -12,7 +12,7 @@ import { TaskWorkspaces, type TaskRunner } from "./tasks.js";
 import { taskKey } from "./task-contract.js";
 import { archiveCommand } from "./interaction.js";
 
-export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; operatorUserId?: string; hostSpace?: boolean };
+export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; projectRoot?: string; operatorUserId?: string; hostSpace?: boolean };
 type Attachment = { peer: Peer; idle: boolean; key: string; stopping?: boolean };
 const running = new Set<string>();
 /** Single daemon, native-session routing and transactional delivery only. */

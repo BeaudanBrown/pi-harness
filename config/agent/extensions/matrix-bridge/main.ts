@@ -22,6 +22,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   if (!Array.isArray(raw.roots) || !raw.roots.length || !Array.isArray(raw.ignoredSenderUserIds)) throw Error("Invalid bridge roots or ignored users");
   if (raw.hostSpace !== undefined && typeof raw.hostSpace !== "boolean") throw Error("Invalid host Space preference");
   const config: RelayConfig = { hostId: string(raw.hostId, 128), stateDirectory: hostPath(string(raw.stateDirectory)), socket: hostPath(string(raw.socket)), roots: raw.roots.map(root => hostPath(string(root))), operatorUserId: string(raw.operatorUserId, 255), hostSpace: raw.hostSpace !== false };
+  if (raw.projectRoot != null) config.projectRoot = hostPath(string(raw.projectRoot));
   refuseLegacyStore(config.stateDirectory);
   const client = new BridgeMatrix(new MatrixHttp({ homeserver: string(raw.homeserver), accessToken: credential(readFileSync(args[3]!, "utf8")) }, fetch, { maxAttempts: 1 }),
     string(raw.botUserId, 255), new Set(raw.ignoredSenderUserIds.map(sender => string(sender, 255))));
