@@ -40,7 +40,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
   const idle = (scope: Scope) => scope.ctx.isIdle() && !scope.ctx.hasPendingMessages() && !scope.controlPending;
   const status = (scope: Scope, message: string) => { if (valid(scope)) scope.ctx.ui.setStatus("matrix-bridge", message); };
   const remoteStatus = (scope: Scope, view: Record<string, unknown>) => {
-    status(scope, view.syncError || view.error ? "Bridge connected · remote delivery needs attention" : view.intakeReady !== true ? "Matrix connected · fresh sync pending; input not yet enabled" : !view.room ? "Bridge connected · room setup pending" : view.archived ? "Matrix connected · archived (organization only)" : "Matrix bridge connected");
+    status(scope, view.syncError ? "Matrix sync failed · new messages delayed" : view.error ? "Matrix delivery problem in this room" : view.intakeReady !== true ? "Matrix connected · fresh sync pending; input not yet enabled" : !view.room ? "Bridge connected · room setup pending" : view.archived ? "Matrix connected · archived (organization only)" : "Matrix bridge connected");
   };
   const attach = async (scope: Scope, cfg: AdapterConfig): Promise<void> => {
     if (!valid(scope)) return;

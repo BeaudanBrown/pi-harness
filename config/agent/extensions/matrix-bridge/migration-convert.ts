@@ -305,17 +305,6 @@ export function convert(snapshot: Snapshot): Conversion {
     }
   } else result.report.findings.push("Durable inbox/cursor missing; explicit cutover review required");
   if (!result.cursor && [...cursors.values()].some(cursor => cursor !== undefined)) throw Error("Established legacy room cursors require a coherent global inbox cutoff; no fresh-sync reset is permitted");
-  // Preserve each old room's intake cutoff. Recover an older interval under the
-  // initial hold before advancing to the first new sync; never skip it merely
-  // because another room advanced the old global inbox cursor.
-  for (const binding of result.bindings) if (binding.room) {
-    const key = (result.progress[`migration-binding:${binding.key}`] as Row).conversation as string;
-    const since = cursors.get(key);
-    if (since !== undefined) {
-      result.progress[`room-cursor:${binding.room}`] = since;
-      if (result.cursor && since !== result.cursor) result.progress[`gap:${binding.room}`] = { from: since, to: result.cursor, tail: [], tokens: [since] };
-    }
-  }
   const outbox = optional("notice-outbox.json");
   if (outbox && outbox.version !== 1) throw Error("Unsupported notice outbox");
   let unresolvedNotices = 0;

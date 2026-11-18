@@ -72,6 +72,9 @@ export class BridgeStore {
           CREATE TABLE IF NOT EXISTS images(input TEXT NOT NULL REFERENCES inputs(id), offset INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(input,offset));
           CREATE TABLE IF NOT EXISTS tasks(key TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), phase TEXT NOT NULL, value TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS task_phase ON tasks(phase);`);
+        // Retire old pagination checkpoints; skip their incomplete interval at the next sync.
+        for (const row of this.db.prepare("SELECT b.value FROM bindings b JOIN progress p ON p.key='gap:'||b.room WHERE p.value!='null'").all()) this.saveBinding({ ...JSON.parse(String(row.value)), resumePending: true });
+        this.db.exec("DELETE FROM progress WHERE key GLOB 'gap:*' OR key GLOB 'room-cursor:*'");
         this.setMeta("host", hostId); this.setMeta("version", "5");
         // A runtime writer opening an imported ledger conservatively closes the
         // pre-cutover rollback window. Read-only migration checks do not use us.
@@ -153,15 +156,19 @@ export class BridgeStore {
     this.saveBinding({ ...binding, room });
   }
   /** Raw intake and cursor are atomic; room membership is checked before authorization/dispatch. */
-  intake(cursor: string, events: RawEvent[], checkpoints: Record<string, unknown> = {}): void {
+  intake(cursor: string, events: RawEvent[], skipped: readonly string[] = []): void {
     this.atomic(() => {
       let position = Number(this.getMeta("position") ?? 0);
       for (const input of events) {
         const binding = this.byRoom(input.room); if (!binding) continue;
-        this.db.prepare("INSERT OR IGNORE INTO inputs(id,binding,position,event,prompt,state,interaction,held,archive_revision) VALUES (?,?,?,?,NULL,'received',?,?,?)")
-          .run(input.id, binding.key, ++position, JSON.stringify(input.event), null, this.connected(binding.key) && !binding.resumePending ? 0 : 1, binding.archiveRevision ?? 0);
+        this.db.prepare("INSERT OR IGNORE INTO inputs(id,binding,position,event,prompt,state,interaction,held,archive_revision) VALUES (?,?,?,?,NULL,?,?,?,?)")
+          .run(input.id, binding.key, ++position, JSON.stringify(input.event), skipped.includes(binding.key) ? "ignored" : "received", null, this.connected(binding.key) && !binding.resumePending ? 0 : 1, binding.archiveRevision ?? 0);
       }
-      for (const [key, value] of Object.entries(checkpoints)) this.saveProgress(key, value);
+      for (const key of skipped) {
+        this.materialize(key, `missed:${cursor}`, [{ type: "m.room.message", content: { msgtype: "m.notice", body: "Some Matrix messages may have been missed. Nothing from that interval will be processed. Please resend any instruction or vote that still matters.", "m.mentions": {} } }]);
+        const binding = this.binding(key)!;
+        if (binding.resumePending) this.saveBinding({ ...binding, resumePending: false });
+      }
       this.setMeta("position", String(position)); this.setMeta("cursor", cursor);
     });
   }
@@ -238,9 +245,6 @@ export class BridgeStore {
   takeInput(key: string, expectedId?: string): Input | undefined {
     const id = expectedId ?? this.nextInput(key)?.id;
     return id ? this.takeBatch(key, [id])[0] : undefined;
-  }
-  knowsEvent(id: string, room: string): boolean {
-    return Boolean(this.db.prepare("SELECT 1 FROM inputs JOIN bindings ON bindings.key=inputs.binding WHERE inputs.id=? AND bindings.room=?").get(id, room));
   }
   ownsInput(key: string, id: string, sender: string): boolean {
     const row = this.db.prepare("SELECT prompt FROM inputs WHERE binding=? AND id=? AND prompt IS NOT NULL").get(key, id);

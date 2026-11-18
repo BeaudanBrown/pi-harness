@@ -160,7 +160,7 @@ export class BridgeRelay {
   }
   private status(binding: Binding): ObjectValue {
     const current = this.attached.get(binding.key);
-    return { ...binding, intakeReady: current?.ready === true, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
+    return { ...binding, intakeReady: current?.ready === true, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null };
   }
   private async syncLoop(): Promise<void> {
     while (!this.stopSignal.signal.aborted) {
@@ -172,17 +172,16 @@ export class BridgeRelay {
       });
     }
   }
-  async syncOnce(): Promise<Array<{ room: string; error: string }>> {
+  async syncOnce(): Promise<void> {
     try {
       // A newly connected adapter first observes a complete sync boundary.
       // Backlog received before that boundary stays held, never replayed.
       const connections = [...this.attached.values()];
-      const errors = await syncIntoStore(this.matrix, this.store, this.stopSignal.signal);
-      if (!errors.length) for (const connection of connections) {
+      await syncIntoStore(this.matrix, this.store, this.stopSignal.signal);
+      for (const connection of connections) {
         if (this.attached.get(connection.key) === connection) connection.ready = true;
       }
-      this.syncError = errors.length ? `${errors.length} room history interval(s) pending` : undefined;
-      return errors;
+      this.syncError = undefined;
     } catch (error) { this.syncError = error instanceof Error ? error.message : "Matrix sync failed"; throw error; }
   }
   async pump(): Promise<void> {
@@ -203,8 +202,8 @@ export class BridgeRelay {
         if (imported && this.store.progress(`migration-room-verified:${binding.room}`) !== imported.source) {
           this.failures.set(binding.key, "Original imported room identity is not yet verified; local Pi remains available"); return;
         }
-        const room = binding.room, gap = this.store.progress(`gap:${room}`);
-        for (const input of !gap ? this.store.received(binding.key) : []) if (historyReady || archiveCommand(input.event) !== undefined) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
+        const room = binding.room;
+        for (const input of this.store.received(binding.key)) if (historyReady || archiveCommand(input.event) !== undefined) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
           this.tasks ? (interaction, accepted) => this.tasks!.answer(binding, input, interaction, accepted) : undefined,
           archived => {
             if (input.event.sender !== this.config.operatorUserId) { this.store.finishInput(binding.key, input.id, "Only the configured operator may archive or restore this conversation."); return; }
@@ -212,7 +211,7 @@ export class BridgeRelay {
             catch { this.store.finishInput(binding.key, input.id, "Archive policy changed during this request. Check !status and issue a fresh command."); }
           }, () => this.attached.get(binding.key)?.ready === true);
         binding = this.store.binding(binding.key)!;
-        if (historyReady && !gap && binding.enabled) {
+        if (historyReady && binding.enabled) {
           const attachment = this.attached.get(binding.key), queued = this.store.queuedInputs(binding.key);
           // Controls bypass waiting chat so abort remains usable while busy.
           const control = queued.find(input => input.prompt?.control === "abort") ?? queued.find(input => input.prompt?.control);

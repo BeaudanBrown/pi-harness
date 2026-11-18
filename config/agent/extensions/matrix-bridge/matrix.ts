@@ -17,7 +17,6 @@ export class BridgeMatrix {
     return string(result.event_id, 255);
   }
 }
-type Gap = { from: string; to: string; tail: string[]; tokens: string[] };
 function events(room: string, value: unknown): RawEvent[] {
   if (!Array.isArray(value)) throw Error("Malformed Matrix timeline");
   return value.map(item => {
@@ -26,63 +25,22 @@ function events(room: string, value: unknown): RawEvent[] {
     return { id, room, event };
   });
 }
-/** Independent room intake; a broken history interval cannot hold other rooms hostage.
- * Each recovered page is durable before its resume token changes. The global
- * sync cursor moves only when every relevant room covers the whole interval.
- */
-export async function syncIntoStore(matrix: BridgeMatrix, store: BridgeStore, signal?: AbortSignal): Promise<Array<{ room: string; error: string }>> {
+/** Commit each sync once. Never reconstruct missing commands from room history. */
+export async function syncIntoStore(matrix: BridgeMatrix, store: BridgeStore, signal?: AbortSignal): Promise<void> {
   const since = store.cursor(), bindings = store.bindings();
   const query = new URLSearchParams({ timeout: "30000", filter: JSON.stringify({ room: { timeline: { limit: 100 } } }) });
   if (since) query.set("since", since);
   const { nextBatch, response } = await matrix.http.sync(query, signal);
-  if (!since) { store.intake(nextBatch, []); for (const binding of bindings) if (binding.resumePending) store.resumeAfterSync(binding.key, binding.archiveRevision ?? 0); return []; } // Establish a live boundary, never backfill room history.
-  const joined = object(object(object(response).rooms ?? {}).join ?? {});
-  const errors: Array<{ room: string; error: string }> = [];
-  let complete = true;
-  // Historical disabled/retired imports are not live consumers. In particular,
-  // a room the old bot left cannot pin the host's new global sync cursor.
-  await Promise.all(bindings.filter(binding => binding.room && !store.enrollmentBlocked(binding.file, binding.nativeId)).map(async binding => {
-    const room = binding.room!, checkpoint = `room-cursor:${room}`, gapKey = `gap:${room}`;
+  const joined = object(object(object(response).rooms ?? {}).join ?? {}), incoming: RawEvent[] = [], skipped: string[] = [];
+  for (const { room, key, file, nativeId, resumePending } of bindings) {
+    if (!room || store.enrollmentBlocked(file, nativeId)) continue;
+    if (resumePending) skipped.push(key); // An older ledger needs a fresh boundary.
+    if (!since || !Object.hasOwn(joined, room)) continue;
     try {
-      const timeline = object(object(joined[room] ?? {}).timeline ?? { events: [] });
-      const tail = events(room, timeline.events ?? []);
-      let gap = store.progress<Gap | null>(gapKey);
-      let from = store.progress<string>(checkpoint) ?? since;
-      if (from === nextBatch && !gap) { if (binding.resumePending) store.resumeAfterSync(binding.key, binding.archiveRevision ?? 0); return; }
-      if (!gap && timeline.limited === true) {
-        gap = { from, to: nextBatch, tail: tail.map(event => event.id), tokens: [from] };
-        store.saveProgress(gapKey, gap);
-      }
-      if (gap) {
-        // Bounded work per iteration, not a permanent cap on recoverable history.
-        for (let page = 0; page < 4; page++) {
-          const params = new URLSearchParams({ from: gap.from, to: gap.to, dir: "f", limit: "100" });
-          const result = object(await matrix.http.request("GET", `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/messages?${params}`, undefined, AbortSignal.timeout(8000)));
-          const end = string(result.end, 16384);
-          if (result.start !== gap.from || !Array.isArray(result.chunk) || result.chunk.length > 100) throw Error("Malformed Matrix history page");
-          const pageEvents = events(room, result.chunk);
-          if (end !== gap.to && gap.tokens.includes(end)) throw Error("Matrix history pagination stalled");
-          // Keep a bounded cycle detector. Repeated event IDs still never dispatch twice.
-          gap = { ...gap, from: end, tokens: [...gap.tokens.slice(-31), end] };
-          store.intake(since, pageEvents, { [gapKey]: gap });
-          if (end === gap.to) {
-            if (gap.tail.some(id => !store.knowsEvent(id, room))) throw Error("Matrix history did not cover the sync tail; cursor preserved");
-            from = gap.to;
-            store.intake(since, [], { [checkpoint]: from, [gapKey]: null });
-            gap = null;
-            break;
-          }
-        }
-        if (gap || from !== nextBatch) { complete = false; return; }
-      } else store.intake(since, tail, { [checkpoint]: nextBatch });
-      // Only a snapshot begun after this restore can release its intake fence.
-      // Previously received events keep their held bit permanently.
-      if (binding.resumePending) store.resumeAfterSync(binding.key, binding.archiveRevision ?? 0);
-    } catch (error) {
-      complete = false;
-      errors.push({ room, error: error instanceof Error ? error.message : "Matrix intake failed" });
-    }
-  }));
-  if (complete) store.intake(nextBatch, []);
-  return errors;
+      const timeline = object(object(joined[room]).timeline ?? { events: [] });
+      if (timeline.limited === true && !resumePending) skipped.push(key);
+      incoming.push(...events(room, timeline.events));
+    } catch { if (!skipped.includes(key)) skipped.push(key); } // Reject the whole malformed room interval, never a partial command stream.
+  }
+  store.intake(nextBatch, incoming, skipped);
 }

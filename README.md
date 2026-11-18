@@ -31,7 +31,10 @@ literal attributed custom-message content, batched in arrival order when Pi is
 fully idle; slash commands and template/skill expansion remain terminal-only.
 Local steering remains native. Abort/disconnect holds pending remote input
 without replay or a release interface. Offline input is rejected; a reconnect
-first catches up Matrix sync without delivering the backlog.
+first establishes a fresh Matrix sync boundary without delivering the backlog.
+If a room timeline is incomplete, the bridge skips that interval and queues one
+notice in that room asking participants to resend. Other rooms and previously
+queued chat are unaffected. There is no history backfill or manual reset.
 
 `ask_user` publishes Matrix choice polls or replyable notices without gating
 other input. First eligible answer wins; unanswered polls remain answerable as

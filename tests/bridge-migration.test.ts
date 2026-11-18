@@ -320,28 +320,26 @@ test("imported delivery waits only for exact original room ownership, not hierar
   assert.ok([...http.sent.values()].some(event => String(event.content.body).includes("never dispatched")));
 });
 
-test("original room cutoffs recover under the cutover hold; departed disabled rooms cannot pin the new cursor", async t => {
+test("imported rooms skip cutover input and accept fresh events without fetching history", async t => {
   const f = imported(t), store = new BridgeStore(f.db, "fixture"); t.after(() => store.close());
   let round = 0; const calls: string[] = [];
   const event = (id: string) => ({ event_id: id, type: "m.room.message", sender: "@operator:example.org", content: { msgtype: "m.text", body: id } });
   const http = new MatrixHttp({ homeserver: "https://example.org", accessToken: "fixture" }, (async (value: URL | RequestInfo) => {
     const url = new URL(String(value)); calls.push(url.pathname);
     if (url.pathname.endsWith("/sync")) {
-      round++; return new Response(JSON.stringify({ next_batch: round > 2 ? "fresh-sync" : "cutover-sync", rooms: { join: { "!live:example.org": { timeline: { events: [event(round > 2 ? "$after-cutover" : "$during-cutover")], limited: false } } } } }));
+      round++; return new Response(JSON.stringify({ next_batch: round > 1 ? "fresh-sync" : "cutover-sync", rooms: { join: { "!live:example.org": { timeline: { events: [event(round > 1 ? "$after-cutover" : "$during-cutover")], limited: false } } } } }));
     }
-    assert.ok(url.pathname.endsWith("/messages"));
-    assert.ok(!url.pathname.includes("retired") && !url.pathname.includes("disabled"), "do not request history in historical departed rooms");
-    return new Response(JSON.stringify({ start: url.searchParams.get("from"), end: url.searchParams.get("to"), chunk: url.pathname.includes("live") ? [event("$before-global-cutoff")] : [] }));
+    throw Error("Unexpected history request");
   }) as typeof fetch, { maxAttempts: 1 });
   const matrix = new BridgeMatrix(http, "@bot:example.org"), live = store.bindings().find(row => row.nativeId === "native-live")!;
-  assert.deepEqual(await syncIntoStore(matrix, store), []); assert.equal(store.cursor(), "original-sync-cutoff");
   assert.equal(store.binding(live.key)!.resumePending, true);
-  assert.deepEqual(await syncIntoStore(matrix, store), []); assert.equal(store.cursor(), "cutover-sync");
+  await syncIntoStore(matrix, store); assert.equal(store.cursor(), "cutover-sync");
   assert.equal(store.binding(live.key)!.resumePending, false);
   assert.ok(store.received(live.key).filter(row => row.id !== "$after-cutover").every(row => row.held));
-  assert.deepEqual(await syncIntoStore(matrix, store), []); assert.equal(store.cursor(), "fresh-sync");
+  await syncIntoStore(matrix, store); assert.equal(store.cursor(), "fresh-sync");
   assert.equal(store.received(live.key).find(row => row.id === "$after-cutover")!.held, undefined);
-  assert.equal(calls.filter(path => path.endsWith("/messages")).length, 3);
+  assert.equal(calls.length, 2);
+  assert.equal(store.outputs(live.key, "missed:cutover-sync").length, 1);
 });
 
 test("ambiguous copied native identities require an explicit current-file map, never a guessed active binding", () => {
