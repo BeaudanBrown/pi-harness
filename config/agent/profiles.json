@@ -13,7 +13,6 @@
         "nix-runtime",
         "lsp",
         "codex-fast",
-        "tmux-cursor-focus",
         "sesh",
         "agentgraph",
         "agent-profiles"
@@ -131,7 +130,7 @@
   "variants": {
     "managed-project": {
       "base": "engineering-full",
-      "excludeExtensions": ["pi-r", "agentgraph", "tmux-cursor-focus", "sesh"],
+      "excludeExtensions": ["pi-r", "agentgraph", "sesh"],
       "excludeSkills": ["agentgraph"],
       "excludePrompts": ["agentgraph"],
       "inactiveTools": ["diagram_show"]

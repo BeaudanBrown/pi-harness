@@ -68,7 +68,7 @@ test("implementation, coordinator, local, and managed variants preserve their ro
 	const managed = resolveAgentProfile("managed-project");
 	assert.equal(managed.toolPolicy, full.toolPolicy);
 	assert.ok(full.extensions.includes("lsp"));
-	assert.deepEqual(managed.extensions, full.extensions.filter((name) => !["pi-r", "agentgraph", "tmux-cursor-focus", "sesh"].includes(name)));
+	assert.deepEqual(managed.extensions, full.extensions.filter((name) => !["pi-r", "agentgraph", "sesh"].includes(name)));
 	for (const extension of ["web-search", "github-issues", "aloop", "diagram-tools", "worker-runner", "review-agents", "nix-runtime", "lsp"]) {
 		assert.ok(managed.extensions.includes(extension), `managed project retains ${extension}`);
 	}

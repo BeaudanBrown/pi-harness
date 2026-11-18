@@ -23,7 +23,6 @@ layout remains external and uses regular tmux through fixed host-owned actions.
 - a small web search extension under `config/agent/extensions/web-search`
 - a Nix runtime guidance extension under `config/agent/extensions/nix-runtime`
 - a Codex fast-mode extension under `config/agent/extensions/codex-fast`
-- a tmux cursor focus extension under `config/agent/extensions/tmux-cursor-focus`
 - a tmux/fzf session picker command under `config/agent/extensions/sesh`
 - a delegated noisy-command runner under `config/agent/extensions/worker-runner`
 - dedicated parallel code-review agents under `config/agent/extensions/review-agents`
@@ -407,25 +406,10 @@ launch and records only bounded private executable-resolution evidence. Python,
 compilers, and project dependencies still belong to the repository environment.
 The lean local and coordinator launchers do not explicitly inject this baseline.
 
-## Tmux Cursor Focus
+## Cursor in tmux
 
-The included `tmux-cursor-focus` extension hides Pi's software-rendered editor
-cursor when the current tmux pane loses focus, then restores it when focus
-returns. It is based on the approach used by the community
-`pi-tmux-cursor-focus` extension but is vendored as a small harness-owned
-extension so the packaged Pi wrapper does not depend on mutable `pi install`
-state or an unpinned npm package.
-
-It only activates when `TMUX_PANE` is set. It uses tmux `pane-focus-in` and
-`pane-focus-out` hooks for the current pane, so tmux focus events must be
-enabled:
-
-```tmux
-set -g focus-events on
-```
-
-The `nix-dotfiles` tmux module already sets Home Manager's `focusEvents = true`,
-which generates the required tmux setting.
+Set `"showHardwareCursor": true` in `~/.pi/agent/settings.json` to use the
+terminal cursor. tmux displays it in the focused pane; no Pi focus hooks are needed.
 
 ## Sesh Session Picker
 
