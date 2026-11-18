@@ -1,6 +1,6 @@
 import { object, string } from "./wire.js";
 
-export type NativeControl = "help" | "status" | "start" | "stop" | "abort" | "model" | "thinking" | "compact";
+export type NativeControl = "help" | "status" | "abort" | "model" | "thinking" | "compact";
 export type InteractionSpec = { kind: "question" | "model" | "thinking" | "approval"; question: string; options?: string[]; nativeEntry?: string; approval?: string };
 export type Interaction = InteractionSpec & { id: string; binding: string; source: string; state: "active" | "answered" | "cancelled"; answer?: string };
 export const POLL_START = "org.matrix.msc3381.poll.start", POLL_RESPONSE = "org.matrix.msc3381.poll.response", POLL_END = "org.matrix.msc3381.poll.end";
@@ -53,10 +53,9 @@ export function pollVote(type: unknown, value: unknown): { eventId: string; inde
 }
 export function nativeControl(text: string): { name: NativeControl; argument?: string } | "unknown" | undefined {
   const match = /^!([^\s]+)(?:\s+([\s\S]*))?$/.exec(text.trim()); if (!match) return;
-  if (match[1] === "follow-up" || match[1] === "steer") return;
-  if (!["help", "status", "start", "stop", "abort", "model", "thinking", "compact"].includes(match[1]!)) return "unknown";
+  if (!["help", "status", "abort", "model", "thinking", "compact"].includes(match[1]!)) return "unknown";
   const argument = match[2]?.trim();
   if (argument && !["model", "thinking", "compact"].includes(match[1]!)) return "unknown";
   return { name: match[1] as NativeControl, ...(argument ? { argument } : {}) };
 }
-export const CONTROL_HELP = "Native Pi controls: !help, !status, !start (open idle, no model turn), !stop, !abort, !model [provider/model or filter], !thinking [level], !compact [focus], !follow-up TEXT, !steer TEXT. The configured operator may use !archive / !restore (no stop, deletion or replay; fresh sync required between policy changes). Local UI: /bridge-archive /bridge-restore. Local Pi remains available without Matrix.";
+export const CONTROL_HELP = "Native Pi controls: !help, !status, !abort, !model [provider/model or filter], !thinking [level], !compact [focus]. Chat is literal and delivered in idle batches. Controls are best effort; offline instructions are rejected. The configured operator may use !archive / !restore for organization only. Local UI: /bridge-archive /bridge-restore. Open Pi locally; Matrix never starts or stops processes.";

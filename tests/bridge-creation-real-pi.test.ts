@@ -1,0 +1,137 @@
+import assert from "node:assert/strict";
+import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
+import { appendFileSync, chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import test from "node:test";
+import { BridgeStore } from "../config/agent/extensions/matrix-bridge/store.js";
+import { BridgeRelay } from "../config/agent/extensions/matrix-bridge/relay.js";
+import { BridgeMatrix } from "../config/agent/extensions/matrix-bridge/matrix.js";
+import { MatrixHttp } from "../config/agent/extensions/matrix-shared/http.js";
+import { InteractionHttp, ROOM, USER, textEvent } from "./fixtures/matrix-bridge/interaction-http.js";
+import { POLL_START, POLL_RESPONSE } from "../config/agent/extensions/matrix-bridge/interaction.js";
+import { connect, object, Peer, remoteText } from "../config/agent/extensions/matrix-bridge/wire.js";
+import { imageInfo } from "../config/agent/extensions/matrix-bridge/media.js";
+import { localTasks } from "../config/agent/extensions/matrix-bridge/local-process.js";
+
+import { piProcess, until } from "./bridge-pi-fixture.js";
+test("real Pi task tool requires a fresh native UI or operator poll and opens its child idle until new human input", { timeout: 60000 }, async () => {
+  for (const name of ["PI_TASK_TEST_HELPER", "PI_TASK_TEST_GIT", "PI_TEST_TMUX"]) assert.ok(process.env[name], `${name} is mandatory native task evidence`);
+  const root = mkdtempSync(join(tmpdir(), "bridge-native-task-")), cwd = join(root, "project"), file = join(root, "source.jsonl"), socket = join(root, "bridge.sock"), history = join(root, "task-history");
+  const helperHome = join(root, "helper-home"), parentLog = join(root, "parent-log"), childLog = join(root, "child-log"); mkdirSync(cwd); mkdirSync(helperHome);
+  const git = (args: string[]) => execFileSync(process.env.PI_TASK_TEST_GIT!, ["-C", cwd, ...args], { encoding: "utf8", env: { ...process.env, HOME: helperHome, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" }, stdio: ["ignore", "pipe", "pipe"] }).trim();
+  git(["init", "-q"]); git(["config", "user.name", "Native fixture"]); git(["config", "user.email", "native@example.invalid"]); git(["config", "commit.gpgsign", "false"]);
+  writeFileSync(join(cwd, "tracked"), "committed\n"); git(["add", "tracked"]); git(["commit", "-qm", "base"]);
+  writeFileSync(file, [ { type: "session", version: 3, id: "task-source", cwd, timestamp: new Date().toISOString() }, { type: "custom", id: "private", parentId: null, customType: "private", data: "SOURCE_SECRET_AND_PENDING_APPROVAL" } ].map(value => JSON.stringify(value) + "\n").join(""));
+  const extension = join(root, "bridge.ts"), wrapper = join(root, "task-wrapper.mjs");
+  writeFileSync(extension, `import {installAdapter} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/adapter.ts"))}; export default pi => installAdapter(pi,{config:${JSON.stringify({ socket, roots: [root] })},interactive:()=>true});`);
+  writeFileSync(wrapper, `#!${process.execPath}\nimport {spawn} from 'node:child_process'; const child=spawn(${JSON.stringify(process.env.PI_TASK_TEST_HELPER)},process.argv.slice(2),{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(helperHome)},XDG_CONFIG_HOME:${JSON.stringify(join(root, "helper-config"))},XDG_CACHE_HOME:${JSON.stringify(join(root, "helper-cache"))},PI_TASK_SESSION_DIRECTORY:${JSON.stringify(history)},GIT_CONFIG_NOSYSTEM:'1',GIT_CONFIG_GLOBAL:'/dev/null'}});child.on('error',()=>process.exit(1));child.on('close',code=>process.exit(code??1));\n`, { mode: 0o700 });
+  const http = new InteractionHttp(); let opens = 0;
+  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root], operatorUserId: USER }, http.matrix, async () => { opens++; throw Error("creation must not launch Pi"); }, localTasks(wrapper));
+  await relay.start(false); relay.store.intake("ready", []);
+  const live = piProcess(root, file, extension, [], { cwd, home: join(root, "parent-home"), log: parentLog }); let child: ReturnType<typeof piProcess> | undefined;
+  const idle = async (process = live) => until(async () => !((await process.send("get_state")).data as { isStreaming: boolean }).isStreaming);
+  try {
+    assert.equal((await live.send("get_state")).success, true); await until(() => relay.store.bindings().length === 1);
+    const source = relay.store.bindings()[0]!; relay.store.setRoom(source.key, ROOM); const originalStatus = git(["status", "--porcelain"]);
+    const prompt = live.send("prompt", { message: "create task fixture" });
+    await until(() => live.ui.length === 1); assert.match(String(live.ui[0]!.message), /Base: HEAD/);
+    const draft = relay.store.tasks(["approval"])[0]!; assert.equal(existsSync(draft.plan.container), false); assert.equal(relay.store.bindings().length, 1);
+    await live.send("abort"); live.confirm(live.ui[0]!.id, true); await prompt; await idle();
+    assert.equal(relay.store.task(draft.plan.key)!.approval, undefined); assert.equal(existsSync(draft.plan.container), false);
+    const again = live.send("prompt", { message: "create task fixture" }); await until(() => live.ui.length === 2);
+    const fresh = relay.store.task(draft.plan.key)!; assert.notEqual(fresh.request.id, draft.request.id, "reused model tool-call IDs must not reuse a cancelled native UI request");
+    live.confirm(live.ui[0]!.id, true); assert.equal(existsSync(fresh.plan.container), false);
+    live.confirm(live.ui[1]!.id, true); await again;
+    await until(() => relay.store.task(draft.plan.key)?.phase === "ready"); await idle();
+    const ready = relay.tasks!.status(relay.store.binding(source.key)!, draft.plan.key); assert.equal(ready.localReady, true); assert.equal(ready.remotePending, true); assert.equal(opens, 0);
+    assert.equal(git(["status", "--porcelain"]), originalStatus); assert.equal(((await live.send("get_state")).data as { sessionId: string }).sessionId, "task-source");
+    assert.doesNotMatch(readFileSync(ready.file!, "utf8"), /SOURCE_SECRET_AND_PENDING_APPROVAL/);
+    const rows = JSON.parse(execFileSync(join(dirname(process.env.PI_TASK_TEST_HELPER!), "pi-session"), ["list"], { encoding: "utf8", env: { HOME: helperHome, PATH: process.env.PATH, PI_BRIDGE_SESSION_ROOTS: JSON.stringify([history]), PI_BRIDGE_STATE_DIRECTORY: join(root, "absent-ledger"), PI_BRIDGE_TMUX: process.env.PI_TEST_TMUX!, PI_BRIDGE_TMUX_SOCKET: join(root, "disposable-tmux.sock"), PI_SESSION_LOCK_DIRECTORY: join(root, "locks") } })) as Array<{ file: string; id: string }>;
+    assert.ok(rows.some(row => row.file === ready.file && row.id === draft.plan.nativeId), "offline native picker discovery needs neither the bridge database nor a running child");
+    child = piProcess(root, ready.file!, extension, [], { cwd: ready.cwd!, home: join(root, "child-home"), log: childLog });
+    assert.equal((await child.send("get_state")).success, true); await idle(child);
+    assert.match(JSON.stringify((await child.send("get_messages")).data), /Only the explicit visible handoff/);
+    await relay.pump(); assert.equal(existsSync(join(childLog, "modelcalls.jsonl")), false, "opening the native handoff must not call the provider");
+    assert.equal((await child.send("prompt", { message: "Fresh human instruction in the child" })).success, true); await idle(child);
+    assert.equal(readFileSync(join(childLog, "modelcalls.jsonl"), "utf8").trim().split("\n").length, 1);
+    assert.doesNotMatch(readFileSync(file, "utf8"), /Fresh human instruction in the child/);
+    relay.store.intake("remote-task", [{ id: "$remote-task", room: ROOM, event: textEvent("$remote-task", "remote create task fixture", "@second:example.test") }]); await relay.pump();
+    await until(() => relay.store.tasks(["approval"]).some(record => record.plan.intent.branch === "task/remote"));
+    const remote = relay.store.tasks(["approval"]).find(record => record.plan.intent.branch === "task/remote")!;
+    assert.equal(remote.request.surface, "matrix", "persisted native metadata, not visible text, chooses the remote approval boundary");
+    await idle(); assert.equal(live.ui.length, 2, "remote callers must not strand a native local dialog");
+    await relay.pump();
+    const interaction = relay.store.task(remote.plan.key)!.request.interaction!;
+    assert.equal(relay.store.interaction(interaction)?.state, "active", "projection of the originating native user entry must precede, not cancel, its approval poll");
+    const poll = relay.store.outputs(source.key, `interaction:${interaction}`)[0]!.eventId!;
+    const vote = async (id: string, sender: string) => { relay.store.intake(id, [{ id, room: ROOM, event: { event_id: id, sender, type: POLL_RESPONSE, content: { "m.relates_to": { rel_type: "m.reference", event_id: poll }, [POLL_RESPONSE]: { answers: ["answer-0"] } } } }]); await relay.pump(); };
+    await vote("$participant", "@second:example.test"); assert.equal(existsSync(remote.plan.container), false);
+    await vote("$operator", USER); await relay.tasks!.run(remote.plan.key);
+    assert.equal(relay.tasks!.status(relay.store.binding(source.key)!, remote.plan.key).localReady, true); assert.equal(opens, 0);
+    assert.equal(readFileSync(parentLog + "/modelcalls.jsonl", "utf8").trim().split("\n").length, 3, "approval must not become another source model turn");
+    assert.equal(readFileSync(remote.plan.nativeFile, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(entry => entry.type === "message").length, 0);
+  } finally { await child?.stop(); await live.stop(); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("actual Pi create_project uses independent local and Matrix approvals and saves idle children without source Git", { timeout: 60000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-native-project-")), cwd = join(root, "non-git"), file = join(root, "source.jsonl"), socket = join(root, "bridge.sock"), history = join(root, "children");
+  mkdirSync(cwd);
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "project-source", cwd, timestamp: new Date().toISOString() }) + "\n");
+  const extension = join(root, "bridge.ts"), wrapper = join(root, "helper.mjs");
+  writeFileSync(extension, `import {installAdapter} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/adapter.ts"))}; export default pi => installAdapter(pi,{config:${JSON.stringify({ socket, roots: [root] })},interactive:()=>true});`);
+  assert.ok(process.env.PI_TASK_TEST_HELPER);
+  writeFileSync(wrapper, `#!${process.execPath}\nimport {spawn} from 'node:child_process'; const child=spawn(${JSON.stringify(process.env.PI_TASK_TEST_HELPER)},process.argv.slice(2),{stdio:'inherit',env:{...process.env,HOME:${JSON.stringify(root)},PI_TASK_SESSION_DIRECTORY:${JSON.stringify(history)}}});child.on('error',()=>process.exit(1));child.on('close',code=>process.exit(code??1));\n`, { mode: 0o700 });
+  const http = new InteractionHttp(); let opens = 0;
+  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [cwd, root], projectRoot: root, operatorUserId: USER }, http.matrix, async () => { opens++; throw Error("Project creation must never launch Pi"); }, localTasks(wrapper));
+  await relay.start(false); relay.store.intake("ready", []);
+  const live = piProcess(root, file, extension, [], { cwd });
+  const idle = () => until(async () => !((await live.send("get_state")).data as { isStreaming: boolean }).isStreaming);
+  try {
+    await live.send("get_state"); await until(() => relay.store.bindings().length === 1);
+    const source = relay.store.bindings()[0]!; relay.store.setRoom(source.key, ROOM);
+    const cancelled = live.send("prompt", { message: "create project fixture" }); await until(() => live.ui.length === 1);
+    assert.equal(live.ui[0]!.title, "Create fresh project?"); assert.match(String(live.ui[0]!.message), /No Pi process/);
+    assert.equal(existsSync(join(root, "local-project")), false);
+    live.confirm(live.ui[0]!.id, false); await cancelled; await idle(); assert.equal(existsSync(join(root, "local-project")), false);
+    const approved = live.send("prompt", { message: "create project fixture" }); await until(() => live.ui.length === 2);
+    live.confirm(live.ui[1]!.id, true); await approved; await idle();
+    const child = relay.store.bindings().find(b => b.cwd === join(root, "local-project"))!;
+    assert.ok(child); assert.equal(opens, 0); assert.equal(existsSync(join(cwd, ".git")), false);
+    assert.equal(readFileSync(child.file, "utf8").trim().split("\n").map(line => JSON.parse(line)).filter(e => e.type === "message").length, 0);
+    relay.store.intake("remote-project", [{ id: "$remote-project", room: ROOM, event: textEvent("$remote-project", "remote create project fixture", "@second:example.test") }]); await relay.pump();
+    await until(() => relay.store.tasks(["approval"]).some(record => record.plan.intent.project?.name === "remote-project")); await idle(); await relay.pump();
+    const draft = relay.store.tasks(["approval"]).find(record => record.plan.intent.project?.name === "remote-project")!;
+    assert.equal(draft.request.surface, "matrix"); assert.equal(live.ui.length, 2);
+    const interaction = draft.request.interaction!, poll = relay.store.outputs(source.key, `interaction:${interaction}`)[0]!.eventId!;
+    const vote = async (id: string, sender: string) => { relay.store.intake(id, [{ id, room: ROOM, event: { event_id: id, sender, type: POLL_RESPONSE, content: { "m.relates_to": { rel_type: "m.reference", event_id: poll }, [POLL_RESPONSE]: { answers: ["answer-0"] } } } }]); await relay.pump(); };
+    await vote("$not-owner", "@second:example.test"); assert.equal(existsSync(join(root, "remote-project")), false);
+    await vote("$owner", USER); await relay.tasks!.run(draft.plan.key);
+    assert.equal(relay.tasks!.status(source, draft.plan.key).localReady, true);
+    assert.equal(opens, 0); assert.equal(relay.store.bindings().length, 3);
+  } finally { await live.stop(); await relay.stop(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("the production enrollment policy excludes an RPC worker even when configured", { timeout: 15000 }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-unbridged-worker-")), file = join(root, "worker.jsonl"), socket = join(root, "bridge.sock");
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "worker", cwd: root, timestamp: new Date().toISOString() }) + "\n");
+  const extension = join(root, "worker-extension.ts");
+  writeFileSync(extension, `import {installAdapter} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/adapter.ts"))}; export default pi => installAdapter(pi,{config:${JSON.stringify({ socket, roots: [root] })}});`);
+  let live = piProcess(root, file, extension);
+  try {
+    assert.equal((await live.send("get_state")).success, true);
+    assert.equal((await live.send("prompt", { message: "ordinary worker prompt" })).success, true);
+    await until(() => readFileSync(file, "utf8").includes("probe answer"));
+    assert.ok(!readFileSync(file, "utf8").includes("matrix-bridge.boundary"));
+    const firstEntries = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line) as { customType?: string; data?: { enabled?: boolean } });
+    assert.equal(firstEntries.find(entry => entry.customType === "matrix-bridge.enrollment")?.data?.enabled, false, "an imported public file may have no new boundary marker; worker/local-only startup must still disable projection before work");
+    await live.stop();
+    appendFileSync(file, JSON.stringify({ type: "custom", id: "old-boundary", customType: "matrix-bridge.boundary", data: { nativeId: "worker" } }) + "\n");
+    live = piProcess(root, file, extension);
+    assert.equal((await live.send("get_state")).success, true);
+    const entries = readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line) as { customType?: string; data?: { enabled?: boolean } });
+    assert.equal(entries.find(entry => entry.customType === "matrix-bridge.enrollment")?.data?.enabled, false, "a headless resume of a formerly bridged file disables projection before new work");
+  } finally { await live.stop(); rmSync(root, { recursive: true, force: true }); }
+});

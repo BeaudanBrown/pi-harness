@@ -40,8 +40,10 @@ function fixture() {
 }
 async function attach(f: ReturnType<typeof fixture>, handler: (method: string, params: Record<string, unknown>) => Promise<unknown>): Promise<{ peer: Peer; key: string }> {
   const peer = await connect(f.config.socket, handler);
-  const result = object(await peer.request("register", { file: f.file, nativeId: "native", boundary: "boundary", title: "Test", idle: true }));
-  return { peer, key: String(result.key) };
+  try {
+    const result = object(await peer.request("register", { protocol: 2, file: f.file, nativeId: "native", boundary: "boundary", title: "Test", idle: true }));
+    return { peer, key: String(result.key) };
+  } catch (error) { peer.close(); throw error; }
 }
 const message = (event_id: string, sender = friend, body = "hello") => ({ event_id, sender, type: "m.room.message", content: { msgtype: "m.text", body } });
 
@@ -52,7 +54,7 @@ test("private bridge intake deduplicates, enforces current membership and never 
   try {
     await relay.start(false);
     const first = await attach(f, async (method, params) => {
-      assert.equal(method, "input"); acted.push(String(params.id));
+      assert.equal(method, "input"); acted.push(String((params.ids as string[])[0]));
       peer!.close(); // Native effect happened, but the bridge cannot receive its acknowledgement.
       return { accepted: true };
     }); peer = first.peer;
@@ -63,7 +65,7 @@ test("private bridge intake deduplicates, enforces current membership and never 
     assert.equal(relay.store.status(first.key).interrupted, 1);
     assert.equal(relay.store.status(first.key).ignored, 2);
     await relay.stop(); relay = new BridgeRelay(f.config, f.matrix, async () => {}); await relay.start(false);
-    const replacement = await attach(f, async (_method, params) => { acted.push(String(params.id)); return { accepted: true }; }); peer = replacement.peer;
+    const replacement = await attach(f, async (_method, params) => { acted.push(String((params.ids as string[])[0])); return { accepted: true }; }); peer = replacement.peer;
     relay.store.intake("two", [{ id: "$first", room, event: message("$first") }, { id: "$fresh", room, event: message("$fresh") }]);
     await relay.pump();
     assert.deepEqual(acted, ["$first", "$fresh"]);
@@ -113,7 +115,7 @@ test("already-bound input/output remain usable while independent setup HTTP is b
   try {
     await relay.start(false);
     const handed: string[] = [];
-    const registration = await attach(f, async (_method, params) => { handed.push(String(params.id)); return { accepted: true }; }); peer = registration.peer;
+    const registration = await attach(f, async (_method, params) => { handed.push(String((params.ids as string[])[0])); return { accepted: true }; }); peer = registration.peer;
     relay.store.setRoom(registration.key, room);
     appendFileSync(f.file, JSON.stringify({ type: "message", id: "answer", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Available while setup is pending" }] } }) + "\n");
     relay.store.intake("input", [{ id: "$during-setup", room, event: message("$during-setup") }]);

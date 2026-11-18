@@ -2,17 +2,16 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { CONTROL_HELP, type InteractionSpec, type NativeControl } from "./interaction.js";
 
 export type ControlResult = { message: string; selection?: InteractionSpec; selected?: "model" | "thinking"; pending?: true };
-/** Native APIs only. The caller owns session fencing and durable result publication. */
+/** Best-effort public native APIs. Accepted asynchronous work is not revocable. */
 export async function nativeControlResult(pi: ExtensionAPI, ctx: ExtensionContext, name: NativeControl, argument: string | undefined,
   valid: () => boolean, result: (value: ControlResult) => void): Promise<ControlResult> {
   if (!valid()) throw Error("Native session changed before control");
   if (name === "help") return { message: CONTROL_HELP };
-  if (name === "start") return { message: "Pi is attached. No model turn was started." };
   if (name === "status") {
     const usage = ctx.getContextUsage();
     return { message: `Pi ${ctx.isIdle() ? "idle" : "busy"}; model ${ctx.model ? `${ctx.model.provider}/${ctx.model.id}` : "unavailable"}; thinking ${pi.getThinkingLevel()}; context ${usage?.tokens ?? "unknown"}/${usage?.contextWindow ?? "unknown"}.` };
   }
-  if (name === "abort" || name === "stop") throw Error("Abort/stop belong to the adapter's native cancellation path");
+  if (name === "abort") throw Error("Abort belongs to the adapter's native cancellation path");
   if (!ctx.isIdle() || ctx.hasPendingMessages()) return { message: `Cannot change ${name} while Pi is busy or has queued input. Use !abort first; the run was not altered.` };
   const leaf = ctx.sessionManager.getLeafId();
   const branch = () => valid() && (!leaf || ctx.sessionManager.getBranch().some(entry => entry.id === leaf));
@@ -23,7 +22,7 @@ export async function nativeControlResult(pi: ExtensionAPI, ctx: ExtensionContex
     if (argument?.includes("/")) {
       const selected = available.find(model => `${model.provider}/${model.id}` === argument);
       if (!selected) return { message: "That exact model is unauthenticated or outside this native session's scope." };
-      const accepted = await pi.setModel(selected, { preflight: ready });
+      const accepted = await pi.setModel(selected);
       if (!valid()) throw Error("Native session changed during model selection; inspect locally before retrying");
       return { message: accepted ? `Model changed to ${argument}.` : "Pi could not authenticate that model; no alternative was selected.", ...(accepted ? { selected: "model" as const } : {}) };
     }
@@ -42,7 +41,7 @@ export async function nativeControlResult(pi: ExtensionAPI, ctx: ExtensionContex
     return { message: `Thinking changed to ${pi.getThinkingLevel()}.`, selected: "thinking" };
   }
   if (name === "compact") {
-    ctx.compact({ customInstructions: argument, preflight: branch,
+    ctx.compact({ customInstructions: argument,
       onComplete: () => { if (valid()) result({ message: "Native compaction completed; history remains owned by Pi." }); },
       onError: () => { if (valid()) result({ message: "Native compaction failed. Inspect the local Pi session; it will not be retried automatically." }); },
     });

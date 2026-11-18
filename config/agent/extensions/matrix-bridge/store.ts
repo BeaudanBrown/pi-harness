@@ -39,7 +39,7 @@ function privatePath(filename: string): void {
 /** Transactional delivery ledger. Runtime/window observations deliberately do not live here. */
 export class BridgeStore {
   private readonly db: DatabaseSync;
-  constructor(filename: string, hostId: string) {
+  constructor(filename: string, hostId: string, private readonly connected: (key: string) => boolean = () => true) {
     privatePath(filename);
     const mask = process.umask(0o077);
     try { this.db = new DatabaseSync(filename, { timeout: 1000 }); } finally { process.umask(mask); }
@@ -48,7 +48,7 @@ export class BridgeStore {
         CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);`);
       const oldHost = this.getMeta("host"), version = this.getMeta("version");
       if (oldHost !== undefined && oldHost !== hostId) throw Error("Bridge database belongs to another host");
-      if (version !== undefined && !["1", "2", "3", "4"].includes(version)) throw Error("Unsupported bridge database version");
+      if (version !== undefined && !["1", "2", "3", "4", "5"].includes(version)) throw Error("Unsupported bridge database version");
       this.db.exec(`CREATE TABLE IF NOT EXISTS bindings(key TEXT PRIMARY KEY, file TEXT NOT NULL UNIQUE, room TEXT UNIQUE, value TEXT NOT NULL);
         CREATE TABLE IF NOT EXISTS inputs(id TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), position INTEGER NOT NULL,
           event TEXT NOT NULL, prompt TEXT, state TEXT NOT NULL CHECK(state IN ('received','queued','handed','settled','interrupted','ignored')));
@@ -61,7 +61,7 @@ export class BridgeStore {
         const oldHost = this.getMeta("host");
         if (oldHost !== undefined && oldHost !== hostId) throw Error("Bridge database belongs to another host");
         const version = this.getMeta("version");
-        if (version !== undefined && !["1", "2", "3", "4"].includes(version)) throw Error("Unsupported bridge database version");
+        if (version !== undefined && !["1", "2", "3", "4", "5"].includes(version)) throw Error("Unsupported bridge database version");
         if (!this.db.prepare("PRAGMA table_info(inputs)").all().some(column => column.name === "interaction")) this.db.exec("ALTER TABLE inputs ADD COLUMN interaction TEXT");
         if (!this.db.prepare("PRAGMA table_info(inputs)").all().some(column => column.name === "held")) this.db.exec("ALTER TABLE inputs ADD COLUMN held INTEGER NOT NULL DEFAULT 0");
         if (!this.db.prepare("PRAGMA table_info(inputs)").all().some(column => column.name === "archive_revision")) this.db.exec("ALTER TABLE inputs ADD COLUMN archive_revision INTEGER NOT NULL DEFAULT -1");
@@ -72,11 +72,11 @@ export class BridgeStore {
           CREATE TABLE IF NOT EXISTS images(input TEXT NOT NULL REFERENCES inputs(id), offset INTEGER NOT NULL, size INTEGER NOT NULL, data BLOB NOT NULL, PRIMARY KEY(input,offset));
           CREATE TABLE IF NOT EXISTS tasks(key TEXT PRIMARY KEY, binding TEXT NOT NULL REFERENCES bindings(key), phase TEXT NOT NULL, value TEXT NOT NULL);
           CREATE INDEX IF NOT EXISTS task_phase ON tasks(phase);`);
-        this.setMeta("host", hostId); this.setMeta("version", "4");
+        this.setMeta("host", hostId); this.setMeta("version", "5");
         // A runtime writer opening an imported ledger conservatively closes the
         // pre-cutover rollback window. Read-only migration checks do not use us.
         if (this.getMeta("migration")) this.setMeta("migration_started", "true");
-        this.db.exec("UPDATE inputs SET state='interrupted' WHERE state='handed'");
+        this.db.exec("UPDATE inputs SET state='interrupted' WHERE state IN ('received','queued','handed')");
       });
     } catch (error) { this.db.close(); throw error; }
   }
@@ -135,14 +135,11 @@ export class BridgeStore {
       const binding = this.binding(key); if (!binding) throw Error("Unknown native binding");
       if ((binding.archiveRevision ?? 0) !== expectedRevision) throw Error("Archive state changed; inspect current status before confirming again");
       if (binding.archived === archived) return binding;
-      const next = { ...binding, archived, archiveRevision: expectedRevision + 1, resumePending: true };
+      const next = { ...binding, archived, archiveRevision: expectedRevision + 1, resumePending: false };
       this.saveBinding(next);
-      this.db.prepare("UPDATE inputs SET held=1 WHERE binding=? AND state IN ('received','queued','handed')").run(key);
-      this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state IN ('queued','handed')").run(key);
-      this.cancelInteractions(key);
       this.materialize(key, `archive:${next.archiveRevision}`, [{ type: "m.room.message", content: { msgtype: "m.notice", "m.mentions": {}, body: archived ?
-        "Archived: future remote input/wake is disabled. Existing work may finish and publish. History, membership and files remain; this room may still appear in All Rooms. Archive grouping updates in the background. A fresh Matrix sync is required before remote restore; check !status." :
-        "Restored: original grouping updates in the background. Held/uncertain messages will not replay. Fresh remote input resumes after Matrix sync catches up; check !status before sending a new instruction." } }]);
+        "Archived for organization only. This room can still instruct connected Pi. History, membership, files and input are unchanged; Space grouping updates asynchronously." :
+        "Restored to active organization. Execution and input are unchanged; Space grouping updates asynchronously." } }]);
       return next;
     });
   }
@@ -162,7 +159,7 @@ export class BridgeStore {
       for (const input of events) {
         const binding = this.byRoom(input.room); if (!binding) continue;
         this.db.prepare("INSERT OR IGNORE INTO inputs(id,binding,position,event,prompt,state,interaction,held,archive_revision) VALUES (?,?,?,?,NULL,'received',?,?,?)")
-          .run(input.id, binding.key, ++position, JSON.stringify(input.event), this.activeInteraction(binding.key)?.id ?? null, binding.archived || binding.resumePending ? 1 : 0, binding.resumePending ? -1 : binding.archiveRevision ?? 0);
+          .run(input.id, binding.key, ++position, JSON.stringify(input.event), null, this.connected(binding.key) ? 0 : 1, binding.archiveRevision ?? 0);
       }
       for (const [key, value] of Object.entries(checkpoints)) this.saveProgress(key, value);
       this.setMeta("position", String(position)); this.setMeta("cursor", cursor);
@@ -178,7 +175,7 @@ export class BridgeStore {
     return this.atomic(() => {
       const input = this.db.prepare("SELECT binding,held FROM inputs WHERE id=? AND state='received'").get(id); if (!input) return false;
       const binding = this.binding(String(input.binding));
-      if (prompt && (input.held || !binding?.enabled || binding.archived || binding.resumePending)) {
+      if (prompt && (input.held || !binding?.enabled || !this.connected(String(input.binding)))) {
         this.db.prepare("UPDATE inputs SET state='interrupted' WHERE id=?").run(id); return false;
       }
       if (prompt && options.interaction && this.db.prepare("UPDATE interactions SET state='answered',answer=? WHERE id=? AND binding=? AND state='active'").run(id, options.interaction, input.binding!).changes !== 1) prompt = undefined;
@@ -218,15 +215,28 @@ export class BridgeStore {
   interruptInput(key: string, id: string): void {
     this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND id=? AND state IN ('handed','queued')").run(key, id);
   }
-  takeInput(key: string, expectedId?: string): Input | undefined {
+  queuedInputs(key: string): Input[] {
+    return this.db.prepare("SELECT * FROM inputs WHERE binding=? AND state='queued' ORDER BY position LIMIT 100").all(key).map(row => this.decodeInput(row));
+  }
+  takeBatch(key: string, ids: string[]): Input[] {
     return this.atomic(() => {
-      const binding = this.binding(key);
-      if (!binding?.enabled || binding.archived || binding.resumePending) return undefined;
-      const row = this.db.prepare("SELECT * FROM inputs WHERE binding=? AND state IN ('received','queued') ORDER BY position LIMIT 1").get(key);
-      if (!row || row.state === "received" || expectedId !== undefined && row.id !== expectedId) return undefined;
-      this.db.prepare("UPDATE inputs SET state='handed' WHERE id=?").run(row.id!);
-      return { ...this.decodeInput(row), state: "handed" };
+      if (!this.binding(key)?.enabled || !this.connected(key)) return [];
+      const rows = ids.map(id => this.db.prepare("SELECT * FROM inputs WHERE binding=? AND id=? AND state='queued' AND held=0").get(key, id));
+      if (!ids.length || new Set(ids).size !== ids.length || rows.some(row => !row)) return [];
+      return rows.map(row => {
+        this.db.prepare("UPDATE inputs SET state='handed' WHERE id=?").run(row!.id!);
+        return { ...this.decodeInput(row!), state: "handed" as const };
+      });
     });
+  }
+  deferBatch(key: string, ids: string[]): void {
+    // Only an explicit no-submission receipt permits returning to the inbox.
+    // Abort/disconnect has already made affected rows interrupted: never revive them.
+    this.atomic(() => { for (const id of ids) this.db.prepare("UPDATE inputs SET state='queued' WHERE binding=? AND id=? AND state='handed'").run(key, id); });
+  }
+  takeInput(key: string, expectedId?: string): Input | undefined {
+    const id = expectedId ?? this.nextInput(key)?.id;
+    return id ? this.takeBatch(key, [id])[0] : undefined;
   }
   knowsEvent(id: string, room: string): boolean {
     return Boolean(this.db.prepare("SELECT 1 FROM inputs JOIN bindings ON bindings.key=inputs.binding WHERE inputs.id=? AND bindings.room=?").get(id, room));
@@ -246,7 +256,8 @@ export class BridgeStore {
       this.materialize(key, source, [{ type: "m.room.message", content: { msgtype: "m.notice", body: message, "m.mentions": {}, "m.relates_to": { "m.in_reply_to": { event_id: id } } } }]);
     });
   }
-  disconnect(key: string): void { this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state='handed'").run(key); }
+  holdPending(key: string, except = ""): void { this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND id!=? AND state IN ('received','queued','handed')").run(key, except); }
+  disconnect(key: string): void { this.holdPending(key); }
   status(key: string): Record<InputState, number> {
     const counts: Record<InputState, number> = { received: 0, queued: 0, handed: 0, settled: 0, interrupted: 0, ignored: 0 };
     for (const row of this.db.prepare("SELECT state,count(*) AS n FROM inputs WHERE binding=? GROUP BY state").all(key)) counts[row.state as InputState] = Number(row.n);
@@ -288,11 +299,6 @@ export class BridgeStore {
   private materializeInteraction(key: string, source: string, value: InteractionSpec): Interaction {
     const id = identity("interaction", key, source), existing = this.interaction(id); if (existing) return existing;
     const spec = interactionSpec(value);
-    this.cancelInteractions(key);
-    if (spec.nativeEntry) {
-      this.saveProgress(`question-cutoff:${key}`, Number(this.getMeta("position") ?? 0));
-      this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state='queued'").run(key);
-    }
     this.db.prepare("INSERT INTO interactions VALUES (?,?,?,?,'active',NULL)").run(id, key, source, JSON.stringify(spec));
     this.materialize(key, `interaction:${id}`, [pollStart(spec)]);
     return this.interaction(id)!;
@@ -324,7 +330,7 @@ export class BridgeStore {
       const record = this.task(key); if (!record || record.request.id !== request || record.request.surface !== "matrix") throw Error("Task approval publication is stale");
       if (record.phase !== "approval") return;
       const binding = this.binding(record.plan.source.key);
-      if (record.request.expires < at || !binding?.enabled || binding.archived) throw Error("Task approval expired or its source is unavailable");
+      if (record.request.expires < at || !binding?.enabled) throw Error("Task approval expired or its source is unavailable");
       if (record.request.interaction) {
         if (this.interaction(record.request.interaction)?.state !== "active") this.saveTask({ ...record, phase: "declined" });
         return; // Never revive an earlier poll.
@@ -341,7 +347,7 @@ export class BridgeStore {
       if (receipt.via === "matrix") {
         const interaction = record.request.interaction ? this.interaction(record.request.interaction) : undefined;
         const input = inputId ? this.db.prepare("SELECT * FROM inputs WHERE id=?").get(inputId) : undefined;
-        if (record.request.surface !== "matrix" || binding.archived || !input || input.state !== "received" || input.binding !== binding.key ||
+        if (record.request.surface !== "matrix" || !input || input.state !== "received" || input.binding !== binding.key ||
             JSON.parse(String(input.event)).sender !== receipt.sender || receipt.sender !== record.request.operator || receipt.event !== inputId ||
             !interaction || interaction.binding !== binding.key || interaction.state !== "active" || interaction.kind !== "approval" || interaction.approval !== key) return false;
         this.db.prepare("UPDATE interactions SET state='answered',answer=? WHERE id=?").run(inputId!, interaction.id);

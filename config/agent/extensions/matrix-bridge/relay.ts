@@ -13,12 +13,12 @@ import { taskKey } from "./task-contract.js";
 import { archiveCommand } from "./interaction.js";
 
 export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; projectRoot?: string; operatorUserId?: string; hostSpace?: boolean };
-type Attachment = { peer: Peer; idle: boolean; key: string; stopping?: boolean };
+type Attachment = { peer: Peer; idle: boolean; key: string };
 const running = new Set<string>();
 /** Single daemon, native-session routing and transactional delivery only. */
 export class BridgeRelay {
   readonly store: BridgeStore;
-  private readonly dispatchLedger: string;
+  private readonly database: string;
   readonly organization?: BridgeOrganization;
   readonly tasks?: TaskWorkspaces;
   private release: () => void;
@@ -32,7 +32,7 @@ export class BridgeRelay {
   private interval?: NodeJS.Timeout;
   private syncWork?: Promise<void>;
   private syncError?: string;
-  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, private readonly open: (binding: Binding) => Promise<unknown>, taskRunner?: TaskRunner) {
+  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, _open: ((binding: Binding) => Promise<unknown>) | undefined, taskRunner?: TaskRunner) {
     mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
     const directory = lstatSync(config.stateDirectory);
     if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid!() || (directory.mode & 0o077)) throw Error("Bridge state directory must be private");
@@ -41,8 +41,8 @@ export class BridgeRelay {
     const unlock = nativeLock.acquireSessionLock(join(key, "daemon-owner"));
     running.add(key);
     this.release = () => { unlock(); running.delete(key); };
-    this.dispatchLedger = join(key, "bridge.sqlite");
-    try { this.store = new BridgeStore(this.dispatchLedger, config.hostId); }
+    this.database = join(key, "bridge.sqlite");
+    try { this.store = new BridgeStore(this.database, config.hostId, key => this.attached.has(key)); }
     catch (error) { this.release(); throw error; }
     try {
       const account = this.store.progress<{ bot: string; operator: string }>("migration-account");
@@ -73,6 +73,7 @@ export class BridgeRelay {
           if (!binding) throw Error("Unknown native binding"); return this.status(binding);
         }
         if (method === "register") {
+          if (params.protocol !== 2) throw Error("Adapter upgrade required: reopen Pi locally with the unpatched runtime. No automatic restart or replay.");
           const file = realpathSync(string(params.file));
           const metadata = lstatSync(file);
           if (!metadata.isFile() || metadata.nlink !== 1 || metadata.uid !== process.getuid!()) throw Error("Native session must be a user-owned regular file");
@@ -92,9 +93,8 @@ export class BridgeRelay {
           const binding = this.store.register({ file, nativeId, cwd, boundary: saved.entries.at(-1)?.id ?? boundary, title: string(params.title, 512) });
           if (key && key !== binding.key) throw Error("A connection cannot switch native sessions");
           if (!key) {
-            this.store.disconnect(binding.key);
-            this.attached.get(binding.key)?.peer.close();
-            key = binding.key; this.attached.set(key, { peer, key, idle: params.idle === true, stopping: params.stopping === true });
+            if (this.attached.has(binding.key)) throw Error("Another adapter is already connected to this conversation");
+            key = binding.key; this.attached.set(key, { peer, key, idle: params.idle === true });
           }
           return this.status(binding);
         }
@@ -105,7 +105,7 @@ export class BridgeRelay {
           return this.archive(key, params.archived, Number(params.revision));
         }
         if (["task.prepare", "project.prepare", "task.publish-approval", "task.confirm-local", "task.status"].includes(method)) {
-          if (!this.tasks || this.attached.get(key)?.stopping) throw Error("Task workspace creation is unavailable; local Pi remains available");
+          if (!this.tasks) throw Error("Task workspace creation is unavailable; local Pi remains available");
           const binding = this.store.binding(key)!;
           if (method === "task.prepare" || method === "project.prepare") {
             if (params.surface !== "local" && params.surface !== "matrix") throw Error("Invalid independent approval surface");
@@ -120,12 +120,9 @@ export class BridgeRelay {
         }
         if (method === "input.read") return this.store.inputChunk(key, string(params.id, 255), Number(params.offset));
         if (method === "image.read") return this.store.imageChunk(key, string(params.id, 255), Number(params.offset));
-        if (method === "withdrawn") { this.store.interruptInput(key, string(params.id, 255)); return {}; }
+        if (method === "hold") { this.store.disconnect(key); return {}; }
         if (method === "activity") {
           this.attached.get(key)!.idle = params.idle === true;
-          if (params.idle === true && Array.isArray(params.settled)) {
-            for (const id of params.settled.slice(0, 128)) this.store.settle(key, string(id, 255));
-          }
           return this.status(this.store.binding(key)!);
         }
         throw Error("Unknown bridge operation");
@@ -146,13 +143,12 @@ export class BridgeRelay {
     }
   }
   archive(key: string, archived: boolean, revision: number): ObjectValue {
-    const binding = this.store.setArchived(key, archived, revision), attachment = this.attached.get(key);
-    if (attachment) void attachment.peer.request("archive-policy", { archived: binding.archived, revision: binding.archiveRevision ?? 0, resumePending: binding.resumePending === true }).catch(() => attachment.peer.close());
+    const binding = this.store.setArchived(key, archived, revision);
     return this.status(binding);
   }
   private status(binding: Binding): ObjectValue {
     const current = this.attached.get(binding.key);
-    return { ...binding, dispatchLedger: this.dispatchLedger, intakeReady: this.store.cursor() !== undefined, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.stopping ? "stopping" : current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
+    return { ...binding, intakeReady: this.store.cursor() !== undefined, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
   }
   private async syncLoop(): Promise<void> {
     while (!this.stopSignal.signal.aborted) {
@@ -196,45 +192,36 @@ export class BridgeRelay {
             if (input.event.sender !== this.config.operatorUserId) { this.store.finishInput(binding.key, input.id, "Only the configured operator may archive or restore this conversation."); return; }
             try { this.archive(binding.key, archived, input.archiveRevision ?? -1); this.store.finishInput(binding.key, input.id, "Archive policy recorded; grouping is asynchronous. No process was stopped and no pending input was replayed."); }
             catch { this.store.finishInput(binding.key, input.id, "Archive policy changed during this request. Check !status and issue a fresh command."); }
-          });
+          }, () => this.attached.has(binding.key));
         binding = this.store.binding(binding.key)!;
-        if (historyReady && !gap && binding.enabled && !binding.archived && !binding.resumePending) {
-          const input = this.store.nextInput(binding.key);
-          if (input?.state === "queued" && input.prompt) {
-            const joined = await this.matrix.joined(room, input.prompt.sender), fresh = this.store.binding(binding.key);
-            if (!joined) this.store.interruptInput(binding.key, input.id);
-            else if (fresh?.enabled && !fresh.archived && !fresh.resumePending && (fresh.archiveRevision ?? 0) === (binding.archiveRevision ?? 0)) {
-              const attachment = this.attached.get(binding.key);
-              if (!attachment && ["status", "abort", "stop"].includes(input.prompt.control ?? "")) {
-                this.store.finishInput(binding.key, input.id, "No native adapter is connected. No stop/abort was sent and process exit is not implied. Use local Pi, or !start to open without starting a model turn.");
-              } else if (!attachment) {
-                allowedWorkspace(binding.cwd, this.config.roots);
-                if (input.prompt.control === "start") {
-                  const taken = this.store.takeInput(binding.key, input.id);
-                  if (taken) try {
-                    await this.open(binding);
-                    this.store.finishInput(binding.key, input.id, "Local open requested. No model turn was started; a window/helper reply is not a native startup receipt.");
-                  } catch (error) { this.store.interruptInput(binding.key, input.id); throw error; }
-                } else await this.open(binding); // Actual native writer exclusion is in Pi, never a reservation.
-              }
-              else if (!attachment.stopping) {
-                const taken = this.store.takeInput(binding.key, input.id);
-                if (taken) {
-                  if (taken.prompt?.control === "abort" || taken.prompt?.control === "stop") this.store.interruptBefore(binding.key, taken.id);
-                  try {
-                    const receipt = object(await attachment.peer.request("input", { id: taken.id, archived: false, revision: binding.archiveRevision ?? 0, resumePending: false }));
-                    if (receipt.stopping === true) attachment.stopping = true;
-                    if (receipt.accepted !== true) {
-                      if (typeof receipt.message === "string") this.store.finishInput(binding.key, taken.id, string(receipt.message, 4096));
-                      else this.store.interruptInput(binding.key, taken.id);
-                    }
-                  } catch (error) {
-                    this.store.interruptInput(binding.key, taken.id); attachment.peer.close(); throw error;
-                  }
+        if (historyReady && !gap && binding.enabled) {
+          const attachment = this.attached.get(binding.key), queued = this.store.queuedInputs(binding.key);
+          // Controls bypass waiting chat so abort remains usable while busy.
+          const control = queued.find(input => input.prompt?.control === "abort") ?? queued.find(input => input.prompt?.control);
+          const candidates = control ? [control] : attachment?.idle ? queued : [];
+          const eligible = [];
+          for (const input of candidates) {
+            if (input.prompt && await this.matrix.joined(room, input.prompt.sender)) eligible.push(input);
+            else this.store.interruptInput(binding.key, input.id);
+          }
+          if (attachment && attachment === this.attached.get(binding.key)) {
+            const taken = this.store.takeBatch(binding.key, eligible.map(input => input.id));
+            if (taken.length) {
+              if (control?.prompt?.control === "abort") this.store.holdPending(binding.key, control.id);
+              if (!control) attachment.idle = false;
+              try {
+                const receipt = object(await attachment.peer.request("input", { ids: taken.map(input => input.id) }));
+                if (receipt.deferred === true && !control) this.store.deferBatch(binding.key, taken.map(input => input.id));
+                else if (receipt.accepted !== true) for (const input of taken) {
+                  if (typeof receipt.message === "string") this.store.finishInput(binding.key, input.id, string(receipt.message, 4096));
+                  else this.store.interruptInput(binding.key, input.id);
                 }
+              } catch (error) {
+                for (const input of taken) this.store.interruptInput(binding.key, input.id);
+                attachment.peer.close(); throw error;
               }
             }
-          }
+          } else if (!attachment) this.store.disconnect(binding.key);
         }
         for (const input of this.store.unreportedInputs(binding.key)) this.store.offer(binding.key, `uncertain:${input.id}`, () => [{ type: "m.room.message", content: {
           msgtype: "m.notice", body: this.store.progress<{ unattempted: boolean }>(`migration-input:${input.id}`)?.unattempted ?

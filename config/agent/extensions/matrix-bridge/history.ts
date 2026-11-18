@@ -5,7 +5,7 @@ import { renderRemoteCheckpoint, validateRemoteCheckpoint } from "../matrix-shar
 import { interactionSpec } from "./interaction.js";
 import { object, string } from "./wire.js";
 
-export type NativeEntry = { type: string; id: string; nativeId?: string; customType?: string; data?: Record<string, unknown>; message?: { role: string; content: unknown; stopReason?: string; metadata?: Record<string, unknown> } };
+export type NativeEntry = { type: string; id: string; nativeId?: string; customType?: string; data?: Record<string, unknown>; details?: Record<string, unknown>; message?: { role: string; content: unknown; stopReason?: string; metadata?: Record<string, unknown> } };
 function parseLine(line: string): unknown {
   try { return JSON.parse(line); } catch { throw Error("Malformed completed native history line; history unchanged"); }
 }
@@ -60,8 +60,11 @@ export function offerHistory(store: BridgeStore, binding: Binding): void {
     if (!enabled) return;
     if (entry.type === "custom" && entry.data?.nativeId === binding.nativeId) {
       if (entry.customType === "matrix-bridge.question") {
-        const checkpoint = validateRemoteCheckpoint(entry.data.checkpoint);
-        store.offerInteraction(binding.key, `native:${entry.id}`, { kind: "question", nativeEntry: entry.id, question: renderRemoteCheckpoint(checkpoint), ...(checkpoint.kind === "question" && checkpoint.options ? { options: checkpoint.options } : {}) });
+        const spec = entry.data.question ? interactionSpec(entry.data.question) : (() => {
+          const checkpoint = validateRemoteCheckpoint(entry.data!.checkpoint);
+          return { kind: "question" as const, question: renderRemoteCheckpoint(checkpoint), ...(checkpoint.kind === "question" && checkpoint.options ? { options: checkpoint.options } : {}) };
+        })();
+        store.offerInteraction(binding.key, `native:${entry.id}`, { ...spec, nativeEntry: entry.id });
       } else if (entry.customType === "matrix-bridge.answer") {
         const active = store.activeInteraction(binding.key);
         if (active && active.nativeEntry === entry.data.question) store.cancelInteractions(binding.key, active.id);
@@ -72,11 +75,16 @@ export function offerHistory(store: BridgeStore, binding: Binding): void {
         if (result.selection) store.offerInteraction(binding.key, `native:${entry.id}`, interactionSpec(result.selection));
       }
     }
+    if (entry.type === "custom_message" && entry.customType === "matrix-bridge.input" && entry.details?.nativeId === binding.nativeId && Array.isArray(entry.details.events)) {
+      for (const event of entry.details.events) {
+        if (event && typeof event.id === "string" && typeof event.sender === "string" && store.ownsInput(binding.key, event.id, event.sender)) store.settle(binding.key, event.id);
+      }
+      return; // Remote content already exists in Matrix; never echo it.
+    }
     if (entry.type !== "message" || !entry.message) return;
     const { role, content, stopReason } = entry.message;
     const text = textContent(content);
     if (role === "user") {
-      store.cancelInteractions(binding.key); // New native input supersedes old choices, without gating local Pi.
       const eventId = entry.message.metadata?.["pi.bridge.event"], sender = entry.message.metadata?.["pi.bridge.sender"];
       if (typeof eventId === "string" && typeof sender === "string" && store.ownsInput(binding.key, eventId, sender)) return;
       // Never infer origin from text: locally resubmitted/restored queue text

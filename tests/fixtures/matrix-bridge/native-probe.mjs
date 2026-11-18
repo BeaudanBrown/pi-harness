@@ -4,7 +4,8 @@ export default function (pi) {
   let sequence = 0;
   pi.on("message_end", (event, ctx) => {
     if (!process.env.BRIDGE_PROBE_PERSISTENCE_LOG) return;
-    const entries = readFileSync(ctx.sessionManager.getSessionFile(), "utf8").trim().split("\n").map(line => JSON.parse(line));
+    const file = ctx.sessionManager.getSessionFile();
+    const entries = file && existsSync(file) ? readFileSync(file, "utf8").trim().split("\n").map(line => JSON.parse(line)) : [];
     const persisted = entries.some(entry => entry.message?.role === event.message.role && entry.message?.timestamp === event.message.timestamp);
     appendFileSync(process.env.BRIDGE_PROBE_PERSISTENCE_LOG, JSON.stringify({ role: event.message.role, persisted }) + "\n");
   });
@@ -26,7 +27,7 @@ export default function (pi) {
       const abort = () => emit(true);
       const emit = (aborted = false) => {
         clearTimeout(timer); options?.signal?.removeEventListener("abort", abort);
-        const message = { role: "assistant", content: project ? [{ type: "toolCall", id: "project-fixed", name: "create_project", arguments: { name: remoteProject ? "remote-project" : "local-project", description: "Fresh acceptance repository", handoff_summary: "Only this visible project handoff. Wait for human instructions." } }] : task ? [{ type: "toolCall", id: "task-fixed", name: "create_task_workspace", arguments: { branch: remoteTask ? "task/remote" : "task/local", base_ref: "HEAD", title: "Task fixture", handoff_summary: "Only the explicit visible handoff. Wait for fresh human intent before execution." } }] : question ? [{ type: "toolCall", id: `question-${++sequence}`, name: "remote_checkpoint", arguments: { kind: "question", decision: "Choose one", options: ["First", "Second"] } }] : [{ type: "text", text: "probe answer" }], api: model.api, provider: model.provider, model: model.id,
+        const message = { role: "assistant", content: project ? [{ type: "toolCall", id: "project-fixed", name: "create_project", arguments: { name: remoteProject ? "remote-project" : "local-project", description: "Fresh acceptance repository", handoff_summary: "Only this visible project handoff. Wait for human instructions." } }] : task ? [{ type: "toolCall", id: "task-fixed", name: "create_task_workspace", arguments: { branch: remoteTask ? "task/remote" : "task/local", base_ref: "HEAD", title: "Task fixture", handoff_summary: "Only the explicit visible handoff. Wait for fresh human intent before execution." } }] : question ? [{ type: "toolCall", id: `question-${++sequence}`, name: "ask_user", arguments: { question: "Choose one", options: ["First", "Second"] } }] : [{ type: "text", text: "probe answer" }], api: model.api, provider: model.provider, model: model.id,
           usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } },
           stopReason: question || task || project ? "toolUse" : "stop", timestamp: Date.now() + ++sequence };
         if (aborted) stream.push({ type: "error", reason: "aborted", error: { ...message, content: [], stopReason: "aborted" } });
@@ -45,10 +46,4 @@ export default function (pi) {
       return stream;
     },
   });
-  pi.registerCommand("probe-submit", { handler: async () => {
-    pi.sendUserMessage("/probe-template raw", { expandPromptTemplates: true,
-      onPromptExpanded: text => `Attributed remote input:\n${text}`,
-      preflightResult: success => appendFileSync(process.env.BRIDGE_PROBE_RECEIPTS, `${success}\n`),
-    });
-  } });
 }

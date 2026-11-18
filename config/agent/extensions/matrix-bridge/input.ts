@@ -8,7 +8,7 @@ import { object } from "./wire.js";
 /** Room-scoped authorization; parsing alone never grants execution authority. */
 export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, binding: Binding, input: Input, signal?: AbortSignal,
   approval?: (interaction: Interaction, accepted: boolean) => Promise<void>,
-  archive?: (archived: boolean) => void): Promise<void> {
+  archive?: (archived: boolean) => void, connected: () => boolean = () => true): Promise<void> {
   const ignore = () => { store.authorize(input.id, undefined); };
   const explain = (message: string) => store.finishInput(binding.key, input.id, message);
   const event = input.event, sender = typeof event.sender === "string" ? event.sender : "";
@@ -21,10 +21,8 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
   if (!await matrix.joined(binding.room, sender)) return ignore();
   const archived = archiveCommand(event);
   if (archived !== undefined) { if (archive) archive(archived); else ignore(); return; }
-  const current = store.binding(binding.key);
-  if (current?.archived || current?.resumePending || input.held) {
-    if (event.type === "m.room.message" && content.body === "!status") return explain(`Archive: ${current?.archived ? "archived" : "live"}. ${current?.resumePending ? "Fresh Matrix sync is pending." : "Held input is not replayed."} Use !restore to restore; no process exit is implied.`);
-    return explain("This input was held at an archive/restore boundary and was not dispatched. Use !status, then send a fresh instruction when remote input is enabled.");
+  if (input.held || !connected()) {
+    return explain("Pi is offline or this input arrived while disconnected. Open the conversation locally, then send a fresh instruction or vote. Nothing was queued for replay.");
   }
   if (event.type === "m.room.encrypted") return explain("Encrypted input is not supported by this bridge. Send unencrypted text or a supported image.");
   let interaction: Interaction | undefined;
@@ -40,7 +38,7 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
     if (interaction.state !== "active" || !interaction.options?.[vote.index]) return ignore();
     if (interaction.kind === "approval") { if (approval) await approval(interaction, vote.index === 0); else ignore(); return; }
     const answer = interaction.options[vote.index]!;
-    store.authorize(input.id, interaction.kind === "question" ? { text: `Answer to the recorded question: ${answer}`, sender, question: interaction.nativeEntry } :
+    store.authorize(input.id, interaction.kind === "question" ? { text: `Answer to: ${interaction.question}\n\n${answer}`, sender, question: interaction.nativeEntry } :
       { text: answer, sender, control: interaction.kind, argument: answer }, { interaction: interaction.id });
     return;
   }
@@ -69,16 +67,9 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
     if (control) { store.authorize(input.id, { text, sender, control: control.name, argument: control.argument }); return; }
   }
   interaction = referenced;
-  interaction ??= input.interaction ? store.interaction(input.interaction) : undefined;
   // Unrelated text is a fresh instruction, never implicit mutation approval.
   if (interaction?.kind === "approval") interaction = undefined;
   if (interaction && interaction.state !== "active") return ignore();
-  if (interaction && !reply) {
-    const published = store.interactionPosition(interaction);
-    if (published === undefined) return; // Await own start in the authoritative room timeline, not a cross-host clock guess.
-    if (input.position <= published) return explain("This input preceded the displayed question. Send a fresh answer or reply directly to that question.");
-  }
-  if (!interaction && input.position <= (store.progress<number>(`question-cutoff:${binding.key}`) ?? -1)) return explain("This input was pending at a question boundary. It was not submitted; send a fresh instruction to continue.");
   if (interaction && (interaction.kind === "model" || interaction.kind === "thinking")) {
     const number = /^(?:[1-9]|1[0-9]|20)$/.test(text.trim()) ? Number(text.trim()) - 1 : -1;
     const answer = interaction.options?.includes(text.trim()) ? text.trim() : interaction.options?.[number];
@@ -97,7 +88,6 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
     }
     return;
   }
-  const followUp = text.startsWith("!follow-up "), steer = text.startsWith("!steer ");
-  const prompt: Prompt = { text: followUp ? text.slice(11) : steer ? text.slice(7) : text, sender, deliverAs: followUp ? "followUp" : "steer", question: interaction?.nativeEntry };
+  const prompt: Prompt = { text: interaction?.kind === "question" ? `Answer to: ${interaction.question}\n\n${text}` : text, sender, question: interaction?.nativeEntry };
   store.authorize(input.id, prompt, { interaction: interaction?.id });
 }
