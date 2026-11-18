@@ -56,6 +56,33 @@ an ordinary remote-backed rebuild; a local input override is only validation.
 - Archive/restore only organizes the picker and Matrix Spaces; archived rooms may
   still instruct a connected session.
 
+## Runtime and compatibility notes
+
+- Protocol 2 requires reopening existing Pi processes locally after an approved
+  activation. Old adapters fail closed with an upgrade message; no daemon action
+  restarts a process or replays its inbox. First registration alone is not intake
+  readiness: each attachment must survive a complete fresh sync.
+- Schema 5 preserves native/room identities, historical custom/metadata provenance,
+  independent creation approvals and frozen outbox IDs. Pending input is held on
+  startup. This is not a request to rerun legacy history migration.
+- Idle control results use the bridge ledger directly, including saved idle child
+  histories which upstream has not yet flushed. At idle, unobserved handed input
+  is marked uncertain only after projection and outside an active handoff.
+- Pi 1.5.2 native defaults include built-in MCP, llama.cpp, codemode and tool-search
+  extensions, plus idle cache warming. Ordinary Pi retains upstream defaults;
+  this repository adds no MCP server configuration. Lean CLI launchers keep
+  `--no-extensions` with explicit additions. Restricted SDK workers supply their
+  own empty ResourceLoader, exact tool allowlists, disabled compaction and
+  `cacheWarming: "off"`; no discovery of built-ins or background cache requests.
+- The separate stateless chat default is now `gpt-5.6-luna`: `gpt-5.4` is absent
+  from the pinned 1.5.2 catalog. Explicit unavailable models fail at startup;
+  no runtime fallback is added. Confirm account entitlement during activation.
+  Stateless chat also disables cache warming and validates the exact tool set.
+- Pi-R, AgentGraph and LSP pins are unchanged. Native registry ordering can change;
+  Pi-R capability/restoration tests compare exact tool membership, not order.
+- Harness-owned daemon/creation/publication locks remain local utility locks.
+  They do not lock native Pi sessions or restore the removed writer guarantee.
+
 ## Verification and commits
 
 - Unpatched Pi 1.5.2 CLI/SDK built; TypeScript compilation passed.
@@ -66,4 +93,30 @@ an ordinary remote-backed rebuild; a local input override is only validation.
 - Busy fake-model tests now use explicit release signals rather than ten-second
   sleeps. An observed stale-idle race is covered: an explicit no-submission
   receipt returns the batch to the inbox, never reviving interrupted input.
-- Broad verification and consuming-host integration remain outstanding.
+- Final canonical `nix run --keep-going -L .#verify`: **all 11 checks passed**
+  in 65.4 seconds on 2026-11-18. Main units: 289/289 in 43.9 seconds;
+  stateless chat: 93/93 in 15.9 seconds; Pi-R: 6/6; eval: 73/73;
+  packaged CLI/headless probes: 8/8 and 17/17. No skipped/cancelled tests.
+- The later chat hang was distinct: an unavailable catalog model caused setup
+  to throw before socket cleanup, and that separate runner was unbounded.
+  Cleanup is now registered first, unavailable models fail closed, and SDK
+  assertions account for native system-patch messages. Every deterministic
+  component has a 180-second deadline, five-second kill grace and explicit
+  start/pass/fail logs. Node tests have a 60-second default; independent unit
+  and chat files run four at a time.
+- Consuming `grill` and `nas` module evaluations with a local harness override:
+  Pi 1.5.2, native-only bridge, independent process/service lifetimes, all
+  assertions passed (six integration tests).
+- Full `grill` toplevel evaluation with import-from-derivation disabled stopped
+  at the existing KDE/base16 theme dependency, which requires IFD. No full host
+  system build or activation was performed; this does not invalidate the focused
+  integration evaluations. No live Matrix/account/model smoke test was run.
+- Publication is still pending. The consuming flake remains pinned to `21f9a4b`
+  (Pi 0.84.4); local override validation does not update that GitHub-backed lock.
+  Publish the verified harness commit only with approval, then update the host
+  input pin and lock, repeat host validation, and request activation separately.
+  Reopen existing sessions locally on the new runtime; do not restart them from
+  the daemon or replay held input. Preserve the existing ledger and histories.
+- Canonical builds use the pinned 1.5.2 types. An already-running editor LSP may
+  retain cached 0.84.4 types until refreshed; no unsafe casts or runtime patches
+  were added to accommodate those stale diagnostics.

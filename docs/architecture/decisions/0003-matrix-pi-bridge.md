@@ -1,6 +1,6 @@
 # ADR 0003: Native Pi with an optional Matrix bridge
 
-- Status: Accepted target; implementation/release evidence is tracked separately
+- Status: Accepted; amended for the [unpatched Pi 1.5.2 contract](../../pi-upstream-upgrade.md). That contract supersedes earlier patch-backed guarantees.
 - Issues: [#160](https://github.com/BeaudanBrown/pi-harness/issues/160), [#161](https://github.com/BeaudanBrown/pi-harness/issues/161)
 - Supersedes: conflicting **target** requirements in [ADR 0002](0002-managed-session-contracts.md), including its subsequent amendments
 
@@ -8,15 +8,15 @@
 
 Pi owns history and execution; tmux owns windows; the bridge owns Matrix routing,
 delivery and organization. Ordinary Pi must not depend on bridge, Matrix, NAS,
-Git metadata or Space health. An actual native-history/writer conflict remains
-an error. Native session APIs, not a second execution manager, determine the
+Git metadata or Space health. Pi source remains unmodified; there is no harness
+single-writer guarantee. Native session APIs, not a second execution manager, determine the
 model, thinking, branch, compaction, pending messages and extension dispatch.
 
 ### Terms
 
 - **Native session:** one Pi JSONL file and its native header identity. The file's
-  canonical path is the local writer-lock key; the path/header pair identifies a
-  binding. Missing/corrupt files are not recreated on resume. Copies and forks
+  path/header pair identifies a binding. The local helper rejects missing/corrupt
+  histories; direct Pi navigation retains upstream behaviour. Copies and forks
   are not automatically adopted as the original binding.
 - **Binding:** one host-local association of a native session with one Matrix
   room and a projection start. Resume reuses it. New/fork gets another binding;
@@ -30,8 +30,8 @@ model, thinking, branch, compaction, pending messages and extension dispatch.
 - **Task setup:** one approved, idempotent branch/worktree/native-session/binding
   creation, with a frozen base commit and visible handoff summary. It is not a
   workflow engine. The child is idle until fresh human instruction.
-- **Archive:** reversible organization and disabled remote dispatch/wake, NOT
-  execution status, process termination, deletion or irreversible retirement.
+- **Archive:** reversible picker/Space organization only, NOT execution status,
+  access control, process termination, deletion or irreversible retirement.
 
 ### Retained behavior
 
@@ -56,8 +56,8 @@ or make local work wait for account-side acknowledgement.
 Archive retains original room, membership and native/worktree files. Move its
 room into a host Archive Space; unlink empty live checkout presentation without
 deleting historical Spaces. The picker defaults to live bindings. Already-running
-work may finish and project output. New text/votes cannot dispatch while archived.
-Preserve queued/uncertain input visibly without replay on restore. Matrix clients
+work may finish and project output. Archived rooms can still instruct connected
+Pi. Archive/restore does not change pending input or polls. Matrix clients
 may still show joined archived rooms in All Rooms.
 
 An ordinary development conversation can request a task workspace. Infer its
@@ -72,35 +72,40 @@ surface small rather than retaining the generic host-action catalogue.
 ## Interfaces and persistence
 
 A private local `list`, `open <session-file>` and `status <session-file>` interface
-serves picker and remote wake. It discovers saved native sessions/live windows
-without requiring Matrix. Open uses fixed argv and one writer seam, never
+serves the local picker only. It discovers saved sessions and advisory live-pane
+hints without requiring Matrix. Open uses fixed argv and a transient helper lock
+for simultaneous picker requests, not exclusive writer ownership; never
 `send-keys`, caller-selected shell fragments or full-user process inspection.
 
 The adapter interface is session-scoped: register/reconnect, offer eligible
 persisted text, receive input/control, report handoff/outcome, and offer a poll
 or narrow approved mutation. It has no Matrix token or arbitrary-room send.
 Transport frames are bounded; media uses bounded chunks, not unbounded frames.
-Native expansion remains native; built-in TUI commands are not assumed to work
-through `sendUserMessage`.
+Remote chat is literal attributed custom-message content, batched at idle.
+Terminal commands/skills/templates remain native and local-only. No remote
+messages enter native steering/follow-up queues. Controls are best effort and
+fail fast when busy; submitted asynchronous work may finish after disconnect.
+`ask_user` publishes Matrix questions without gating chat. Unanswered polls remain
+answerable; first eligible answer wins. Independent creation approvals stay separate.
 
 One bridge daemon uses one host-local SQLite database. Persist bindings,
 sync/intake identity, immutable output and transaction IDs, interaction polls and
 bounded task/provisioning progress. Do not sync the database across hosts. Private
 scratch locks/window observations are reconstructible, not additional lifecycle
-stores. Runtime ownership must be proved at the actual native writer seam,
-including switch/fork/reload, crashes and child descriptor inheritance.
-The native adapter may synchronously read only its own binding's dispatch policy
-from this same database at remote handoff/queue consumption: asynchronous socket
-notifications alone cannot fence a concurrent archive commit. Use a fresh read-only
-connection with no lock wait; missing, unsafe or unavailable policy rejects remote
-input, never ordinary local Pi, an already active run, or local queued input. This
-is no second store, write capability or process/launch admission authority.
+stores. First connected adapter wins routing; duplicate connections are refused
+without stopping either Pi process. No native writer locks, startup authority,
+synchronous adapter database reads or archive dispatch fences are supplied.
+Ordinary empty sessions enroll only once upstream saves conversation history.
+Control results are published through the bridge ledger, not a forced Pi flush;
+this also works in saved idle task handoffs without assistant messages.
 
-Persist input before advancing sync. Only queued-before-handoff input can retry
-automatically. Commit the potentially-dispatched state before sending to Pi;
-a lost receipt means interrupted, not completed and not automatic rerun. Keep
-per-room ordering and isolate failed rooms; fresh input bypasses old interrupted
-records, not still-queued predecessors. Stable Matrix event IDs deduplicate intake.
+Persist input before advancing sync. Commit an entire batch as potentially
+handed before IPC. A definite no-submission/busy receipt can return it to the
+inbox; an uncertain receipt never can. Abort, disconnect and restart hold pending
+input without automatic replay or a release interface. Offline input/votes are
+rejected, and newly connected adapters first pass a fresh sync boundary without
+replaying backlog. Preserve chat order within a batch; controls may bypass waiting
+chat so abort works while busy. Stable Matrix event IDs deduplicate intake.
 
 Only eligible persisted post-binding local text and completed assistant text
 project. Never project thinking, tool payloads, internal entries or pre-binding
@@ -154,4 +159,6 @@ manager/generation/archive targets are superseded, not claimed implemented.
 #83 contributes worktree constraints, #88/#89 media cases, #129–131 grouping/admin
 history, #133 pressure/reconnect evidence and #158/#159 launcher/attention evidence.
 Do not silently close these or treat the observed tmux failure as fixed by this
-ADR. The old default-launch/repair behavior remains deployed until migration.
+ADR. Historical cutover records are not instructions to rerun migration. The
+patch-free adapter protocol rejects older adapters; users reopen their sessions
+locally after an independently approved rebuild. No session is restarted automatically.

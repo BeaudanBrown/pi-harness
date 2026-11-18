@@ -7,39 +7,50 @@ The optional Matrix bridge owns routing, durable delivery and background room
 organization, not local launch permission. Local Pi works without the bridge,
 Matrix, NAS, or Git. See [ADR 0003](docs/architecture/decisions/0003-matrix-pi-bridge.md).
 
-**Not rebuild-ready:** [epic #160](https://github.com/BeaudanBrown/pi-harness/issues/160)
-has completed cumulative deterministic verification and full-epic review, but
-publication/pinning and grill/NAS cutover still require separate approval. Source
-removal is not deployment. See the [verified candidate and cutover handoff](docs/matrix-pi-release.md),
-[acceptance evidence](docs/matrix-pi-bridge-evidence.md),
-[removal evidence](docs/matrix-pi-removal.md), and the
-[offline migration runbook](docs/matrix-pi-migration.md). No legacy conversation
-runtime or automatic live conversion is packaged.
+**Upgrade candidate:** the [unpatched Pi 1.5.2 handoff](docs/pi-upstream-upgrade.md)
+tracks current verification and publication. Publication/pinning and live activation
+remain separate approvals. Earlier [release](docs/matrix-pi-release.md),
+[acceptance](docs/matrix-pi-bridge-evidence.md), [removal](docs/matrix-pi-removal.md)
+and [migration](docs/matrix-pi-migration.md) records describe the previous
+patch-backed generation; they are not instructions to repeat migration. No legacy
+conversation runtime or automatic live conversion is packaged.
 
-## Staged native bridge interactions
+## Patch-free native bridge interactions
 
-The replacement is not yet approved for cutover. Its room interface retains
-`!help`, `!status`, idle `!start`, `!abort`, `!stop`, `!model [FILTER|provider/model]`,
-`!thinking [LEVEL]`, `!compact [INSTRUCTIONS]`, `!steer` and `!follow-up`.
-Ordinary messages use native prompting/steering; extension commands, templates
-and skills expand before remote attribution. Controls are not shell commands or
-model prompts. A start/stop acknowledgement does not prove startup/process exit.
+The Pi 1.5.2 upgrade replaces the earlier patch-backed interaction contract.
+See [the approved design and verification](docs/pi-upstream-upgrade.md). Pi source
+is unmodified; the optional bridge uses public extension interfaces. Publication
+and live activation are separate from source verification.
 
-Native questions become choice polls or replyable notices. The first authorized
-answer wins; stale votes/replies do not start another turn. Current joined,
-non-ignored room members can collaborate. JPEG/PNG/WebP input retains original
+The room interface retains `!help`, `!status`, `!abort`,
+`!model [FILTER|provider/model]`, `!thinking [LEVEL]` and `!compact [INSTRUCTIONS]`.
+Configuration controls fail fast when busy; submitted operations may complete
+regardless of later disconnect/abort and are never automatically retried.
+Matrix cannot start or stop Pi. Open the conversation locally first. Chat is
+literal attributed custom-message content, batched in arrival order when Pi is
+fully idle; slash commands and template/skill expansion remain terminal-only.
+Local steering remains native. Abort/disconnect holds pending remote input
+without replay or a release interface. Offline input is rejected; a reconnect
+first catches up Matrix sync without delivering the backlog.
+
+`ask_user` publishes Matrix choice polls or replyable notices without gating
+other input. First eligible answer wins; unanswered polls remain answerable as
+the conversation moves on. Reply directly to a notice to associate an answer;
+ordinary text remains independent chat. Late answers include the original
+question. Offline votes do not consume the poll. Questions are not approvals.
+Current joined, non-ignored room members can collaborate. JPEG/PNG/WebP input retains original
 bytes and captions through authenticated media fetch and private chunked IPC;
 unsupported media/models are explained rather than silently dropping the image
-or switching models. See the [implementation evidence](docs/matrix-pi-bridge-evidence.md)
+or switching models. See the [upgrade evidence](docs/pi-upstream-upgrade.md)
 for tested boundaries and outstanding release work.
 
 The configured operator can send `!archive` / `!restore`; native humans can use
 `/bridge-archive` / `/bridge-restore` with UI confirmation. Archive hides the
-default picker entry and disables future remote input, not running Pi. Original
+default picker entry, but does not affect execution, input or authorization. Original
 history, membership and worktrees stay intact; grouping moves to a host Archive
 Space asynchronously. Rooms may still appear in All Rooms. Check `!status` after
-a fresh Matrix sync before another remote policy change or new restored input:
-held messages, old commands and polls never replay. There is no model archive tool.
+organization changes; archived rooms can still instruct connected Pi.
+Held messages and uncertain operations never replay. There is no model archive tool.
 
 The `matrix-bridge` package includes the one-shot `pi-bridge-migrate` offline
 inventory/export/import/check command. It requires independent read-only snapshots
@@ -110,12 +121,11 @@ Ordinary engineering sessions retain Pi's project resource discovery and trust
 policy. Implementation/patch workers admit project extensions only through the
 registry's explicit `aloop-opt-in` policy in `.aloop.json`.
 
-Live capabilities are not ambient. The native `remote_checkpoint` requires an
-enrolled interactive session and registered live intake before recording its
-question and aborting the turn. `create_task_workspace` requires a separate
-human decision for each frozen intent. Aloop's supervisor tools are active only
-from `/aloop` startup until that supervisor turn settles; its native checkpoint
-and abort hooks do not restore a managed host-control catalogue.
+Live capabilities are not ambient. `ask_user` requires a connected interactive
+Matrix session; offline/local questions use ordinary assistant text.
+`create_task_workspace` and `create_project` require a separate human decision
+for each frozen intent. Aloop retains its own supervisor checkpoint workflow;
+there is no bridge checkpoint delegate or managed host-control catalogue.
 
 ## Lean local Pi with pi-r
 
@@ -237,11 +247,12 @@ reservation, automatic runtime refresh or general account/repair API exists.
 Recognizable old state fails before credential/HTTP access; use the offline
 migration tool with a distinct destination instead of repointing a live store.
 
-Ordinary interactive Pi enrolls asynchronously in configured roots. Headless,
+Ordinary interactive Pi enrolls asynchronously after native history exists in configured roots. Empty sessions do not get rooms. Headless,
 worker and private sessions stay private. `pi-local-only` retains engineering
 resources without bridge enrollment; it is distinct from the lean model-specific
-`pi-local` / `pi-r-local` profile. Real writer conflicts and missing/corrupt saved
-history remain errors, not excuses to create replacement history.
+`pi-local` / `pi-r-local` profile. The bridge does not lock Pi histories or promise
+single-writer ownership. Its local helper rejects missing/corrupt saved histories;
+direct native Pi navigation retains upstream behaviour.
 
 The host's `pi-session` CLI exposes `list`, `status` and `open` (use `--help` for
 exact options). The native file/header is authoritative. The optional ledger
@@ -253,8 +264,8 @@ Do not treat tmux hints or a successful open reply as execution completion.
 
 Persisted local user text, completed assistant commentary and final output are
 projected with frozen transaction IDs. Remote input retains verified sender
-provenance after normal Pi command/template/skill expansion, without echoing its
-Matrix event. Thinking, tools, internal entries and pre-enrollment history stay
+provenance in custom-message details and visible attribution, without echoing its
+Matrix event. Historical patched metadata remains readable. Thinking, tools, internal entries and pre-enrollment history stay
 private. Interrupted input is held and explained, never automatically rerun.
 Setup failures do not block local Pi or independent rooms.
 
@@ -281,7 +292,7 @@ signing, dependency installation, remotes or pushes.
 
 The result is a repository, saved **idle** native session and asynchronous Matrix
 room/Space setup. It does **not** launch Pi, a terminal, tmux or a model turn.
-Open it later through the normal picker or `!start`. Only the explicit handoff is
+Open it later through the normal local picker. Only the explicit handoff is
 copied. Existing/foreign paths are never adopted, overwritten or removed. Exact
 approved retries reuse owned resources; uncertain unpublished staging is retained
 for inspection, not automatically cleaned up. These are workflow approvals, not
