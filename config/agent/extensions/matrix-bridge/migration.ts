@@ -29,7 +29,7 @@ export function checkMigration(root: string, target: string): { source: string; 
   let started: boolean;
   try {
     const meta = (key: string) => db.prepare("SELECT value FROM meta WHERE key=?").get(key)?.value;
-    if (meta("version") !== "4" || meta("host") !== snapshot.inventory.source.hostId || meta("migration") !== receipt.source || db.prepare("PRAGMA quick_check").get()?.quick_check !== "ok") throw Error("Migration ledger identity/integrity mismatch");
+    if (!["4", "5"].includes(String(meta("version"))) || meta("host") !== snapshot.inventory.source.hostId || meta("migration") !== receipt.source || db.prepare("PRAGMA quick_check").get()?.quick_check !== "ok") throw Error("Migration ledger identity/integrity mismatch");
     started = meta("migration_started") === "true";
   } finally { db.close(); }
   const reportBytes = privateFile(join(target, "migration-report.json"));

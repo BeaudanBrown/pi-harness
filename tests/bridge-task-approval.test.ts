@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync,
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { BridgeRelay } from "../config/agent/extensions/matrix-bridge/relay.js";
+import { BridgeRelay, connect } from "../config/agent/extensions/matrix-bridge/relay.js";
 import { BridgeMatrix } from "../config/agent/extensions/matrix-bridge/matrix.js";
 import { localTasks } from "../config/agent/extensions/matrix-bridge/local-process.js";
 import { POLL_RESPONSE } from "../config/agent/extensions/matrix-bridge/interaction.js";
@@ -45,19 +45,27 @@ async function fixture(t: TestContext) {
   } };
   const http = new SetupHttp(), matrix = new BridgeMatrix(http.bot, BOT, new Set());
   const config = { hostId: "host", stateDirectory: join(directory, "bridge"), socket: join(directory, "runtime/bridge.sock"), roots: [root], operatorUserId: OWNER };
-  const make = () => new BridgeRelay(config, matrix, async () => { opens++; throw Error("fixture did not request a native open"); }, runner);
+  const make = () => new BridgeRelay(config, matrix, runner);
   let relay = make();
+  let peer: Awaited<ReturnType<typeof connect>> | undefined;
+  const attach = async () => {
+    await relay.start(false);
+    peer = await connect(config.socket, async () => ({ accepted: false, message: "fixture has no model" }));
+    await peer.request("register", { protocol: 2, file, nativeId, boundary: "boundary", title: "Development", idle: true });
+    await relay.syncOnce();
+  };
+  t.after(async () => { peer?.close(); await relay.stop(); });
+  await attach();
   const source = relay.store.register({ file, nativeId, cwd, title: "Development", boundary: "boundary" });
   await relay.organization!.pump();
   for (const room of http.rooms.keys()) http.member(room, "join"); now += 6000; await relay.organization!.pump();
   relay.store.intake("ready", []);
   const binding = () => relay.store.binding(source.key)!;
   const intent: TaskIntent = { branch: "task/example", base_ref: "HEAD", title: "Approved handoff", handoff_summary: "Only this explicit plan is copied. Wait for fresh human intent." };
-  t.after(async () => { await relay.stop(); });
   return { directory, cwd, file, history, http, intent, binding, get relay() { return relay; },
     get creates() { return creates; }, get maximum() { return maximum; }, get opens() { return opens; },
     lose: () => { loseResult = true; }, advance: (ms = 6000) => { now += ms; },
-    restart: async (operator = OWNER) => { await relay.stop(); config.operatorUserId = operator; relay = make(); now += 6000; },
+    restart: async (operator = OWNER) => { peer?.close(); await relay.stop(); config.operatorUserId = operator; relay = make(); await attach(); now += 6000; },
     request: async (call: string, surface: "local" | "matrix" = "matrix", value: unknown = intent) => {
       const proposal = await relay.tasks!.prepare(binding(), value, call, surface);
       return surface === "matrix" ? relay.tasks!.publishApproval(binding(), proposal.key, proposal.request) : proposal;

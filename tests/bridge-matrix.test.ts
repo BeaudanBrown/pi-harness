@@ -35,8 +35,10 @@ test("limited-room recovery is durable across restarts and cannot block healthy-
     store.close(); store = new BridgeStore(file, "host"); recover = true;
     assert.deepEqual(await syncIntoStore(matrix, store), []);
     assert.equal(store.cursor(), "s1");
-    assert.deepEqual(store.received(a.key).map(input => input.id), ["$a1", "$a2"]);
-    assert.equal(store.status(b.key).received, 1);
+    assert.deepEqual(store.received(a.key).map(input => input.id), ["$a2"]);
+    assert.deepEqual(store.unreportedInputs(a.key).map(input => input.id), ["$a1"]);
+    assert.equal(store.status(b.key).received, 0);
+    assert.equal(store.status(b.key).interrupted, 1);
     assert.deepEqual(requests, ["s0", "p1", "p1"]);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

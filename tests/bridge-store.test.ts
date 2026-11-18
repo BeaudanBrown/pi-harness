@@ -51,7 +51,7 @@ test("lost output acknowledgements retry the frozen payload and transaction afte
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
-test("intake failure commits neither a partial batch nor its cursor; queued input recovers", () => {
+test("intake is atomic and restart holds previously queued input without replay", () => {
   const root = mkdtempSync(join(tmpdir(), "bridge-atomic-"));
   let store = new BridgeStore(join(root, "bridge.sqlite"), "test-host");
   try {
@@ -63,8 +63,10 @@ test("intake failure commits neither a partial batch nor its cursor; queued inpu
     assert.equal(store.status(binding.key).received, 0);
     store.intake("good-cursor", [event]); store.authorize(event.id, { text: "hello", sender: "@friend:example.org" });
     store.close(); store = new BridgeStore(join(root, "bridge.sqlite"), "test-host");
-    assert.equal(store.status(binding.key).queued, 1);
-    assert.equal(store.takeInput(binding.key)?.id, "$valid");
+    assert.equal(store.status(binding.key).queued, 0);
+    assert.equal(store.status(binding.key).interrupted, 1);
+    assert.equal(store.unreportedInputs(binding.key)[0]?.id, "$valid");
+    assert.equal(store.takeInput(binding.key), undefined);
     assert.throws(() => store.register({ file: "/p/session.jsonl", nativeId: "different", cwd: "/p", title: "Replacement", boundary: null }));
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -83,9 +85,9 @@ test("schema-one upgrade preserves durable delivery facts and advances the versi
     prior.exec("DROP TABLE tasks; DROP TABLE images; DROP TABLE interactions; DROP INDEX output_receipt; ALTER TABLE inputs DROP COLUMN interaction; ALTER TABLE inputs DROP COLUMN held; ALTER TABLE inputs DROP COLUMN archive_revision; UPDATE meta SET value='1' WHERE key='version'"); prior.close();
     store = new BridgeStore(file, "host");
     assert.equal(store.cursor(), "saved-cursor"); assert.equal(store.binding(binding.key)?.boundary, "boundary");
-    assert.equal(store.nextInput(binding.key)?.prompt?.text, "preserved"); assert.deepEqual(store.outputs(binding.key)[0], output);
+    assert.equal(store.unreportedInputs(binding.key)[0]?.prompt?.text, "preserved"); assert.deepEqual(store.outputs(binding.key)[0], output);
     const inspect = new DatabaseSync(file, { readOnly: true });
-    assert.equal(inspect.prepare("SELECT value FROM meta WHERE key='version'").get()!.value, "4"); inspect.close();
+    assert.equal(inspect.prepare("SELECT value FROM meta WHERE key='version'").get()!.value, "5"); inspect.close();
     assert.throws(() => new BridgeStore(file, "wrong-host"), /another host/);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
@@ -101,8 +103,11 @@ test("schema-two upgrade preserves interaction, media, output and cursor identit
     store.saveProgress("setup:original", { room: "!room:example.test", stage: "invitation" }); store.close();
     const prior = new DatabaseSync(file); prior.exec("DROP TABLE tasks; ALTER TABLE inputs DROP COLUMN held; ALTER TABLE inputs DROP COLUMN archive_revision; UPDATE meta SET value='2' WHERE key='version'"); prior.close();
     store = new BridgeStore(file, "host"); assert.equal(store.cursor(), "saved-cursor-two"); assert.deepEqual(store.interaction(question.id), question);
-    assert.equal(store.outputs(binding.key, `interaction:${question.id}`)[0]!.eventId, "$original-poll"); assert.equal(store.takeInput(binding.key)?.id, "$image");
-    assert.deepEqual(Buffer.from(store.imageChunk(binding.key, "$image", 0).data, "base64"), bytes); assert.deepEqual(store.progress("setup:original"), { room: "!room:example.test", stage: "invitation" }); assert.deepEqual(store.tasks(["approval"]), []);
+    assert.equal(store.outputs(binding.key, `interaction:${question.id}`)[0]!.eventId, "$original-poll"); assert.equal(store.takeInput(binding.key), undefined);
+    assert.equal(store.unreportedInputs(binding.key)[0]?.id, "$image");
+    const inspect = new DatabaseSync(file, { readOnly: true });
+    assert.deepEqual(Buffer.from(inspect.prepare("SELECT data FROM images WHERE input=? AND offset=0").get("$image")!.data as Uint8Array), bytes); inspect.close();
+    assert.throws(() => store.imageChunk(binding.key, "$image", 0), /unavailable/); assert.deepEqual(store.progress("setup:original"), { room: "!room:example.test", stage: "invitation" }); assert.deepEqual(store.tasks(["approval"]), []);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });
 
@@ -128,7 +133,7 @@ test("large original media authorization is atomic, chunk-scoped and durable wit
     const info = imageInfo(bytes), prompt = { text: "caption", sender: "@friend:example.test", image: info };
     assert.throws(() => store.authorize("$image", { ...prompt, image: { ...info, sha256: "0".repeat(64) } }, { image: bytes }), /integrity/);
     assert.equal(store.status(binding.key).received, 1);
-    store.authorize("$image", prompt, { image: bytes }); store.close(); store = new BridgeStore(filename, "host");
+    store.authorize("$image", prompt, { image: bytes });
     assert.deepEqual(store.takeInput(binding.key)?.prompt?.image, info);
     assert.throws(() => store.imageChunk("another-binding", "$image", 0), /unavailable/);
     const chunks: Buffer[] = [];
@@ -138,6 +143,10 @@ test("large original media authorization is atomic, chunk-scoped and durable wit
       assert.equal(chunk.done, offset === bytes.length);
     }
     assert.deepEqual(Buffer.concat(chunks), bytes);
+    store.close(); store = new BridgeStore(filename, "host");
+    assert.deepEqual(store.unreportedInputs(binding.key)[0]?.prompt?.image, info);
+    assert.equal(store.takeInput(binding.key), undefined);
+    assert.throws(() => store.imageChunk(binding.key, "$image", 0), /unavailable/);
     store.settle(binding.key, "$image"); assert.throws(() => store.imageChunk(binding.key, "$image", 0), /unavailable/);
   } finally { store.close(); rmSync(root, { recursive: true, force: true }); }
 });

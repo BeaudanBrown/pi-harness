@@ -48,7 +48,7 @@ async function attach(f: ReturnType<typeof fixture>, handler: (method: string, p
 const message = (event_id: string, sender = friend, body = "hello") => ({ event_id, sender, type: "m.room.message", content: { msgtype: "m.text", body } });
 
 test("private bridge intake deduplicates, enforces current membership and never replays a lost native handoff", { timeout: 15000 }, async () => {
-  const f = fixture(); let relay = new BridgeRelay(f.config, f.matrix, async () => { throw Error("must not relaunch a live writer"); });
+  const f = fixture(); let relay = new BridgeRelay(f.config, f.matrix);
   let peer: Peer | undefined;
   const acted: string[] = [];
   try {
@@ -57,15 +57,15 @@ test("private bridge intake deduplicates, enforces current membership and never 
       assert.equal(method, "input"); acted.push(String((params.ids as string[])[0]));
       peer!.close(); // Native effect happened, but the bridge cannot receive its acknowledgement.
       return { accepted: true };
-    }); peer = first.peer;
+    }); peer = first.peer; await relay.syncOnce();
     relay.store.setRoom(first.key, room); relay.store.intake("before", []);
     f.syncs.push({ next_batch: "one", rooms: { join: { [room]: { timeline: { events: [message("$first"), message("$first"), message("$bot", bot), message("$outsider", "@outsider:example.org")] } } } } });
     await relay.syncOnce(); await relay.pump();
     assert.deepEqual(acted, ["$first"]);
     assert.equal(relay.store.status(first.key).interrupted, 1);
     assert.equal(relay.store.status(first.key).ignored, 2);
-    await relay.stop(); relay = new BridgeRelay(f.config, f.matrix, async () => {}); await relay.start(false);
-    const replacement = await attach(f, async (_method, params) => { acted.push(String((params.ids as string[])[0])); return { accepted: true }; }); peer = replacement.peer;
+    await relay.stop(); relay = new BridgeRelay(f.config, f.matrix); await relay.start(false);
+    const replacement = await attach(f, async (_method, params) => { acted.push(String((params.ids as string[])[0])); return { accepted: true }; }); peer = replacement.peer; await relay.syncOnce();
     relay.store.intake("two", [{ id: "$first", room, event: message("$first") }, { id: "$fresh", room, event: message("$fresh") }]);
     await relay.pump();
     assert.deepEqual(acted, ["$first", "$fresh"]);
@@ -77,7 +77,7 @@ test("private bridge intake deduplicates, enforces current membership and never 
 });
 
 test("output recovery freezes payloads and transaction IDs; native private content and local-only turns never project", async () => {
-  const f = fixture(); let relay = new BridgeRelay(f.config, f.matrix, async () => {});
+  const f = fixture(); let relay = new BridgeRelay(f.config, f.matrix);
   let peer: Peer | undefined;
   try {
     await relay.start(false);
@@ -91,7 +91,7 @@ test("output recovery freezes payloads and transaction IDs; native private conte
     append({ type: "custom", id: "on", customType: "matrix-bridge.enrollment", data: { nativeId: "native", enabled: true } });
     f.loseNextSend(); await relay.pump();
     assert.equal(f.attempts.length, 1);
-    await relay.stop(); relay = new BridgeRelay(f.config, f.matrix, async () => {}); await relay.start(false);
+    await relay.stop(); relay = new BridgeRelay(f.config, f.matrix); await relay.start(false);
     await relay.pump();
     assert.equal(f.attempts.length, 2); assert.equal(new Set(f.attempts).size, 1);
     assert.equal(f.sent.size, 1);
@@ -110,13 +110,13 @@ test("already-bound input/output remain usable while independent setup HTTP is b
     if (args[1].endsWith("/state")) { requested = true; return blocked; }
     return request(...args);
   });
-  const relay = new BridgeRelay(f.config, f.matrix, async () => { throw Error("must not launch"); });
+  const relay = new BridgeRelay(f.config, f.matrix);
   let peer: Peer | undefined;
   try {
     await relay.start(false);
     const handed: string[] = [];
     const registration = await attach(f, async (_method, params) => { handed.push(String((params.ids as string[])[0])); return { accepted: true }; }); peer = registration.peer;
-    relay.store.setRoom(registration.key, room);
+    relay.store.setRoom(registration.key, room); await relay.syncOnce();
     appendFileSync(f.file, JSON.stringify({ type: "message", id: "answer", message: { role: "assistant", stopReason: "stop", content: [{ type: "text", text: "Available while setup is pending" }] } }) + "\n");
     relay.store.intake("input", [{ id: "$during-setup", room, event: message("$during-setup") }]);
     const pending = relay.organization!.pump(); assert.equal(requested, true);
@@ -130,10 +130,10 @@ test("already-bound input/output remain usable while independent setup HTTP is b
 });
 
 test("a second daemon cannot replace the live private socket", async () => {
-  const f = fixture(); const relay = new BridgeRelay(f.config, f.matrix, async () => {});
+  const f = fixture(); const relay = new BridgeRelay(f.config, f.matrix);
   try {
     await relay.start(false);
-    assert.throws(() => new BridgeRelay(f.config, f.matrix, async () => {}), /already running/);
+    assert.throws(() => new BridgeRelay(f.config, f.matrix), /already running/);
     const peer = await connect(f.config.socket, async () => ({}));
     assert.deepEqual(await peer.request("list", {}), []); peer.close();
   } finally { await relay.stop(); rmSync(f.root, { recursive: true, force: true }); }

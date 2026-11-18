@@ -54,7 +54,7 @@ export class TaskWorkspaces {
       file: record.plan.nativeFile, cwd: record.plan.worktree, ...(child?.room ? { room: child.room } : {}), ...(error ? { error } : {}) };
   }
   async prepare(binding: Binding, value: unknown, call: string, surface: "local" | "matrix", kind: "task" | "project" = "task"): Promise<TaskStatus> {
-    if (this.stopped || !binding.enabled || surface === "matrix" && binding.archived) throw Error("Task proposal is unavailable for this binding");
+    if (this.stopped || !binding.enabled) throw Error("Task proposal is unavailable for this binding");
     if (surface === "matrix" && !this.policy.operatorUserId) throw Error("Remote task approval requires a configured operator");
     const source = this.source(binding), intent = kind === "project" ? projectIntent(value, this.projectRoot()) : taskIntent(value);
     if (kind === "task" && intent.project) throw new TaskFailure("Use create_project for fresh repositories");

@@ -10,10 +10,10 @@ import { BridgeOrganization } from "./organization.js";
 import { authorizeInput } from "./input.js";
 import { TaskWorkspaces, type TaskRunner } from "./tasks.js";
 import { taskKey } from "./task-contract.js";
-import { archiveCommand } from "./interaction.js";
+import { archiveCommand, interactionSpec } from "./interaction.js";
 
 export type RelayConfig = { hostId: string; stateDirectory: string; socket: string; roots: string[]; projectRoot?: string; operatorUserId?: string; hostSpace?: boolean };
-type Attachment = { peer: Peer; idle: boolean; key: string };
+type Attachment = { peer: Peer; idle: boolean; key: string; ready?: boolean };
 const running = new Set<string>();
 /** Single daemon, native-session routing and transactional delivery only. */
 export class BridgeRelay {
@@ -32,7 +32,7 @@ export class BridgeRelay {
   private interval?: NodeJS.Timeout;
   private syncWork?: Promise<void>;
   private syncError?: string;
-  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, _open: ((binding: Binding) => Promise<unknown>) | undefined, taskRunner?: TaskRunner) {
+  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, taskRunner?: TaskRunner) {
     mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
     const directory = lstatSync(config.stateDirectory);
     if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid!() || (directory.mode & 0o077)) throw Error("Bridge state directory must be private");
@@ -42,7 +42,7 @@ export class BridgeRelay {
     running.add(key);
     this.release = () => { unlock(); running.delete(key); };
     this.database = join(key, "bridge.sqlite");
-    try { this.store = new BridgeStore(this.database, config.hostId, key => this.attached.has(key)); }
+    try { this.store = new BridgeStore(this.database, config.hostId, key => this.attached.get(key)?.ready === true); }
     catch (error) { this.release(); throw error; }
     try {
       const account = this.store.progress<{ bot: string; operator: string }>("migration-account");
@@ -118,11 +118,23 @@ export class BridgeRelay {
           }
           return this.tasks.status(binding, taskKey(params.key));
         }
+        if (method === "control.result") {
+          const id = string(params.id, 255), sender = string(params.sender, 255), result = object(params.result);
+          if (!this.store.ownsInput(key, id, sender)) throw Error("Unknown control origin");
+          const source = `control:${id}:${result.pending === true ? "requested" : "result"}`;
+          this.store.finishInput(key, id, string(result.message, 4096), source);
+          if (result.selection) this.store.offerInteraction(key, source, interactionSpec(result.selection));
+          return {};
+        }
         if (method === "input.read") return this.store.inputChunk(key, string(params.id, 255), Number(params.offset));
         if (method === "image.read") return this.store.imageChunk(key, string(params.id, 255), Number(params.offset));
         if (method === "hold") { this.store.disconnect(key); return {}; }
         if (method === "activity") {
           this.attached.get(key)!.idle = params.idle === true;
+          if (params.idle === true && !this.roomWork.has(key)) {
+            offerHistory(this.store, this.store.binding(key)!);
+            this.store.interruptUnobserved(key);
+          }
           return this.status(this.store.binding(key)!);
         }
         throw Error("Unknown bridge operation");
@@ -148,7 +160,7 @@ export class BridgeRelay {
   }
   private status(binding: Binding): ObjectValue {
     const current = this.attached.get(binding.key);
-    return { ...binding, intakeReady: this.store.cursor() !== undefined, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
+    return { ...binding, intakeReady: current?.ready === true, ...(this.organization ? { setup: this.organization.status(binding.key) } : {}), runtime: current ? current.idle ? "idle" : "running" : "detached", input: this.store.status(binding.key), error: this.failures.get(binding.key) ?? null, syncError: this.syncError ?? null, syncGap: Boolean(binding.room && this.store.progress(`gap:${binding.room}`)) };
   }
   private async syncLoop(): Promise<void> {
     while (!this.stopSignal.signal.aborted) {
@@ -162,7 +174,13 @@ export class BridgeRelay {
   }
   async syncOnce(): Promise<Array<{ room: string; error: string }>> {
     try {
+      // A newly connected adapter first observes a complete sync boundary.
+      // Backlog received before that boundary stays held, never replayed.
+      const connections = [...this.attached.values()];
       const errors = await syncIntoStore(this.matrix, this.store, this.stopSignal.signal);
+      if (!errors.length) for (const connection of connections) {
+        if (this.attached.get(connection.key) === connection) connection.ready = true;
+      }
       this.syncError = errors.length ? `${errors.length} room history interval(s) pending` : undefined;
       return errors;
     } catch (error) { this.syncError = error instanceof Error ? error.message : "Matrix sync failed"; throw error; }
@@ -192,7 +210,7 @@ export class BridgeRelay {
             if (input.event.sender !== this.config.operatorUserId) { this.store.finishInput(binding.key, input.id, "Only the configured operator may archive or restore this conversation."); return; }
             try { this.archive(binding.key, archived, input.archiveRevision ?? -1); this.store.finishInput(binding.key, input.id, "Archive policy recorded; grouping is asynchronous. No process was stopped and no pending input was replayed."); }
             catch { this.store.finishInput(binding.key, input.id, "Archive policy changed during this request. Check !status and issue a fresh command."); }
-          }, () => this.attached.has(binding.key));
+          }, () => this.attached.get(binding.key)?.ready === true);
         binding = this.store.binding(binding.key)!;
         if (historyReady && !gap && binding.enabled) {
           const attachment = this.attached.get(binding.key), queued = this.store.queuedInputs(binding.key);

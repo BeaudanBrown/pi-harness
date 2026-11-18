@@ -280,12 +280,12 @@ test("missing/corrupt media is explicit, and bot/state inbox events cannot gener
 });
 
 test("an empty/wrong ledger cannot resurrect matching historical native markers; genuine native forks remain new identities", async t => {
-  const root = temporary(t), socket = join(root, "bridge.sock"), relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] }, new BridgeMatrix(new SetupHttp().bot, "@bot:example.test"), async () => { throw Error("No wake expected"); });
+  const root = temporary(t), socket = join(root, "bridge.sock"), relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] }, new BridgeMatrix(new SetupHttp().bot, "@bot:example.test"));
   await relay.start(false); const peer = await connect(socket, async () => ({})); t.after(async () => { peer.close(); await relay.stop(); });
   for (const nativeId of ["old-native", "fresh-fork"]) {
     const file = join(root, `${nativeId}.jsonl`);
     writeFileSync(file, [{ type: "session", id: nativeId, version: 3, cwd: root }, { type: "custom", id: "historical", customType: "managed-session.binding", data: { sessionId: "old-native" } }, { type: "custom", id: "boundary", customType: "matrix-bridge.boundary", data: { nativeId } }].map(row => JSON.stringify(row)).join("\n") + "\n");
-    const register = peer.request("register", { file, nativeId, boundary: "boundary", title: "test" });
+    const register = peer.request("register", { protocol: 2, file, nativeId, boundary: "boundary", title: "test" });
     if (nativeId === "old-native") { await assert.rejects(register, /explicit offline migration/); assert.equal(relay.store.bindings().length, 0); }
     else { await register; assert.equal(relay.store.bindings()[0]!.nativeId, "fresh-fork"); }
   }
@@ -294,15 +294,15 @@ test("an empty/wrong ledger cannot resurrect matching historical native markers;
 test("imported sends cannot change bot/operator accounts, and rejected startup releases owned daemon resources", async t => {
   const f = imported(t), http = new SetupHttp(), config = { hostId: "fixture", stateDirectory: f.target, socket: join(f.root, "socket"), roots: [f.root], operatorUserId: "@operator:example.org" };
   for (const [bot, operator] of [["@foreign:example.org", config.operatorUserId], ["@bot:example.org", "@foreign:example.org"]]) {
-    assert.throws(() => new BridgeRelay({ ...config, operatorUserId: operator }, new BridgeMatrix(http.bot, bot!), async () => ({})), /Migrated bot\/operator identity changed/);
+    assert.throws(() => new BridgeRelay({ ...config, operatorUserId: operator }, new BridgeMatrix(http.bot, bot!)), /Migrated bot\/operator identity changed/);
   }
-  const relay = new BridgeRelay(config, new BridgeMatrix(http.bot, "@bot:example.org"), async () => ({}));
+  const relay = new BridgeRelay(config, new BridgeMatrix(http.bot, "@bot:example.org"));
   await relay.stop(); assert.equal(http.count(""), 0);
   assert.equal(checkMigration(source, f.target).started, true, "startup failure is not proof that an imported writer never opened");
 });
 
 test("imported delivery waits only for exact original room ownership, not hierarchy/checkout availability", async t => {
-  const f = imported(t), http = new SetupHttp(), relay = new BridgeRelay({ hostId: "fixture", stateDirectory: f.target, socket: join(f.root, "socket"), roots: [f.root], operatorUserId: "@operator:example.org" }, new BridgeMatrix(http.bot, "@bot:example.org"), async () => { throw Error("No native wake expected"); });
+  const f = imported(t), http = new SetupHttp(), relay = new BridgeRelay({ hostId: "fixture", stateDirectory: f.target, socket: join(f.root, "socket"), roots: [f.root], operatorUserId: "@operator:example.org" }, new BridgeMatrix(http.bot, "@bot:example.org"));
   const seeded = setup(relay.store, http); await seeded.stop();
   t.after(async () => relay.stop());
   let now = Date.now(); t.mock.method(Date, "now", () => now);

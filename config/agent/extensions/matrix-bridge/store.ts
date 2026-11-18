@@ -159,7 +159,7 @@ export class BridgeStore {
       for (const input of events) {
         const binding = this.byRoom(input.room); if (!binding) continue;
         this.db.prepare("INSERT OR IGNORE INTO inputs(id,binding,position,event,prompt,state,interaction,held,archive_revision) VALUES (?,?,?,?,NULL,'received',?,?,?)")
-          .run(input.id, binding.key, ++position, JSON.stringify(input.event), null, this.connected(binding.key) ? 0 : 1, binding.archiveRevision ?? 0);
+          .run(input.id, binding.key, ++position, JSON.stringify(input.event), null, this.connected(binding.key) && !binding.resumePending ? 0 : 1, binding.archiveRevision ?? 0);
       }
       for (const [key, value] of Object.entries(checkpoints)) this.saveProgress(key, value);
       this.setMeta("position", String(position)); this.setMeta("cursor", cursor);
@@ -175,7 +175,7 @@ export class BridgeStore {
     return this.atomic(() => {
       const input = this.db.prepare("SELECT binding,held FROM inputs WHERE id=? AND state='received'").get(id); if (!input) return false;
       const binding = this.binding(String(input.binding));
-      if (prompt && (input.held || !binding?.enabled || !this.connected(String(input.binding)))) {
+      if (prompt && (input.held || !binding?.enabled || binding.resumePending || !this.connected(String(input.binding)))) {
         this.db.prepare("UPDATE inputs SET state='interrupted' WHERE id=?").run(id); return false;
       }
       if (prompt && options.interaction && this.db.prepare("UPDATE interactions SET state='answered',answer=? WHERE id=? AND binding=? AND state='active'").run(id, options.interaction, input.binding!).changes !== 1) prompt = undefined;
@@ -220,7 +220,8 @@ export class BridgeStore {
   }
   takeBatch(key: string, ids: string[]): Input[] {
     return this.atomic(() => {
-      if (!this.binding(key)?.enabled || !this.connected(key)) return [];
+      const binding = this.binding(key);
+      if (!binding?.enabled || binding.resumePending || !this.connected(key)) return [];
       const rows = ids.map(id => this.db.prepare("SELECT * FROM inputs WHERE binding=? AND id=? AND state='queued' AND held=0").get(key, id));
       if (!ids.length || new Set(ids).size !== ids.length || rows.some(row => !row)) return [];
       return rows.map(row => {
@@ -255,6 +256,9 @@ export class BridgeStore {
       this.db.prepare("DELETE FROM images WHERE input=?").run(id);
       this.materialize(key, source, [{ type: "m.room.message", content: { msgtype: "m.notice", body: message, "m.mentions": {}, "m.relates_to": { "m.in_reply_to": { event_id: id } } } }]);
     });
+  }
+  interruptUnobserved(key: string): void {
+    this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state='handed'").run(key);
   }
   holdPending(key: string, except = ""): void { this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND id!=? AND state IN ('received','queued','handed')").run(key, except); }
   disconnect(key: string): void { this.holdPending(key); }

@@ -40,7 +40,7 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
   const idle = (scope: Scope) => scope.ctx.isIdle() && !scope.ctx.hasPendingMessages() && !scope.controlPending;
   const status = (scope: Scope, message: string) => { if (valid(scope)) scope.ctx.ui.setStatus("matrix-bridge", message); };
   const remoteStatus = (scope: Scope, view: Record<string, unknown>) => {
-    status(scope, view.syncError || view.error ? "Bridge connected · remote delivery needs attention" : !view.room ? "Bridge connected · room setup pending" : view.archived ? "Matrix connected · archived (organization only)" : "Matrix bridge connected");
+    status(scope, view.syncError || view.error ? "Bridge connected · remote delivery needs attention" : view.intakeReady !== true ? "Matrix connected · fresh sync pending; input not yet enabled" : !view.room ? "Bridge connected · room setup pending" : view.archived ? "Matrix connected · archived (organization only)" : "Matrix bridge connected");
   };
   const attach = async (scope: Scope, cfg: AdapterConfig): Promise<void> => {
     if (!valid(scope)) return;
@@ -70,21 +70,26 @@ export function installAdapter(pi: ExtensionAPI, options: { config?: AdapterConf
           if (inputs.length !== 1) throw Error("Controls cannot be batched");
           const command = string(first.control, 32) as NativeControl;
           if (nativeControl(`!${command}`) === "unknown") throw Error("Unknown native control");
-          const publish = (result: ControlResult) => { if (valid(scope, peer)) pi.appendEntry("matrix-bridge.control", { nativeId: scope.nativeId, input: id, sender, result }); };
+          const publish = async (result: ControlResult) => {
+            if (!valid(scope, peer)) throw Error("Control outcome unknown after disconnect; inspect status before retrying");
+            // A saved idle handoff may contain no assistant messages. Do not
+            // depend on upstream flushing custom entries to publish a result.
+            await peer.request("control.result", { id, sender, result });
+          };
           if (command === "abort") {
-            publish({ message: "Abort requested. This does not undo or prove completion of earlier effects." });
+            await publish({ message: "Abort requested. This does not undo or prove completion of earlier effects." });
             scope.epoch++; cancelAloop(scope.nativeId); scope.ctx.abort();
             return { accepted: true };
           }
           const mutation = !["help", "status"].includes(command);
-          if (mutation && !idle(scope)) { publish({ message: "Pi is busy or a control is pending. Retry when idle; nothing was changed." }); return { accepted: true }; }
+          if (mutation && !idle(scope)) { await publish({ message: "Pi is busy or a control is pending. Retry when idle; nothing was changed." }); return { accepted: true }; }
           if (mutation) scope.controlPending = true;
           let pending = false;
           try {
             const result = await nativeControlResult(pi, scope.ctx, command, first.argument === undefined ? undefined : string(first.argument, 4096), () => valid(scope, peer), result => {
-              scope.controlPending = false; publish(result);
+              scope.controlPending = false; void publish(result).catch(() => peer.close());
             });
-            pending = result.pending === true; publish(result);
+            pending = result.pending === true; await publish(result);
             return { accepted: true };
           } finally { if (mutation && !pending) scope.controlPending = false; }
         }

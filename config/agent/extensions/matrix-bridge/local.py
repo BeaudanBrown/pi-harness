@@ -158,59 +158,31 @@ def tmux(*args, timeout=5):
 
 
 def observe(file):
-    with lock(file) as (available, fd):
-        if available:
-            return {"running": False}
-        try:
-            owner = json.loads(os.read(fd, 32768))
-        except (ValueError, OSError):
-            return {"running": True}
-    result = {"running": True}
-    if not isinstance(owner, dict):
-        return result
-    pane = owner.get("pane")
-    if not isinstance(pane, str) or not pane.startswith("%") or not pane[1:].isdigit():
-        return result
+    # A live process and its own start time validate a focus hint, not exclusive
+    # file ownership. Native Pi may still open the same history elsewhere.
     try:
-        fields = tmux("display-message", "-p", "-t", pane, "#{pane_id}\t#{pid}\t#{pane_dead}").split("\t")
-        # Server identity is only a focus hint, never permission to stop a process.
-        if len(fields) == 3 and fields[0] == pane and fields[1] == str(owner.get("serverPid")) and fields[2] == "0":
-            result["pane"] = pane
-            result["serverPid"] = int(fields[1])
-    except (RuntimeError, subprocess.TimeoutExpired):
+        rows = tmux("list-panes", "-a", "-F", "#{pane_id}\t#{pid}\t#{pane_dead}\t#{@pi_native_session}")
+        for line in rows.splitlines():
+            fields = line.split("\t", 3)
+            if len(fields) != 4 or fields[2] != "0":
+                continue
+            try:
+                value = json.loads(fields[3])
+            except ValueError:
+                continue
+            if isinstance(value, dict) and value.get("file") == file and value.get("birth") and value["birth"] == process_birth(value.get("pid")):
+                return {"running": True, "pane": fields[0], "serverPid": int(fields[1])}
+    except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
         pass
-    return result
+    return {"running": False}
 
 
 def process_birth(pid):
     try:
         value = Path(f"/proc/{int(pid)}/stat").read_text()
         return value[value.rfind(")") + 2:].split()[19]
-    except (OSError, ValueError, IndexError):
+    except (OSError, TypeError, ValueError, IndexError):
         return None
-
-
-def discard_hint(file, pane, server):
-    # Once this pane has acquired the file, it is not a bootstrap anymore. The
-    # record remains after /new or /resume releases it; it only INVALIDATES a
-    # hint here, never establishes current ownership or launch authority.
-    try:
-        fd = os.open(lock_path(file), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-        try:
-            info = os.fstat(fd)
-            if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_mode & 0o077:
-                return True
-            data = os.read(fd, 32768)
-            if not data:
-                return False
-            owner = json.loads(data)
-            return not isinstance(owner, dict) or owner.get("pane") == pane and str(owner.get("serverPid")) == server
-        finally:
-            os.close(fd)
-    except FileNotFoundError:
-        return False
-    except (OSError, ValueError):
-        return True  # A corrupt advisory record cannot reserve a session.
 
 
 def pending_windows():
@@ -229,9 +201,8 @@ def pending_windows():
                 continue
             if isinstance(value, dict) and isinstance(value.get("file"), str) and value.get("pid") == fields[1] and value.get("server") == fields[3] and value.get("birth") and value["birth"] == process_birth(fields[1]):
                 created = value.get("created")
-                # A live but wedged bootstrap is not a permanent reservation.
-                # A later start still has to acquire the native kernel lock.
-                if not isinstance(created, (int, float)) or not 0 <= time.monotonic() - created <= 60 or discard_hint(value["file"], fields[0], fields[3]):
+                # A live but wedged bootstrap is only a temporary focus hint.
+                if not isinstance(created, (int, float)) or not 0 <= time.monotonic() - created <= 60:
                     continue
                 result[value["file"]] = {"running": False, "pending": True, "pane": fields[0], "serverPid": int(fields[3])}
     except (OSError, RuntimeError, ValueError, subprocess.TimeoutExpired):
@@ -285,8 +256,8 @@ def open_session(file, expected_id=None):
             env = dict(os.environ)
             env.pop("TMUX", None)
             env.pop("TMUX_PANE", None)
-            if tmux_socket():
-                env["TMUX_PROJECT_SOCKET"] = tmux_socket()
+            if socket := tmux_socket():
+                env["TMUX_PROJECT_SOCKET"] = socket
             result = subprocess.run([window_launcher, "native-window"], input=json.dumps({"cwd": cwd, "argv": args}), env=env,
                                     text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=5)
             if result.returncode:
@@ -306,19 +277,18 @@ def open_session(file, expected_id=None):
         if not isinstance(pane, str) or not pane.startswith("%") or not pane[1:].isdigit():
             raise ValueError("window launcher returned an invalid pane")
         mark_pending(saved["file"], pane)
-        # Holding this transient open lock joins ordinary concurrent calls. Pi
-        # itself owns the session lock, so an interrupted launcher cannot leave
-        # a permanent reservation or admit a second writer after a slow start.
-        until = time.monotonic() + 10
+        # This transient helper lock only joins simultaneous picker requests.
+        # It does not prevent another Pi from opening the same history.
+        until = time.monotonic() + 2
         while time.monotonic() < until:
             observed = observe(saved["file"])
             if observed["running"]:
                 return {**saved, **observed}
             try:
                 if tmux("display-message", "-p", "-t", pane, "#{pane_dead}") != "0":
-                    raise RuntimeError("Pi exited before acquiring its native session; inspect the failed terminal")
+                    raise RuntimeError("Pi window exited before publishing a focus hint; inspect the failed terminal")
             except RuntimeError as error:
-                raise RuntimeError("Pi window exited before session ownership; retry is safe") from error
+                raise RuntimeError("Pi window exited before a focus hint; inspect locally before retrying") from error
             time.sleep(.05)
         pending = pending_windows().get(saved["file"])
         if not pending:

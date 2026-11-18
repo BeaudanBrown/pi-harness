@@ -1,19 +1,17 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
 import { BridgeRelay } from "../config/agent/extensions/matrix-bridge/relay.js";
 import { BridgeMatrix } from "../config/agent/extensions/matrix-bridge/matrix.js";
-import { authorizeInput } from "../config/agent/extensions/matrix-bridge/input.js";
-import { POLL_RESPONSE } from "../config/agent/extensions/matrix-bridge/interaction.js";
 import { BOT, OWNER, SetupHttp } from "./fixtures/matrix-bridge/setup-http.js";
 
 async function fixture(t: TestContext) {
   const root = mkdtempSync(join(tmpdir(), "bridge-archive-")), cwd = join(root, "workspace"); mkdirSync(cwd);
   let now = Date.now(); t.mock.method(Date, "now", () => now);
   const http = new SetupHttp(), config = { hostId: "host", stateDirectory: join(root, "state"), socket: join(root, "runtime/bridge.sock"), roots: [root], operatorUserId: OWNER };
-  let opens = 0, relay = new BridgeRelay(config, new BridgeMatrix(http.bot, BOT), async () => { opens++; });
+  let opens = 0, relay = new BridgeRelay(config, new BridgeMatrix(http.bot, BOT));
   const register = (id: string) => {
     const file = join(root, `${id}.jsonl`), timestamp = new Date().toISOString();
     writeFileSync(file, [ { type: "session", version: 3, id, cwd, timestamp }, { type: "custom", id: "boundary", parentId: null, timestamp, customType: "matrix-bridge.boundary", data: { nativeId: id } } ].map(value => JSON.stringify(value) + "\n").join(""));
@@ -27,7 +25,7 @@ async function fixture(t: TestContext) {
   return { root, a, b, http, get relay() { return relay; }, binding, event, get opens() { return opens; },
     advance: () => { now += 6000; },
     command: async (id: string, body: string, sender = OWNER, key = a.key) => { await relay.syncOnce(); relay.store.intake(id, [event(id, body, sender, key)]); await relay.pump(); },
-    restart: async () => { await relay.stop(); relay = new BridgeRelay(config, new BridgeMatrix(http.bot, BOT), async () => { opens++; }); now += 6000; },
+    restart: async () => { await relay.stop(); relay = new BridgeRelay(config, new BridgeMatrix(http.bot, BOT)); now += 6000; },
     archive: (key = a.key, archived = true) => relay.archive(key, archived, binding(key).archiveRevision ?? 0),
   };
 }

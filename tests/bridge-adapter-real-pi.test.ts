@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import test from "node:test";
@@ -18,8 +18,10 @@ async function fixture(empty = false) {
       pi.registerCommand("native-command",{handler:async args=>pi.appendEntry("probe.command",{args})});
     };`);
   const http = new InteractionHttp();
-  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] }, http.matrix, async () => { throw Error("Remote launch is forbidden"); });
+  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] }, http.matrix);
   await relay.start(false); relay.store.intake("ready", []);
+  mkdirSync(join(root, "home", ".pi"), { recursive: true });
+  writeFileSync(join(root, "home", ".pi", "settings.json"), JSON.stringify({ compaction: { enabled: false, keepRecentTokens: 1, reserveTokens: 128 } }));
   const live = piProcess(root, file, extension);
   const state = async () => (await live.send("get_state")).data as { isStreaming: boolean; model?: { id: string }; thinkingLevel?: string; pendingMessageCount: number; sessionFile?: string };
   await live.send("get_state");
@@ -28,7 +30,7 @@ async function fixture(empty = false) {
   const text = (id: string, body: string) => relay.store.intake(id, [{ id, room: ROOM, event: textEvent(id, body) }]);
   const idle = () => until(async () => !(await state()).isStreaming);
   const delivered = (id: string) => until(async () => { await relay.pump(); return Boolean(remote(id)); });
-  if (!empty) { await until(() => relay.store.bindings().length === 1); relay.store.setRoom(relay.store.bindings()[0]!.key, ROOM); }
+  if (!empty) { await until(() => relay.store.bindings().length === 1); relay.store.setRoom(relay.store.bindings()[0]!.key, ROOM); await relay.syncOnce(); }
   return { root, socket, file, http, relay, live, state, entries, remote, text, idle, delivered,
     cleanup: async () => { await live.stop(); await relay.stop(); rmSync(root, { recursive: true, force: true }); } };
 }
@@ -59,6 +61,9 @@ test("upstream custom messages preserve literal text, provenance, images, polls 
       const image = f.remote(id).content.find((part: any) => part.type === "image");
       assert.deepEqual(Buffer.from(image.data, "base64"), bytes);
     }
+    f.text("$compact", "!compact retain the explicit task");
+    await until(async () => { await f.relay.pump(); return [...f.http.sent.values()].some(event => String(event.content.body).includes("Native compaction completed")); });
+    assert.ok(f.entries().some(entry => entry.type === "compaction"));
     f.text("$question", "ask choice"); await f.delivered("$question");
     await until(async () => { await f.relay.pump(); return [...f.http.sent.values()].some(event => event.type === POLL_START); }); await f.idle();
     const poll = [...f.http.sent.values()].find(event => event.type === POLL_START)!;

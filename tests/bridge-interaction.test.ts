@@ -14,27 +14,33 @@ async function fixture(t: TestContext) {
   const config = { hostId: "host", stateDirectory: join(root, "state"), socket, roots: [root] }, http = new InteractionHttp();
   writeFileSync(file, [JSON.stringify({ type: "session", version: 3, id: "native", cwd: root }), JSON.stringify({ type: "custom", id: "boundary", customType: "matrix-bridge.boundary", data: { nativeId: "native" } })].join("\n") + "\n");
   let now = Date.now(); t.mock.method(Date, "now", () => now);
-  let opens = 0, relay = new BridgeRelay(config, http.matrix, async () => { opens++; }), peer: Peer | undefined, cursor = 0;
+  let opens = 0, relay = new BridgeRelay(config, http.matrix), peer: Peer | undefined, cursor = 0;
   const delivered: Array<{ id: string; prompt: Record<string, unknown>; image?: { data: string; mimeType: string } }> = [];
   const attach = async () => {
     peer = await connect(socket, async (_method, params) => {
-      const id = String(params.id); let payload = "";
-      for (;;) { const chunk = object(await peer!.request("input.read", { id, offset: payload.length })); payload += String(chunk.text); if (chunk.done) break; }
-      const prompt = object(JSON.parse(payload)), image = prompt.image ? await readImage(peer!, id, prompt.image, () => true) : undefined;
-      delivered.push({ id, prompt, ...(image ? { image } : {}) }); return { accepted: true };
+      for (const id of params.ids as string[]) {
+        let payload = "";
+        for (;;) { const chunk = object(await peer!.request("input.read", { id, offset: payload.length })); payload += String(chunk.text); if (chunk.done) break; }
+        const prompt = object(JSON.parse(payload)), image = prompt.image ? await readImage(peer!, id, prompt.image, () => true) : undefined;
+        delivered.push({ id, prompt, ...(image ? { image } : {}) });
+        appendFileSync(file, JSON.stringify({ type: "custom_message", id: `accepted-${id}`, customType: "matrix-bridge.input", details: { nativeId: "native", events: [{ id, sender: prompt.sender }] } }) + "\n");
+      }
+      await peer!.request("activity", { idle: true });
+      return { accepted: true };
     });
-    const registration = object(await peer.request("register", { file, nativeId: "native", boundary: "boundary", title: "Native", idle: true }));
+    const registration = object(await peer.request("register", { protocol: 2, file, nativeId: "native", boundary: "boundary", title: "Native", idle: true }));
+    await relay.syncOnce();
     return String(registration.key);
   };
-  await relay.start(false); const key = await attach(); relay.store.setRoom(key, ROOM); relay.store.intake("live", []);
   t.after(async () => { peer?.close(); await relay.stop(); rmSync(root, { recursive: true, force: true }); });
+  await relay.start(false); const key = await attach(); relay.store.setRoom(key, ROOM); relay.store.intake("live", []);
   const intake = (...events: Array<Record<string, unknown>>) => relay.store.intake(`cursor-${++cursor}`, events.map(event => ({ id: String(event.event_id), room: ROOM, event })));
   return { root, file, http, key, delivered, get relay() { return relay; }, get opens() { return opens; }, intake,
     question: (id = "question", options = ["First", "Second"]) => appendFileSync(file, JSON.stringify({ type: "custom", id, customType: "matrix-bridge.question", data: { nativeId: "native", checkpoint: { kind: "question", decision: "Which option?", options } } }) + "\n"),
     observe: () => intake(...http.sent.values()),
     advance: () => { now += 6000; },
     detach: async () => { peer?.close(); peer = undefined; await new Promise(resolve => setTimeout(resolve, 10)); },
-    restart: async () => { peer?.close(); await relay.stop(); relay = new BridgeRelay(config, http.matrix, async () => { opens++; }); await relay.start(false); await attach(); now += 6000; },
+    restart: async () => { peer?.close(); await relay.stop(); relay = new BridgeRelay(config, http.matrix); await relay.start(false); await attach(); now += 6000; },
   };
 }
 const vote = (id: string, event: string, answer = "answer-0", sender = USER) => ({ event_id: id, sender, type: POLL_RESPONSE, content: { "m.relates_to": { rel_type: "m.reference", event_id: event }, [POLL_RESPONSE]: { answers: [answer] } } });
@@ -44,21 +50,21 @@ test("concurrent votes/text fallback resolve a native question once and obsolete
   const start = [...f.http.sent.values()].find(event => event.type === POLL_START)!;
   f.intake(vote("$one", start.event_id), textEvent("$two", "ordinary fallback"), vote("$three", start.event_id, "answer-1", "@second:example.test"));
   await Promise.all([f.relay.pump(), f.relay.pump()]);
-  assert.equal(f.delivered.length, 1); assert.equal(f.delivered[0]!.id, "$one"); assert.equal(f.delivered[0]!.prompt.question, "question");
+  assert.equal(f.delivered.length, 2); assert.equal(f.delivered[0]!.id, "$one"); assert.equal(f.delivered[0]!.prompt.question, "question");
   assert.ok([...f.http.sent.values()].some(event => event.type === POLL_END));
   f.intake(vote("$one", start.event_id), vote("$obsolete", start.event_id), { ...textEvent("$stale-text", "Second"), content: { msgtype: "m.text", body: "Second", "m.relates_to": { "m.in_reply_to": { event_id: start.event_id } } } });
-  await f.relay.pump(); assert.equal(f.delivered.length, 1);
+  await f.relay.pump(); assert.equal(f.delivered.length, 2);
   await f.restart(); f.intake(textEvent("$fresh", "A genuinely fresh request")); await f.relay.pump();
-  assert.deepEqual(f.delivered.map(item => item.id), ["$one", "$fresh"]);
+  assert.deepEqual(f.delivered.map(item => item.id), ["$one", "$two", "$fresh"]);
 });
 
-test("plain text fallback uses timeline order, not clocks or messages posted before the question", async t => {
+test("ordinary text is independent of polls and never waits for an answer", async t => {
   const f = await fixture(t); f.question(); await f.relay.pump();
   f.intake(textEvent("$early", "posted before the poll")); f.observe(); f.intake(textEvent("$answer", "ordinary text answer"));
   await f.relay.pump();
-  assert.deepEqual(f.delivered.map(item => item.id), ["$answer"]);
-  assert.equal(f.delivered[0]!.prompt.text, "ordinary text answer");
-  assert.ok([...f.http.sent.values()].some(event => String(event.content.body).includes("preceded the displayed question")));
+  assert.deepEqual(f.delivered.map(item => item.id), ["$early", "$answer"]);
+  assert.equal(f.delivered[1]!.prompt.text, "ordinary text answer");
+  assert.equal(f.relay.store.activeInteraction(f.key)?.state, "active");
 });
 
 test("lost poll start/end receipts survive restart and keep exactly the original transactions and bodies", async t => {
@@ -66,6 +72,7 @@ test("lost poll start/end receipts survive restart and keep exactly the original
   const start = [...f.http.sent.values()].find(event => event.type === POLL_START)!;
   f.intake(vote("$vote-before-ack", start.event_id)); await f.restart(); await f.relay.pump();
   assert.equal(f.delivered.length, 0, "unknown publication receipt cannot authorize a vote yet");
+  f.intake(vote("$fresh-vote", start.event_id));
   f.http.loseType = POLL_END; await f.relay.pump(); assert.equal(f.delivered.length, 1);
   await f.restart(); await f.relay.pump();
   assert.equal(f.delivered.length, 1);
@@ -84,7 +91,7 @@ test("departed/ignored senders and malformed/foreign votes never resolve a quest
   f.intake(vote("$valid", start.event_id)); await f.relay.pump(); assert.equal(f.delivered.length, 1);
 });
 
-test("local input closes old questions and publication replay cannot cancel a later recorded question", async t => {
+test("local input and projection replay do not expire unanswered polls", async t => {
   const f = await fixture(t); f.question("old"); await f.relay.pump(); f.observe();
   appendFileSync(f.file, JSON.stringify({ type: "message", id: "local", message: { role: "user", content: "answered locally" } }) + "\n");
   f.question("new");
@@ -95,7 +102,8 @@ test("local input closes old questions and publication replay cannot cancel a la
     return save(key, value);
   });
   await f.relay.pump(); assert.equal(failed, true);
-  await f.restart(); await f.relay.pump(); assert.equal(f.relay.store.activeInteraction(f.key)?.nativeEntry, "new");
+  await f.restart(); await f.relay.pump(); assert.equal(f.relay.store.activeInteraction(f.key)?.nativeEntry, "old");
+  assert.equal([...f.http.sent.values()].filter(event => event.type === POLL_START).length, 2);
 });
 
 test("original JPEG/PNG/WebP bytes, captions and captionless input cross bounded private frames once", async t => {
@@ -139,12 +147,13 @@ test("a failed poll publication cannot stall another room's persisted output", a
   assert.ok(f.relay.store.outputs(f.key).some(output => output.type === POLL_START));
 });
 
-test("help/status/stop do not wake detached Pi; explicit start opens without a model turn", async t => {
+test("all offline instructions and removed start/stop controls fail without launching Pi", async t => {
   const f = await fixture(t); await f.detach();
   for (const [id, body] of [["help", "!help"], ["status", "!status"], ["stop", "!stop"], ["unknown", "!host repair"]]) {
     f.intake(textEvent(`$${id}`, body!)); await f.relay.pump();
   }
   assert.equal(f.opens, 0); assert.equal(f.delivered.length, 0);
-  f.intake(textEvent("$start", "!start")); await f.relay.pump(); assert.equal(f.opens, 1);
-  await f.relay.pump(); assert.equal(f.opens, 1); assert.equal(f.delivered.length, 0);
+  f.intake(textEvent("$start", "!start")); await f.relay.pump(); assert.equal(f.opens, 0);
+  await f.relay.pump(); assert.equal(f.delivered.length, 0);
+  assert.equal(f.relay.store.status(f.key).queued, 0);
 });

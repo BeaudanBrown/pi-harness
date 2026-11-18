@@ -1,29 +1,15 @@
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
-import { promisify } from "node:util";
-import type { Binding } from "./store.js";
 import type { TaskRunner } from "./tasks.js";
 import { TaskFailure, taskPlan } from "./task-contract.js";
 import { FRAME_BYTES, object, string } from "./wire.js";
 
-const execute = promisify(execFile);
 export function localEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   const clean: NodeJS.ProcessEnv = {};
   for (const key of ["HOME", "USER", "LOGNAME", "PATH", "SHELL", "TERM", "LANG", "LC_ALL", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "XDG_STATE_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"]) {
     if (env[key] !== undefined) clean[key] = env[key];
   }
   return clean;
-}
-export function localOpen(helper: string): (binding: Binding) => Promise<unknown> {
-  if (!isAbsolute(helper)) throw Error("The local open helper must be an absolute packaged executable");
-  return async binding => {
-    const result = await execute(helper, ["open", binding.file, "--expected-id", binding.nativeId], {
-      env: localEnvironment(process.env), timeout: 15000, maxBuffer: 65536,
-    });
-    const value = object(JSON.parse(result.stdout));
-    if (value.file !== binding.file || value.id !== binding.nativeId) throw Error("Local open returned a different native identity");
-    return value;
-  };
 }
 /** One finite helper invocation, not process/launch authority. Disconnecting a
  * caller is not cancellation of an approved Git effect. Never expose stderr. */

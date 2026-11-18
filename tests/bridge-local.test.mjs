@@ -23,7 +23,7 @@ function fixture(t) {
   const header = id => JSON.stringify({ type: "session", version: 3, id, timestamp: new Date().toISOString(), cwd: root }) + "\n";
   writeFileSync(file, header(nativeId));
   const launcher = join(root, "pi"), ready = join(root, "ready"), probe = join(root, "ready.mjs");
-  writeFileSync(probe, `import { writeFileSync } from "node:fs"; export default pi => { pi.on("session_start", (_event, ctx) => { writeFileSync(${JSON.stringify(ready)}, ctx.sessionManager.getSessionId()); }); };`);
+  writeFileSync(probe, `import { writeFileSync } from "node:fs"; import {installPresentation} from ${JSON.stringify(resolve("config/agent/extensions/matrix-bridge/presentation.ts"))}; export default pi => { installPresentation(pi); pi.on("session_start", (_event, ctx) => { writeFileSync(${JSON.stringify(ready)}, ctx.sessionManager.getSessionId()); }); };`);
   const body = `exec '${pi}' --no-extensions --no-skills --no-prompt-templates --no-themes --no-context-files --no-builtin-tools --extension '${probe}' "$@"\n`;
   const launch = prefix => writeFileSync(launcher, `#!/bin/sh\n${prefix ?? ""}${body}`, { mode: 0o700 });
   launch();
@@ -74,41 +74,16 @@ test("local list/open/status work with no relay, reuse the live writer and reope
   assert.equal(value("list")[0].running, true);
   assert.notEqual(call("open", join(root, "missing.jsonl")).status, 0);
   server("kill-server");
-  // Observe the actual native lock lifetime, not a relay-disconnect receipt.
+  // Observe live pane hints disappearing, not a relay-disconnect receipt.
   const until = Date.now() + 4000;
   while (value("status", file).running && Date.now() < until) await pause(30);
   assert.equal(value("status", file).running, false);
   assert.equal(value("open", file).running, true);
 });
 
-test("daemon-context remote wake works without tmux on PATH and strips credentials", { timeout: 15000 }, async t => {
-  const f = fixture(t);
-  assert.ok(process.env.PI_BRIDGE_TEST_MAIN, "compiled production bridge entrypoint is required");
-  const { localOpen } = await import(pathToFileURL(process.env.PI_BRIDGE_TEST_MAIN).href);
-  const binary = tool => spawnSync(f.shell, ["-c", 'command -v "$1"', "resolve-tool", tool], { env: f.env, encoding: "utf8" }).stdout.trim();
-  // This is the public configuration normally supplied by the Nix pi-session
-  // wrapper. Do not restore an interactive PATH after localOpen sanitizes env.
-  const configured = { ...f.env, PI_BRIDGE_TMUX: binary(tmux), PI_BRIDGE_DIRENV: binary(process.env.PI_TEST_DIRENV || "direnv") };
-  delete configured.PATH;
-  const executable = join(f.root, "remote-helper");
-  writeFileSync(executable, `#!${process.execPath}\nif(process.env.PI_MATRIX_ACCESS_TOKEN || process.env.CREDENTIALS_DIRECTORY) throw Error("credential leaked"); process.stdout.write(require("node:child_process").execFileSync(${JSON.stringify(binary(python))},[${JSON.stringify(helper)},...process.argv.slice(2)],{env:{...process.env,...${JSON.stringify(configured)}}}));\n`, { mode: 0o700 });
-  const keys = ["HOME", "PATH", "SHELL", "PI_MATRIX_ACCESS_TOKEN", "CREDENTIALS_DIRECTORY"];
-  const saved = keys.map(key => process.env[key]);
-  try {
-    process.env.HOME = f.env.HOME; process.env.PATH = f.root; process.env.SHELL = f.shell;
-    process.env.PI_MATRIX_ACCESS_TOKEN = "fixture-secret"; process.env.CREDENTIALS_DIRECTORY = "/fixture-credentials";
-    assert.equal(spawnSync("tmux", ["-V"]).error?.code, "ENOENT", "daemon fixture must not supply tmux on PATH");
-    const opened = await localOpen(executable)({ key: "fixture", file: f.file, nativeId: f.nativeId, cwd: f.root, title: "Wake", boundary: null, archived: false, enabled: true });
-    assert.equal(opened.id, f.nativeId); assert.equal(opened.running, true);
-    const until = Date.now() + 5000;
-    while (!existsSync(f.ready) && Date.now() < until) await pause(20);
-    assert.equal(readFileSync(f.ready, "utf8"), f.nativeId, "actual native startup must be observed after wake");
-  } finally {
-    keys.forEach((key, index) => { if (saved[index] === undefined) delete process.env[key]; else process.env[key] = saved[index]; });
-  }
-});
+;
 
-test("an actual native writer outside tmux is reported without opening another terminal", { timeout: 10000 }, async t => {
+test("a native process without presentation hints is not claimed as an exclusively owned session", { timeout: 10000 }, async t => {
   const { file, env, value, server } = fixture(t);
   const child = spawn(pi, ["--mode", "rpc", "--session", file, "--no-extensions", "--no-skills", "--no-context-files"], { env, stdio: ["pipe", "pipe", "pipe"] });
   const closed = new Promise(resolve => child.once("close", resolve));
@@ -124,10 +99,10 @@ test("an actual native writer outside tmux is reported without opening another t
       });
       child.stdin.write(JSON.stringify({ type: "get_state", id: "ready" }) + "\n");
     });
-    const opened = value("open", file);
-    assert.equal(opened.running, true); assert.equal(opened.pane, undefined);
+    const observed = value("status", file);
+    assert.equal(observed.running, false); assert.equal(observed.pane, undefined);
     assert.notEqual(server("list-panes", "-a").status, 0, "no tmux server was created");
-  } finally { child.kill("SIGTERM"); await closed; }
+  } finally { child.kill("SIGKILL"); await closed; }
 });
 
 test("native file and workspace semicolons remain literal arguments", { timeout: 10000 }, t => {
@@ -141,8 +116,8 @@ test("native file and workspace semicolons remain literal arguments", { timeout:
 });
 
 test("slow bootstrap is focusable, but a replaced pane cannot reserve the native session", { timeout: 30000 }, t => {
-  const { file, launch, value, server, shell } = fixture(t);
-  launch("sleep 20\n"); // Beyond the helper's bounded ownership observation.
+  const { root, file, launch, value, server, shell } = fixture(t);
+  launch(`while [ ! -f '${root}/release' ]; do sleep 0.05; done\n`); // Explicit unreleased bootstrap, not a fixed sleep.
   const pending = value("open", file);
   assert.equal(pending.running, false); assert.equal(pending.pending, true);
   assert.equal(value("open", file).pane, pending.pane);
@@ -151,7 +126,7 @@ test("slow bootstrap is focusable, but a replaced pane cannot reserve the native
   const hint = server("show-option", "-p", "-v", "-t", pending.pane, "@pi_native_launch").stdout.trim();
   server("set-option", "-p", "-t", pending.pane, "@pi_native_launch", JSON.stringify({ ...JSON.parse(hint), created: 0 }));
   assert.notEqual(value("status", file).pending, true, "a wedged live bootstrap has no permanent reservation");
-  assert.equal(server("respawn-pane", "-k", "-t", pending.pane, shell, "-c", "exec sleep 20").status, 0);
+  assert.equal(server("respawn-pane", "-k", "-t", pending.pane, shell, "-c", "exec cat").status, 0);
   // Preserve the old annotation deliberately: PID/birth, not its mere presence,
   // determines whether the now-unrelated live pane is a bootstrap hint.
   assert.equal(server("set-option", "-p", "-t", pending.pane, "@pi_native_launch", hint).status, 0);
@@ -183,7 +158,7 @@ test("live partial appends do not gate listing/focus, while a saved corrupt file
   appendFileSync(file, JSON.stringify({ id: "name", parentId: null, name: "Native title", type: "session_info" }) + "\n");
   assert.equal(value("list")[0].title, "Native title", "metadata field order is immaterial");
   const pane = value("open", file).pane;
-  // Kernel ownership precedes history loading: it is not a startup receipt.
+  // Readiness is observed explicitly before simulating a partial append.
   const until = Date.now() + 5000;
   while (!existsSync(ready) && Date.now() < until) await pause(20);
   assert.ok(existsSync(ready), "actual session_start hook must finish before simulating a live append");

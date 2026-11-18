@@ -3,8 +3,7 @@ import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "no
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { credential, localEnvironment, localOpen, main } from "../config/agent/extensions/matrix-bridge/main.js";
-import type { Binding } from "../config/agent/extensions/matrix-bridge/store.js";
+import { credential, localEnvironment, main } from "../config/agent/extensions/matrix-bridge/main.js";
 import { interactiveProcess } from "../config/agent/extensions/matrix-bridge/adapter.js";
 import { localTasks } from "../config/agent/extensions/matrix-bridge/local-process.js";
 
@@ -71,22 +70,4 @@ test("finite task helper frames are bounded and malformed replies never leak dia
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
-test("remote wake uses only the same local helper and frozen native identity without Matrix credentials", async () => {
-  const root = mkdtempSync(join(tmpdir(), "bridge-launch-wiring-")), helper = join(root, "pi-session"), captured = join(root, "captured.json");
-  const binding: Binding = { key: "binding", file: join(root, "session with spaces.jsonl"), nativeId: "native-id", cwd: root, title: "Task", boundary: null, archived: false, enabled: true };
-  writeFileSync(helper, `#!${process.execPath}\nconst fs=require('node:fs'); fs.writeFileSync(${JSON.stringify(captured)},JSON.stringify({args:process.argv.slice(2),env:process.env})); console.log(JSON.stringify({file:process.argv[3],id:process.argv[5],running:true}));\n`, { mode: 0o700 });
-  const old = process.env.PI_MATRIX_ACCESS_TOKEN;
-  process.env.PI_MATRIX_ACCESS_TOKEN = "must-not-reach-helper";
-  try {
-    await localOpen(helper)(binding);
-    const observed = JSON.parse(readFileSync(captured, "utf8")) as { args: string[]; env: Record<string, string> };
-    assert.deepEqual(observed.args, ["open", binding.file, "--expected-id", binding.nativeId]);
-    assert.equal(observed.env.PI_MATRIX_ACCESS_TOKEN, undefined);
-    assert.equal(observed.env.CREDENTIALS_DIRECTORY, undefined);
-    assert.equal(observed.env.HOME, process.env.HOME);
-    assert.throws(() => localOpen("relative-helper"), /absolute/);
-  } finally {
-    if (old === undefined) delete process.env.PI_MATRIX_ACCESS_TOKEN; else process.env.PI_MATRIX_ACCESS_TOKEN = old;
-    rmSync(root, { recursive: true, force: true });
-  }
-});
+;

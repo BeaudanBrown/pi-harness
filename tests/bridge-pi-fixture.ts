@@ -1,20 +1,8 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { appendFileSync, chmodSync, existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { createServer } from "node:net";
-import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
-import test from "node:test";
-import { BridgeStore } from "../config/agent/extensions/matrix-bridge/store.js";
-import { BridgeRelay } from "../config/agent/extensions/matrix-bridge/relay.js";
-import { BridgeMatrix } from "../config/agent/extensions/matrix-bridge/matrix.js";
-import { MatrixHttp } from "../config/agent/extensions/matrix-shared/http.js";
-import { InteractionHttp, ROOM, USER, textEvent } from "./fixtures/matrix-bridge/interaction-http.js";
-import { POLL_START, POLL_RESPONSE } from "../config/agent/extensions/matrix-bridge/interaction.js";
-import { connect, object, Peer, remoteText } from "../config/agent/extensions/matrix-bridge/wire.js";
-import { imageInfo } from "../config/agent/extensions/matrix-bridge/media.js";
-import { localTasks } from "../config/agent/extensions/matrix-bridge/local-process.js";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 export async function until(check: () => boolean | Promise<boolean>): Promise<void> {
   const end = Date.now() + 8000;

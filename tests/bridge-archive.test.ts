@@ -12,7 +12,7 @@ test("detached input is rejected promptly without any wake callback", { timeout:
   const root = mkdtempSync(join(tmpdir(), "bridge-no-wake-")), file = join(root, "native.jsonl");
   writeFileSync(file, [{ type: "session", version: 3, id: "native", cwd: root }, { type: "custom", id: "boundary", customType: "matrix-bridge.boundary", data: { nativeId: "native" } }].map(entry => JSON.stringify(entry) + "\n").join(""));
   const http = new InteractionHttp(); let opens = 0;
-  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket: join(root, "bridge.sock"), roots: [root] }, http.matrix, async () => { opens++; });
+  const relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket: join(root, "bridge.sock"), roots: [root] }, http.matrix);
   t.after(async () => { await relay.stop(); rmSync(root, { recursive: true, force: true }); });
   const binding = relay.store.register({ file, nativeId: "native", cwd: root, boundary: "boundary", title: "Native" }); relay.store.setRoom(binding.key, ROOM);
   relay.store.intake("offline", [{ id: "$offline", room: ROOM, event: textEvent("$offline", "do not wake") }]);
