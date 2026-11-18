@@ -144,13 +144,15 @@ let
       exit 1
     fi
     ${environment}
-    ${commandPrefix} node --test ${nodeArgs} "''${test_files[@]}"
+    # Bound leaked handles / unreachable async test barriers as well as tests
+    # that declare their own deadlines. A timeout is a failure, never a pass.
+    ${commandPrefix} timeout --kill-after=5s 180s node --test --test-timeout=60000 ${nodeArgs} "''${test_files[@]}"
     touch "$out"
   '';
 
   unitTests = runCompiledTests {
     name = "pi-harness-unit-tests";
-    nodeArgs = "--test-concurrency=2";
+    nodeArgs = "--test-concurrency=4";
     # Nix sandbox input binds can have rw VFS flags despite immutable ownership.
     # Give the synthetic snapshot a real private read-only mount; never weaken
     # the production migrator's kernel check or skip it in the canonical gate.

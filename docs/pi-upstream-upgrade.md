@@ -58,4 +58,12 @@ an ordinary remote-backed rebuild; a local input override is only validation.
 
 ## Verification and commits
 
-Implementation and validation outcomes will be recorded here as work proceeds.
+- Unpatched Pi 1.5.2 CLI/SDK built; TypeScript compilation passed.
+- Focused real-Pi, relay, archive and hierarchy regressions: 12/12 passed in
+  11.9 seconds (2026-11-18). The initial broad run was interrupted: an obsolete
+  archive test awaited the removed remote-wake callback indefinitely. Replaced
+  it with a bounded offline-rejection regression, retaining hierarchy coverage.
+- Busy fake-model tests now use explicit release signals rather than ten-second
+  sleeps. An observed stale-idle race is covered: an explicit no-submission
+  receipt returns the batch to the inbox, never reviving interrupted input.
+- Broad verification and consuming-host integration remain outstanding.
