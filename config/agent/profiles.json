@@ -12,7 +12,6 @@
         "nix-runtime",
         "lsp",
         "codex-fast",
-        "tmux-cursor-focus",
         "sesh",
         "matrix-bridge",
         "agent-profiles"
