@@ -21,6 +21,21 @@
   lspPackages,
 }:
 let
+  # Every deterministic component is bounded, including leaked test handles,
+  # Python fixtures, schema validation and source/package checks. Dependency
+  # builds are separate; this deadline begins when the check itself starts.
+  boundedCheck = name: attrs: script: pkgs.runCommand name attrs ''
+    echo "verification: ${name} started (180s deadline)"
+    if ${pkgs.coreutils}/bin/timeout --kill-after=5s 180s \
+      ${pkgs.bash}/bin/bash -e -o pipefail ${pkgs.writeText "${name}-check.sh" script}; then
+      echo "verification: ${name} passed"
+    else
+      result=$?
+      echo "verification: ${name} failed (exit $result; 124 means deadline exceeded)" >&2
+      exit "$result"
+    fi
+  '';
+  nodeTest = "${pkgs.nodejs}/bin/node --test --test-timeout=60000";
   matrixMarkdown = pkgs.callPackage ./matrix-markdown.nix { };
   prepareSource = ''
     work="$TMPDIR/pi-harness-source"
@@ -29,7 +44,7 @@ let
     cd "$work"
   '';
 
-  sourceContracts = pkgs.runCommand "pi-harness-source-contracts" {
+  sourceContracts = boundedCheck "pi-harness-source-contracts" {
     nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep pkgs.jq pkgs.nodejs ];
   } ''
     ${prepareSource}
@@ -52,7 +67,7 @@ let
     touch "$out"
   '';
 
-  schemaContracts = pkgs.runCommand "pi-harness-schema-contracts" {
+  schemaContracts = boundedCheck "pi-harness-schema-contracts" {
     nativeBuildInputs = [ pkgs.check-jsonschema pkgs.coreutils ];
   } ''
     ${prepareSource}
@@ -109,7 +124,7 @@ let
     touch "$out"
   '';
 
-  testBuild = pkgs.runCommand "pi-harness-typescript-test-build" {
+  testBuild = boundedCheck "pi-harness-typescript-test-build" {
     nativeBuildInputs = [ pkgs.coreutils pkgs.typescript ];
   } ''
     ${prepareSource}
@@ -127,7 +142,7 @@ let
     environment ? "",
     nodeArgs ? "",
     commandPrefix ? "",
-  }: pkgs.runCommand name {
+  }: boundedCheck name {
     nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.git pkgs.nodejs pkgs.jq pkgs.gnugrep ] ++ extraInputs;
   } ''
     export HOME="$TMPDIR/home"
@@ -146,7 +161,7 @@ let
     ${environment}
     # Bound leaked handles / unreachable async test barriers as well as tests
     # that declare their own deadlines. A timeout is a failure, never a pass.
-    ${commandPrefix} timeout --kill-after=5s 180s node --test --test-timeout=60000 ${nodeArgs} "''${test_files[@]}"
+    ${commandPrefix} ${nodeTest} ${nodeArgs} "''${test_files[@]}"
     touch "$out"
   '';
 
@@ -189,18 +204,18 @@ let
     '';
   };
 
-  piRIntegration = pkgs.runCommand "pi-harness-pi-r-integration" {
+  piRIntegration = boundedCheck "pi-harness-pi-r-integration" {
     nativeBuildInputs = [ pkgs.git pkgs.nodejs ];
   } ''
     PI_HARNESS_NORMAL_PI=${piHarnessPackage}/bin/pi \
       PI_HARNESS_LOCAL_PI=${piHarnessPackage}/bin/pi-r-local \
-      node --test ${source}/tests/pi-r-integration.test.mjs ${source}/tests/experiment-defaults.test.mjs
+      ${nodeTest} ${source}/tests/pi-r-integration.test.mjs ${source}/tests/experiment-defaults.test.mjs
     touch "$out"
   '';
 
   # Reuse the canonical TypeScript build. The standalone eval app keeps its
   # own package, but verification must not compile the same sources twice.
-  evalTests = pkgs.runCommand "pi-harness-eval-self-test-check" {
+  evalTests = boundedCheck "pi-harness-eval-self-test-check" {
     nativeBuildInputs = [ pkgs.bash pkgs.coreutils pkgs.git pkgs.nodejs ] ++ lib.optionals pkgs.stdenv.isLinux [ pkgs.bubblewrap ];
   } ''
     export HOME="$TMPDIR/home"
@@ -217,12 +232,12 @@ let
       PATH="$PATH" \
       PI_TEST_SHELL=${lib.getExe pkgs.bash} \
       ${lib.optionalString pkgs.stdenv.isLinux "PI_EVAL_BWRAP=${lib.getExe pkgs.bubblewrap} \\"}
-      ${lib.getExe pkgs.nodejs} --test --test-concurrency=1 \
+      ${nodeTest} --test-concurrency=1 \
         ${testBuild}/build/tests/eval-*.test.js
     touch "$out"
   '';
 
-  packageContracts = pkgs.runCommand "pi-harness-package-contracts" {
+  packageContracts = boundedCheck "pi-harness-package-contracts" {
     nativeBuildInputs = [ pkgs.check-jsonschema pkgs.coreutils pkgs.gnugrep pkgs.git pkgs.jq pkgs.nodejs ];
   } ''
     export HOME="$TMPDIR/home"
@@ -303,9 +318,9 @@ let
       PI_HARNESS_NATIVE_PI=${bridgePiWrapper}/bin/pi \
       PI_HARNESS_NATIVE_LOCAL_ONLY_PI=${bridgeLocalOnlyWrapper}/bin/pi-local-only \
       PI_HARNESS_WORKER_EXTENSION=${piHarnessResources}/share/pi-harness/agent/extensions/worker-runner/index.ts \
-      node --test ${source}/tests/engineering-runtime.test.mjs
+      ${nodeTest} ${source}/tests/engineering-runtime.test.mjs
     PI_HARNESS_HEADLESS_PI=${piHarnessPackage}/bin/pi-aloop \
-      node --test ${source}/tests/aloop-headless.test.mjs
+      ${nodeTest} ${source}/tests/aloop-headless.test.mjs
 
     # High-value negative package assertions remain explicit security contracts.
     ! grep -F 'extensions/remote-session/' ${piHarnessPackage}/bin/pi
@@ -314,7 +329,7 @@ let
     touch "$out"
   '';
 
-  moduleContracts = pkgs.runCommand "pi-harness-module-contracts" {
+  moduleContracts = boundedCheck "pi-harness-module-contracts" {
     nativeBuildInputs = [ pkgs.coreutils pkgs.gnugrep pkgs.jq pkgs.python3 ];
   } ''
     ${prepareSource}
@@ -379,7 +394,7 @@ let
       modules = [ { services.pi-harness.bridgeChat.preflight.bridges.signal.credentialFile = lib.mkForce "/nix/store/unsafe-secret"; } ];
     }).config.assertions);
   });
-  bridgePreflightTests = pkgs.runCommand "pi-bridge-chat-preflight-tests" {
+  bridgePreflightTests = boundedCheck "pi-bridge-chat-preflight-tests" {
     nativeBuildInputs = [ (pkgs.python3.withPackages (p: [ p.pyyaml ])) pkgs.jq ];
   } ''
     ${prepareSource}
@@ -443,7 +458,7 @@ let
       modules = [ { services.pi-harness.bridgeChat.assistant.piAgentDirectory = lib.mkForce "/nix/store/unsafe"; } ];
     }).config.assertions);
   });
-  bridgeChatTests = pkgs.runCommand "pi-bridge-chat-tests" {
+  bridgeChatTests = boundedCheck "pi-bridge-chat-tests" {
     nativeBuildInputs = [ pkgs.nodejs pkgs.jq ];
   } ''
     export HOME="$TMPDIR/home"
@@ -461,7 +476,7 @@ let
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-coding-agent"
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/@earendil-works/pi-ai "$TMPDIR/chat-tests/node_modules/@earendil-works/pi-ai"
     ln -s ${piPackage}/lib/node_modules/@earendil-works/pi-coding-agent/node_modules/typebox "$TMPDIR/chat-tests/node_modules/typebox"
-    node --test --test-concurrency=1 "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
+    ${nodeTest} --test-concurrency=4 --test-reporter=tap "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.js "$TMPDIR"/chat-tests/tests/bridge-chat-*.test.mjs
     jq -e '(.assertions | all) and .rejectsEmptyScope and .rejectsStoreSecret
       and .legacyAccountOptionAbsent and .nativeInvitations == {"fixture":"@bot:example.com"}
       and (.services["pi-chat-model"].serviceConfig | has("LoadCredential") | not)
@@ -515,7 +530,7 @@ let
       modules = [ { services.pi-harness.bridgeChat.workspaceExecutor.projectDirectory = lib.mkForce "/"; } ];
     }).config.assertions);
   });
-  workspaceTests = pkgs.runCommand "pi-chat-workspace-tests" {
+  workspaceTests = boundedCheck "pi-chat-workspace-tests" {
     nativeBuildInputs = [ pkgs.python3 pkgs.jq ];
   } ''
     cp -R ${../.} source
@@ -552,7 +567,7 @@ let
     module-contracts = moduleContracts;
   };
 
-  verify = pkgs.runCommand "pi-harness-verify" { } ''
+  verify = boundedCheck "pi-harness-verify" { } ''
     mkdir -p "$out"
     ${lib.concatMapStringsSep "\n" (name: ''ln -s ${deterministicChecks.${name}} "$out/${name}"'') (builtins.attrNames deterministicChecks)}
     printf '%s\n' ${lib.concatMapStringsSep " " lib.escapeShellArg (builtins.attrNames deterministicChecks)} > "$out/checks"
@@ -585,7 +600,7 @@ let
       done
       PI_LSP_EXTENSION=${piLspExtension}/share/pi-lsp-extension \
         PI_LSP_EXTENSION_SOURCE=${piLspExtension}/share/pi-lsp-extension/src \
-        node --test ${testBuild}/build/tests/lsp-live.test.js
+        timeout --kill-after=5s 180s ${nodeTest} ${testBuild}/build/tests/lsp-live.test.js
     '';
   };
   verifyFilesLiveApp = pkgs.writeShellApplication {

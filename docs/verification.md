@@ -41,16 +41,18 @@ builds each named check separately. Nix builds independent checks in parallel,
 reuses their outputs when inputs have not changed, and shares one TypeScript
 compilation between the ordinary/native TypeScript, bridge-chat, and evaluation
 suites. JavaScript package-contract probes run directly from source.
-Ordinary/native TypeScript test files run four at a time
-while each file retains Node's normal in-file ordering. Compiled suites have a
-60-second default test deadline and a 180-second hard process deadline (plus
-five seconds for termination). Timeouts fail verification; they never count as
-passes. Fixture barriers must be explicitly released in cleanup and must not
-wait for callbacks belonging to removed features. Prefer explicit model-release
-signals over sleeping to simulate a busy provider. Bridge-chat and
-evaluation files remain serial because they exercise process-global SDK,
-sandbox, or Git environment state. These suite-level bounds prevent the
-parallel Nix checks from oversubscribing the host with nested Node workers.
+Ordinary/native and bridge-chat test files run four at a time, each in its own
+Node child process, while retaining normal in-file ordering. All Node test
+runners have a 60-second default test deadline. Every deterministic check
+(including Python, schema, TypeScript and package checks) shares a 180-second
+hard process deadline plus five seconds for termination, and logs explicit
+start/pass/fail markers. Dependency builds are outside those check deadlines.
+Timeouts fail verification; they never count as passes. Register socket/process
+cleanup before fallible setup. Release fixture barriers explicitly; never wait
+for callbacks belonging to removed features. Prefer model-release signals over
+sleeping to simulate a busy provider. Evaluation files remain serial because
+they exercise shared sandbox/Git state. Bridge-chat uses TAP to expose failure
+stacks immediately, even if a later fixture hangs.
 
 For an end-to-end timing measurement, time that same invocation rather than
 running a separate build first:
