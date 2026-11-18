@@ -235,7 +235,7 @@ services.pi-harness.bridgeChat.assistant = {
   roomIds = [ "!REPLACEMENT_NOTE_TO_SELF_ROOM:matrix.bepis.lol" ];
   remoteOwnerUserIds = [ ];
   allJoinedRooms = false;
-  model = "gpt-5.4";
+  model = "gpt-5.6-luna"; # Pi 1.5.2 catalog; confirm account entitlement before activation
 };
 ```
 

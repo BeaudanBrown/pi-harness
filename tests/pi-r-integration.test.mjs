@@ -125,11 +125,12 @@ export default function (pi) {
   const restored = records.find((entry) => entry.kind === "restored").tools;
   const shutdown = records.find((entry) => entry.kind === "shutdown").tools;
   assert.equal(initial.some((name) => name.startsWith("r_") || name === "evaluate_r"), false);
-  assert.deepEqual(active, ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_exec", "r_inspect", "r_status", "r_clear", "r_reset", "r_data_inspect"]);
-  assert.deepEqual(restored, initial, `${expectedKind} launcher tools must be restored by /r stop`);
-  assert.deepEqual(shutdown, initial, `${expectedKind} launcher tools must remain restored at shutdown`);
+  // Pi owns registry ordering; the contract is the exact capability surface.
+  assert.deepEqual([...active].sort(), ["read", "grep", "find", "ls", "r_contract_propose", "r_contract_draft_inspect", "r_exec", "r_inspect", "r_status", "r_clear", "r_reset", "r_data_inspect"].sort());
+  assert.deepEqual([...restored].sort(), [...initial].sort(), `${expectedKind} launcher tools must be restored by /r stop`);
+  assert.deepEqual([...shutdown].sort(), [...initial].sort(), `${expectedKind} launcher tools must remain restored at shutdown`);
   if (expectedKind === "local") {
-    assert.deepEqual(initial, ["read", "bash", "edit", "write", "grep", "find", "ls"]);
+    assert.deepEqual([...initial].sort(), ["read", "bash", "edit", "write", "grep", "find", "ls"].sort());
   }
 }
 

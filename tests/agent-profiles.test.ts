@@ -14,7 +14,7 @@ import {
 const mutationTools = [
 	"edit", "write", "bash", "github_issue_mutate", "github_issue_relationship", "github_issue_migration", "github_issue_plan",
 ];
-const orchestrationTools = ["review_agents", "run_worker", "remote_checkpoint", "aloop_launch_worker"];
+const orchestrationTools = ["review_agents", "run_worker", "remote_checkpoint", "ask_user", "aloop_launch_worker"];
 
 test("the declarative registry contains exactly the supported personas", () => {
 	const document = loadAgentProfileDocument();
@@ -56,6 +56,7 @@ test("implementation, local, and ordinary engineering preserve their role bounda
 	assert.deepEqual(implementation.tools.filter((tool) => tool.startsWith("github_")), ["github_issue_inspect", "github_issue_graph"]);
 	assert.equal(implementation.tools.includes("github_issue_mutate"), false);
 	assert.equal(implementation.tools.includes("remote_checkpoint"), false);
+	assert.equal(implementation.tools.includes("ask_user"), false);
 	const projectEnabled = withProjectWorkerOptIn(implementation, { extensions: [".pi/worker-extension.ts"], tools: ["project_lookup"] });
 	assert.ok(projectEnabled.extensions.includes(".pi/worker-extension.ts"));
 	assert.ok(projectEnabled.tools.includes("project_lookup"));

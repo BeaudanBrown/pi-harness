@@ -196,7 +196,7 @@ async function askReviewer(
 		thinkingLevel: REVIEW_THINKING_LEVEL,
 		tools: resolveAgentProfile("review-worker").tools,
 		sessionManager: SessionManager.inMemory(ctx.cwd),
-		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: "off" }),
 		resourceLoader: workerResourceLoader("review-worker", createExtensionRuntime),
 	});
 

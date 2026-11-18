@@ -42,10 +42,10 @@ export async function createChatSession(runtime: ModelRuntime, modelId: string, 
 		noTools: "builtin", tools: names,
 		customTools: [restrictedSearch, ...extraTools],
 		sessionManager: SessionManager.inMemory(cwd),
-		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false } }),
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: false }, cacheWarming: "off" }),
 		resourceLoader: chatResources(systemPrompt),
 	});
-	if (JSON.stringify(session.agent.state.tools.map(t => t.name)) !== JSON.stringify(names) || session.sessionFile || session.messages.length) {
+	if (JSON.stringify(session.agent.state.tools.map(t => t.name).sort()) !== JSON.stringify([...names].sort()) || session.sessionFile || session.messages.length) {
 		session.dispose(); throw Error("Chat capability invariant failed");
 	}
 	return session;

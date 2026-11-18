@@ -15,6 +15,7 @@ import { createAssistantMessageEventStream, type AssistantMessage, type Context,
 import { createChatSession, runQuestion, CHAT_SYSTEM_PROMPT } from "../config/agent/extensions/bridge-chat/model.mjs";
 import { createQuestionServer, modelAnswer } from "../config/agent/extensions/bridge-chat/socket.js";
 
+const TEST_MODEL = 'gpt-5.6-luna';
 const token = 'x.' + Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'account-test' } })).toString('base64url') + '.x';
 const credential = { type: 'oauth', access: token, refresh: 'fixture-only', expires: Date.now() + 3600000, accountId: 'account-test' };
 function fixture(t: { after(fn: () => void): void }) {
@@ -29,6 +30,13 @@ function fixture(t: { after(fn: () => void): void }) {
 	return { dir, auth };
 }
 async function runtime(authPath: string) { return ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false, allowModelNetwork: false }); }
+async function listenFixture(t: { after(fn: () => Promise<void>): void }, server: net.Server, socket: string) {
+	const connections = new Set<net.Socket>();
+	server.on('connection', connection => { connections.add(connection); connection.once('close', () => connections.delete(connection)); });
+	// Register before any setup can fail, including SDK construction.
+	t.after(async () => { for (const connection of connections) connection.destroy(); await new Promise<void>(resolve => server.close(() => resolve())); });
+	server.listen(socket); await once(server, 'listening');
+}
 function message(model: Model<Api>, text: string, tool?: string): AssistantMessage {
 	return { role: 'assistant', content: tool ? [{ type: 'toolCall', id: 'call-1', name: tool, arguments: tool === 'web_search' ? { query: 'current fixture question' } : { command: 'forbidden', path: '/etc/passwd' } }] : [{ type: 'text', text }],
 		api: model.api, provider: model.provider, model: model.id, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, stopReason: tool ? 'toolUse' : 'stop', timestamp: Date.now() };
@@ -44,10 +52,17 @@ function fakeStream(captured: Context[], firstTool?: string) {
 		}); return stream;
 	};
 }
+test('unavailable model fails closed without fallback and setup sockets are cleaned up', async t => {
+	const f = fixture(t), server = net.createServer();
+	await listenFixture(t, server, path.join(f.dir, 'failed-setup.sock'));
+	t.after(() => assert.equal(server.listening, false));
+	await assert.rejects(createChatSession(await runtime(f.auth), 'nonexistent-fixture-model', f.dir), /Configured Pi model unavailable/);
+});
+
 test('file tools are explicit chat capabilities and need no project grant', async t => {
 	const f = fixture(t), r = await runtime(f.auth);
 	const files = new FileSession({ directory: f.dir, downloader: '/unused' });
-	const session = await createChatSession(r, 'gpt-5.4', f.dir, undefined, files);
+	const session = await createChatSession(r, TEST_MODEL, f.dir, undefined, files);
 	try { assert.deepEqual(session.getActiveToolNames(), ['web_search', 'download_file', 'send_file']); }
 	finally { session.dispose(); }
 });
@@ -55,25 +70,27 @@ test('file tools are explicit chat capabilities and need no project grant', asyn
 test('real Pi SDK creates a fresh unsaved web-search-only session without ambient resources', async t => {
 	const f = fixture(t), r = await runtime(f.auth);
 	for (const q of ['first question', '/skill:private second question']) {
-		const session = await createChatSession(r, 'gpt-5.4', f.dir);
+		const session = await createChatSession(r, TEST_MODEL, f.dir);
 		try {
 			assert.deepEqual(session.getActiveToolNames(), ['web_search']);
 			assert.deepEqual(session.getAllTools().map(tool => tool.name), ['web_search']);
 			assert.equal(session.sessionFile, undefined);
 			const captured: Context[] = []; session.agent.streamFunction = fakeStream(captured);
 			assert.equal(await runQuestion(session, q, AbortSignal.timeout(5000)), 'fixture answer');
-			assert.equal(captured[0].messages.length, 1);
-			assert.deepEqual(captured[0].messages[0].content, [{ type: 'text', text: q }]);
-			assert.ok(captured[0].systemPrompt?.includes(CHAT_SYSTEM_PROMPT));
+			// Pi 1.5.2 carries prompt/tool configuration in a native system patch.
+			assert.deepEqual(captured[0].messages.map(m => m.role), ['system', 'user']);
+			const system = captured[0].messages[0]; assert.ok(system.role === 'system');
+			assert.equal(system.sections?.preamble, CHAT_SYSTEM_PROMPT);
+			assert.deepEqual(captured[0].messages[1].content, [{ type: 'text', text: q }]);
 			assert.equal(JSON.stringify(captured).includes('AMBIENT_'), false);
 			assert.equal(JSON.stringify(captured).includes('fixture-only'), false);
-			assert.deepEqual(captured[0].tools?.map(tool => tool.name), ['web_search']);
+			assert.deepEqual(system.toolsAdded?.map(tool => tool.name), ['web_search']);
 		} finally { session.dispose(); }
 	}
 	assert.equal(fs.existsSync(path.join(f.dir, 'sessions')), false);
 });
 for (const tool of ['bash', 'read', 'write', 'run_worker']) test(`real SDK refuses model-requested ${tool}`, async t => {
-	const f = fixture(t), session = await createChatSession(await runtime(f.auth), 'gpt-5.4', f.dir);
+	const f = fixture(t), session = await createChatSession(await runtime(f.auth), TEST_MODEL, f.dir);
 	try {
 		const captured: Context[] = []; session.agent.streamFunction = fakeStream(captured, tool);
 		assert.equal(await runQuestion(session, 'try forbidden tool', AbortSignal.timeout(5000)), 'fixture answer');
@@ -90,8 +107,8 @@ test('approved workspace adds only explicit tools and routes through isolated so
 		connection.on('data', chunk => { data += chunk; if (!data.endsWith('\n')) return;
 			received.push(JSON.parse(data)); connection.end('{"text":"project fixture"}\n'); });
 	});
-	server.listen(socket); await once(server, 'listening');
-	const s = await createChatSession(await runtime(f.auth), 'gpt-5.4', f.dir, { socket, commands: { check: 'Check project' } });
+	await listenFixture(t, server, socket);
+	const s = await createChatSession(await runtime(f.auth), TEST_MODEL, f.dir, { socket, commands: { check: 'Check project' } });
 	try {
 		assert.deepEqual(s.getActiveToolNames(), ['web_search', 'workspace', 'project_command']);
 		assert.deepEqual(s.getAllTools().map(tool => tool.name), ['web_search', 'workspace', 'project_command']);
@@ -101,20 +118,19 @@ test('approved workspace adds only explicit tools and routes through isolated so
 		await runQuestion(s, 'edit requested project', AbortSignal.timeout(5000), 24);
 		assert.equal(JSON.stringify(captured).includes('AMBIENT_'), false);
 		assert.equal(JSON.stringify(captured).includes('fixture-only'), false);
-	} finally { s.dispose(); await new Promise<void>(r => server.close(() => r())); }
+	} finally { s.dispose(); }
 });
 
 test('private model socket transmits only a trusted workspace capability, never room paths', async t => {
 	const f = fixture(t), socket = path.join(f.dir, 'capability.sock');
 	const seen: boolean[] = [];
 	const server = createQuestionServer(async (_question, _signal, workspace) => { seen.push(workspace); return 'answer'; });
-	server.listen(socket); await once(server, 'listening');
-	try { await modelAnswer(socket, 'plain'); await modelAnswer(socket, 'project', undefined, true); assert.deepEqual(seen, [false, true]); }
-	finally { await new Promise<void>(r => server.close(() => r())); }
+	await listenFixture(t, server, socket);
+	await modelAnswer(socket, 'plain'); await modelAnswer(socket, 'project', undefined, true); assert.deepEqual(seen, [false, true]);
 });
 
 test('SDK web search reuses the existing shared extension tool and Pi-managed authentication', async t => {
-	const f = fixture(t), session = await createChatSession(await runtime(f.auth), 'gpt-5.4', f.dir);
+	const f = fixture(t), session = await createChatSession(await runtime(f.auth), TEST_MODEL, f.dir);
 	const original = globalThis.fetch; let searches = 0;
 	globalThis.fetch = async (url, init) => {
 		searches++; assert.equal(String(url), 'https://chatgpt.com/backend-api/codex/responses');
@@ -149,7 +165,7 @@ test('Pi credential updates share the original cross-process lock and preserve o
 	assert.equal((await (await runtime(f.auth)).getAuth('openai-codex'))?.auth.apiKey, token);
 });
 test('request cancellation and session reuse fail closed', async t => {
-	const f = fixture(t), session = await createChatSession(await runtime(f.auth), 'gpt-5.4', f.dir);
+	const f = fixture(t), session = await createChatSession(await runtime(f.auth), TEST_MODEL, f.dir);
 	try {
 		const stop = new AbortController(); stop.abort();
 		await assert.rejects(runQuestion(session, 'question', stop.signal));
@@ -160,7 +176,7 @@ test('request cancellation and session reuse fail closed', async t => {
 test('SDK turn and final-output budgets fail closed', async t => {
 	const f = fixture(t), rt = await runtime(f.auth);
 	for (const mode of ['turns', 'output']) {
-		const s = await createChatSession(rt, 'gpt-5.4', f.dir);
+		const s = await createChatSession(rt, TEST_MODEL, f.dir);
 		let turns = 0;
 		s.agent.streamFunction = (model, _context, options) => {
 			turns++;
@@ -182,7 +198,7 @@ test('SDK turn and final-output budgets fail closed', async t => {
 	}
 });
 test('mid-stream cancellation terminates the SDK request without a partial answer', async t => {
-	const f = fixture(t), s = await createChatSession(await runtime(f.auth), 'gpt-5.4', f.dir), stop = new AbortController();
+	const f = fixture(t), s = await createChatSession(await runtime(f.auth), TEST_MODEL, f.dir), stop = new AbortController();
 	s.agent.streamFunction = (model, _context, options) => {
 		const stream = createAssistantMessageEventStream();
 		const result: AssistantMessage = { ...message(model, 'partial private answer'), stopReason: 'aborted' };
@@ -197,20 +213,25 @@ test('mid-stream cancellation terminates the SDK request without a partial answe
 test('private socket admits only one question field and one in-flight request', async t => {
 	const f = fixture(t), sock = path.join(f.dir, 'worker.sock'); let release: (() => void) | undefined;
 	const server = createQuestionServer(async q => { if (q === 'hold') await new Promise<void>(r => release = r); return 'answer'; });
-	server.listen(sock); await once(server, 'listening');
+	await listenFixture(t, server, sock);
+	t.after(() => release?.());
 	try {
 		const rejected = await new Promise<number>(resolve => { const req = http.request({ socketPath: sock, path: '/answer', method: 'POST' }, res => { res.resume(); res.on('end', () => resolve(res.statusCode!)); }); req.end(JSON.stringify({ question: 'q', room: 'private' })); });
 		assert.equal(rejected, 502);
 		const first = modelAnswer(sock, 'hold'); while (!release) await new Promise(r => setTimeout(r, 5));
 		await assert.rejects(modelAnswer(sock, 'another')); release(); assert.equal(await first, 'answer');
-	} finally { await new Promise<void>(r => server.close(() => r())); }
+	} finally { release?.(); }
 });
-test('packaged SDK worker reuses existing auth without a Codex credential copy', { skip: !process.env.BRIDGE_CHAT_PACKAGE, timeout: 15000 }, async t => {
+for (const model of [TEST_MODEL, 'nonexistent-fixture-model']) test(`packaged SDK worker validates ${model} without a Codex credential copy`, { skip: !process.env.BRIDGE_CHAT_PACKAGE, timeout: 15000 }, async t => {
 	const f = fixture(t), socket = path.join(f.dir, 'packaged.sock');
-	const child = spawn(process.env.BRIDGE_CHAT_PACKAGE + '/bin/pi-chat-model', [socket, f.auth, 'gpt-5.4'], { cwd: f.dir, env: { PATH: process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
+	const child = spawn(process.env.BRIDGE_CHAT_PACKAGE + '/bin/pi-chat-model', [socket, f.auth, model], { cwd: f.dir, env: { PATH: process.env.PATH }, stdio: ['ignore', 'pipe', 'pipe'] });
 	let logs = ''; child.stdout.on('data', c => logs += c); child.stderr.on('data', c => logs += c); const exited = once(child, 'exit');
 	try {
 		for (let i = 0; i < 200 && !fs.existsSync(socket) && child.exitCode === null; i++) await new Promise(r => setTimeout(r, 30));
+		if (model !== TEST_MODEL) {
+			assert.equal(child.exitCode, 1, logs); assert.equal(fs.existsSync(socket), false);
+			assert.equal(logs.includes('fixture-only'), false); return;
+		}
 		assert.equal(child.exitCode, null, logs); assert.ok(fs.existsSync(socket), logs);
 		assert.equal(fs.existsSync(path.join(f.dir, 'auth.json')), false);
 		assert.equal(logs.includes('fixture-only'), false);

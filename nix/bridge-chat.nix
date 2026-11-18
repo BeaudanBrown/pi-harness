@@ -55,7 +55,7 @@ in {
     matrixTokenFile = lib.mkOption { type = lib.types.str; description = "Runtime file containing only a dedicated owner-login access token. This credential has account-wide authority, including admin rights if the owner has them; never provide an appservice token."; };
     modelUser = lib.mkOption { type = lib.types.strMatching "[a-z_][a-z0-9_-]*"; description = "Existing Unix user whose installed Pi login the worker reuses."; };
     piAgentDirectory = lib.mkOption { type = lib.types.str; description = "Original existing Pi agent directory, containing auth.json and its shared sibling lock. Bound at the same path for Pi-coordinated credential refresh; no resources/settings/models are discovered from it."; };
-    model = lib.mkOption { type = lib.types.strMatching "[a-zA-Z0-9._-]{1,100}"; default = "gpt-5.4"; description = "Explicit Codex model; verify account entitlement during activation. No fallback to another model."; };
+    model = lib.mkOption { type = lib.types.strMatching "[a-zA-Z0-9._-]{1,100}"; default = "gpt-5.6-luna"; description = "Explicit Codex model; verify account entitlement during activation. No fallback to another model."; };
     roomIds = lib.mkOption { type = lib.types.listOf (lib.types.strMatching "![^[:space:]]+"); default = [ ]; description = "Initial test-room allowlist; use new IDs after recreating encrypted mirrors."; };
     workspaceRoomIds = lib.mkOption {
       type = lib.types.listOf (lib.types.strMatching "![^[:space:]]+"); default = [ ];

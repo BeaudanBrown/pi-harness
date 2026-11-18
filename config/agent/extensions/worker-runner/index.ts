@@ -124,7 +124,7 @@ async function askWorker(
 		thinkingLevel: "low",
 		tools: resolveAgentProfile("diagnostic-worker").tools,
 		sessionManager: SessionManager.inMemory(ctx.cwd),
-		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false } }),
+		settingsManager: SettingsManager.inMemory({ compaction: { enabled: false }, cacheWarming: "off" }),
 		resourceLoader: workerResourceLoader("diagnostic-worker", createExtensionRuntime),
 	});
 

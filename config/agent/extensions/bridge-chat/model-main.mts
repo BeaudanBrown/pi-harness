@@ -24,17 +24,19 @@ async function main(): Promise<void> {
 	// Disable custom model files, catalog IO, and availability scans of unrelated providers.
 	const runtime = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false, allowModelNetwork: false });
 	if (!(await runtime.listCredentials()).some(c => c.providerId === "openai-codex" && c.type === "oauth")) throw Error("Existing Pi Codex login required");
+	if (!runtime.getModel("openai-codex", model)) throw Error("Configured Pi model unavailable");
 	const server = createQuestionServer(async (question, signal, workspace) => {
 		if (workspace && !policy) throw Error("No approved workspace");
 		const fileSession = policy?.files ? new FileSession(policy.files, workspace ? policy : undefined) : undefined;
 		let success = false;
-		const session = await createChatSession(runtime, model, process.cwd(), workspace ? policy : undefined, fileSession);
+		let session: Awaited<ReturnType<typeof createChatSession>> | undefined;
 		try {
+			session = await createChatSession(runtime, model, process.cwd(), workspace ? policy : undefined, fileSession);
 			const text = await runQuestion(session, question, signal, workspace || fileSession ? 24 : 4);
 			const files = fileSession?.finish(true) ?? [];
 			success = true;
 			return files.length ? { text, files } : text;
-		} finally { session.dispose(); if (!success) fileSession?.finish(false); }
+		} finally { session?.dispose(); if (!success) fileSession?.finish(false); }
 	}, policy?.files ? WORKSPACE_TIMEOUT_MS : MODEL_TIMEOUT_MS);
 	listenPrivate(server, socketPath);
 }
