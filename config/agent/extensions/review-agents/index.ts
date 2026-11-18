@@ -1,7 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { cp, mkdir, writeFile } from "node:fs/promises";
 import * as path from "node:path";
-import { StringEnum } from "@earendil-works/pi-ai";
 import {
 	createAgentSession,
 	createExtensionRuntime,
@@ -29,7 +28,7 @@ const REVIEW_ROOT = ".pi/tmp/reviews";
 const MAX_RESULT_BYTES = 24_000;
 
 const ReviewTaskSchema = Type.Object({
-	axis: StringEnum(["standards", "spec"] as const, {
+	axis: Type.Unsafe<"standards" | "spec">({ type: "string", enum: ["standards", "spec"],
 		description: "Independent review axis.",
 	}),
 	instructions: Type.String({
@@ -38,7 +37,7 @@ const ReviewTaskSchema = Type.Object({
 });
 
 const ReviewAgentsParams = Type.Object({
-	mode: Type.Optional(StringEnum(["diff", "worktree", "audit"] as const, {
+	mode: Type.Optional(Type.Unsafe<"diff" | "worktree" | "audit">({ type: "string", enum: ["diff", "worktree", "audit"],
 		description: "Committed diff review (default), pinned uncommitted worktree review, or whole-repository audit at the current HEAD.",
 	})),
 	fixed_point: Type.Optional(Type.String({

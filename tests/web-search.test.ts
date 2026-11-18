@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionToolContext } from "@earendil-works/pi-coding-agent";
 import { createWebSearchTool, MAX_SEARCH_CONTEXT_BYTES } from "../config/agent/extensions/web-search/index.js";
 
 const token = 'x.' + Buffer.from(JSON.stringify({ 'https://api.openai.com/auth': { chatgpt_account_id: 'fixture' } })).toString('base64url') + '.x';
@@ -21,7 +21,7 @@ test('shared search limits context output, not arguments or HTTP response bytes'
 	assert.equal(Object.hasOwn(tool.parameters.properties.blocked_domains, 'maxItems'), false);
 	for (const value of ['unchanged short answer', 'x'.repeat(MAX_SEARCH_CONTEXT_BYTES), '😀'.repeat(MAX_SEARCH_CONTEXT_BYTES)]) {
 		answer = value;
-		const result = await tool.execute('fixture', { query, allowed_domains: domains, blocked_domains: domains }, undefined, undefined, {} as ExtensionContext);
+		const result = await tool.execute('fixture', { query, allowed_domains: domains, blocked_domains: domains }, undefined, undefined, {} as ExtensionToolContext);
 		const text = result.content.filter(p => p.type === 'text').map(p => p.text).join('');
 		assert.ok(Buffer.byteLength(text) <= MAX_SEARCH_CONTEXT_BYTES);
 		assert.ok(!text.includes('\ufffd'));

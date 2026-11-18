@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/badlogic/pi-mono/main/packages/coding-agent/src/core/settings-schema.json",
+  "$schema": "https://pi.dev/schemas/settings.schema.json",
   "extensions": [
     "./extensions/web-search/index.ts",
     "./extensions/github-issues/index.ts",

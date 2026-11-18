@@ -12,7 +12,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
     flake-utils.url = "github:numtide/flake-utils";
     nix-ai-tools = {
-      url = "github:numtide/llm-agents.nix";
+      url = "github:numtide/llm-agents.nix/aca6bfb2440503d090003b1064a44df8a8a54b5f";
       inputs.bun2nix.url = "https://codeload.github.com/nix-community/bun2nix/tar.gz/2499dedd70744dba1815875b854818a3019e9e4c";
     };
     agentgraph = {
@@ -52,20 +52,8 @@
         upstreamPiPackage = nix-ai-tools.packages.${system}.pi;
         nativeSessionLock = pkgs.callPackage ./nix/pi-session-lock.nix { };
         piPackage = upstreamPiPackage.overrideAttrs (old: {
-          patches = (old.patches or [ ]) ++ [
-            ./nix/patches/pi-prompt-expanded-hook.patch
-            ./nix/patches/pi-native-session-lock.patch
-          ];
-          postPatch = (old.postPatch or "") + ''
-            cp ${nativeSessionLock}/lib/session-lock.cjs dist/core/session-lock.cjs
-          '';
-          # Apply after npm dependencies exist, before Bun embeds the CLI modules.
-          preInstall = ''
-            patch -p1 < ${./nix/patches/pi-queued-message-removal.patch}
-            patch -p1 < ${./nix/patches/pi-bridge-persistence.patch}
-            patch -p1 < ${./nix/patches/pi-bridge-control-preflight.patch}
-            patch -p1 < ${./nix/patches/pi-bridge-queued-preflight.patch}
-          '' + (old.preInstall or "");
+          # Package the public SDK alongside the unmodified upstream CLI.
+          # No Pi source patches: bridge behaviour uses extension interfaces.
           postInstall = (old.postInstall or "") + ''
             sdk_root="$out/lib/node_modules/@earendil-works/pi-coding-agent"
             mkdir -p "$sdk_root"
