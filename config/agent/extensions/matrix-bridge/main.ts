@@ -2,7 +2,7 @@ import { readFileSync } from "node:fs";
 import { MatrixHttp } from "../matrix-shared/http.js";
 import { BridgeMatrix } from "./matrix.js";
 import { BridgeRelay, type RelayConfig } from "./relay.js";
-import { localTasks } from "./local-process.js";
+import { localTasks, roomOpener } from "./local-process.js";
 import { refuseLegacyStore } from "./store.js";
 export { localEnvironment } from "./local-process.js";
 import { hostPath, object, string } from "./wire.js";
@@ -28,7 +28,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     string(raw.botUserId, 255), new Set(raw.ignoredSenderUserIds.map(sender => string(sender, 255))));
   const account = object(await client.http.request("GET", "/_matrix/client/v3/account/whoami", undefined, AbortSignal.timeout(8000)));
   if (account.user_id !== client.userId || account.is_guest === true) throw Error("Matrix credential does not match the configured host bot");
-  const relay = new BridgeRelay(config, client, raw.taskHelper === undefined ? undefined : localTasks(string(raw.taskHelper)));
+  const relay = new BridgeRelay(config, client, raw.taskHelper === undefined ? undefined : localTasks(string(raw.taskHelper)), raw.openHelper === undefined ? undefined : roomOpener(string(raw.openHelper)));
   const shutdown = () => { void relay.stop().catch(() => { process.exitCode = 1; }); };
   process.once("SIGTERM", shutdown); process.once("SIGINT", shutdown);
   try { await relay.start(); }

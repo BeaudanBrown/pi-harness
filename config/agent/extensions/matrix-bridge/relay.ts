@@ -32,7 +32,8 @@ export class BridgeRelay {
   private interval?: NodeJS.Timeout;
   private syncWork?: Promise<void>;
   private syncError?: string;
-  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, taskRunner?: TaskRunner) {
+  private readonly started = Date.now();
+  constructor(readonly config: RelayConfig, readonly matrix: BridgeMatrix, taskRunner?: TaskRunner, private readonly openRoom?: (file: string, nativeId: string) => Promise<void>) {
     mkdirSync(config.stateDirectory, { recursive: true, mode: 0o700 });
     const directory = lstatSync(config.stateDirectory);
     if (!directory.isDirectory() || directory.isSymbolicLink() || directory.uid !== process.getuid!() || (directory.mode & 0o077)) throw Error("Bridge state directory must be private");
@@ -203,13 +204,27 @@ export class BridgeRelay {
           this.failures.set(binding.key, "Original imported room identity is not yet verified; local Pi remains available"); return;
         }
         const room = binding.room;
-        for (const input of this.store.received(binding.key)) if (historyReady || archiveCommand(input.event) !== undefined) await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
+        for (const input of this.store.received(binding.key)) if (historyReady || archiveCommand(input.event) !== undefined || (input.event.content as { body?: unknown } | null)?.body === "!open") await authorizeInput(this.store, this.matrix, binding, input, this.stopSignal.signal,
           this.tasks ? (interaction, accepted) => this.tasks!.answer(binding, input, interaction, accepted) : undefined,
           archived => {
             if (input.event.sender !== this.config.operatorUserId) { this.store.finishInput(binding.key, input.id, "Only the configured operator may archive or restore this conversation."); return; }
             try { this.archive(binding.key, archived, input.archiveRevision ?? -1); this.store.finishInput(binding.key, input.id, "Archive policy recorded; grouping is asynchronous. No process was stopped and no pending input was replayed."); }
             catch { this.store.finishInput(binding.key, input.id, "Archive policy changed during this request. Check !status and issue a fresh command."); }
-          }, () => this.attached.get(binding.key)?.ready === true);
+          }, () => this.attached.get(binding.key)?.ready === true, async () => {
+            const finish = (message: string) => this.store.finishInput(binding.key, input.id, message);
+            const ts = input.event.origin_server_ts, now = Date.now();
+            if (input.event.sender !== this.config.operatorUserId) return finish("Only the configured operator may open this session.");
+            if (typeof ts !== "number" || !Number.isSafeInteger(ts) || ts < this.started || ts > now || now - ts > 60_000) return finish("Stale open request; send a fresh !open.");
+            if (this.attached.has(binding.key)) return finish("Pi is already connected.");
+            if (!this.openRoom) return finish("Room opening is unavailable.");
+            if (!this.store.claimOpen(binding.key, input.id)) return;
+            try {
+              const saved = history(binding.file);
+              if (saved.id !== binding.nativeId || allowedWorkspace(saved.cwd, this.config.roots) !== binding.cwd) throw Error("Session identity changed");
+              await this.openRoom(binding.file, binding.nativeId);
+              finish("Open requested. Wait for Pi to connect, then send a fresh instruction.");
+            } catch { finish("Could not confirm open. Check the saved session locally; no automatic retry."); }
+          });
         binding = this.store.binding(binding.key)!;
         if (historyReady && binding.enabled) {
           const attachment = this.attached.get(binding.key), queued = this.store.queuedInputs(binding.key);
@@ -240,7 +255,7 @@ export class BridgeRelay {
             }
           } else if (!attachment) this.store.disconnect(binding.key);
         }
-        for (const input of this.store.unreportedInputs(binding.key)) this.store.offer(binding.key, `uncertain:${input.id}`, () => [{ type: "m.room.message", content: {
+        for (const input of this.store.unreportedInputs(binding.key)) if (this.matrix.ignoredSender(String(input.event.sender))) this.store.dismissEcho(binding.key, input.id); else this.store.offer(binding.key, `uncertain:${input.id}`, () => [{ type: "m.room.message", content: {
           msgtype: "m.notice", body: this.store.progress<{ unattempted: boolean }>(`migration-input:${input.id}`)?.unattempted ?
             "Historical input was never dispatched and remains held. It will not replay automatically. Send a fresh instruction when ready." :
             "Input interrupted: Pi may already have acted on this message. It will not be replayed automatically. You can send a fresh instruction.",

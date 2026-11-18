@@ -58,4 +58,4 @@ export function nativeControl(text: string): { name: NativeControl; argument?: s
   if (argument && !["model", "thinking", "compact"].includes(match[1]!)) return "unknown";
   return { name: match[1] as NativeControl, ...(argument ? { argument } : {}) };
 }
-export const CONTROL_HELP = "Native Pi controls: !help, !status, !abort, !model [provider/model or filter], !thinking [level], !compact [focus]. Chat is literal and delivered in idle batches. Controls are best effort; offline instructions are rejected. The configured operator may use !archive / !restore for organization only. Local UI: /bridge-archive /bridge-restore. Open Pi locally; Matrix never starts or stops processes.";
+export const CONTROL_HELP = "Native Pi controls: !help, !status, !abort, !model [provider/model or filter], !thinking [level], !compact [focus]. Chat is literal and delivered in idle batches. Controls are best effort; offline instructions are rejected. The configured operator may use !archive / !restore for organization only. Local UI: /bridge-archive /bridge-restore. The joined operator may send !open to open this room's existing saved Pi session. No prompt, retry or remote stop.";

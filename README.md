@@ -26,7 +26,7 @@ The room interface retains `!help`, `!status`, `!abort`,
 `!model [FILTER|provider/model]`, `!thinking [LEVEL]` and `!compact [INSTRUCTIONS]`.
 Configuration controls fail fast when busy; submitted operations may complete
 regardless of later disconnect/abort and are never automatically retried.
-Matrix cannot start or stop Pi. Open the conversation locally first. Chat is
+The joined operator can send a fresh standalone `!open` to request that this room’s existing saved session open in tmux. No arguments, prompt, retry, or remote stop. Wait for connection before sending instructions. Chat is
 literal attributed custom-message content, batched in arrival order when Pi is
 fully idle; slash commands and template/skill expansion remain terminal-only.
 Local steering remains native. Abort/disconnect holds pending remote input

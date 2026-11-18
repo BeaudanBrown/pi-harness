@@ -8,7 +8,7 @@ import { object } from "./wire.js";
 /** Room-scoped authorization; parsing alone never grants execution authority. */
 export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, binding: Binding, input: Input, signal?: AbortSignal,
   approval?: (interaction: Interaction, accepted: boolean) => Promise<void>,
-  archive?: (archived: boolean) => void, connected: () => boolean = () => true): Promise<void> {
+  archive?: (archived: boolean) => void, connected: () => boolean = () => true, open?: () => Promise<void>): Promise<void> {
   const ignore = () => { store.authorize(input.id, undefined); };
   const explain = (message: string) => store.finishInput(binding.key, input.id, message);
   const event = input.event, sender = typeof event.sender === "string" ? event.sender : "";
@@ -19,6 +19,9 @@ export async function authorizeInput(store: BridgeStore, matrix: BridgeMatrix, b
   const voting = event.type === POLL_RESPONSE || event.type === "m.poll.response", vote = pollVote(event.type, content);
   if (voting && !vote || !voting && !["m.room.message", "m.room.encrypted"].includes(String(event.type))) return ignore();
   if (!await matrix.joined(binding.room, sender)) return ignore();
+  if (event.type === "m.room.message" && content.msgtype === "m.text" && content.body === "!open" && !Object.keys(relation).length) {
+    if (open) await open(); else explain("Room opening is unavailable."); return;
+  }
   const archived = archiveCommand(event);
   if (archived !== undefined) { if (archive) archive(archived); else ignore(); return; }
   if (input.held || !connected()) {

@@ -1,4 +1,4 @@
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { isAbsolute } from "node:path";
 import type { TaskRunner } from "./tasks.js";
 import { TaskFailure, taskPlan } from "./task-contract.js";
@@ -10,6 +10,12 @@ export function localEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
     if (env[key] !== undefined) clean[key] = env[key];
   }
   return clean;
+}
+export function roomOpener(helper: string) {
+  if (!isAbsolute(helper)) throw Error("Expected absolute session helper");
+  return (file: string, nativeId: string) => new Promise<void>((resolve, reject) => {
+    execFile(helper, ["open", "--expected-id", nativeId, "--", file], { env: localEnvironment(process.env), timeout: 12000, maxBuffer: 65536 }, error => error ? reject(Error("Session helper did not confirm open")) : resolve());
+  });
 }
 /** One finite helper invocation, not process/launch authority. Disconnecting a
  * caller is not cancellation of an approved Git effect. Never expose stderr. */

@@ -26,6 +26,7 @@ let
   '';
   daemonConfig = pkgs.writeText "pi-matrix-bridge.json" (builtins.toJSON {
     inherit (cfg) hostId stateDirectory socket roots projectRoot homeserver botUserId operatorUserId ignoredSenderUserIds hostSpace;
+    openHelper = "${helper}/bin/pi-session";
     taskHelper = "${taskHelper}/bin/pi-task-workspace";
   });
 in {

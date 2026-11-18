@@ -261,6 +261,10 @@ export class BridgeStore {
       this.materialize(key, source, [{ type: "m.room.message", content: { msgtype: "m.notice", body: message, "m.mentions": {}, "m.relates_to": { "m.in_reply_to": { event_id: id } } } }]);
     });
   }
+  claimOpen(key: string, id: string): boolean {
+    return this.db.prepare("UPDATE inputs SET state='handed' WHERE binding=? AND id=? AND state='received'").run(key, id).changes === 1;
+  }
+  dismissEcho(key: string, id: string): void { this.db.prepare("UPDATE inputs SET state='ignored' WHERE binding=? AND id=? AND state='interrupted'").run(key, id); }
   interruptUnobserved(key: string): void {
     this.db.prepare("UPDATE inputs SET state='interrupted' WHERE binding=? AND state='handed'").run(key);
   }

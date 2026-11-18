@@ -32,6 +32,20 @@ test("reconnect sync holds offline chat and votes without consuming their poll",
   assert.equal(relay.store.status(binding.key).queued, 1, "explicit no-submission keeps the answer in the inbox");
 });
 
+test("offline open uses only the bound identity, once, for a fresh operator event", async t => {
+  const root = mkdtempSync(join(tmpdir(), "bridge-open-")), file = join(root, "saved.jsonl"), opened: string[][] = [];
+  writeFileSync(file, JSON.stringify({ type: "session", version: 3, id: "native", cwd: root }) + "\n");
+  const http = new InteractionHttp(), relay = new BridgeRelay({ hostId: "host", stateDirectory: join(root, "state"), socket: join(root,"bridge.sock"), roots: [root], operatorUserId: USER }, http.matrix, undefined, async (...args) => { opened.push(args); });
+  t.after(async () => { await relay.stop(); rmSync(root, { recursive: true, force: true }); });
+  const b = relay.store.register({ file, nativeId: "native", cwd: root, title: "Saved", boundary: null }); relay.store.setRoom(b.key, ROOM);
+  for (const [id, body, sender, ts] of [["$other", "!open", "@second:example.test", Date.now()], ["$old", "!open", USER, 1], ["$args", "!open /tmp", USER, Date.now()], ["$ok", "!open", USER, Date.now()], ["$ok", "!open", USER, Date.now()]] as const) {
+    relay.store.intake(id, [{ id, room: ROOM, event: { ...textEvent(id, body, sender), origin_server_ts: ts } }]); await relay.pump();
+  }
+  assert.deepEqual(opened, [[file, "native"]]);
+  relay.store.intake("echo", [{ id: "$echo", room: ROOM, event: textEvent("$echo", "reply", "@bot:example.test") }]); relay.store.disconnect(b.key); await relay.pump();
+  assert.deepEqual(relay.store.outputs(b.key, "uncertain:$echo"), []);
+});
+
 test("a definite deferral cannot revive an abort/disconnect hold", t => {
   const root = mkdtempSync(join(tmpdir(), "bridge-deferral-")), store = new BridgeStore(join(root, "state.sqlite"), "host");
   t.after(() => { store.close(); rmSync(root, { recursive: true, force: true }); });
